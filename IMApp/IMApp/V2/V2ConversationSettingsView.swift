@@ -5,6 +5,7 @@ import SwiftUI
 struct V2ConversationSettingsView: View {
     let roomID: String
     let peerKey: V2ProfileViewLookupKey?
+    var openResources: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @Environment(\.v2UserInteractionContext) private var context
     @State private var profile: V2UserProfileTarget?
@@ -14,6 +15,12 @@ struct V2ConversationSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                if let openResources {
+                    Section("会话内容") {
+                        Button("聊天文件", systemImage: "folder", action: openResources)
+                            .accessibilityIdentifier("v2.chat-settings.resources")
+                    }
+                }
                 if let peerKey {
                     Section {
                         Button { profile = .init(key: peerKey) } label: {

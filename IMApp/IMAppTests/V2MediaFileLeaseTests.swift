@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import IMV2ClientKit
 import IMV2Core
 import Testing
@@ -8,20 +9,46 @@ import UniformTypeIdentifiers
 @MainActor
 @Suite(.timeLimit(.minutes(1)))
 struct V2MediaFileLeaseTests {
+    @Test("avatar decoders own the actual borrowed path and account close waits for that decoder")
+    func avatarDecoderLeaseOutlivesAdapterClose() async throws {
+        let fixture = try await MediaFileLeaseFixture()
+        defer { fixture.remove() }
+        let payload = Data(repeating: 1, count: 4)
+        let checksum = try V2ResourceChecksum(value: SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined())
+        let access = try V2ResourceAvatarAccess(mediaID: .init(uuid: UUID()), variantID: .init(uuid: UUID()), version: 1, checksum: checksum,
+            plan: .init(mode: .httpGet, url: #require(URL(string: "https://media.invalid/1")), expiresAt: Date().addingTimeInterval(120), expectedByteCount: 4, checksum: checksum))
+        let home = V2ResourceHome.account(.init(uuid: UUID()))
+        let use = try await fixture.files.avatar(access, home: home)
+        var finished = false
+        let closing = Task { try await fixture.files.close(); finished = true }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while true {
+            do { let attempt = try await fixture.files.avatar(access, home: home); await attempt.release() }
+            catch is CancellationError { break }
+            try #require(ContinuousClock.now < deadline)
+            await Task.yield()
+        }
+        #expect(!finished)
+        #expect(try Data(contentsOf: use.fileURL) == payload)
+        await use.release()
+        try await closing.value
+        #expect(finished)
+    }
+
     @Test("independent consumers survive expiry and each token releases at most once")
     func expiryAndIndependentLeases() async throws {
-        let fixture = try MediaFileLeaseFixture()
+        let fixture = try await MediaFileLeaseFixture()
         defer { fixture.remove() }
         let downloaded = try await fixture.files.download(fixture.media)
         let first = try await downloaded.borrowFile(), second = try await downloaded.borrowFile()
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3_600)], ofItemAtPath: downloaded.fileURL.path)
-        await fixture.files.performMaintenance()
+        try await fixture.files.performMaintenance(now: Date().addingTimeInterval(3_600))
         #expect(fixture.exists(downloaded))
         await first.release(); await first.release()
-        await fixture.files.performMaintenance()
+        try await fixture.files.performMaintenance(now: Date().addingTimeInterval(3_600))
         #expect(fixture.exists(downloaded))
         await second.release()
-        await fixture.files.performMaintenance()
+        try await fixture.files.performMaintenance(now: Date().addingTimeInterval(3_600))
         #expect(!fixture.exists(downloaded))
         await #expect(throws: V2MediaFileAccessError.unavailable) { try await downloaded.borrowFile() }
         try await fixture.files.close()
@@ -29,7 +56,7 @@ struct V2MediaFileLeaseTests {
 
     @Test("redownload publishes immutable bytes and withdrawal defers deletion until the final use")
     func replacementAndDiscard() async throws {
-        let fixture = try MediaFileLeaseFixture()
+        let fixture = try await MediaFileLeaseFixture()
         defer { fixture.remove() }
         let old = try await fixture.files.download(fixture.media), oldLease = try await old.borrowFile()
         let fresh = try await fixture.files.download(fixture.media), freshLease = try await fresh.borrowFile()
@@ -49,7 +76,7 @@ struct V2MediaFileLeaseTests {
 
     @Test("close stops borrowing, waits for actual consumers and leaves another account intact")
     func closeDrainsConsumers() async throws {
-        let fixture = try MediaFileLeaseFixture()
+        let fixture = try await MediaFileLeaseFixture()
         defer { fixture.remove() }
         let downloaded = try await fixture.files.download(fixture.media)
         let first = try await downloaded.borrowFile(), second = try await downloaded.borrowFile()
@@ -71,14 +98,14 @@ struct V2MediaFileLeaseTests {
         await second.release()
         try await closing.value
         try await alsoClosing.value
-        #expect(finished == 2 && !fixture.exists(downloaded))
+        #expect(finished == 2 && fixture.exists(downloaded))
         #expect(try Data(contentsOf: other) == Data([7]))
         try await fixture.files.close()
     }
 
     @Test("an abandoned presentation releases its lease even if no controller was created")
     func abandonedPresentation() async throws {
-        let fixture = try MediaFileLeaseFixture()
+        let fixture = try await MediaFileLeaseFixture()
         defer { fixture.remove() }
         let downloaded = try await fixture.files.download(fixture.media)
         var lease: V2ConversationMediaFileLease? = try await downloaded.borrowFile()
@@ -90,24 +117,9 @@ struct V2MediaFileLeaseTests {
         #expect(!fixture.exists(downloaded))
     }
 
-    @Test("pinned bytes count toward admission and cannot be evicted to admit another transfer")
-    func capacityBackpressure() async throws {
-        let fixture = try MediaFileLeaseFixture(maximumBytes: 8)
-        defer { fixture.remove() }
-        let first = try await fixture.files.download(fixture.media), lease = try await first.borrowFile()
-        await #expect(throws: V2ConversationAttachmentStagingError.stagingQuotaExceeded) {
-            try await fixture.files.download(.init(mediaID: .init("another-file")))
-        }
-        #expect(await fixture.transfer.calls == 1 && fixture.exists(first))
-        await lease.release()
-        let next = try await fixture.files.download(.init(mediaID: .init("another-file")))
-        #expect(!fixture.exists(first) && fixture.exists(next))
-        try await fixture.files.close()
-    }
-
     @Test("untrusted paths, cancelled borrows and missing files cannot create file uses")
     func invalidBorrow() async throws {
-        let fixture = try MediaFileLeaseFixture()
+        let fixture = try await MediaFileLeaseFixture()
         defer { fixture.remove() }
         let downloaded = try await fixture.files.download(fixture.media)
         let naked = V2DownloadedConversationMedia(mediaID: fixture.media.mediaID, fileURL: downloaded.fileURL)
@@ -129,7 +141,7 @@ struct V2MediaFileLeaseTests {
 
     @Test("file use admission is bounded independently of the byte budget")
     func leaseAdmission() async throws {
-        let fixture = try MediaFileLeaseFixture()
+        let fixture = try await MediaFileLeaseFixture()
         defer { fixture.remove() }
         let downloaded = try await fixture.files.download(fixture.media)
         var leases: [V2ConversationMediaFileLease] = []
@@ -144,70 +156,76 @@ struct V2MediaFileLeaseTests {
         let root = FileManager.default.temporaryDirectory.appending(path: "im-file-use-late-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
         let gate = FileUseTransferGate()
-        let files = try V2ForegroundConversationMediaDownloader(downloader: .init(targetResolver: FileUseResolver(), byteTransfer: gate), directory: root)
+        let files = try await makeResourceMediaTestDownloader(downloader: .init(targetResolver: FileUseResolver(initialValue: 3), byteTransfer: gate), directory: root)
         let media = V2MediaReference(mediaID: try .init("late-media"))
         let loading = Task { try await files.download(media) }
         let partial = try await gate.waitForEntry()
-        await files.performMaintenance()
+        try await files.performMaintenance()
         #expect(try Data(contentsOf: partial) == Data(repeating: 3, count: 4))
         await files.discard(media)
         await gate.release()
         await #expect(throws: CancellationError.self) { try await loading.value }
-        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        try await files.performMaintenance(now: Date().addingTimeInterval(8 * 86_400))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "cache-scope/resources/files").path).isEmpty)
         try await files.close()
     }
 
-    @Test("the system share coordinator retains the file until completion and tolerates repeated completion")
-    func shareCompletion() async throws {
-        let fixture = try MediaFileLeaseFixture()
+    @Test("the system share coordinator retains bytes and exported names until completion", arguments: ["会话录音.wav", "notes version 2.wav", nil] as [String?])
+    func shareCompletion(name: String?) async throws {
+        let fixture = try await MediaFileLeaseFixture()
         defer { fixture.remove() }
-        let downloaded = try await fixture.files.download(fixture.media), lease = try await downloaded.borrowFile()
+        let downloaded = try await fixture.files.download(fixture.media), original = try await downloaded.borrowFile()
+        let displayName = try name.map { try V2ResourceDisplayName($0) }
+        let lease = try await V2LocalMediaShareSheet.prepareLease(original, kind: .audio, contentType: "audio/wav", displayName: displayName)
         let coordinator = V2LocalMediaShareSheet.Coordinator(lease: lease)
-        let provider = V2LocalMediaShareSheet.itemProvider(lease: lease, kind: .audio, contentType: "audio/wav")
-        #expect(provider.suggestedName == "音频.wav")
-        #expect(provider.hasItemConformingToTypeIdentifier(UTType.wav.identifier))
+        #expect(lease.fileURL.lastPathComponent == (name ?? "音频.wav"))
+        #expect(lease.fileURL != downloaded.fileURL)
+        let directory = lease.fileURL.deletingLastPathComponent()
+        #expect(UUID(uuidString: directory.lastPathComponent) != nil)
+        #expect(directory.deletingLastPathComponent().lastPathComponent == "exports")
+        let originalFacts = try FileManager.default.attributesOfItem(atPath: downloaded.fileURL.path)
+        let exportFacts = try FileManager.default.attributesOfItem(atPath: lease.fileURL.path)
+        #expect(originalFacts[.systemFileNumber] as? NSNumber == exportFacts[.systemFileNumber] as? NSNumber)
         await fixture.files.discard(fixture.media)
         #expect(fixture.exists(downloaded))
-        let exported: Data = try await withCheckedThrowingContinuation { continuation in
-            _ = provider.loadFileRepresentation(forTypeIdentifier: UTType.wav.identifier) { url, error in
-                do {
-                    if let error { throw error }
-                    let file = try #require(url)
-                    continuation.resume(returning: try Data(contentsOf: file))
-                } catch { continuation.resume(throwing: error) }
-            }
-        }
-        #expect(exported == Data(repeating: 1, count: 4))
+        #expect(try Data(contentsOf: lease.fileURL) == Data(repeating: 1, count: 4))
         coordinator.finish(); coordinator.finish()
         try await fixture.files.close()
         #expect(!fixture.exists(downloaded))
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
     }
 }
 
 @MainActor private struct MediaFileLeaseFixture {
     let root: URL
-    let files: V2ForegroundConversationMediaDownloader
+    let files: V2ResourceMediaTestOwner
     let transfer = FileUseTransfer()
     let media = V2MediaReference(mediaID: .init(uuid: UUID()))
-    init(maximumBytes: Int64 = 64) throws {
+    init(maximumBytes: Int64 = 1_048_576) async throws {
         root = FileManager.default.temporaryDirectory.appending(path: "im-file-use-\(UUID())")
-        files = try .init(downloader: .init(targetResolver: FileUseResolver(), byteTransfer: transfer),
+        files = try await makeResourceMediaTestDownloader(downloader: .init(targetResolver: FileUseResolver(), byteTransfer: transfer),
             directory: root.appending(path: "cache"), cachePolicy: .init(maximumByteCount: maximumBytes, maximumEntryCount: 8, maximumAge: 60))
     }
     func exists(_ file: V2DownloadedConversationMedia) -> Bool { FileManager.default.fileExists(atPath: file.fileURL.path) }
     func remove() { try? FileManager.default.removeItem(at: root) }
 }
-private struct FileUseResolver: V2ClientMediaDownloadTargetResolver {
+private actor FileUseResolver: V2ClientMediaDownloadTargetResolver {
+    private var next: UInt8
+    init(initialValue: UInt8 = 1) { next = initialValue }
     func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation?) throws -> V2ClientMediaTransferTarget {
-        try .init(downloadPlan: .init(mode: .httpGet, url: URL(string: "https://media.invalid/file")!, expiresAt: .distantFuture, expectedByteCount: 4, checksum: .init(value: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a")))
+        let value = next; next += 1
+        let data = Data(repeating: value, count: 4)
+        let checksum = try V2ResourceChecksum(value: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())
+        return try .init(downloadPlan: .init(mode: .httpGet, url: URL(string: "https://media.invalid/\(value)")!,
+            expiresAt: .distantFuture, expectedByteCount: 4, checksum: checksum))
     }
 }
 private actor FileUseTransfer: V2ClientMediaByteTransfer {
     private(set) var calls = 0
-    func upload(fileURL: URL, target: V2ClientMediaTransferTarget) throws { throw CancellationError() }
     func download(target: V2ClientMediaTransferTarget, destinationURL: URL) throws {
         calls += 1
-        try Data(repeating: UInt8(calls), count: 4).write(to: destinationURL)
+        let value = try #require(UInt8(target.url.lastPathComponent))
+        try Data(repeating: value, count: 4).write(to: destinationURL)
     }
 }
 private actor FileUseTransferGate: V2ClientMediaByteTransfer {

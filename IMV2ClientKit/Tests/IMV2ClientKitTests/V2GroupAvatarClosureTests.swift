@@ -62,7 +62,7 @@ struct V2GroupAvatarClosureTests {
         let pending = try #require(try await f.store.groupAvatarIntent(command.operationID))
         #expect(pending.command == command && pending.recoveryAction == nil && pending.stage == .submitted)
         #expect(pending.closureProof == nil && pending.retryAt > f.now)
-        #expect(try await f.store.claimReleasableResourceFileToken(id: job.id) == nil)
+        #expect(try await f.store.releasableResourceAssetID(id: job.id) == nil)
         await #expect(throws: V2GroupAvatarIntentError.conflict) { try await f.store.abandonClosedGroupAvatarIntent(command.operationID) }
         await #expect(throws: V2GroupAvatarIntentError.conflict) { _ = try await f.store.replaceClosedGroupAvatarIntent(command.operationID, expectedRevision: 1) }
         try await f.store.close(); try f.removeFiles()
@@ -74,11 +74,11 @@ struct V2GroupAvatarClosureTests {
         _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: command, uploadJobID: nil)
         try await f.store.requestGroupAvatarRecovery(id, action: .closeIfAbsent)
         let client = ClosureClient(reply: try reply(f, command, .closeIfAbsent, .closed))
-        let transfers = f.transfers(), engine = V2GroupAvatarIntentEngine(actorUserID: f.actor, store: f.store,
+        let transfers = try await f.transfers(), engine = V2GroupAvatarIntentEngine(actorUserID: f.actor, store: f.store,
             transfers: transfers, submissions: client, recovery: client)
         await #expect(throws: V2GroupAvatarSubmissionError.outcomeUnknown) { _ = try await engine.resume(id) }
         await engine.close(); await transfers.close(); try await f.store.close()
-        let reopened = try f.reopen(), nextTransfers = f.transfers(store: reopened)
+        let reopened = try f.reopen(), nextTransfers = try await f.transfers(store: reopened)
         let nextEngine = V2GroupAvatarIntentEngine(actorUserID: f.actor, store: reopened, transfers: nextTransfers,
             submissions: client, recovery: client, now: { f.now.addingTimeInterval(61) })
         try await nextEngine.recoverOnce()
@@ -93,7 +93,7 @@ struct V2GroupAvatarClosureTests {
         let f = try IntentFixture(), command = try f.command(media: nil), id = command.operationID
         _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: command, uploadJobID: nil)
         let client = ClosureGatedClient(submission: try f.response(command), closure: try reply(f, command, .closeIfAbsent, .closed), commits: commits)
-        let transfers = f.transfers(), engine = V2GroupAvatarIntentEngine(actorUserID: f.actor, store: f.store,
+        let transfers = try await f.transfers(), engine = V2GroupAvatarIntentEngine(actorUserID: f.actor, store: f.store,
             transfers: transfers, submissions: client, recovery: client)
         let submission = Task { try await engine.resume(id) }
         await client.waitForSubmission()
@@ -118,16 +118,16 @@ struct V2GroupAvatarClosureTests {
         let proof = try await close(f, command)
         try await f.store.saveResourceSession(.init(locator: #require(job.session).locator, mediaID: job.request.mediaID,
             generation: 1, state: .expired, resourceState: .deleted, expiresAt: f.now), for: job.id)
-        #expect(try await f.store.claimReleasableResourceFileToken(id: job.id) == nil)
-        #expect(try await f.store.retainedResourceFileTokens().contains(job.localFileToken))
+        #expect(try await f.store.releasableResourceAssetID(id: job.id) == nil)
+        #expect(try await f.store.testHeldAssetIDs().contains(job.localAssetID))
         try await f.store.close()
-        let reopened = try f.reopen(), transfers = f.transfers(store: reopened)
+        let reopened = try f.reopen(), transfers = try await f.transfers(store: reopened)
         #expect(try await reopened.groupAvatarIntent(command.operationID)?.closureProof == proof)
         try await reopened.abandonClosedGroupAvatarIntent(command.operationID)
         try await reopened.abandonClosedGroupAvatarIntent(command.operationID)
-        try await transfers.releaseAcceptedStaging()
-        #expect(!FileManager.default.fileExists(atPath: f.directory.appendingPathComponent(job.localFileToken).path))
-        #expect(try await reopened.retainedResourceFileTokens().isEmpty)
+        try await transfers.releaseFinishedSources()
+        #expect(FileManager.default.fileExists(atPath: f.directory.appendingPathComponent(job.localAssetID.value.uuidString).path))
+        #expect(try await reopened.testHeldAssetIDs().isEmpty)
         #expect(try await reopened.groupAvatarIntent(command.operationID)?.closedDisposition == .abandoned)
         #expect(try await reopened.groupAvatarIntent(command.operationID)?.closureProof == proof)
         await transfers.close(); try await reopened.close(); try f.removeFiles()
@@ -153,7 +153,7 @@ struct V2GroupAvatarClosureTests {
         #expect(try await f.store.groupAvatarIntent(command.operationID)?.closedDisposition == .awaitingDecision)
         #expect(try await f.store.pendingGroupAvatarIntents(in: f.room).count == 1)
         let freed = fillers[0]
-        try await f.store.saveResourceImport(.init(locator: .init(home: .room(f.room), operationID: freed.1.operationID),
+        try await f.store.seedResourceImportStatus(.init(locator: .init(home: .room(f.room), operationID: freed.1.operationID),
             mediaID: freed.1.targetMediaID, state: .cancelled, bindableUntil: nil), id: freed.0)
         let id = try await f.store.replaceClosedGroupAvatarIntent(command.operationID, expectedRevision: 7)
         #expect(try await f.store.replaceClosedGroupAvatarIntent(command.operationID, expectedRevision: 99) == id)
@@ -164,11 +164,13 @@ struct V2GroupAvatarClosureTests {
         #expect(nextJob.id != job.id && nextJob.request.operationID != job.request.operationID)
         #expect(nextJob.request.mediaID != job.request.mediaID && next.command.mutation.mediaID == nextJob.request.mediaID)
         #expect(nextJob.request.usage == .groupAvatar(f.room) && nextJob.request.checksum == job.request.checksum)
-        #expect(nextJob.localFileToken == job.localFileToken && nextJob.stage == .prepared)
+        #expect(nextJob.localAssetID == job.localAssetID && nextJob.stage == .prepared)
         #expect(try await f.store.resourceTransfer(id: job.id)?.cancellationRequested == true)
         #expect(try await f.store.groupAvatarIntent(command.operationID)?.closureProof == proof)
         #expect(try await f.store.groupAvatarIntent(command.operationID)?.closedDisposition == .replaced)
-        #expect(try await f.store.claimReleasableResourceFileToken(id: job.id) == nil)
+        #expect(try await f.store.releasableResourceAssetID(id: job.id) == job.localAssetID)
+        try await f.store.releaseResourceSource(id: job.id)
+        #expect(try await f.store.testHeldAssetIDs().contains(nextJob.localAssetID))
         await #expect(throws: V2GroupAvatarIntentError.conflict) { try await f.store.abandonClosedGroupAvatarIntent(command.operationID) }
         try await f.store.close()
         let reopened = try f.reopen()

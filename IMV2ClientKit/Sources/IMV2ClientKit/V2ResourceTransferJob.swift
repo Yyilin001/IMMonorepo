@@ -7,10 +7,11 @@ public struct V2ResourceTransferJob: Equatable, Sendable {
     public enum Stage: String, Sendable { case prepared, transferring, processing, ready, paused, cancelled, rejected, expired }
     public let id: UUID
     public let request: V2ResourceUploadRequest
-    public let localFileToken: String
+    public let localAssetID: V2LocalResourceAssetID
     public let session: V2ResourceUploadSession?
     public let stage: Stage
     public let cancellationRequested: Bool
+    public let control: V2ResourceTransferControl
     public let attempts: Int
     public let retryAt: Date
     public let lastError: String?
@@ -26,35 +27,49 @@ public struct V2ResourceTransferJob: Equatable, Sendable {
 public struct V2ResourcePreparedUpload: Sendable {
     public let id: UUID
     public let request: V2ResourceUploadRequest
-    public let localFileToken: String
-    public init(id: UUID, request: V2ResourceUploadRequest, localFileToken: String) throws {
-        guard UUID(uuidString: localFileToken) != nil else { throw V2ResourceJournalError.invalidRecord }
-        self.id = id; self.request = request; self.localFileToken = localFileToken
+    public let localAssetID: V2LocalResourceAssetID
+    public init(id: UUID, request: V2ResourceUploadRequest, localAssetID: V2LocalResourceAssetID) throws {
+        self.id = id; self.request = request; self.localAssetID = localAssetID
     }
 }
 
 extension GRDBV2LocalSyncStore {
-    public func prepareResourceTransfer(id: UUID, request: V2ResourceUploadRequest, localFileToken: String, now: Date = Date()) throws -> V2ResourceTransferJob {
+    public func prepareResourceTransfer(id: UUID, request: V2ResourceUploadRequest, localAssetID: V2LocalResourceAssetID, now: Date = Date()) throws -> V2ResourceTransferJob {
         try databasePool.write { db in
-            try Self.prepareResourceTransfer(id: id, request: request, localFileToken: localFileToken, now: now, db: db)
+            try Self.prepareResourceTransfer(id: id, request: request, localAssetID: localAssetID, now: now, db: db)
         }
     }
 
-    static func prepareResourceTransfer(id: UUID, request: V2ResourceUploadRequest, localFileToken: String,
-                                        now: Date, db: Database) throws -> V2ResourceTransferJob {
-        guard UUID(uuidString: localFileToken) != nil else { throw V2ResourceJournalError.invalidRecord }
+    static func prepareResourceTransfer(id: UUID, request: V2ResourceUploadRequest, localAssetID: V2LocalResourceAssetID,
+                                        adoptingFrom: V2LocalResourceOriginalConsumer? = nil, now: Date, db: Database) throws -> V2ResourceTransferJob {
         if let existing = try Self.readResourceTransfer(id, db: db) {
-            guard existing.request == request, existing.localFileToken == localFileToken else { throw V2ResourceJournalError.conflict }
+            guard existing.request == request, existing.localAssetID == localAssetID else { throw V2ResourceJournalError.conflict }
             return existing
         }
-        guard try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_resource_transfer_jobs WHERE local_file_token=? AND (staging_release_started=1 OR staging_released=1))",
-            arguments: [localFileToken]) != true else { throw V2ResourceJournalError.conflict }
+        guard let asset = try V2ResourceFileJournal.readAsset(localAssetID, db: db), asset.availability == .local,
+              asset.checksum == request.checksum, asset.byteCount == request.byteCount,
+              asset.contentType.value == request.contentType, asset.displayName == request.displayName,
+              request.clientImageDimensions == nil || request.clientImageDimensions == asset.imageDimensions else { throw V2ResourceJournalError.conflict }
+        let expectedPurpose: V2LocalResourceAssetPurpose
+        switch request.usage {
+        case .messageAttachment(let room): expectedPurpose = .messageDraft(room)
+        case .groupAvatar(let room): expectedPurpose = .groupAvatar(room)
+        case .userAvatar: expectedPurpose = .personalAvatar
+        }
+        guard asset.purpose == expectedPurpose else { throw V2ResourceJournalError.conflict }
+        var origin = adoptingFrom
+        if origin == nil, case .userAvatar = request.usage,
+           let owner = try String.fetchOne(db, sql: "SELECT intent_id FROM v2_profile_intents WHERE upload_job_id=? AND local_asset_id=? AND source_released=0 ORDER BY local_sequence DESC LIMIT 1",
+                arguments: [id.uuidString,localAssetID.value.uuidString]), let ownerID = UUID(uuidString: owner) {
+            origin = .profileIntent(ownerID)
+        }
         try Self.requireResourceJobCapacity(db: db)
         try db.execute(sql: """
-            INSERT INTO v2_resource_transfer_jobs(job_id,operation_id,media_id,request,local_file_token,stage,created_at)
+            INSERT INTO v2_resource_transfer_jobs(job_id,operation_id,media_id,request,local_asset_id,stage,created_at)
             VALUES(?,?,?,?,?,'prepared',?)
             """, arguments: [id.uuidString, request.operationID.rawValue, request.mediaID.rawValue,
-                              try JSONEncoder().encode(request), localFileToken, try Self.commandRetryTimestamp(now)])
+                              try JSONEncoder().encode(request), localAssetID.value.uuidString, try Self.commandRetryTimestamp(now)])
+        _ = try Self.bindLocalResourceAsset(localAssetID, consumer: .upload(id), adoptingFrom: origin, relinquishSelection: true, db: db)
         return try Self.readResourceTransfer(id, db: db)!
     }
 
@@ -62,91 +77,60 @@ extension GRDBV2LocalSyncStore {
         try databasePool.read { try Self.readResourceTransfer(id, db: $0) }
     }
 
-    public func releasableResourceFileToken(id: UUID) throws -> String? {
+    public func releasableResourceAssetID(id: UUID) throws -> V2LocalResourceAssetID? {
         try databasePool.read { db in
-            try String.fetchOne(db, sql: """
-                SELECT local_file_token FROM v2_resource_transfer_jobs j WHERE job_id=? AND \(Self.resourceStagingReleasePredicate)
-                """, arguments: [id.uuidString])
-        }
-    }
-
-    /// Freeze every consumer of the same local file before deleting it outside
-    /// SQLite. Once claimed, new consumers cannot race with the filesystem step.
-    func claimReleasableResourceFileToken(id: UUID) throws -> String? {
-        try databasePool.write { db in
-            guard let token = try String.fetchOne(db, sql: "SELECT local_file_token FROM v2_resource_transfer_jobs j WHERE job_id=? AND \(Self.resourceStagingReleasePredicate)",
-                arguments: [id.uuidString]) else { return nil }
-            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET staging_release_started=1 WHERE local_file_token=?", arguments: [token])
-            return token
+            try String.fetchOne(db, sql: "SELECT local_asset_id FROM v2_resource_transfer_jobs j WHERE job_id=? AND \(Self.resourceSourceReleasePredicate)", arguments: [id.uuidString]).map {
+                guard let uuid = UUID(uuidString: $0) else { throw V2ResourceJournalError.invalidRecord }; return .init(uuid)
+            }
         }
     }
 
     public func releasableResourceJobs(limit: Int = 64) throws -> [UUID] {
         guard (1...256).contains(limit) else { throw V2ResourceJournalError.invalidRecord }
         return try databasePool.read { db in
-            try String.fetchAll(db, sql: "SELECT job_id FROM v2_resource_transfer_jobs j WHERE \(Self.resourceStagingReleasePredicate) ORDER BY job_id LIMIT ?", arguments: [limit]).map {
-                guard let id=UUID(uuidString:$0) else { throw V2ResourceJournalError.invalidRecord }; return id
+            try String.fetchAll(db, sql: "SELECT job_id FROM v2_resource_transfer_jobs j WHERE \(Self.resourceSourceReleasePredicate) ORDER BY job_id LIMIT ?", arguments: [limit]).map {
+                guard let id = UUID(uuidString: $0) else { throw V2ResourceJournalError.invalidRecord }; return id
             }
         }
     }
 
-    public func confirmResourceStagingReleased(id: UUID) throws {
+    /// Releasing a logical source claim is one SQLite transaction. Physical
+    /// retirement and user pins remain exclusively owned by ResourceFileStore.
+    public func releaseResourceSource(id: UUID) throws {
         try databasePool.write { db in
-            try db.execute(sql: "UPDATE v2_resource_transfer_jobs AS j SET staging_released=1 WHERE job_id=? AND staging_release_started=1 AND \(Self.resourceStagingReleasePredicate)", arguments: [id.uuidString])
+            guard let job = try Self.readResourceTransfer(id, db: db),
+                  try Bool.fetchOne(db, sql: "SELECT \(Self.resourceSourceReleasePredicate) FROM v2_resource_transfer_jobs j WHERE job_id=?", arguments: [id.uuidString]) == true else { return }
+            try Self.releaseLocalResourceAssetConsumer(job.localAssetID, consumer: .upload(id), db: db)
+            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET source_released=1 WHERE job_id=?", arguments: [id.uuidString])
+            try Self.pruneResourceTransferHistory(db: db, now: Date())
         }
     }
 
-    // Handoff is only a local fact. Keep the original file until every consumer
-    // has been accepted, or the user has cancelled a still-unsubmitted intent.
-    private static let resourceStagingReleasePredicate = """
-        j.stage IN ('ready','cancelled','rejected','expired') AND j.staging_released=0
-        AND (EXISTS(SELECT 1 FROM v2_send_intent_dependencies d WHERE d.job_id=j.job_id)
+    static let resourceSourceReleasePredicate = """
+        j.stage IN ('ready','cancelled','rejected','expired') AND j.source_released=0 AND j.execution_owner IS NULL
+        AND (j.stage IN ('cancelled','rejected','expired') OR j.cancellation_requested=1
+          OR EXISTS(SELECT 1 FROM v2_send_intent_dependencies d WHERE d.job_id=j.job_id)
           OR EXISTS(SELECT 1 FROM v2_group_avatar_intents i WHERE i.upload_job_id=j.job_id)
-          OR EXISTS(SELECT 1 FROM v2_profile_intents i WHERE i.local_file_token=j.local_file_token))
+          OR EXISTS(SELECT 1 FROM v2_profile_intents i WHERE i.upload_job_id=j.job_id))
         AND NOT EXISTS(
-            SELECT 1 FROM v2_resource_transfer_jobs shared
-            JOIN v2_send_intent_dependencies d ON d.job_id=shared.job_id
-            JOIN v2_send_intents i USING(intent_id)
+            SELECT 1 FROM v2_send_intent_dependencies d JOIN v2_send_intents i USING(intent_id)
             LEFT JOIN v2_operation_work c ON c.work_id=i.work_id
-            WHERE shared.local_file_token=j.local_file_token AND i.stage<>'cancelled'
+            WHERE d.job_id=j.job_id AND i.stage<>'cancelled'
               AND (i.stage<>'handedOff' OR c.execution_state IS NULL OR c.execution_state<>'committed')
         )
         AND NOT EXISTS(
-            SELECT 1 FROM v2_resource_transfer_jobs shared JOIN v2_group_avatar_intents i ON i.upload_job_id=shared.job_id
-            WHERE shared.local_file_token=j.local_file_token
+            SELECT 1 FROM v2_group_avatar_intents i WHERE i.upload_job_id=j.job_id
               AND (i.stage NOT IN ('committed','cancelled','closed') OR (i.stage='closed' AND i.closed_disposition='awaitingDecision'))
         )
-        AND NOT EXISTS(
-            SELECT 1 FROM v2_profile_intents i
-            WHERE i.local_file_token=j.local_file_token AND i.source_released=0
-        )
-        AND NOT EXISTS(
-            SELECT 1 FROM v2_resource_transfer_jobs shared WHERE shared.local_file_token=j.local_file_token
-              AND shared.staging_released=0 AND shared.stage NOT IN ('cancelled','rejected','expired')
-              AND NOT EXISTS(SELECT 1 FROM v2_send_intent_dependencies d WHERE d.job_id=shared.job_id)
-              AND NOT EXISTS(SELECT 1 FROM v2_group_avatar_intents i WHERE i.upload_job_id=shared.job_id)
-              AND NOT EXISTS(SELECT 1 FROM v2_profile_intents i WHERE i.upload_job_id=shared.job_id)
-        )
+        AND NOT EXISTS(SELECT 1 FROM v2_profile_intents i WHERE i.upload_job_id=j.job_id AND i.source_released=0)
         """
-
-    public func retainedResourceFileTokens() throws -> Set<String> {
-        try databasePool.read { db in
-            Set(try String.fetchAll(db, sql: """
-                SELECT local_file_token FROM v2_resource_transfer_jobs j WHERE staging_released=0
-                AND (stage NOT IN ('cancelled','rejected','expired')
-                    OR EXISTS(SELECT 1 FROM v2_group_avatar_intents i WHERE i.upload_job_id=j.job_id
-                        AND (i.stage NOT IN ('committed','cancelled','closed') OR (i.stage='closed' AND i.closed_disposition='awaitingDecision'))))
-                UNION SELECT local_file_token FROM v2_profile_intents WHERE source_released=0 AND local_file_token IS NOT NULL
-                """))
-        }
-    }
 
     public func saveResourceSession(_ session: V2ResourceUploadSession, for id: UUID) throws {
         try databasePool.write { db in
-            guard let job = try Self.readResourceTransfer(id, db: db), job.request.mediaID == session.mediaID,
+            guard let job = try Self.readResourceTransfer(id, db: db),
                   !job.cancellationRequested,
-                  ![.cancelled, .rejected, .expired].contains(job.stage),
-                  job.session.map({ $0.locator == session.locator && $0.generation <= session.generation }) ?? true else { throw V2ResourceJournalError.conflict }
+                  ![.cancelled, .rejected, .expired].contains(job.stage) else { throw V2ResourceJournalError.conflict }
+            try Self.requireResourceSessionBinding(session, job: job, db: db)
             let stage: V2ResourceTransferJob.Stage
             switch session.state {
             case .cancelled: stage = .cancelled
@@ -165,25 +149,28 @@ extension GRDBV2LocalSyncStore {
     }
 
     public func retryResourceTransfer(id: UUID) throws {
-        try databasePool.write { db in
-            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET attempts=0,action_attempts=0,poll_attempts=0,background_attempts=0,round_deadline=NULL,needs_attention=0,retry_at=server_retry_not_before,last_error=NULL,next_action=CASE WHEN session IS NULL THEN 'create' ELSE 'status' END WHERE job_id=? AND stage='paused' AND cancellation_requested=0", arguments: [id.uuidString])
-        }
+        try databasePool.write { try Self.retryResourceTransfer(id: id, db: $0) }
+    }
+
+    static func retryResourceTransfer(id: UUID, db: Database) throws {
+        try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET attempts=0,action_attempts=0,poll_attempts=0,background_attempts=0,round_deadline=NULL,needs_attention=0,retry_at=server_retry_not_before,last_error=NULL,next_action=CASE WHEN session IS NULL THEN 'create' ELSE 'status' END WHERE job_id=? AND stage='paused' AND execution_owner IS NULL AND cancellation_requested=0 AND user_control='run'", arguments: [id.uuidString])
     }
 
     public func requestResourceCancellation(id: UUID) throws -> V2ResourceTransferJob? {
         try databasePool.write { db in
-            let stillUsed = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_send_intent_dependencies d JOIN v2_send_intents i ON i.intent_id=d.intent_id WHERE d.job_id=? AND i.stage IN ('preparing','handedOff'))", arguments: [id.uuidString]) ?? false
-            let avatarUsed = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_group_avatar_intents WHERE upload_job_id=? AND stage NOT IN ('cancelled','closed'))", arguments: [id.uuidString]) ?? false
-            guard !stillUsed, !avatarUsed else { return nil }
-            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET cancellation_requested=1,next_action=CASE WHEN EXISTS(SELECT 1 FROM v2_background_transfer_tasks b WHERE b.job_id=v2_resource_transfer_jobs.job_id AND b.state='active') THEN 'awaitingBackground' ELSE 'cancel' END,retry_at=server_retry_not_before,needs_attention=0,action_attempts=0,round_deadline=NULL WHERE job_id=?", arguments: [id.uuidString])
+            guard let job = try Self.readResourceTransfer(id, db: db),
+                  try !Self.uploadHasLiveResourceConsumer(id, db: db) else { return nil }
+            if job.cancellationRequested { return job }
+            guard ![.ready,.cancelled,.rejected,.expired].contains(job.stage) else { return nil }
+            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET cancellation_requested=1,user_control='run',next_action=CASE WHEN EXISTS(SELECT 1 FROM v2_background_transfer_tasks b WHERE b.job_id=v2_resource_transfer_jobs.job_id AND b.state='active') THEN 'awaitingBackground' ELSE 'cancel' END,retry_at=server_retry_not_before,needs_attention=0,action_attempts=0,round_deadline=NULL WHERE job_id=?", arguments: [id.uuidString])
             return try Self.readResourceTransfer(id, db: db)
         }
     }
 
     public func confirmResourceCancellation(id: UUID, session: V2ResourceUploadSession) throws {
         try databasePool.write { db in
-            guard let job = try Self.readResourceTransfer(id, db: db), job.cancellationRequested,
-                  job.request.mediaID == session.mediaID else { throw V2ResourceJournalError.conflict }
+            guard let job = try Self.readResourceTransfer(id, db: db), job.cancellationRequested else { throw V2ResourceJournalError.conflict }
+            try Self.requireResourceSessionBinding(session, job: job, db: db)
             // Completed means cancellation lost to completion; retain that fact,
             // without reactivating the cancelled send intent.
             guard [.cancelled, .completed, .expired, .failed].contains(session.state) else { throw V2ResourceJournalError.conflict }
@@ -195,6 +182,15 @@ extension GRDBV2LocalSyncStore {
         guard ["network", "processing", "fileUnavailable", "rejected"].contains(code) else { throw V2ResourceJournalError.invalidRecord }
         try databasePool.write { db in
             try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET stage='paused',attempts=attempts+1,last_error=?,retry_at=? WHERE job_id=? AND stage NOT IN ('cancelled','rejected','expired','ready')", arguments: [code, try Self.commandRetryTimestamp(retryAt), id.uuidString])
+        }
+    }
+
+    private static func requireResourceSessionBinding(_ session: V2ResourceUploadSession, job: V2ResourceTransferJob, db: Database) throws {
+        guard job.request.mediaID == session.mediaID,
+              job.session.map({ $0.locator == session.locator && $0.generation <= session.generation }) ?? true,
+              let rawUser = try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1"),
+              session.locator.home == job.request.usage.home(actorUserID: try UserID(rawUser)) else {
+            throw V2ResourceJournalError.conflict
         }
     }
 }
@@ -210,7 +206,8 @@ extension GRDBV2LocalSyncStore {
         let session = try bytes.map { try JSONDecoder().decode(V2ResourceUploadSession.self, from: $0) }
         let deadline: Double? = row["round_deadline"]
         let nextAction = V2ResourceTransferJob.Action(rawValue: row["next_action"]) ?? .status
-        let token: String = row["local_file_token"]
+        let token: String = row["local_asset_id"]
+        guard let assetUUID = UUID(uuidString: token) else { throw V2ResourceJournalError.invalidRecord }
         let cancellation: Bool = row["cancellation_requested"]
         let attempts: Int = row["attempts"]
         let retryTimestamp: Double = row["retry_at"]
@@ -220,8 +217,9 @@ extension GRDBV2LocalSyncStore {
         let pollAttempts: Int = row["poll_attempts"]
         let needsAttention: Bool = row["needs_attention"]
         let roundDeadline = deadline.map { Date(timeIntervalSince1970: $0) }
-        return V2ResourceTransferJob(id: id, request: request, localFileToken: token, session: session,
-            stage: stage, cancellationRequested: cancellation, attempts: attempts,
+        guard let control = V2ResourceTransferControl(rawValue: row["user_control"]) else { throw V2ResourceJournalError.invalidRecord }
+        return V2ResourceTransferJob(id: id, request: request, localAssetID: .init(assetUUID), session: session,
+            stage: stage, cancellationRequested: cancellation, control: control, attempts: attempts,
             retryAt: Date(timeIntervalSince1970: retryTimestamp), lastError: lastError,
             nextAction: nextAction, actionAttempts: actionAttempts, totalAttempts: totalAttempts,
             roundDeadline: roundDeadline, pollAttempts: pollAttempts, needsAttention: needsAttention)

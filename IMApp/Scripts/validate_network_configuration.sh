@@ -83,6 +83,28 @@ PY
     fi
   done
 
+  # Direct device installs use a development profile, even with Release
+  # optimization. Keep public HTTPS rules while matching its APNs environment.
+  device_environment=(env IMAPP_NETWORK_CONFIG_MODE=device-test
+    IM_V2_ACCOUNT_BASE_URL=https://120.77.66.38 IM_V2_GATEWAY_HOST=120.77.66.38
+    IM_V2_GATEWAY_PORT=7443 IM_V2_PUSH_ENVIRONMENT=development APS_ENVIRONMENT=development)
+  INFO_PLIST="${test_plist}" IMAPP_NETWORK_CONFIG_SELF_TEST=false \
+    "${device_environment[@]}" bash "${BASH_SOURCE[0]}" >/dev/null
+  expect_failure device_test_requires_matching_development_push_environment \
+    "${device_environment[@]}" APS_ENVIRONMENT=production
+  expect_failure device_test_requires_matching_development_push_environment \
+    "${device_environment[@]}" APS_ENVIRONMENT=
+  expect_failure device_test_requires_matching_development_push_environment \
+    "${device_environment[@]}" IM_V2_PUSH_ENVIRONMENT=production
+  expect_failure production_v2_account_requires_https \
+    "${device_environment[@]}" IM_V2_ACCOUNT_BASE_URL=http://120.77.66.38
+  expect_failure production_v2_account_host_requires_domain \
+    "${device_environment[@]}" IM_V2_ACCOUNT_BASE_URL=https://10.0.0.1
+  expect_failure production_v2_gateway_host_requires_domain \
+    "${device_environment[@]}" IM_V2_GATEWAY_HOST=127.0.0.1
+  expect_failure production_v2_account_requires_default_https_port \
+    "${device_environment[@]}" IM_V2_ACCOUNT_BASE_URL=https://120.77.66.38:8443
+
   printf 'network-config-self-test result=pass\n'
   exit 0
 fi
@@ -98,7 +120,7 @@ from urllib.parse import urlsplit
 info_plist = Path(sys.argv[1])
 mode = (sys.argv[2] or "development").strip().lower()
 use_env_overrides = (sys.argv[3] or "true").strip().lower() in {"1", "true", "yes", "on"}
-production_modes = {"release", "production", "appstore", "app-store", "testflight"}
+production_modes = {"release", "production", "appstore", "app-store", "testflight", "device-test"}
 placeholder_hosts = {"im.example.com", "example.com", "example.net", "example.org"}
 placeholder_suffixes = (".example.com", ".example.net", ".example.org", ".test", ".invalid", ".localhost")
 local_hosts = {"127.0.0.1", "localhost", "::1"}
@@ -114,7 +136,7 @@ def public_host_policy_reason(host):
     except ValueError:
         pass
     else:
-        if mode == "testflight" and address.is_global:
+        if mode in {"testflight", "device-test"} and address.is_global:
             return "ok"
         return "ip_literal"
     if "." not in normalized:
@@ -161,8 +183,12 @@ if "$(" in push_environment or ")" in push_environment:
 push_environment = push_environment.lower()
 if push_environment and push_environment not in {"development", "production"}:
     errors.append(f"invalid_IMV2PushEnvironment:{push_environment}")
-if mode in production_modes and push_environment != "production":
+if mode in production_modes - {"device-test"} and push_environment != "production":
     errors.append(f"production_v2_push_environment_requires_production:{push_environment or '<missing>'}")
+if mode == "device-test" and (
+    push_environment != "development" or os.environ.get("APS_ENVIRONMENT") != "development"
+):
+    errors.append("device_test_requires_matching_development_push_environment")
 
 account_url = urlsplit(account_base_url) if account_base_url else None
 if account_url is not None:

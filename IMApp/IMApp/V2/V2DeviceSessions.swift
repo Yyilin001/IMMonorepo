@@ -250,11 +250,22 @@ final class V2DeviceSessionsStore {
 /// 展示当前设备与其他登录设备，并提供单设备退出与全部退出入口。
 struct V2DeviceSessionsView: View {
     @Bindable var store: V2DeviceSessionsStore
+    var exitConfirmation: V2DeviceRevocationPresentation = .hidden
+    var retryExitConfirmation: (@MainActor () async -> Void)? = nil
     @State private var pendingCommand: V2RemoteDeviceRevocationCommand?
     @State private var actionTask: Task<Void, Never>?
 
     var body: some View {
         List {
+            if exitConfirmation != .hidden, let retryExitConfirmation {
+                Section {
+                    V2DeviceRevocationStatusView(state: exitConfirmation, retry: retryExitConfirmation)
+                } header: {
+                    Text("此前的设备退出")
+                } footer: {
+                    Text("此前会话的退出确认与当前登录状态相互独立。")
+                }
+            }
             switch store.state {
             case .loading where store.sessions.isEmpty:
                 Section { HStack { Spacer(); ProgressView("正在读取设备…"); Spacer() } }

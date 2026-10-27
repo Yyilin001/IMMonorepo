@@ -9,7 +9,7 @@ struct V2MessageOperationRecoveryTests {
     func unresolvedThenAccepted() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let intent=try f.intent("never duplicate"),created=Date().addingTimeInterval(-90_000)
-        try await f.store.freezeSendIntent(intent,now:created)
+        try await f.store.freezeMetadataSendIntent(intent,now:created)
         try await f.store.handOffSendIntent(intent.id,now:created)
         let remote=RecoveryMessageClient(),service=V2MessageSendOperationService(accountID:f.account,store:f.store,client:remote)
         let work=try await f.head()
@@ -35,11 +35,11 @@ struct V2MessageOperationRecoveryTests {
     func unknownRoomHead() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let first=try f.intent("unknown"),second=try f.intent("successor")
-        for intent in [first,second] { try await f.store.freezeSendIntent(intent);try await f.store.handOffSendIntent(intent.id) }
+        for intent in [first,second] { try await f.store.freezeMetadataSendIntent(intent);try await f.store.handOffSendIntent(intent.id) }
         let work=try await f.head()
         try await V2MessageSendOperationService(accountID:f.account,store:f.store,client:f.remote).execute(f.claim(work))
         let independent=try V2SendIntent(id:UUID(),roomID:.init(uuid:UUID()),clientMessageID:.init(uuid:UUID()),text:"other room",attachmentJobIDs:[])
-        try await f.store.freezeSendIntent(independent);try await f.store.handOffSendIntent(independent.id)
+        try await f.store.freezeMetadataSendIntent(independent);try await f.store.handOffSendIntent(independent.id)
         let due=try await f.store.dueOperationWork(now:.distantFuture,kinds:[.sendMessage])
         #expect(due.contains { $0.intentID==first.id })
         #expect(!due.contains { $0.intentID==second.id })

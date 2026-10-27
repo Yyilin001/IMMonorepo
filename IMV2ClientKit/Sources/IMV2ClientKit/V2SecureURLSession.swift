@@ -11,20 +11,21 @@ public enum V2SecureURLSession {
     public static let account = make()
 
     /// 独立的媒体提供方连接池，将签名媒体请求与账户服务请求分离。
-    public static let mediaProvider = make()
+    public static let mediaProvider = make(waitForConnectivity: true)
 
     /// 创建临时配置的 URLSession，禁用 Cookie 接收、Cookie 存储、URL 凭证存储和 URL 缓存。
     ///
     /// - Returns: 使用拒绝重定向代理的新会话；共享池由静态属性持有，自建会话生命周期由调用方管理。
     ///
     /// 此工厂不限制请求 URL，业务适配器仍负责自己的端点校验。
-    public static func make() -> URLSession {
+    public static func make(waitForConnectivity: Bool = false) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieAcceptPolicy = .never
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         configuration.urlCache = nil
+        configuration.waitsForConnectivity = waitForConnectivity
         return URLSession(
             configuration: configuration,
             delegate: V2RejectingRedirectDelegate.shared,

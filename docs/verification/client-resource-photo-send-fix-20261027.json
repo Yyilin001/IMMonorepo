@@ -1,0 +1,191 @@
+{
+  "observedAt": "2026-10-26T17:49:21.280693+00:00",
+  "status": "fixed-deployed-and-installed-phone-launch-locked",
+  "sourceSHA256": {
+    "IMApp/IMApp/V2/V2PhotoLibraryPicker.swift": "456b9dcdc18d488d554e7fe17dc9ae2280c7db68b0649070af94e4d796bc2f81",
+    "IMApp/IMApp/V2/V2DurableConversationSendService.swift": "e2cc6f853311231643e9f501241354d103624e1f8fee53fbad5df7f8aba4b4df",
+    "IMApp/IMAppTests/V2PhotoLibraryImageTests.swift": "d2a1b3d551fcb645033edae326a308e3e88cc16d24ff6b0ad6c0a9545d95e6c5",
+    "IMApp/IMAppTests/V2DurableResourceLifecycleTests.swift": "4f5d32c3ebe23d09da5ab0e4e64c4f4c3f0b444ee614f35b171cd2de76d0363d",
+    "IMV2Server/Sources/IMV2ResourceImageWorker/main.swift": "6215518d7b95c98ca1d3a7340d6ee6f9049e095dc91bb9d6229e861f72c07765",
+    "scripts/verify_v2_resource_photo_worker.py": "43c5e0d955cd4af3a1193c97a3f78019fc3917b9515273c19f313d87281bdf0d"
+  },
+  "roots": [
+    "Opaque RGBA bitmap was treated as transparent and encoded as large PNG.",
+    "Full-size Linux Lanczos thumbnail exhausted existing ImageMagick pixel caches."
+  ],
+  "clientTests": {
+    "passed": 14,
+    "log": "/tmp/im-photo-send-client-regression-20261027.log",
+    "resultBundle": "/tmp/im-photo-send-client-regression-20261027.xcresult",
+    "beforeFixRegressionFailed": true,
+    "beforeFixLog": "/tmp/im-photo-alpha-before-fix-20261027.log"
+  },
+  "actualPhotoClientNormalization": {
+    "format": "jpeg",
+    "normalizedBytes": 1809759,
+    "originalBytes": 13296890,
+    "seconds": 0.2032109498977661,
+    "sourceSHA256": "456b9dcdc18d488d554e7fe17dc9ae2280c7db68b0649070af94e4d796bc2f81",
+    "scope": "Native macOS exact current prepare/alpha/bounded encoding bodies; actual iOS regression separate. Private diagnostic photo not printed or sent to other accounts."
+  },
+  "localLinuxBuild": {
+    "exitCode": 0,
+    "sourceSHA256": "6215518d7b95c98ca1d3a7340d6ee6f9049e095dc91bb9d6229e861f72c07765",
+    "binarySHA256": "adfe5855cad7cd155de9c7b106588f203c9350e315c33d28771fc3f5c25f7a80",
+    "builderImageID": "sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
+    "seconds": 21.406954917000007,
+    "container": "im-photo-worker-r2-20261027",
+    "bytes": 45632
+  },
+  "actualFailedPhotoRegression": {
+    "status": "passed-two-actual-failed-photos-same-limits",
+    "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+    "previousImageID": "sha256:e734853b445f768358e460f5bd42c80f6d258ac7ea9e020596bf7572c88ebb1a",
+    "workerSHA256": "adfe5855cad7cd155de9c7b106588f203c9350e315c33d28771fc3f5c25f7a80",
+    "unchangedOtherSixProductsAndPolicy": true,
+    "cases": [
+      {
+        "sourceSHA256": "56c168aab3f6fcaca74d78a2745786218c16c8da4242b2de7a3331254907a760",
+        "sourceBytes": 13296890,
+        "workerExitCode": 0,
+        "seconds": 2.837,
+        "dimensions": [
+          "240 320",
+          "960 1280"
+        ],
+        "previewBytes": [
+          74364,
+          1066646
+        ]
+      },
+      {
+        "sourceSHA256": "2d10244effa3d735557423daa545f15791f8b8d4d51de1843c2cc105671256f6",
+        "sourceBytes": 14940408,
+        "workerExitCode": 0,
+        "seconds": 2.845,
+        "dimensions": [
+          "240 320",
+          "960 1280"
+        ],
+        "previewBytes": [
+          66850,
+          1072643
+        ]
+      }
+    ]
+  },
+  "syntheticBeforeFix": {
+    "exitCode": 1,
+    "workerExitCode": 4,
+    "log": "/tmp/im-photo-worker-synthetic-before-20261027.log"
+  },
+  "syntheticAfterFix": {
+    "status": "passed",
+    "image": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+    "cases": [
+      {
+        "name": "camera-rgba",
+        "exitCode": 0,
+        "dimensions": [
+          [
+            240,
+            320
+          ],
+          [
+            960,
+            1280
+          ]
+        ],
+        "seconds": 1.505,
+        "sourceSHA256": "a5b693b1f9c0592679b04b053cc15611ae68f6a3b7b07b5bddb758a8b1ed9a70"
+      },
+      {
+        "name": "transparent-avatar",
+        "exitCode": 0,
+        "dimensions": [
+          [
+            128,
+            128
+          ],
+          [
+            256,
+            256
+          ]
+        ],
+        "seconds": 0.495,
+        "sourceSHA256": "a84c9259059da012314411265331a6de99efa60ceb2906cb7e453481534a0feb"
+      }
+    ],
+    "fixtures": "/tmp/im-resource-photo-worker-0j40jw4b",
+    "network": "none",
+    "memoryBytes": 805306368,
+    "cpus": 1
+  },
+  "deployment": {
+    "status": "deployed-six-healthy-services-public-https-verified",
+    "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+    "previousImageID": "sha256:e734853b445f768358e460f5bd42c80f6d258ac7ea9e020596bf7572c88ebb1a",
+    "databaseUnchanged": true,
+    "schemaChanged": false,
+    "services": [
+      {
+        "service": "placement-a",
+        "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+        "health": "healthy"
+      },
+      {
+        "service": "placement-b",
+        "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+        "health": "healthy"
+      },
+      {
+        "service": "placement-c",
+        "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+        "health": "healthy"
+      },
+      {
+        "service": "account",
+        "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+        "health": "healthy"
+      },
+      {
+        "service": "gateway",
+        "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+        "health": "healthy"
+      },
+      {
+        "service": "operator",
+        "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+        "health": "healthy"
+      }
+    ],
+    "publicHTTPSSystemTrust": true,
+    "caddyNamespaceVerified": true
+  },
+  "functional": {
+    "status": "passed-deployed-large-png-oss-processing-message-recipient-bytes-and-authorization",
+    "imageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+    "dimensions": [
+      3072,
+      4096
+    ],
+    "sourceBytes": 52078,
+    "readySeconds": 1.863,
+    "recipientRoomLogVerified": true,
+    "recipientBytesVerified": true,
+    "outsiderDenied": true
+  },
+  "signedClient": {
+    "record": "/tmp/im-resource-client-signed-release-20261027-r18/result.json",
+    "binarySHA256": "38f5980ce15914a29162b357ff3bfcf1e2f4384882425dcdf7cb78dce18662c5",
+    "installed": true,
+    "installRecord": "/tmp/im-photo-fix-phone-install-20261027.json",
+    "launchRecord": "/tmp/im-photo-fix-phone-launch-20261027.json",
+    "launchSucceeded": false,
+    "launchFailure": "Device locked"
+  },
+  "discardedCandidate": "Swift 6.2.1 candidate failed actual runtime --check with Foundation symbol mismatch. Never deployed. Recompiled locally with exact pinned Swift 6.4 Jammy builder; all runtime and photo checks passed.",
+  "limitsUnchanged": true,
+  "existingRejectedAttachmentsAutomaticallyResent": false,
+  "manualPhysicalSendAndBackgroundBehaviorVerified": false
+}

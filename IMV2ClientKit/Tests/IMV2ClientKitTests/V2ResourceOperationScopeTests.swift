@@ -6,6 +6,30 @@ import Testing
 
 @Suite("Account resource task ownership", .timeLimit(.minutes(1)))
 struct V2ResourceOperationScopeTests {
+    @Test("close drains cleanup for a produced value rejected by cancellation")
+    func cancellationCleanupIsInsideTheCloseBoundary() async throws {
+        let scope = V2ResourceOperationScope(limit: 1), producer = ScopeGate(), cleanup = ScopeGate()
+        let finished = Mutex(false)
+        let request = Task {
+            try await scope.run(onCancelledValue: { value in
+                #expect(value == 7)
+                await cleanup.wait()
+            }) { await producer.wait(); return 7 }
+        }
+        await producer.entered()
+        let close = Task { await scope.close(); finished.withLock { $0 = true } }
+        await producer.cancelled()
+        await producer.release()
+        await cleanup.entered()
+        #expect(await scope.activeCount() == 1)
+        #expect(!finished.withLock { $0 })
+        await cleanup.release()
+        await close.value
+        await #expect(throws: CancellationError.self) { try await request.value }
+        #expect(await scope.activeCount() == 0)
+        #expect(finished.withLock { $0 })
+    }
+
     @Test func callerCancellationRetainsCapacityUntilActualCompletion() async throws {
         let scope = V2ResourceOperationScope(limit: 1), gate = ScopeGate()
         let request = Task { try await scope.run { await gate.wait(); return 1 } }
@@ -57,14 +81,16 @@ struct V2ResourceOperationScopeTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appendingPathComponent("db.sqlite"), installationBinding: .init(value: UUID()))
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appendingPathComponent("db.sqlite"), installationBinding: .init(value: UUID()), userID: .init(uuid: UUID()))
         let gate = ScopeGate(), control = ScopeResourceControl(gate: gate)
-        let engine = V2ResourceTransferEngine(store: store, control: control, executor: ScopeExecutor(), directory: directory,
+        let resources = try await makeResourceTestCenter(store: store, root: directory)
+        let engine = V2ResourceTransferEngine(store: store, control: control, executor: ScopeExecutor(), resources: resources,
             capabilities: .init(reader: control))
         let id = UUID()
         let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
             usage: .userAvatar, contentType: "image/png", byteCount: 3, checksum: .init(value: String(repeating: "a", count: 64)))
-        _ = try await engine.prepare(id: id, request: request)
+        try await store.seedMetadataResourceAsset(.init(id), request: request)
+        _ = try await engine.prepare(id: id, request: request, localAssetID: .init(id))
         let work = Task {
             if capability { try await engine.refreshCapabilitiesIfNeeded() }
             else {
@@ -78,7 +104,7 @@ struct V2ResourceOperationScopeTests {
         let close = Task { await engine.close(); finished.withLock { $0 = true } }
         await gate.cancelled()
         #expect(!finished.withLock { $0 })
-        await #expect(throws: CancellationError.self) { _ = try await engine.prepare(id: UUID(), request: request) }
+        await #expect(throws: CancellationError.self) { _ = try await engine.prepare(id: UUID(), request: request, localAssetID: .init(id)) }
         await gate.release()
         await close.value
         await #expect(throws: CancellationError.self) { try await work.value }
@@ -86,9 +112,9 @@ struct V2ResourceOperationScopeTests {
         let job = try #require(try await store.resourceTransfer(id: id))
         #expect(job.session == nil)
         #expect(job.cancellationRequested == !capability)
-        try await store.close()
+        await resources.close(); try await store.close()
         await #expect(throws: CancellationError.self) { try await engine.cancel(id: id) }
-        await #expect(throws: CancellationError.self) { try await engine.releaseAcceptedStaging() }
+        await #expect(throws: CancellationError.self) { try await engine.releaseFinishedSources() }
     }
 }
 

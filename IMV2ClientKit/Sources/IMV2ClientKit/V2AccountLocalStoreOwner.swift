@@ -14,6 +14,7 @@ public enum V2AccountLocalStoreError: Error, Equatable, Sendable {
 /// 关闭后来创建的实例。调用者需在关闭前停止该 store 的业务访问者。
 public actor V2AccountLocalStoreOwner {
     private let root: URL
+    private let cacheRoot: URL
     private let bootstrapper: V2LocalStoreBootstrapper
     private var catalogs: [UserID: V2AccountStorageDirectory] = [:]
     private var current: (scope: V2AccountStorageScope, store: GRDBV2LocalSyncStore, readOnly: Bool)?
@@ -27,8 +28,9 @@ public actor V2AccountLocalStoreOwner {
     ///   - bootstrapper: 打开数据库前验证设备安装绑定的依赖。
     ///
     /// 构造不触碰文件系统；目录根在首次实际打开时创建。
-    public init(root: URL, bootstrapper: V2LocalStoreBootstrapper) {
+    public init(root: URL, cacheRoot: URL, bootstrapper: V2LocalStoreBootstrapper) {
         self.root = root
+        self.cacheRoot = cacheRoot
         self.bootstrapper = bootstrapper
     }
 
@@ -111,7 +113,8 @@ public actor V2AccountLocalStoreOwner {
         if let existing = catalogs[accountID] { return existing }
         // UserID is a domain identifier, not a filesystem path component.
         let key = SHA256.hash(data: Data(accountID.rawValue.utf8)).map { String(format: "%02x", $0) }.joined()
-        let catalog = V2AccountStorageDirectory(root: root.appending(path: key, directoryHint: .isDirectory))
+        let catalog = V2AccountStorageDirectory(root: root.appending(path: key, directoryHint: .isDirectory),
+                                              cacheRoot: cacheRoot.appending(path: key, directoryHint: .isDirectory))
         catalogs[accountID] = catalog
         return catalog
     }

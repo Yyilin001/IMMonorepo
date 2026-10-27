@@ -19,7 +19,7 @@ struct V2LocalSchemaContractTests {
         #expect(try migrationIdentifiers(in: primary) == ["createCurrentV2Schema"])
         #expect(try migrationIdentifiers(in: search) == ["createCurrentV2MessageSearchSchema"])
         let primaryObjectCount = try schemaObjectCount(in: primary)
-        #expect(primaryObjectCount == 209)
+        #expect(primaryObjectCount == 278)
         #expect(try schemaObjectExists(named: "v2_room_unread_directory", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_room_unread_rotation", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_hybrid_group_background_state", in: primary) == false)
@@ -35,9 +35,9 @@ struct V2LocalSchemaContractTests {
             #expect(try schemaObjectExists(named: table, in: primary) == false)
         }
         let primaryFingerprint = try schemaFingerprint(in: primary)
-        // Direct rooms use membership revision zero in recovery state/work
-        // and latest-visible snapshots; group membership retains its checks.
-        #expect(primaryFingerprint == 0x5d3ae036c5318601)
+        // Canonical resource catalog, file ownership, transfer demands and local
+        // direct messages, including avatar import edges and the room directory index, share one baseline.
+        #expect(primaryFingerprint == 0x9ccf1b1e332de3d0)
         #expect(try schemaObjectCount(in: search) == 5)
         #expect(try schemaFingerprint(in: search) == 0x39f4_35c6_3f7a_01b5)
 

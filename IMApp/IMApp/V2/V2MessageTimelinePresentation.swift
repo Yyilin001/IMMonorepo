@@ -1,6 +1,8 @@
 import MessagingUI
 import Observation
 import SwiftUI
+import IMV2ClientKit
+import UIKit
 
 enum V2MessageTimelineRow: Hashable, Identifiable {
     case committed(V2ConversationTimelineItem)
@@ -10,6 +12,34 @@ enum V2MessageTimelineRow: Hashable, Identifiable {
         case .committed(let item): item.id
         case .pending(let item): "pending-" + item.id.uuidString
         }
+    }
+}
+
+/// First-entry pin survives self-sizing and viewport/inset changes. It is
+/// relinquished on real user scroll input or explicit history navigation;
+/// programmatic geometry notifications cannot accidentally relinquish it.
+struct V2MessageTimelineInitialBottomAnchor {
+    struct Geometry: Equatable {
+        let contentSize: CGSize
+        let visibleSize: CGSize
+        let bottomInset: CGFloat
+        let pointsFromBottom: CGFloat
+    }
+    private(set) var isActive: Bool
+    private var lastCorrection: Geometry?
+
+    init(isActive: Bool = true) { self.isActive = isActive }
+
+    mutating func release() { isActive = false; lastCorrection = nil }
+
+    mutating func needsCorrection(_ geometry: Geometry, hasItems: Bool) -> Bool {
+        guard isActive, hasItems, geometry.visibleSize.height > 0,
+              geometry.contentSize.height.isFinite, geometry.visibleSize.height.isFinite,
+              geometry.pointsFromBottom.isFinite else { return false }
+        guard geometry.pointsFromBottom > 1 else { lastCorrection = nil; return false }
+        guard lastCorrection != geometry else { return false }
+        lastCorrection = geometry
+        return true
     }
 }
 
@@ -109,24 +139,67 @@ struct V2MessageTimelineEnvironment<Content: View>: View {
     var body: some View { content(environment) }
 }
 
+/// Hosting cells own their SwiftUI accessibility and presentation roots.
+/// Replacing the entire EnvironmentValues also replaces those private roots,
+/// leaving visible message content absent from the accessibility tree.
+/// Carry only the page dependencies and public display settings we need.
+struct V2MessageTimelineInheritedEnvironment: ViewModifier {
+    let source: EnvironmentValues
+
+    @ViewBuilder func body(content: Content) -> some View {
+        let inherited = content
+            .environment(\.v2AvatarPipeline, source.v2AvatarPipeline)
+            .environment(\.v2AuthorPresentationPageScope, source.v2AuthorPresentationPageScope)
+            .environment(\.v2MediaThumbnailCache, source.v2MediaThumbnailCache)
+            .environment(\.v2UserInteractionContext, source.v2UserInteractionContext)
+            .environment(\.v2ResourceManagement, source.v2ResourceManagement)
+            .environment(\.v2ResourceNavigation, source.v2ResourceNavigation)
+            .environment(\.scenePhase, source.scenePhase)
+            .environment(\.displayScale, source.displayScale)
+            .environment(\.dynamicTypeSize, source.dynamicTypeSize)
+            .environment(\.colorScheme, source.colorScheme)
+            .environment(\.layoutDirection, source.layoutDirection)
+            .environment(\.locale, source.locale)
+            .environment(\.calendar, source.calendar)
+            .environment(\.timeZone, source.timeZone)
+        #if DEBUG
+        inherited.environment(\.v2MockProfileNames, source.v2MockProfileNames)
+        #else
+        inherited
+        #endif
+    }
+}
+
 struct V2PendingMessageRow: View {
     let pending: V2DurableConversationSendService.Pending
     let retry: () -> Void
     let cancel: () -> Void
+    var borrowImage: (@MainActor (UUID) async throws -> V2ResourceFileLease)? = nil
 
     var body: some View {
         HStack {
             Spacer(minLength: 48)
             VStack(alignment: .trailing, spacing: 6) {
-                Text(pending.text.isEmpty ? "附件" : pending.text)
-                    .padding(14)
+                VStack(alignment: .trailing, spacing: 6) {
+                    if !pending.text.isEmpty || (pending.images.isEmpty && pending.total == 0) {
+                        Text(pending.text.isEmpty ? "附件" : pending.text)
+                    }
+                    if !pending.images.isEmpty {
+                        ForEach(pending.images, id: \.jobID) { image in
+                            V2PendingImagePreview(image: image, borrow: borrowImage)
+                        }
+                    }
+                    ForEach(0..<max(0, pending.total - pending.images.count), id: \.self) { _ in
+                        V2ConversationMediaPlaceholder(systemImage: "paperclip")
+                            .frame(width: 200, height: 88)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .accessibilityLabel("待发送附件")
+                    }
+                }
+                    .padding(.horizontal, 14).padding(.vertical, 10)
                     .foregroundStyle(.white)
                     .background(V2VisualStyle.outgoing, in: RoundedRectangle(cornerRadius: 20))
                 Text(pending.status).font(.caption).foregroundStyle(.secondary)
-                if pending.total > 0 {
-                    ProgressView(value: Double(pending.completed), total: Double(pending.total))
-                        .accessibilityLabel("附件已准备 \(pending.completed)/\(pending.total)")
-                }
                 if pending.canRetry || pending.canCancel {
                     HStack {
                         if pending.canRetry { Button(pending.retryTitle, action: retry) }
@@ -136,5 +209,37 @@ struct V2PendingMessageRow: View {
             }
         }
         .accessibilityIdentifier("v2.message.pending.\(pending.id.uuidString)")
+    }
+}
+
+private struct V2PendingImagePreview: View {
+    let image: V2PendingResourceSendSnapshot.LocalImage
+    let borrow: (@MainActor (UUID) async throws -> V2ResourceFileLease)?
+    @Environment(\.v2MediaThumbnailCache) private var cache
+    @State private var thumbnail: UIImage?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            V2ConversationImageLayout(dimensions: image.dimensions) {
+                if let thumbnail {
+                    V2ZoomableConversationImage(image: thumbnail)
+                } else {
+                    V2ConversationMediaPlaceholder()
+                }
+            }
+            .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .accessibilityLabel("待发送图片")
+        .task(id: image.jobID) {
+            guard let borrow else { return }
+            do {
+                let lease = try await borrow(image.jobID)
+                let result = await cache?.thumbnail(fileURL: lease.fileURL, maximumPixelSize: 2048)
+                await lease.release()
+                guard !Task.isCancelled else { return }
+                thumbnail = result?.image
+            } catch { }
+        }
     }
 }

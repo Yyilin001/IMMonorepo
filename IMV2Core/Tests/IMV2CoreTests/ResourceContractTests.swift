@@ -4,6 +4,52 @@ import Testing
 
 @Suite("Supplier-independent resource contracts")
 struct ResourceContractTests {
+    @Test func clientDimensionsAreBoundedTypedDeclarations() throws {
+        let size = try V2ResourcePixelDimensions(width: 1536, height: 2048)
+        let request = try V2ResourceUploadRequest(operationID: .init("op"), mediaID: .init("media"),
+            usage: .messageAttachment(.init("room")), contentType: "image/jpeg", byteCount: 128,
+            checksum: checksum, clientImageDimensions: size)
+        let encoded = try JSONEncoder().encode(request)
+        #expect(try JSONDecoder().decode(V2ResourceUploadRequest.self, from: encoded) == request)
+        let fields = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        #expect((fields["clientImageDimensions"] as? [String: Int]) == ["width": 1536, "height": 2048])
+        #expect(fields["pixelWidth"] == nil && fields["resourceDescriptor"] == nil)
+        #expect(throws: V2ResourceValidationError.invalidUploadRequest) {
+            try V2ResourceUploadRequest(operationID: .init("op"), mediaID: .init("media"), usage: .messageAttachment(.init("room")),
+                contentType: "text/plain", byteCount: 128, checksum: checksum, clientImageDimensions: size)
+        }
+        for json in ["{\"width\":0,\"height\":1}", "{\"width\":1}", "{\"width\":10000,\"height\":10000}", "{\"width\":9223372036854775807,\"height\":1}"] {
+            #expect(throws: (any Error).self) { try JSONDecoder().decode(V2ResourcePixelDimensions.self, from: Data(json.utf8)) }
+        }
+    }
+    @Test func wholeBackgroundPutBindsExactBytesAndRejectsPartOrLegacyScope() throws {
+        let issued = Date(), expiry = issued.addingTimeInterval(600)
+        let hash = try V2ResourceChecksum(value: String(repeating: "a", count: 64))
+        let grant = try V2ResourceBackgroundAuthorization(id: UUID(), sessionID: .init(uuid: UUID()), generation: 1,
+            mediaID: .init(uuid: UUID()), scope: .whole(byteCount: 9 * 1_024 * 1_024, checksum: hash), issuedAt: issued, expiresAt: expiry)
+        let plan = try V2ResourceTransferPlan(mode: .httpPut, url: #require(URL(string: "https://objects.invalid/object")),
+            expiresAt: expiry, expectedByteCount: 9 * 1_024 * 1_024, checksum: hash, backgroundAuthorization: grant)
+        #expect(try JSONDecoder().decode(V2ResourceTransferPlan.self, from: JSONEncoder().encode(plan)) == plan)
+        #expect(grant.partNumber == nil)
+        #expect(throws: V2ResourceValidationError.invalidTransferPlan) {
+            try V2ResourceTransferPlan(mode: .httpPut, url: plan.url, expiresAt: expiry,
+                expectedByteCount: plan.expectedByteCount - 1, checksum: hash, backgroundAuthorization: grant)
+        }
+        #expect(throws: V2ResourceValidationError.invalidTransferPlan) {
+            try V2ResourceTransferPlan(mode: .httpPartPut, url: plan.url, expiresAt: expiry,
+                expectedByteCount: 4, byteRange: .init(lowerBound: 0, upperBound: 3), partNumber: 1, backgroundAuthorization: grant)
+        }
+        var old = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(grant)) as? [String: Any])
+        old.removeValue(forKey: "scope"); old["partNumber"] = 1
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(V2ResourceBackgroundAuthorization.self, from: JSONSerialization.data(withJSONObject: old))
+        }
+        #expect(throws: V2ResourceValidationError.invalidUploadRequest) {
+            try V2ResourceCapabilities(version: 1, uploadModes: [.httpPut], maximumBytes: 4,
+                allowedUsages: [.messageAttachment], maximumParts: 0, backgroundTransfer: true)
+        }
+    }
+
     private let expiry = Date(timeIntervalSince1970: 2_000_000_000)
     private var checksum: V2ResourceChecksum { get throws { try .init(value: String(repeating: "a", count: 64)) } }
 

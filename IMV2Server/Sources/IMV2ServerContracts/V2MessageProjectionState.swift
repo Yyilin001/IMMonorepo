@@ -200,6 +200,7 @@ package struct V2MessageProjectionState: Codable, Equatable, Sendable {
               Set(mediaIDs).count == mediaIDs.count,
               Set(mentionUserIDs).count == mentionUserIDs.count,
               mediaPresentations.map(\.mediaID) == mediaIDs,
+              mediaPresentations.allSatisfy({ $0.resourceDescriptor?.key.home == .room(roomID) }),
               (forwardedFromMessageID == nil) == (forwardedFromUserID == nil)
         else { throw V2MessageProjectionStateError.invalidPayload }
         if isWithdrawn {
@@ -281,7 +282,7 @@ package struct V2MessageProjectionState: Codable, Equatable, Sendable {
         try values.encode(senderUserID.rawValue, forKey: .senderUserID)
         try values.encode(text, forKey: .text)
         try values.encode(mediaIDs.map(\.rawValue), forKey: .mediaIDs)
-        try values.encode(mediaPresentations.map(MediaPresentationWire.init), forKey: .mediaPresentations)
+        try values.encode(try mediaPresentations.map(MediaPresentationWire.init), forKey: .mediaPresentations)
         try values.encode(mentionUserIDs.map(\.rawValue), forKey: .mentionUserIDs)
         try values.encode(mentionsEveryone, forKey: .mentionsEveryone)
         try values.encode(entities, forKey: .entities)
@@ -357,8 +358,11 @@ private struct MediaPresentationWire: Codable {
     let kind: V2MediaPresentation.Kind
     let contentType: String
     let byteCount: Int64
+    let resourceDescriptor: V2ResourceDescriptor
 
-    init(_ value: V2MediaPresentation) {
+    init(_ value: V2MediaPresentation) throws {
+        guard let descriptor = value.resourceDescriptor else { throw V2MessageProjectionStateError.invalidPayload }
+        resourceDescriptor = descriptor
         mediaID = value.mediaID.rawValue
         kind = value.kind
         contentType = value.contentType
@@ -371,7 +375,8 @@ private struct MediaPresentationWire: Codable {
                 mediaID: MediaID(mediaID),
                 kind: kind,
                 contentType: contentType,
-                byteCount: byteCount
+                byteCount: byteCount,
+                resourceDescriptor: resourceDescriptor
             )
         }
     }
@@ -381,5 +386,6 @@ private struct MediaPresentationWire: Codable {
         case kind
         case contentType = "content_type"
         case byteCount = "byte_count"
+        case resourceDescriptor = "resource_descriptor"
     }
 }

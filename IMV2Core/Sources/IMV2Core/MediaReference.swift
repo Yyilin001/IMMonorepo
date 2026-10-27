@@ -12,7 +12,7 @@ public struct V2MediaReference: Hashable, Codable, Sendable {
 
 /// 服务端根据媒体对象派生的持久展示资料，不携带对象地址或下载凭证。
 ///
-/// 合成 Codable 解码不经过普通构造器校验，外部输入应由对应业务边界验证。
+/// 构造和解码均校验描述一致性；消息同步边界还必须验证描述归属。
 public struct V2MediaPresentation: Hashable, Codable, Sendable {
     /// 媒体展示类别，原始值参与编码。
     public enum Kind: String, Codable, CaseIterable, Sendable {
@@ -36,9 +36,13 @@ public struct V2MediaPresentation: Hashable, Codable, Sendable {
     public let contentType: String
     /// 媒体字节数，允许零。
     public let byteCount: Int64
+    /// Verified resource facts for durable synchronization. Local draft display
+    /// values may omit this; accepted wire projections must include it.
+    public let resourceDescriptor: V2ResourceDescriptor?
 
     /// 要求内容类型已经去除首尾空白并小写、包含斜线、无 ASCII 控制字符且不超过 127 字节，字节数非负，否则抛出 invalidPresentation；不验证完整 MIME 语法。
-    public init(mediaID: MediaID, kind: Kind, contentType: String, byteCount: Int64) throws {
+    public init(mediaID: MediaID, kind: Kind, contentType: String, byteCount: Int64,
+                resourceDescriptor: V2ResourceDescriptor? = nil) throws {
         let normalizedContentType = contentType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard normalizedContentType == contentType,
               normalizedContentType.contains("/"),
@@ -49,7 +53,21 @@ public struct V2MediaPresentation: Hashable, Codable, Sendable {
         self.mediaID = mediaID
         self.kind = kind
         self.contentType = normalizedContentType
+        if let descriptor = resourceDescriptor {
+            guard descriptor.key.mediaID == mediaID, descriptor.kind == kind,
+                  descriptor.contentType == contentType, descriptor.byteCount == byteCount,
+                  descriptor.state == .ready else { throw V2MediaValidationError.invalidPresentation }
+        }
         self.byteCount = byteCount
+        self.resourceDescriptor = resourceDescriptor
+    }
+
+    private enum CodingKeys: String, CodingKey { case mediaID, kind, contentType, byteCount, resourceDescriptor }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(mediaID: values.decode(MediaID.self, forKey: .mediaID), kind: values.decode(Kind.self, forKey: .kind),
+            contentType: values.decode(String.self, forKey: .contentType), byteCount: values.decode(Int64.self, forKey: .byteCount),
+            resourceDescriptor: values.decodeIfPresent(V2ResourceDescriptor.self, forKey: .resourceDescriptor))
     }
 
     /// 按区分大小写的前缀分类：image/gif 优先动图，其次 image/、video/、audio/，其余为 file；不验证内容字节，也不先规范化输入。
@@ -83,19 +101,28 @@ public struct V2MediaDownloadGrant: Equatable, Sendable {
 
 /// 已认证边缘返回的临时下载计划；不可写入消息、投影、journal、备份或日志。
 /// 下载只接受完整 GET，并要求长度和摘要，解码与普通构造使用同一校验。
+public enum V2MediaImagePreviewSize: Int, Codable, Sendable { case thumbnail = 320, large = 1280 }
+
 public struct V2MediaDownloadTargetEnvelope: Codable, Equatable, Sendable {
     public let plan: V2ResourceTransferPlan
+    public let preview: V2ResourceVariantDescriptor?
 
-    public init(plan: V2ResourceTransferPlan) throws {
+    public init(plan: V2ResourceTransferPlan, preview: V2ResourceVariantDescriptor? = nil) throws {
         guard plan.mode == .httpGet, plan.checksum != nil
         else { throw V2MediaValidationError.invalidDownloadTarget }
-        self.plan = plan
+        if let preview {
+            guard case .derived = preview.key.rendition, preview.checksum == plan.checksum,
+                  preview.byteCount == plan.expectedByteCount, preview.byteCount <= 2 * 1_024 * 1_024
+            else { throw V2MediaValidationError.invalidDownloadTarget }
+        }
+        self.plan = plan; self.preview = preview
     }
 
-    private enum CodingKeys: String, CodingKey { case plan }
+    private enum CodingKeys: String, CodingKey { case plan, preview }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(plan: values.decode(V2ResourceTransferPlan.self, forKey: .plan))
+        try self.init(plan: values.decode(V2ResourceTransferPlan.self, forKey: .plan),
+                      preview: values.decodeIfPresent(V2ResourceVariantDescriptor.self, forKey: .preview))
     }
 }
 

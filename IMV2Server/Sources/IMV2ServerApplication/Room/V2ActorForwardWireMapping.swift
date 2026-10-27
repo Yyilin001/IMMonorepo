@@ -61,12 +61,12 @@ extension V2ActorForwardExportIntentWire {
 extension V2ActorForwardExportMediaWire {
     init(domain: V2ForwardExportMedia) {
         self.init(mediaID: domain.mediaID, uploadSessionID: domain.uploadSessionID,
-                  contentType: domain.contentType, byteCount: domain.byteCount)
+                  contentType: domain.contentType, byteCount: domain.byteCount, displayName: domain.displayName)
     }
 
     func toDomain() -> V2ForwardExportMedia {
         .init(mediaID: mediaID, uploadSessionID: uploadSessionID,
-              contentType: contentType, byteCount: byteCount)
+              contentType: contentType, byteCount: byteCount, displayName: displayName)
     }
 }
 

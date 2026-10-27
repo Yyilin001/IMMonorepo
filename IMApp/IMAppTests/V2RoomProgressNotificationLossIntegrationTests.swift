@@ -29,9 +29,9 @@ struct V2RoomProgressNotificationLossIntegrationTests {
         let auth = V2AuthSession(credentialStore: ProgressCredentials(receiver.credentials), transport: ProgressNoRefresh(), revocationScheduler: ProgressNoRevocation())
         let credentials = try await auth.realtimeCredentials()
         let epoch = try #require(credentials.sessionEpoch)
-        let realtime = try V2AppRealtimeRuntime(configuration: configuration, actorUserID: receiver.userID,
+        let realtime = try await V2AppRealtimeRuntime(configuration: configuration, actorUserID: receiver.userID,
             deviceID: receiver.deviceID, authSession: auth, authEpoch: epoch, localStore: store,
-            mediaCacheDirectory: root.appendingPathComponent("cache"), mediaStagingDirectory: root.appendingPathComponent("staging"),
+            resourceCenter: try await makeResourceCenter(store: store, root: root, user: receiver.userID),
             testRoomNotificationInterceptor: { witness.discard(room: $0, head: $1, bodies: $2) },
             testRoomProgressObserver: { room, head in
                 let cursor = try await store.groupEventCursor(roomID: room)
@@ -140,13 +140,13 @@ struct V2RoomProgressNotificationLossIntegrationTests {
         let credentials = try await auth.realtimeCredentials()
         let epoch = try #require(credentials.sessionEpoch)
         let activeWire = Mutex<V2TLSFrameConnection?>(nil)
-        func makeRuntime(_ local: GRDBV2LocalSyncStore) throws -> V2AppRealtimeRuntime {
-            try V2AppRealtimeRuntime(configuration: configuration, actorUserID: receiver.userID,
+        func makeRuntime(_ local: GRDBV2LocalSyncStore) async throws -> V2AppRealtimeRuntime {
+            try await V2AppRealtimeRuntime(configuration: configuration, actorUserID: receiver.userID,
                 deviceID: receiver.deviceID, authSession: auth, authEpoch: epoch, localStore: local,
-                mediaCacheDirectory: root.appendingPathComponent("cache"), mediaStagingDirectory: root.appendingPathComponent("staging"),
+                resourceCenter: try await makeResourceCenter(store: local, root: root, user: receiver.userID),
                 testConnectionObserver: { connection in activeWire.withLock { $0 = connection } })
         }
-        var runtime = try makeRuntime(store)
+        var runtime = try await makeRuntime(store)
         var task: Task<Void, Error>?
         do {
             _ = try await wire.connectAndAuthenticate(accessToken: sender.accessToken, deviceID: sender.deviceID, supportedCapabilityProfiles: ["base"])
@@ -179,7 +179,7 @@ struct V2RoomProgressNotificationLossIntegrationTests {
             var final = try #require(receipts.last)
             store = try await V2LocalStoreBootstrapper(bindingStore: binding).open(databaseURL: database, userID: receiver.userID)
             #expect(try await store.groupEventCursor(roomID: room) == initial.roomSequence)
-            runtime = try makeRuntime(store)
+            runtime = try await makeRuntime(store)
             let replacement = runtime
             task = Task { try await replacement.accountRuntime.runRealtime(replacement.runtime) }
             try await eventually {
@@ -259,10 +259,10 @@ struct V2RoomProgressNotificationLossIntegrationTests {
         let auth = V2AuthSession(credentialStore: ProgressCredentials(sibling.credentials),
             transport: ProgressNoRefresh(), revocationScheduler: ProgressNoRevocation())
         let credentials = try await auth.realtimeCredentials()
-        let siblingRuntime = try V2AppRealtimeRuntime(configuration: .init(localE2ERealtimePort: secondaryPort),
+        let siblingRuntime = try await V2AppRealtimeRuntime(configuration: .init(localE2ERealtimePort: secondaryPort),
             actorUserID: sibling.userID, deviceID: sibling.deviceID, authSession: auth,
             authEpoch: #require(credentials.sessionEpoch), localStore: siblingStore,
-            mediaCacheDirectory: root.appendingPathComponent("cache"), mediaStagingDirectory: root.appendingPathComponent("staging"))
+            resourceCenter: try await makeResourceCenter(store: siblingStore, root: root.appending(path: "sibling"), user: sibling.userID))
         let task = Task { try await siblingRuntime.accountRuntime.runRealtime(siblingRuntime.runtime) }
         let stores = [store, siblingStore], runtimes = [runtime, siblingRuntime]
         do {
@@ -341,10 +341,9 @@ struct V2RoomProgressNotificationLossIntegrationTests {
         var senderRuntime: V2AppRealtimeRuntime?
         var senderTask: Task<Void, Error>?
         do {
-            let runtime = try V2AppRealtimeRuntime(configuration: configuration, actorUserID: account.userID,
+            let runtime = try await V2AppRealtimeRuntime(configuration: configuration, actorUserID: account.userID,
                 deviceID: account.deviceID, authSession: auth, authEpoch: epoch, localStore: local,
-                mediaCacheDirectory: database.deletingLastPathComponent().appendingPathComponent("sender-cache"),
-                mediaStagingDirectory: database.deletingLastPathComponent().appendingPathComponent("sender-staging"),
+                resourceCenter: try await makeResourceCenter(store: local, root: database.deletingLastPathComponent().appending(path: "sender"), user: account.userID),
                 testConnectionObserver: { connection in activeWire.withLock { $0 = connection } })
             senderRuntime = runtime
             let wire = try #require(activeWire.withLock { $0 })
@@ -550,4 +549,8 @@ private actor ProgressDurableSendClient: V2MessageSendOperationClient {
         }
         return result
     }
+}
+
+private func makeResourceCenter(store: GRDBV2LocalSyncStore, root: URL, user: UserID) async throws -> V2ResourceCenter {
+    try await .make(scope: .init(incarnation: UUID(), accountID: user, directory: root, cacheDirectory: root.appending(path: "cache-scope")), store: store)
 }

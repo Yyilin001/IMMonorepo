@@ -148,6 +148,7 @@ struct V2ResourceLogicalIdentityPostgresTests {
             try await processor.prepare(mediaID: f.media.uuidValue!, input: input)
             let first = try await f.sql.raw("SELECT variant_id::text AS value FROM im_v2.resource_variants WHERE media_id=\(bind: f.media.uuidValue!) ORDER BY size").all(decoding: IdentityTextRow.self)
             #expect(first.count == 2 && Set(first.map(\.value)).count == 2)
+            #expect(try await f.sql.raw("SELECT 1 FROM im_v2.resource_catalog WHERE media_id=\(bind: f.media.uuidValue!) AND pixel_width=300 AND pixel_height=160").first() != nil)
             #expect(try await f.sql.raw("SELECT 1 FROM im_v2.resource_variants WHERE media_id=\(bind: f.media.uuidValue!) AND variant_id=(reference_json->>'placementID')::uuid").first() == nil)
             try await processor.prepare(mediaID: f.media.uuidValue!, input: input)
             let second = try await f.sql.raw("SELECT variant_id::text AS value FROM im_v2.resource_variants WHERE media_id=\(bind: f.media.uuidValue!) ORDER BY size").all(decoding: IdentityTextRow.self)
@@ -284,7 +285,7 @@ private actor IdentityTransformer: V2ResourceTransformer {
         for (size, reference) in outputs {
             let facts = try await registry.storage(for: reference.binding).write(reference, byteCount: input.byteCount,
                 sha256: input.sha256, bytes: registry.storage(for: input.reference.binding).read(input.reference))
-            result.append(try .init(size: size, facts: facts))
+            result.append(try .init(size: size, facts: facts, sourceDimensions: .init(width: 300, height: 160)))
         }
         return result
     }

@@ -1085,11 +1085,42 @@ CREATE TRIGGER message_forward_operations_identity_immutable
 CREATE TABLE im_v2.message_media_references (
     message_id uuid NOT NULL,
     media_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    room_sequence bigint NOT NULL CHECK(room_sequence>0),
     ordinal smallint NOT NULL,
     referenced_at timestamp with time zone NOT NULL,
     revoked_at timestamp with time zone,
     CONSTRAINT message_media_references_ordinal_check CHECK ((ordinal >= 0))
 );
+
+-- Directory ordering is indexed at the attachment binding, so a room with a
+-- long text-only history does not need an unbounded message scan for one page.
+CREATE INDEX message_media_references_room_directory_idx
+    ON im_v2.message_media_references(room_id,room_sequence DESC,ordinal DESC,media_id DESC)
+    WHERE revoked_at IS NULL;
+
+CREATE FUNCTION im_v2.bind_message_media_room_position() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, im_v2
+AS $$
+DECLARE source_room uuid; source_sequence bigint;
+BEGIN
+    SELECT room_id,room_sequence INTO source_room,source_sequence
+    FROM im_v2.messages WHERE message_id=NEW.message_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE='23503', MESSAGE='message binding requires a persisted message';
+    END IF;
+    IF (NEW.room_id IS NOT NULL AND NEW.room_id<>source_room)
+       OR (NEW.room_sequence IS NOT NULL AND NEW.room_sequence<>source_sequence) THEN
+        RAISE EXCEPTION USING ERRCODE='23514', MESSAGE='message binding position mismatch';
+    END IF;
+    NEW.room_id=source_room; NEW.room_sequence=source_sequence;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER message_media_references_room_position
+    BEFORE INSERT OR UPDATE OF message_id,room_id,room_sequence ON im_v2.message_media_references
+    FOR EACH ROW EXECUTE FUNCTION im_v2.bind_message_media_room_position();
 
 CREATE TABLE im_v2.message_mentions (
     message_id uuid NOT NULL,
@@ -3315,6 +3346,13 @@ CREATE TABLE im_v2.resource_catalog (
     home_id uuid NOT NULL,
     usage_kind text NOT NULL CHECK(usage_kind IN ('message_attachment','user_avatar','group_avatar')),
     generation bigint NOT NULL DEFAULT 1 CHECK(generation > 0),
+    display_name text NOT NULL DEFAULT '附件' CHECK(octet_length(display_name) BETWEEN 1 AND 255),
+    pixel_width integer,
+    pixel_height integer,
+    duration_ms bigint CHECK(duration_ms BETWEEN 1 AND 2678400000),
+    CHECK ((pixel_width IS NULL AND pixel_height IS NULL) OR
+           (pixel_width IS NOT NULL AND pixel_height IS NOT NULL AND pixel_width BETWEEN 1 AND 16384
+            AND pixel_height BETWEEN 1 AND 16384 AND pixel_width::bigint * pixel_height <= 40000000)),
     created_at timestamptz NOT NULL,
     CHECK((usage_kind='user_avatar' AND home_kind='account')
        OR (usage_kind IN ('message_attachment','group_avatar') AND home_kind='room'))

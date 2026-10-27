@@ -120,6 +120,7 @@ extension GRDBV2LocalSyncStore {
             try Self.completeOperationWork(.init(identity:identity,fingerprint:fingerprint,state:state,receipt:receipt),now:now,db:db)
             if case .accepted(let acceptance) = receipt.outcome {
                 guard let sequence = Int64(exactly: acceptance.roomSequence), sequence > 0 else { throw V2OperationWorkError.invalidRecord }
+                try Self.bindAcceptedUploadBytes(command: command.command, db: db)
                 try db.execute(sql: "UPDATE v2_message_send_operations SET accepted_message_id=?,accepted_room_sequence=? WHERE work_id=(SELECT work_id FROM v2_operation_work WHERE identity_key=?)",
                     arguments: [acceptance.messageID.rawValue,sequence,identity.storageKey])
                 // A projection may have arrived before the send receipt.

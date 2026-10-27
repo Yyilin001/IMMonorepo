@@ -119,7 +119,7 @@ struct V2ClientSessionBootstrapperTests {
         let bootstrapper = V2ClientSessionBootstrapper(
             authSession: V2AuthSession(credentialStore: SessionBootstrapCredentialStore(), transport: SessionBootstrapRefreshTransport()),
             localStoreBootstrapper: .init(bindingStore: SessionBootstrapBindingStore()),
-            databaseURL: url, accountStorageRoot: url.appendingPathExtension("accounts")
+            databaseURL: url, accountStorageRoots: .init(persistent: url.appendingPathExtension("accounts"), cache: url.appendingPathExtension("caches"))
         )
         let first = try await bootstrapper.establishSession(using: SessionBootstrapProvider(credentials: credentials))
         let scope = try #require(await bootstrapper.storageScope(for: first))
@@ -143,7 +143,7 @@ struct V2ClientSessionBootstrapperTests {
         let credentialStore = SessionBootstrapCredentialStore()
         let auth = V2AuthSession(credentialStore: credentialStore, transport: SessionBootstrapRefreshTransport())
         let bootstrapper = V2ClientSessionBootstrapper(authSession: auth, localStoreBootstrapper: .init(bindingStore: SessionBootstrapBindingStore()),
-                                                      databaseURL: url, accountStorageRoot: url.appendingPathExtension("accounts"))
+                                                      databaseURL: url, accountStorageRoots: .init(persistent: url.appendingPathExtension("accounts"), cache: url.appendingPathExtension("caches")))
         let a = try V2AuthCredentials(userID: .init("account-a"), deviceID: .init("device-a"), accessToken: "a", accessTokenExpiresAt: .distantFuture, refreshCredential: "a-refresh")
         let b = try V2AuthCredentials(userID: .init("account-b"), deviceID: .init("device-b"), accessToken: "b", accessTokenExpiresAt: .distantFuture, refreshCredential: "b-refresh")
         let provider = DelayedSessionBootstrapProvider(credentials: a)

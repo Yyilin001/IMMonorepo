@@ -131,15 +131,18 @@ struct V2ConversationMediaDependencies {
     let attachmentStager: (any V2ConversationAttachmentStaging)?
     let resourceSender: (any V2DurableConversationSending)?
     let downloader: (any V2ConversationMediaDownloading)?
+    let thumbnails: V2LocalMediaThumbnailCache?
 
     init(
         attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
         resourceSender: (any V2DurableConversationSending)? = nil,
-        downloader: (any V2ConversationMediaDownloading)? = nil
+        downloader: (any V2ConversationMediaDownloading)? = nil,
+        thumbnails: V2LocalMediaThumbnailCache? = nil
     ) {
         self.attachmentStager = attachmentStager
         self.resourceSender = resourceSender
         self.downloader = downloader
+        self.thumbnails = thumbnails
     }
 }
 

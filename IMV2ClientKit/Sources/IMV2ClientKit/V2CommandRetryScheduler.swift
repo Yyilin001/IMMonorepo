@@ -21,6 +21,28 @@ public struct V2CommandRetrySchedule: Sendable {
         self.nextAttemptAt = nextAttemptAt
         self.updates = updates
     }
+
+    /// Runtime capacity is a wake hint, never another command journal. Both
+    /// observers belong to the returned stream and terminate with its consumer.
+    func waking(on capacity: AsyncStream<Void>) -> Self {
+        .init(nextAttemptAt: nextAttemptAt, updates: {
+            let persistent = await self.updates()
+            return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+                let observer = Task {
+                    do {
+                        try await withThrowingTaskGroup(of: Void.self) { group in
+                            group.addTask { for try await _ in persistent { continuation.yield(()) } }
+                            group.addTask { for await _ in capacity { try Task.checkCancellation(); continuation.yield(()) } }
+                            _ = try await group.next()
+                            group.cancelAll()
+                        }
+                        continuation.finish()
+                    } catch { continuation.finish(throwing: error) }
+                }
+                continuation.onTermination = { _ in observer.cancel() }
+            }
+        })
+    }
 }
 
 /// 重试调度自身发现的数据错误。查询、通知流和刷新错误会直接向上传播。

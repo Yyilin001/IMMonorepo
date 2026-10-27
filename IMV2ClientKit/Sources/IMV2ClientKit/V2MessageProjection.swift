@@ -61,6 +61,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
               (!payload.text.isEmpty || !(payload.mediaIDs ?? []).isEmpty)
         else { throw V2ClientProjectionError.invalidMessagePayload }
         do {
+            let resourceRoom = try RoomID(payload.roomID)
             let media = try (payload.mediaIDs ?? []).map { try V2MediaReference(mediaID: .init($0)) }
             let mediaPresentations = try (payload.mediaPresentations ?? []).map { try $0.presentation() }
             let mentions = try (payload.mentionedUserIDs ?? []).map { try V2MentionTarget.user(.init($0)) }
@@ -78,6 +79,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             }
             guard Set(media).count == media.count, media.count <= V2MessageCommandLimits.maxMediaAttachments,
                   mediaPresentations.map(\.mediaID) == media.map(\.mediaID),
+                  mediaPresentations.allSatisfy({ $0.resourceDescriptor?.key.home == .room(resourceRoom) }),
                   Set(mentions).count == mentions.count, mentions.count <= V2MessageCommandLimits.maxMentions
             else { throw V2ClientProjectionError.invalidMessagePayload }
             try V2RichMessageContent.validate(text: payload.text, entities: entities)
@@ -149,9 +151,10 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
             let kind: V2MediaPresentation.Kind
             let contentType: String
             let byteCount: Int64
+            let resourceDescriptor: V2ResourceDescriptor
 
             func presentation() throws -> V2MediaPresentation {
-                try .init(mediaID: .init(mediaID), kind: kind, contentType: contentType, byteCount: byteCount)
+                try .init(mediaID: .init(mediaID), kind: kind, contentType: contentType, byteCount: byteCount, resourceDescriptor: resourceDescriptor)
             }
 
             enum CodingKeys: String, CodingKey {
@@ -159,6 +162,7 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
                 case kind
                 case contentType = "content_type"
                 case byteCount = "byte_count"
+                case resourceDescriptor = "resource_descriptor"
             }
         }
     }

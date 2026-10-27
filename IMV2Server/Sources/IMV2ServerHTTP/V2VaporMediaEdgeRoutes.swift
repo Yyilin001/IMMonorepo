@@ -38,7 +38,8 @@ public struct V2VaporMediaEdgeRoutes: Sendable {
                     deviceID: identity.deviceID,
                     rawMediaID: rawMediaID,
                     rawRoomID: request.query[String.self, at: "room_id"],
-                    rawMessageID: request.query[String.self, at: "message_id"]
+                    rawMessageID: request.query[String.self, at: "message_id"],
+                    rawImageSize: request.query[String.self, at: "image_size"]
                 )
             } catch let error as V2MediaEdgeHTTPHandlerError {
                 switch error {

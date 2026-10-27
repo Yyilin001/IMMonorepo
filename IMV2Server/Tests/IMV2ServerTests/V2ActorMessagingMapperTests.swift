@@ -117,16 +117,11 @@ struct V2ActorMessagingMapperTests {
         #expect(throws: V2ActorMessagingMappingError.invalidMediaPresentationIdentity) {
             try mismatched.toDomain()
         }
-        let decodedBadPresentation = try JSONDecoder().decode(V2MediaPresentation.self,
-            from: Data(#"{"mediaID":{"rawValue":"media-1"},"kind":"image","contentType":" IMAGE/PNG ","byteCount":-1}"#.utf8))
-        let badPresentation = V2ActorAcceptedMessageWire(messageID: message, roomID: room,
-            roomSequence: 1, timelineSequence: 1, senderUserID: user, clientMessageID: client,
-            text: "hello", media: media, mediaPresentations: [decodedBadPresentation], mentions: [],
-            entities: [], replyTo: nil, groupCapacityClass: nil, sourceEventID: nil,
-            acceptedMembershipRevision: nil, directRecipientUserID: nil,
-            projectionCreatedAtUnixMilliseconds: nil, createdAt: date)
+        // Presentation decoding now validates the same invariants as its
+        // constructor, so malformed leaves fail before the actor mapper.
         #expect(throws: V2MediaValidationError.invalidPresentation) {
-            try badPresentation.toDomain()
+            try JSONDecoder().decode(V2MediaPresentation.self,
+                from: Data(#"{"mediaID":{"rawValue":"media-1"},"kind":"image","contentType":" IMAGE/PNG ","byteCount":-1}"#.utf8))
         }
         let invalidEntity = try JSONDecoder().decode(V2MessageEntity.self,
             from: Data(#"{"offsetUTF16":0,"lengthUTF16":100,"kind":"bold","linkURL":null}"#.utf8))

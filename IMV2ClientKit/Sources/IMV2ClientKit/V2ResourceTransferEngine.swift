@@ -23,34 +23,66 @@ public actor V2ResourceTransferEngine {
     private let store: GRDBV2LocalSyncStore
     private let control: any V2ResourceUploadControlling
     private let executor: any V2ResourcePlanExecuting
-    private let directory: URL
+    private let resources: V2ResourceCenter
     private let capabilities: V2ResourceCapabilitiesCache?
     private var background: V2BackgroundTransferCoordinator?
+    func requireAttachment(resources: V2ResourceCenter, store: GRDBV2LocalSyncStore) throws {
+        guard !closed else { throw V2ResourceStorageError.closed }
+        guard self.resources === resources, self.store === store else { throw V2AccountStorageError.scopeMismatch }
+    }
+
+    /// The domain transaction already withdrew the parent intents. This only
+    /// signals and drains owned I/O, without resetting cancellation's budget.
+    func drainRequestedCancellation(id: UUID) async throws {
+        guard !closed else { throw CancellationError() }
+        try await operations.run {
+            guard try await self.store.resourceTransfer(id: id)?.cancellationRequested == true else { return }
+            if let flight = await self.flights[id] { flight.cancel(); _ = await flight.result }
+            try await self.background?.cancel(jobID: id)
+        }
+    }
+    /// User pause stops the local attempt, without aborting the remote upload.
+    /// The durable control excludes new claims until explicit continuation.
+    func drainRequestedPause(id: UUID) async throws {
+        guard !closed else { throw CancellationError() }
+        try await operations.run {
+            guard try await self.store.resourceTransfer(id: id)?.control == .pause else { return }
+            if let flight = await self.flights[id] { flight.cancel(); _ = await flight.result }
+            try await self.background?.cancel(jobID: id)
+        }
+    }
     public func attachBackground(_ coordinator: V2BackgroundTransferCoordinator) async throws {
         try await coordinator.initialize()
         guard !closed, background == nil else { throw V2BackgroundTransferError.closed }
         background = coordinator
     }
+    func nativeTransferProgress() async -> [V2ManagedResourceTransferID: V2ResourceTransferAttemptProgress] {
+        guard !closed else { return [:] }
+        return await background?.transferProgress() ?? [:]
+    }
     private var closed = false
-    private let ownerID = UUID()
+    private var ownerID = UUID()
     private var recovered = false
+    private var recoveryRunning = false
+    private var recoveryFailure: (any Error)?
+    private var recoveryWake: AsyncStream<Void>.Continuation?
     private let now: @Sendable () -> Date
     private let randomUnit: @Sendable () -> Double
     private let operations = V2ResourceOperationScope()
     private var flights: [UUID: V2SharedOperation<V2ResourceTransferJob>] = [:]
 
-    public init(store: GRDBV2LocalSyncStore, control: any V2ResourceUploadControlling, executor: any V2ResourcePlanExecuting, directory: URL, capabilities: V2ResourceCapabilitiesCache? = nil, now: @escaping @Sendable () -> Date = Date.init, randomUnit: @escaping @Sendable () -> Double = { Double.random(in: 0...1) }) {
-        self.store = store; self.control = control; self.executor = executor; self.directory = directory
+    public init(store: GRDBV2LocalSyncStore, control: any V2ResourceUploadControlling, executor: any V2ResourcePlanExecuting, resources: V2ResourceCenter, capabilities: V2ResourceCapabilitiesCache? = nil, now: @escaping @Sendable () -> Date = Date.init, randomUnit: @escaping @Sendable () -> Double = { Double.random(in: 0...1) }) {
+        self.store = store; self.control = control; self.executor = executor; self.resources = resources
         self.capabilities = capabilities
         self.now = now; self.randomUnit = randomUnit
     }
 
-    public func prepare(id: UUID, request: V2ResourceUploadRequest) async throws -> V2ResourceTransferJob {
+    public func prepare(id: UUID, request: V2ResourceUploadRequest, localAssetID: V2LocalResourceAssetID) async throws -> V2ResourceTransferJob {
         guard !closed else { throw CancellationError() }
-        return try await operations.run { try await self.performPrepare(id: id, request: request) }
+        return try await operations.run { try await self.performPrepare(id: id, request: request, localAssetID: localAssetID) }
     }
 
-    private func performPrepare(id: UUID, request: V2ResourceUploadRequest) async throws -> V2ResourceTransferJob {
+    private func performPrepare(id: UUID, request: V2ResourceUploadRequest, localAssetID: V2LocalResourceAssetID) async throws -> V2ResourceTransferJob {
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
         // A persisted operation may already exist at an older backend after a lost
@@ -60,7 +92,7 @@ public actor V2ResourceTransferEngine {
         }
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
-        return try await store.prepareResourceTransfer(id: id, request: request, localFileToken: id.uuidString)
+        return try await store.prepareResourceTransfer(id: id, request: request, localAssetID: localAssetID)
     }
 
     public func prepareSend(_ intent: V2SendIntent, resources: [V2ResourcePreparedUpload]) async throws {
@@ -90,12 +122,18 @@ public actor V2ResourceTransferEngine {
     public func resume(id: UUID) async throws -> V2ResourceTransferJob {
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
-        if let flight = flights[id] { return try await flight.value }
+        return try await flight(id: id).value
+    }
+
+    private func flight(id: UUID) throws -> V2SharedOperation<V2ResourceTransferJob> {
+        if let flight = flights[id] { return flight }
         guard flights.count < 2 else { throw V2ClientMediaTransferError.serverStatus(429) }
         // The account owns the work; a disappearing page only cancels its waiter.
-        let flight = V2SharedOperation { try await self.perform(id: id) }
+        let flight = V2SharedOperation {
+            try await self.resources.observingTransfer(.upload(id)) { try await self.performFlight(id: id) }
+        }
         flights[id] = flight
-        return try await flight.value
+        return flight
     }
 
     public func cancel(id: UUID) async throws {
@@ -111,35 +149,32 @@ public actor V2ResourceTransferEngine {
         try await background?.cancel(jobID: id)
     }
 
-    public func releaseAcceptedStaging(id: UUID) async throws {
+    public func releaseFinishedSources(id: UUID) async throws {
         guard !closed else { throw CancellationError() }
-        return try await operations.run { try await self.performReleaseAcceptedStaging(id: id) }
+        return try await operations.run { try await self.performReleaseFinishedSources(id: id) }
     }
 
-    private func performReleaseAcceptedStaging(id: UUID) async throws {
-        guard !closed, flights[id] == nil,
-              let token = try await store.claimReleasableResourceFileToken(id: id), UUID(uuidString: token) != nil else { return }
-        guard !closed else { throw CancellationError() }
-        let file = directory.appendingPathComponent(token)
-        if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
-        try await store.confirmResourceStagingReleased(id: id)
+    private func performReleaseFinishedSources(id: UUID) async throws {
+        guard !closed else { return }
+        try await store.releaseResourceSource(id: id)
     }
 
-    public func releaseAcceptedStaging() async throws {
+    public func releaseFinishedSources() async throws {
         guard !closed else { throw CancellationError() }
-        return try await operations.run { try await self.performReleaseAcceptedStaging() }
+        return try await operations.run { try await self.performReleaseFinishedSources() }
     }
 
-    private func performReleaseAcceptedStaging() async throws {
+    private func performReleaseFinishedSources() async throws {
         guard !closed else { throw CancellationError() }
         for id in try await store.releasableResourceJobs() {
             try Task.checkCancellation()
-            try await performReleaseAcceptedStaging(id: id)
+            try await performReleaseFinishedSources(id: id)
         }
     }
 
     public func close() async {
         closed = true
+        recoveryWake?.finish()
         async let drainOperations: Void = operations.close()
         await capabilities?.close()
         let running = Array(flights.values)
@@ -154,25 +189,61 @@ public actor V2ResourceTransferEngine {
     /// step per job. No request or provider target survives a step boundary.
     public func runRecovery() async throws {
         guard !closed else { throw CancellationError() }
-        try await recoverOnceIfNeeded()
+        guard !recoveryRunning else { throw V2ResourceOperationScopeError.busy }
+        recoveryRunning = true; recoveryFailure = nil
+        let wakes = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        recoveryWake = wakes.continuation
+        defer { recoveryRunning = false; recoveryWake = nil; wakes.continuation.finish() }
         do {
-            try await V2CommandRetryScheduler(schedule: store.resourceWorkSchedule(), flush: {
-                for id in try await self.store.dueResourceTransfers(now: self.now()) {
-                    do { _ = try await self.resume(id: id) }
-                    catch is CancellationError { throw CancellationError() }
-                    catch { /* The step recorded its retry or needs-attention state. */ }
-                }
-            }).run()
+            // A stopped activity drained its actual work. A fresh generation
+            // can now reclaim a claim whose previous release failed in SQLite.
+            if flights.isEmpty { ownerID = UUID(); recovered = false }
+            try await recoverOnceIfNeeded()
+            let schedule = V2CommandRetrySchedule(nextAttemptAt: { try await self.nextRecoveryAttempt() }, updates: store.resourceWorkSchedule().updates)
+                .waking(on: wakes.stream)
+            try await V2CommandRetryScheduler(schedule: schedule, flush: { try await self.startDueSteps() }).run()
             try Task.checkCancellation()
         } catch {
             // A scheduler waiter cancels independently of its shared step.
             // The account activity must explicitly cancel and drain that I/O.
-            if Task.isCancelled {
-                let running = Array(flights.values)
-                for flight in running { flight.cancel() }
-                for flight in running { _ = await flight.result }
-            }
+            let running = Array(flights.values)
+            for flight in running { flight.cancel() }
+            for flight in running { _ = await flight.result }
             throw error
+        }
+    }
+
+    private func nextRecoveryAttempt() async throws -> Date? {
+        try Task.checkCancellation()
+        guard !closed else { throw CancellationError() }
+        if let recoveryFailure { throw recoveryFailure }
+        guard flights.count < 2 else { return nil }
+        let due = try await store.nextResourceAttempt(excluding: Set(flights.keys))
+        if let recoveryFailure { throw recoveryFailure }
+        return flights.count < 2 ? due : nil
+    }
+
+    private func startDueSteps() async throws {
+        try Task.checkCancellation()
+        guard !closed else { throw CancellationError() }
+        if let recoveryFailure { throw recoveryFailure }
+        let due = try await store.dueResourceTransfers(now: now(), excluding: Set(flights.keys))
+        for id in due {
+            guard flights.count < 2 else { break }
+            if flights[id] == nil { _ = try flight(id: id) }
+        }
+    }
+
+    private func performFlight(id: UUID) async throws -> V2ResourceTransferJob {
+        let owner = ownerID
+        defer { flights.removeValue(forKey: id); recoveryWake?.yield(()) }
+        do { return try await perform(id: id) }
+        catch {
+            let original = error
+            do {
+                if try await store.resourceExecutionIsOwned(id, owner: owner), recoveryRunning, !closed { recoveryFailure = original }
+            } catch { if recoveryRunning, !closed { recoveryFailure = error } }
+            throw original
         }
     }
 
@@ -183,7 +254,6 @@ public actor V2ResourceTransferEngine {
     }
 
     private func perform(id: UUID) async throws -> V2ResourceTransferJob {
-        defer { flights.removeValue(forKey: id) }
         try await recoverOnceIfNeeded()
         guard let job = try await store.claimResourceStep(id: id, owner: ownerID, now: now()) else { return try await requireJob(id) }
         do {
@@ -192,7 +262,7 @@ public actor V2ResourceTransferEngine {
             let seconds = max(0, (job.roundDeadline ?? now()).timeIntervalSince(now()))
             let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
             try await V2HTTPRequestDeadline.$current.withValue(deadline) {
-                try await V2NetworkWorkScope.$context.withValue(.init(service: "resources", priority: .recovery, isRetry: job.lastError != nil && job.actionAttempts > 1)) {
+                try await V2NetworkWorkScope.$context.withValue(.init(service: "resources", priority: job.lastError == nil ? .interactive : .recovery, isRetry: job.lastError != nil && job.actionAttempts > 1)) {
                     try await self.executeAction(job)
                 }
             }
@@ -238,11 +308,31 @@ public actor V2ResourceTransferEngine {
                 try await save(session, id: id)
                 try await finish(session: session, job: job)
             case .upload:
+                let lease = try await resources.borrowLocalOriginal(for: .upload(job.id))
+                do { try await upload(job, lease: lease); await lease.release() }
+                catch { await lease.release(); throw error }
+            case .finalize:
                 guard let session = job.session else { throw V2ResourceJournalError.invalidRecord }
-                let file = directory.appendingPathComponent(job.localFileToken)
-                guard FileManager.default.fileExists(atPath: file.path) else { throw V2ClientMediaTransferError.fileSystemFailure }
-                let digest = try V2ResourceFileDigest.sha256(fileURL: file, expectedByteCount: job.request.byteCount)
-                guard digest == job.request.checksum.value else { throw V2ClientMediaTransferError.byteCountMismatch }
+                let result = try await control.finalize(session)
+                try await save(result, id: id)
+                try await finish(session: result, job: job)
+            case .cancel:
+                let session: V2ResourceUploadSession
+                if let saved = job.session { session = try await control.status(saved.locator) }
+                else { session = try await control.create(job.request) }
+                try Task.checkCancellation()
+                guard !closed else { throw CancellationError() }
+                let result = session.state == .completed ? session : try await control.cancel(session)
+                try Task.checkCancellation()
+                guard !closed else { throw CancellationError() }
+                try await store.confirmResourceCancellation(id: id, session: result)
+                try await store.finishResourceStep(id: id, owner: ownerID, next: .cancel, retryAt: now())
+            }
+    }
+
+    private func upload(_ job: V2ResourceTransferJob, lease: V2ResourceFileLease) async throws {
+        let id = job.id, file = lease.fileURL
+        guard let session = job.session else { throw V2ResourceJournalError.invalidRecord }
                 let target: V2ResourceTransferPlan?
                 if background != nil, case .messageAttachment = job.request.usage,
                    let controller = control as? any V2BackgroundResourceUploadControlling {
@@ -264,13 +354,27 @@ public actor V2ResourceTransferEngine {
                     return
                 }
                 try Task.checkCancellation()
+                try validateUploadPlan(plan, for: job.request)
                 if plan.backgroundAuthorization != nil {
                     guard let background else { throw V2BackgroundTransferError.unsupported }
-                    try await background.enqueue(job: job, resourceOwner: ownerID, plan: plan, source: file)
+                    try await background.enqueue(job: job, resourceOwner: ownerID, plan: plan, source: lease)
                     return
                 }
                 do {
-                    try await executor.upload(fileURL: file, plan: plan)
+                    if plan.mode == .httpPartPut {
+                        guard let range = plan.byteRange else { throw V2ClientMediaTransferError.invalidTarget }
+                        let part = try await resources.makeUploadPart(from: lease, range: range)
+                        do {
+                            if let checksum = plan.checksum {
+                                guard try V2ResourceFileDigest.sha256(fileURL: part.fileURL, expectedByteCount: plan.expectedByteCount) == checksum.value else {
+                                    throw V2ClientMediaTransferError.checksumMismatch
+                                }
+                            }
+                            try await uploadAttempt(id: id, file: part.fileURL, plan: plan)
+                            try await part.release()
+                        }
+                        catch { try? await part.release(); throw error }
+                    } else { try await uploadAttempt(id: id, file: file, plan: plan) }
                 } catch let failure as V2HTTPFailure {
                     // An immutable single-object upload may already exist after a
                     // lost success response. Only the control plane can verify its
@@ -280,23 +384,29 @@ public actor V2ResourceTransferEngine {
                 }
                 try Task.checkCancellation()
                 try await store.finishResourceStep(id: id, owner: ownerID, next: plan.mode == .httpPartPut ? .status : .finalize, retryAt: now())
-            case .finalize:
-                guard let session = job.session else { throw V2ResourceJournalError.invalidRecord }
-                let result = try await control.finalize(session)
-                try await save(result, id: id)
-                try await finish(session: result, job: job)
-            case .cancel:
-                let session: V2ResourceUploadSession
-                if let saved = job.session { session = try await control.status(saved.locator) }
-                else { session = try await control.create(job.request) }
-                try Task.checkCancellation()
-                guard !closed else { throw CancellationError() }
-                let result = session.state == .completed ? session : try await control.cancel(session)
-                try Task.checkCancellation()
-                guard !closed else { throw CancellationError() }
-                try await store.confirmResourceCancellation(id: id, session: result)
-                try await store.finishResourceStep(id: id, owner: ownerID, next: .cancel, retryAt: now())
+    }
+
+    private func validateUploadPlan(_ plan: V2ResourceTransferPlan, for request: V2ResourceUploadRequest) throws {
+        guard request.clientModes.contains(plan.mode) else { throw V2ClientMediaTransferError.invalidTarget }
+        guard plan.expiresAt > now() else { throw V2ClientMediaTransferError.targetExpired }
+        switch plan.mode {
+        case .httpPut:
+            guard plan.expectedByteCount == request.byteCount, plan.checksum.map({ $0 == request.checksum }) ?? true else {
+                throw V2ClientMediaTransferError.invalidTarget
             }
+        case .httpPartPut:
+            guard let range = plan.byteRange, range.upperBound < request.byteCount else { throw V2ClientMediaTransferError.invalidTarget }
+        default: throw V2ClientMediaTransferError.invalidTarget
+        }
+    }
+    private func uploadAttempt(id: UUID, file: URL, plan: V2ResourceTransferPlan) async throws {
+        let reporter = try await resources.beginUploadProgress(job: id, expectedBytes: plan.expectedByteCount)
+        // The executor returns only after the actual URLSession task drains.
+        // The attempt is ephemeral and never becomes recovery authority.
+        defer { reporter.end() }
+        try await V2ResourceTransferProgressScope.$reporter.withValue(reporter) {
+            try await executor.upload(fileURL: file, plan: plan)
+        }
     }
 
     private func finish(session: V2ResourceUploadSession, job: V2ResourceTransferJob) async throws {
@@ -306,7 +416,7 @@ public actor V2ResourceTransferEngine {
             return
         }
         let next: V2ResourceTransferJob.Action = session.state == .created || session.state == .uploading ? .upload : .status
-        let delay = processing ? V2NetworkWorkPolicy.acceptedResultPollDelay(attempt: job.pollAttempts, serverDelay: session.retryNotBefore?.timeIntervalSince(now())) : max(0, session.retryNotBefore?.timeIntervalSince(now()) ?? 0)
+        let delay = processing ? V2NetworkWorkPolicy.resourceProcessingPollDelay(attempt: job.pollAttempts, serverDelay: session.retryNotBefore?.timeIntervalSince(now())) : max(0, session.retryNotBefore?.timeIntervalSince(now()) ?? 0)
         try await store.finishResourceStep(id: job.id, owner: ownerID, next: next, retryAt: now().addingTimeInterval(delay), processingPoll: processing, preserveBudget: !processing && job.lastError != nil && next == .upload)
     }
 

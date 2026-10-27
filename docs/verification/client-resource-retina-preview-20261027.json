@@ -1,0 +1,102 @@
+{
+  "date": "2026-10-27",
+  "status": "implementation_tests_release_archive_and_direct_device_install_verified",
+  "reportedBuild": "1.0 (7)",
+  "preparedBuild": "1.0 (8)",
+  "findings": [
+    "320 physical pixels were displayed in bubbles up to 320 points tall; 3x screens need up to 960 pixels.",
+    "Every row reopen resolved a server target before checking local preview bytes.",
+    "A seeded row repeated borrowing and decoding after the store had already produced an authorized image.",
+    "Local timeline publication followed draft restoration and unrelated history/profile/policy reads."
+  ],
+  "changes": [
+    "Use the existing bounded 1280px server rendition for chat display and decode at the same size; original remains a separate on-open request.",
+    "Retain at most 64 account-session preview authorization records, keyed by message, media and size. Reuse only before expiry and while access generation and current local message access remain valid; verify published local bytes.",
+    "Discard, changed rendition identity, tombstones, access-generation changes and account close prevent stale reuse. No persistent authorization or original fallback added.",
+    "Publish local timeline after redaction cleanup and before draft/metadata reads; do not gate initial timeline on image loading.",
+    "Avoid duplicate decoding of the current seeded file; bound retained decoded store seeds to 16MiB in addition to the existing 32MiB decode cache.",
+    "Before publishing an empty local timeline, probe at most 8 recent image references for valid account-local authorization and already decoded pixels. This path never performs media file I/O, starts/joins decoding, resolves a target or waits for network admission. Cache misses are skipped. Initial snapshot contains seeded pixels on hits; stale refresh generations cannot publish seeds."
+  ],
+  "verification": {
+    "clientTests": {
+      "log": "/tmp/im-preview-first-snapshot-client-tests-final.log",
+      "passed": 53,
+      "coverage": [
+        "Warm preview reopens offline without a second target request or byte transfer",
+        "Different preview size still requires authorization",
+        "Local access generation change prevents offline reuse",
+        "Discard prevents reuse; account close rejects later calls",
+        "Message tombstone prevents borrowing an existing handle"
+      ]
+    },
+    "releaseSimulatorTests": {
+      "status": "not_run_due_to_preexisting_debug_only_test_helpers",
+      "logs": [
+        "/tmp/im-preview-latency-app-tests.log",
+        "/tmp/im-preview-latency-app-tests-r2.log",
+        "/tmp/im-preview-latency-app-tests-r3.log"
+      ],
+      "reason": "Release test target references Debug-only V2ListViewport.layoutDescription and localE2ERealtimePort helpers. Production Release archive is checked separately; no unrelated test-helper changes made."
+    },
+    "releaseArchive": {
+      "path": "/tmp/im-preview-retina-20261027/IMApp-final.xcarchive",
+      "inspection": "/tmp/im-preview-retina-20261027/archive-inspection-final.json",
+      "exitCode": 0,
+      "signatureVerified": true,
+      "sourceDrift": []
+    },
+    "debugSimulatorTests": {
+      "log": "/tmp/im-preview-first-snapshot-app-tests.log",
+      "xcresult": "/tmp/im-preview-first-snapshot-app-tests.xcresult",
+      "passed": 149,
+      "coverage": [
+        "First published timeline snapshot already contains the exact cached UIImage while metadata remains paused",
+        "No preview target request, original download, or second decode on the seeded reopen",
+        "Actual 1600x1200 image decodes to 1280x960, above the 960px needed for a 320pt bubble at 3x",
+        "Metadata delay does not block publication of local messages",
+        "Cache-only image lookup works after source-file removal and rejects after account close"
+      ]
+    },
+    "cacheOnlyPeekDoesNotWaitForDecode": {
+      "passed": 8,
+      "log": "/tmp/im-preview-memory-peek-tests.log",
+      "xcresult": "/tmp/im-preview-memory-peek-tests.xcresult",
+      "note": "Repeated the affected decoder suite after adding an assertion that a cache-only peek returns nil while another decode is suspended. Included in the 149-test coverage, not eight extra distinct tests."
+    },
+    "directDeviceInstall": {
+      "deviceName": "徐徐年年的iPhone",
+      "version": "1.0",
+      "build": "8",
+      "configuration": "Release",
+      "networkMode": "device-test",
+      "pushEnvironment": "development",
+      "signatureAndPushEnvironmentMatch": true,
+      "sourceDrift": [],
+      "installOutcome": "success",
+      "launchOutcome": "success",
+      "installedVersionReadback": "1.0 (8)",
+      "installationMethod": "in-place update without uninstall",
+      "records": [
+        "/tmp/im-preview-retina-20261027/device-build-result.json",
+        "/tmp/im-preview-retina-20261027/device-build-inspection.json",
+        "/tmp/im-preview-retina-20261027/device-install.json",
+        "/tmp/im-preview-retina-20261027/device-launch.json",
+        "/tmp/im-preview-retina-20261027/device-installed-after.json"
+      ]
+    }
+  },
+  "limitations": [
+    "No physical-device first-frame latency measurement yet; no claim of universal instant opening.",
+    "Cold cache and expired authorization still need network access.",
+    "Direct installation requested instead of TestFlight upload. TestFlight still has build 7; build 8 upload has not been performed. Installation and launch are verified, not physical first-frame latency."
+  ],
+  "sourceSHA256": {
+    "IMApp/IMApp/V2/V2ConversationDetailStore.swift": "e9593f51fab3ed41a2e2feb279e14cc92228e36899f1c0696dcfd08a0d92f61b",
+    "IMApp/IMApp/V2/V2ConversationMediaViews.swift": "1f5d3ef8c9e208f4053acceeaf7c3c2652ff0300917a42d2db25f2bd8056d519",
+    "IMApp/IMApp/V2/V2ConversationMediaDownloadService.swift": "088d372c8fc65565d655dbd75ef523dbdee1fc6cfd68ba0063c0dd175d3286d8",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDownloadCache.swift": "c3b77d6d08cec0c369c3713a7c7b7569b4543de8d705b38c0b8bca078113c932",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDownloadCacheTests.swift": "9a3507903faf7d80d9c58739d54804ad10d16947534e0f07f94a2441b893b970",
+    "IMApp/IMAppTests/V2ConversationStoreTests.swift": "049fc10042bbdf292ca1471a3c6c5d2ee59fae18ca8f365dae6bc58b1b5652a5",
+    "IMApp/IMAppTests/V2LocalMediaThumbnailCacheTests.swift": "d547c4684581ea3b737adecec3fad5f0301aba54b225db43a72033fc2bdb6d76"
+  }
+}

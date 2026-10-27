@@ -122,7 +122,7 @@ struct V2ResourceAdapterPublicAPITests {
             _ = try V2ResourceScanReceipt(input: facts, policyVersion: "", engineVersion: "v1", result: .passed)
         }
         #expect(throws: V2ResourceProviderError.configurationInvalid) {
-            _ = try V2ResourceTransformOutput(size: 0, facts: facts)
+            _ = try V2ResourceTransformOutput(size: 0, facts: facts, sourceDimensions: .init(width: 1, height: 1))
         }
     }
 }
@@ -218,7 +218,7 @@ private struct ExternalTransformer: V2ResourceTransformer {
                    outputs: [Int: V2StoredObjectReference], registry: V2ResourceStorageRegistry) async throws -> [V2ResourceTransformOutput] {
         try outputs.map { size, reference in
             guard reference == facts.reference else { throw V2ResourceProviderError.integrityMismatch }
-            return try .init(size: size, facts: facts)
+            return try .init(size: size, facts: facts, sourceDimensions: .init(width: 300, height: 160))
         }
     }
 }

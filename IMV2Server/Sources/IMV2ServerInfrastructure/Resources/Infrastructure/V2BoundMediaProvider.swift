@@ -6,7 +6,7 @@ import IMV2Core
 import SQLKit
 
 /// Resolves already-authorized downloads through the unified resource catalog.
-public struct V2BoundMediaProvider: V2MediaObjectProvider, V2MediaPurgeProvider {
+public struct V2BoundMediaProvider: V2MediaObjectProvider, V2MediaPurgeProvider, V2MediaImagePreviewProviding {
     private let database: any Database
     private let registry: V2ResourceStorageRegistry
     private let now: @Sendable () -> Date
@@ -42,6 +42,29 @@ public struct V2BoundMediaProvider: V2MediaObjectProvider, V2MediaPurgeProvider 
         let plan = try await delivery.issue(.init(facts: facts, expiresAt: deadline))
         try plan.validateDownload(facts: facts, expiresAt: deadline, now: now())
         return plan
+    }
+
+    public func issueImagePreviewTarget(mediaID: MediaID, roomID: RoomID, size: V2MediaImagePreviewSize, expiresAt: Date) async throws -> V2MediaDownloadTargetEnvelope {
+        guard let id = mediaID.uuidValue else { throw V2ResourceProviderError.notFound }
+        guard let row = try await sqlDatabase().raw("""
+            SELECT v.reference_json::text AS reference,v.byte_count,v.sha256,v.variant_id,v.recipe_version
+            FROM im_v2.resource_variants v
+            JOIN im_v2.resource_catalog c ON c.media_id=v.media_id AND c.generation=v.generation
+            JOIN im_v2.media_objects m ON m.media_id=v.media_id
+            WHERE v.media_id=\(bind: id) AND v.recipe='preview' AND v.recipe_version=1
+              AND v.size=\(bind: size.rawValue) AND v.state='ready' AND m.state='available'
+              AND v.byte_count > 0 AND v.byte_count <= 2097152
+            """).first(decoding: BoundPreviewRow.self) else { throw V2ResourceProviderError.notFound }
+        let reference = try JSONDecoder().decode(V2StoredObjectReference.self, from: Data(row.reference.utf8))
+        _ = try registry.storage(for: reference.binding)
+        let facts = try V2StoredObjectFacts(reference: reference, byteCount: row.byteCount, sha256: row.sha256)
+        let deadline = min(expiresAt, now().addingTimeInterval(120))
+        let plan = try await delivery.issue(.init(facts: facts, expiresAt: deadline))
+        try plan.validateDownload(facts: facts, expiresAt: deadline, now: now())
+        let variant = try V2ResourceVariantDescriptor(key: .init(resource: .init(home: .room(roomID), mediaID: mediaID),
+            rendition: .derived(id: .init(uuid: row.variantID), version: .init(row.recipeVersion))),
+            checksum: .init(value: row.sha256.map { String(format: "%02x", $0) }.joined()), byteCount: row.byteCount)
+        return try .init(plan: plan, preview: variant)
     }
 
     /// Exact immutable placements are deleted by V2PlacementMediaPurger first.
@@ -92,3 +115,8 @@ private struct BoundPlacementRow: Decodable {
 }
 
 private struct MultipartPurgeRequest: Decodable { let request: String }
+
+private struct BoundPreviewRow: Decodable {
+    let reference: String; let byteCount: Int64; let sha256: Data; let variantID: UUID; let recipeVersion: Int64
+    enum CodingKeys: String, CodingKey { case reference,byteCount="byte_count",sha256,variantID="variant_id",recipeVersion="recipe_version" }
+}

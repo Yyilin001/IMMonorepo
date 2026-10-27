@@ -406,7 +406,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"${CONFIGURATION}\" != \"Release\" ]; then\n  exit 0\nfi\ncase \"${IMAPP_RELEASE_NETWORK_MODE:-production}\" in\n  production|testflight) ;;\n  *) echo \"Unsupported Release network mode\" >&2; exit 1 ;;\nesac\nINFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" \\\nIMAPP_NETWORK_CONFIG_MODE=\"${IMAPP_RELEASE_NETWORK_MODE:-production}\" \\\nIMAPP_NETWORK_CONFIG_USE_ENV_OVERRIDES=false \\\n/bin/bash \"${SRCROOT}/Scripts/validate_network_configuration.sh\"\n";
+			shellScript = "if [ \"${CONFIGURATION}\" != \"Release\" ]; then\n  exit 0\nfi\ncase \"${IMAPP_RELEASE_NETWORK_MODE:-production}\" in\n  production|testflight|device-test) ;;\n  *) echo \"Unsupported Release network mode\" >&2; exit 1 ;;\nesac\nINFO_PLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\" \\\nIMAPP_NETWORK_CONFIG_MODE=\"${IMAPP_RELEASE_NETWORK_MODE:-production}\" \\\nIMAPP_NETWORK_CONFIG_USE_ENV_OVERRIDES=false \\\n/bin/bash \"${SRCROOT}/Scripts/validate_network_configuration.sh\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

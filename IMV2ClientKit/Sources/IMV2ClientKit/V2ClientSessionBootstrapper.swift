@@ -60,15 +60,15 @@ public actor V2ClientSessionBootstrapper {
     ///   - authSession: 设备凭据与认证代次所有者。
     ///   - localStoreBootstrapper: 负责安装绑定验证的数据库打开入口。
     ///   - databaseURL: 未启用账号目录时的主库位置。
-    ///   - accountStorageRoot: 可选账号目录根；提供后启用按账号分开的 store 管理。
+    ///   - accountStorageRoots: 可选持久与缓存账号目录根；提供后启用按账号分开的 store 管理。
     ///
     /// 构造不请求网络或打开数据库，首次实际会话操作时才执行。
-    public init(authSession: V2AuthSession, localStoreBootstrapper: V2LocalStoreBootstrapper, databaseURL: URL, accountStorageRoot: URL? = nil, beforeClosingLocalStore: @escaping @Sendable (GRDBV2LocalSyncStore) async throws -> Void = { _ in }) {
+    public init(authSession: V2AuthSession, localStoreBootstrapper: V2LocalStoreBootstrapper, databaseURL: URL, accountStorageRoots: V2AccountStorageRoots? = nil, beforeClosingLocalStore: @escaping @Sendable (GRDBV2LocalSyncStore) async throws -> Void = { _ in }) {
         self.beforeClosingLocalStore = beforeClosingLocalStore
         self.authSession = authSession
         self.localStoreBootstrapper = localStoreBootstrapper
         self.databaseURL = databaseURL
-        accountStorage = accountStorageRoot.map { V2AccountLocalStoreOwner(root: $0, bootstrapper: localStoreBootstrapper) }
+        accountStorage = accountStorageRoots.map { V2AccountLocalStoreOwner(root: $0.persistent, cacheRoot: $0.cache, bootstrapper: localStoreBootstrapper) }
     }
 
     /// 查询账号目录模式下当前 store 的 scope。

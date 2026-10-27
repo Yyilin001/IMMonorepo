@@ -3,6 +3,284 @@ import Synchronization
 @testable import IMV2ClientKit
 
 final class V2AccountWorkSchedulerTests: XCTestCase, @unchecked Sendable {
+    func testActiveDownloadPromotionKeepsPhysicalIdentityAndRejectsForeignAndUploadPermits() async throws {
+        let scheduler = V2AccountWorkScheduler(), foreign = V2AccountWorkScheduler()
+        let original = try await scheduler.adoptExistingByteTransfer(id: UUID(), context: .init(service: "objects", priority: .background, kind: .byteTransfer(.download)))
+        let upload = try await scheduler.acquire(.init(service: "objects", priority: .recovery, kind: .byteTransfer(.upload)))
+        let rejected = await foreign.promoteDownloadPermit(original, to: .interactive)
+        XCTAssertNil(rejected)
+        let wrongDirection = await scheduler.promoteDownloadPermit(upload, to: .interactive)
+        XCTAssertNil(wrongDirection)
+        let promoted = await scheduler.promoteDownloadPermit(original, to: .interactive)
+        XCTAssertEqual(promoted, original)
+        XCTAssertEqual(promoted?.context.priority, .interactive)
+        let unchanged = await scheduler.promoteDownloadPermit(original, to: .background)
+        XCTAssertEqual(unchanged?.context.priority, .interactive)
+        let state = await scheduler.snapshot()
+        XCTAssertEqual(state.activeDownloads, 1); XCTAssertEqual(state.activeUploads, 1); XCTAssertEqual(state.activeBackgroundTransfers, 0)
+        _ = await scheduler.release(original); _ = await scheduler.release(upload)
+        let late = await scheduler.promoteDownloadPermit(original, to: .critical)
+        XCTAssertNil(late)
+        await scheduler.closeAndDrain(); await foreign.closeAndDrain()
+    }
+
+    func testSharedDemandPromotesOnlyItsQueuedBytesWithoutReleasingOccupiedSlot() async throws {
+        let scheduler = V2AccountWorkScheduler()
+        let background = V2NetworkWorkContext(service: "objects", priority: .background, kind: .byteTransfer(.download))
+        let occupied = try await scheduler.acquire(background)
+        let unrelated = Task { try await scheduler.acquire(background) }
+        try await awaitWaiting(1, on: scheduler)
+        let demand = V2ByteTransferDemand(priority: .background)
+        let shared = Task {
+            try await V2ByteTransferWorkScope.$demand.withValue(demand) { try await scheduler.acquire(background) }
+        }
+        try await awaitWaiting(2, on: scheduler)
+        demand.promote(to: .interactive)
+        let promoted = try await shared.value
+        XCTAssertEqual(promoted.context.priority, .interactive)
+        XCTAssertEqual(promoted.context.service, background.service)
+        XCTAssertEqual(promoted.context.kind, background.kind)
+        XCTAssertEqual(demand.observerCount, 0)
+        var state = await scheduler.snapshot()
+        XCTAssertEqual(state.activeDownloads, 2); XCTAssertEqual(state.waitingByteTransfers, 1)
+        _ = await scheduler.release(promoted)
+        state = await scheduler.snapshot()
+        XCTAssertEqual(state.activeDownloads, 1); XCTAssertEqual(state.waitingByteTransfers, 1)
+        _ = await scheduler.release(occupied)
+        _ = await scheduler.release(try await unrelated.value)
+        await scheduler.closeAndDrain()
+    }
+
+    func testDemandPromotedBeforeRegistrationIsMonotonicAndCancellationRemovesSubscription() async throws {
+        let scheduler = V2AccountWorkScheduler()
+        let demand = V2ByteTransferDemand(priority: .background)
+        demand.promote(to: .interactive); demand.promote(to: .background)
+        let context = V2NetworkWorkContext(service: "objects", priority: .background, kind: .byteTransfer(.download), orderingKey: "frozen-job", isRetry: true)
+        let first = try await V2ByteTransferWorkScope.$demand.withValue(demand) { try await scheduler.acquire(context) }
+        XCTAssertEqual(first.context.priority, .interactive)
+        XCTAssertEqual(first.context.orderingKey, "frozen-job"); XCTAssertTrue(first.context.isRetry)
+        let second = try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download)))
+        let blocked = Task { try await V2ByteTransferWorkScope.$demand.withValue(demand) { try await scheduler.acquire(context) } }
+        try await awaitWaiting(1, on: scheduler)
+        XCTAssertEqual(demand.observerCount, 1)
+        blocked.cancel()
+        do { _ = try await blocked.value; XCTFail("Expected cancellation") } catch is CancellationError {} catch { throw error }
+        XCTAssertEqual(demand.observerCount, 0)
+        demand.promote(to: .critical)
+        let state = await scheduler.snapshot()
+        XCTAssertEqual(state.activeDownloads, 2); XCTAssertEqual(state.waitingByteTransfers, 0)
+        _ = await scheduler.release(first); _ = await scheduler.release(second)
+        await scheduler.closeAndDrain()
+    }
+
+    func testDefaultDirectionLimitsShareFourByteSlotsAndKeepControlIndependent() async throws {
+        let scheduler = V2AccountWorkScheduler()
+        let up = V2NetworkWorkContext(service: "objects", priority: .recovery, kind: .byteTransfer(.upload))
+        let down = V2NetworkWorkContext(service: "objects", kind: .byteTransfer(.download))
+        let firstUp = try await scheduler.acquire(up), secondUp = try await scheduler.acquire(up)
+        let firstDown = try await scheduler.acquire(down), secondDown = try await scheduler.acquire(down)
+        let thirdUp = Task { try await scheduler.acquire(up) }
+        let thirdDown = Task { try await scheduler.acquire(down) }
+        try await awaitWaiting(2, on: scheduler)
+        let ordinary = try await scheduler.acquire(.init(service: "api"))
+        let auth = try await scheduler.acquire(.init(service: "auth", kind: .authentication))
+        var state = await scheduler.snapshot()
+        XCTAssertEqual(state.activeUploads, 2); XCTAssertEqual(state.activeDownloads, 2)
+        XCTAssertEqual(state.waitingByteTransfers, 2); XCTAssertEqual(state.active, 6)
+        _ = await scheduler.release(firstDown)
+        let nextDown = try await thirdDown.value
+        state = await scheduler.snapshot()
+        XCTAssertEqual(state.activeUploads, 2); XCTAssertEqual(state.activeDownloads, 2); XCTAssertEqual(state.waitingByteTransfers, 1)
+        _ = await scheduler.release(firstUp)
+        let nextUp = try await thirdUp.value
+        for permit in [secondUp, nextUp, secondDown, nextDown, ordinary, auth] { _ = await scheduler.release(permit) }
+        await scheduler.closeAndDrain()
+    }
+
+    func testAutomaticPrefetchCannotBorrowUsersDirectionalReservation() async throws {
+        let scheduler = V2AccountWorkScheduler()
+        let automatic = V2NetworkWorkContext(service: "objects", priority: .background, kind: .byteTransfer(.download))
+        let first = try await scheduler.acquire(automatic)
+        let second = Task { try await scheduler.acquire(automatic) }
+        try await awaitWaiting(1, on: scheduler)
+        let user = try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download)))
+        let state = await scheduler.snapshot()
+        XCTAssertEqual(state.activeDownloads, 2); XCTAssertEqual(state.waitingByteTransfers, 1)
+        _ = await scheduler.release(first)
+        let continued = try await second.value
+        _ = await scheduler.release(continued); _ = await scheduler.release(user)
+        await scheduler.closeAndDrain()
+    }
+
+    func testAutomaticPrefetchKeepsGlobalReservationAcrossDirections() async throws {
+        let scheduler = V2AccountWorkScheduler(configuration: .init(byteTransferLimit: 2))
+        let upload = try await scheduler.acquire(.init(service: "objects", priority: .background, kind: .byteTransfer(.upload)))
+        let backgroundDownload = Task { try await scheduler.acquire(.init(service: "objects", priority: .background, kind: .byteTransfer(.download))) }
+        try await awaitWaiting(1, on: scheduler)
+        let user = try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download)))
+        _ = await scheduler.release(user)
+        let stillReserved = await scheduler.snapshot()
+        XCTAssertEqual(stillReserved.activeUploads, 1); XCTAssertEqual(stillReserved.activeDownloads, 0); XCTAssertEqual(stillReserved.waitingByteTransfers, 1)
+        _ = await scheduler.release(upload)
+        _ = await scheduler.release(try await backgroundDownload.value)
+        await scheduler.closeAndDrain()
+    }
+
+    func testByteQueueHasIndependentBoundAndFreeDirectionDoesNotNeedQueueCapacity() async throws {
+        let scheduler = V2AccountWorkScheduler(configuration: .init(ordinaryLimit: 1, byteTransferLimit: 2,
+            uploadTransferLimit: 1, downloadTransferLimit: 1, byteTransferWaiterLimit: 1, waiterLimit: 1, controlWaiterLimit: 1))
+        let up = V2NetworkWorkContext(service: "objects", kind: .byteTransfer(.upload))
+        let upload = try await scheduler.acquire(up)
+        let queuedUpload = Task { try await scheduler.acquire(up) }
+        try await awaitWaiting(1, on: scheduler)
+        let ordinary = try await scheduler.acquire(.init(service: "api"))
+        let queuedOrdinary = Task { try await scheduler.acquire(.init(service: "api")) }
+        try await awaitWaiting(2, on: scheduler)
+        let auth = try await scheduler.acquire(.init(service: "auth", kind: .authentication))
+        let queuedAuth = Task { try await scheduler.acquire(.init(service: "auth", kind: .authentication)) }
+        try await awaitWaiting(3, on: scheduler)
+        do { _ = try await scheduler.acquire(up); XCTFail("Byte queue exceeded its bound") }
+        catch V2AccountWorkScheduler.AdmissionError.overloaded { }
+        let download = try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download)))
+        let state = await scheduler.snapshot()
+        XCTAssertEqual(state.activeUploads, 1); XCTAssertEqual(state.activeDownloads, 1)
+        XCTAssertEqual(state.waiting, 3); XCTAssertEqual(state.waitingByteTransfers, 1)
+        queuedUpload.cancel()
+        do { _ = try await queuedUpload.value; XCTFail("Cancelled byte waiter survived") } catch is CancellationError { }
+        _ = await scheduler.release(download); _ = await scheduler.release(upload)
+        _ = await scheduler.release(ordinary); _ = await scheduler.release(try await queuedOrdinary.value)
+        _ = await scheduler.release(auth); _ = await scheduler.release(try await queuedAuth.value)
+        await scheduler.closeAndDrain()
+    }
+
+    func testRestoredDirectionalOverageBlocksAllNewBytesUntilAccountedFor() async throws {
+        let scheduler = V2AccountWorkScheduler()
+        let context = V2NetworkWorkContext(service: "objects", priority: .recovery, kind: .byteTransfer(.upload))
+        var adopted: [V2RequestPermit] = []
+        for _ in 0..<3 { adopted.append(try await scheduler.adoptExistingByteTransfer(id: UUID(), context: context)) }
+        let waiting = Task { try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download))) }
+        try await awaitWaiting(1, on: scheduler)
+        let overage = await scheduler.snapshot()
+        XCTAssertEqual(overage.activeUploads, 3); XCTAssertEqual(overage.activeDownloads, 0)
+        _ = await scheduler.release(adopted.removeFirst())
+        let download = try await waiting.value
+        let resumed = await scheduler.snapshot()
+        XCTAssertEqual(resumed.activeUploads, 2); XCTAssertEqual(resumed.activeDownloads, 1)
+        for permit in adopted + [download] { _ = await scheduler.release(permit) }
+        await scheduler.closeAndDrain()
+    }
+
+    func testAgingSelectsOldByteWorkWithoutChangingItsPriorityOrReservedCapacity() async throws {
+        let clock = Mutex<TimeInterval>(0)
+        let scheduler = V2AccountWorkScheduler(configuration: .init(byteTransferLimit: 1, uploadTransferLimit: 1, downloadTransferLimit: 1),
+            monotonicNow: { clock.withLock { $0 } })
+        let running = try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download)))
+        let old = Task { try await scheduler.acquire(.init(service: "objects", priority: .background, kind: .byteTransfer(.download))) }
+        try await awaitWaiting(1, on: scheduler)
+        clock.withLock { $0 = 16 }
+        let newer = Task { try await scheduler.acquire(.init(service: "objects", priority: .interactive, kind: .byteTransfer(.download))) }
+        try await awaitWaiting(2, on: scheduler)
+        _ = await scheduler.release(running)
+        let aged = try await old.value
+        XCTAssertEqual(aged.context.priority, .background)
+        let state = await scheduler.snapshot()
+        XCTAssertEqual(state.waitingByteTransfers, 1)
+        _ = await scheduler.release(aged); _ = await scheduler.release(try await newer.value)
+        await scheduler.closeAndDrain()
+    }
+
+    func testByteCancellationKeepsDirectionSlotUntilUnderlyingWriterActuallyEnds() async throws {
+        let scheduler = V2AccountWorkScheduler(configuration: .init(byteTransferLimit: 1))
+        let gate = WorkTestGate(), context = V2NetworkWorkContext(service: "objects", kind: .byteTransfer(.upload))
+        let writer = Task { try await scheduler.withPermit(context) { _ in await gate.wait(); return 1 } }
+        while await scheduler.snapshot().activeUploads == 0 { await Task.yield() }
+        writer.cancel()
+        let next = Task { try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download))) }
+        try await awaitWaiting(1, on: scheduler)
+        let draining = await scheduler.snapshot()
+        XCTAssertEqual(draining.activeUploads, 1); XCTAssertEqual(draining.activeDownloads, 0)
+        await gate.open(); _ = try await writer.value
+        _ = await scheduler.release(try await next.value)
+        await scheduler.closeAndDrain()
+    }
+
+    func testNativeMappingCannotBeAdoptedWithAnotherDirection() async throws {
+        let scheduler = V2AccountWorkScheduler(), id = UUID()
+        let upload = try await scheduler.adoptExistingByteTransfer(id: id, context: .init(service: "objects", kind: .byteTransfer(.upload)))
+        do {
+            _ = try await scheduler.adoptExistingByteTransfer(id: id, context: .init(service: "objects", kind: .byteTransfer(.download)))
+            XCTFail("Native mapping changed direction")
+        } catch V2AccountWorkScheduler.AdmissionError.invalidAdoption { }
+        _ = await scheduler.release(upload)
+        await scheduler.closeAndDrain()
+    }
+
+    func testDefaultByteBacklogStopsAt128WithoutConsumingControlCapacity() async throws {
+        let scheduler = V2AccountWorkScheduler(configuration: .init(byteTransferLimit: 1))
+        let context = V2NetworkWorkContext(service: "objects", kind: .byteTransfer(.download))
+        let current = try await scheduler.acquire(context)
+        var pending: [Task<V2RequestPermit, any Error>] = []
+        for count in 1...128 {
+            pending.append(Task { try await scheduler.acquire(context) })
+            try await awaitWaiting(count, on: scheduler)
+        }
+        do { _ = try await scheduler.acquire(context); XCTFail("Exceeded 128 byte waiters") }
+        catch V2AccountWorkScheduler.AdmissionError.overloaded { }
+        let control = try await scheduler.acquire(.init(service: "auth", kind: .authentication))
+        let snapshot = await scheduler.snapshot()
+        XCTAssertEqual(snapshot.waitingByteTransfers, 128); XCTAssertEqual(snapshot.activeDownloads, 1)
+        await scheduler.beginClose()
+        for task in pending {
+            do { _ = try await task.value; XCTFail("Queued bytes survived close") }
+            catch V2AccountWorkScheduler.AdmissionError.closed { }
+        }
+        _ = await scheduler.release(control); _ = await scheduler.release(current)
+        await scheduler.closeAndDrain()
+    }
+
+    func testAgedPrefetchStillCannotOccupyInteractiveReservation() async throws {
+        let clock = Mutex<TimeInterval>(0)
+        let scheduler = V2AccountWorkScheduler(monotonicNow: { clock.withLock { $0 } })
+        let automatic = V2NetworkWorkContext(service: "objects", priority: .background, kind: .byteTransfer(.download))
+        let first = try await scheduler.acquire(automatic)
+        let aged = Task { try await scheduler.acquire(automatic) }
+        try await awaitWaiting(1, on: scheduler)
+        let user = try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download)))
+        clock.withLock { $0 = 16 }
+        _ = await scheduler.release(user)
+        let reserved = await scheduler.snapshot()
+        XCTAssertEqual(reserved.activeDownloads, 1); XCTAssertEqual(reserved.waitingByteTransfers, 1)
+        let nextUser = try await scheduler.acquire(.init(service: "objects", kind: .byteTransfer(.download)), deadline: .now.advanced(by: .seconds(1)))
+        _ = await scheduler.release(first)
+        _ = await scheduler.release(try await aged.value)
+        _ = await scheduler.release(nextUser)
+        await scheduler.closeAndDrain()
+    }
+
+    func testAgingDoesNotBypassEarlierSameKeyCommandInAnotherAdmissionPool() async throws {
+        let clock = Mutex<TimeInterval>(0)
+        let scheduler = V2AccountWorkScheduler(monotonicNow: { clock.withLock { $0 } })
+        let prime = try await scheduler.acquire(.init(service: "commands"))
+        await scheduler.coolDown(service: "commands", for: 100)
+        _ = await scheduler.release(prime)
+        let command = Task { try await scheduler.acquire(.init(service: "commands", orderingKey: "room")) }
+        try await awaitWaiting(1, on: scheduler)
+        let bytes = Task { try await scheduler.acquire(.init(service: "objects", priority: .background, kind: .byteTransfer(.download), orderingKey: "room")) }
+        try await awaitWaiting(2, on: scheduler)
+        clock.withLock { $0 = 16 }
+        await scheduler.setDegraded(false)
+        let blocked = await scheduler.snapshot()
+        XCTAssertEqual(blocked.activeDownloads, 0); XCTAssertEqual(blocked.waiting, 2)
+        clock.withLock { $0 = 100 }
+        await scheduler.setDegraded(false)
+        let first = try await command.value
+        let stillOrdered = await scheduler.snapshot()
+        XCTAssertEqual(stillOrdered.activeDownloads, 0); XCTAssertEqual(stillOrdered.waitingByteTransfers, 1)
+        _ = await scheduler.release(first)
+        _ = await scheduler.release(try await bytes.value)
+        await scheduler.closeAndDrain()
+    }
+
     func testControlWaitersHaveBoundedCapacityIndependentOfFullOrdinaryQueue() async throws {
         let scheduler = V2AccountWorkScheduler(configuration: .init(ordinaryLimit: 1, waiterLimit: 1, controlWaiterLimit: 1))
         let ordinary = try await scheduler.acquire(.init(service: "api"))
@@ -54,7 +332,7 @@ final class V2AccountWorkSchedulerTests: XCTestCase, @unchecked Sendable {
 
     func testRestoredSystemTransfersBlockNewBytesUntilActualDrain() async throws {
         let scheduler = V2AccountWorkScheduler(configuration: .init(byteTransferLimit: 1))
-        let context = V2NetworkWorkContext(service: "objects", kind: .byteTransfer, isRetry: true)
+        let context = V2NetworkWorkContext(service: "objects", kind: .byteTransfer(.download), isRetry: true)
         let id = UUID()
         let first = try await scheduler.adoptExistingByteTransfer(id: id, context: context)
         let duplicate = try await scheduler.adoptExistingByteTransfer(id: id, context: context)
@@ -87,10 +365,10 @@ final class V2AccountWorkSchedulerTests: XCTestCase, @unchecked Sendable {
         await scheduler.coolDown(service: "objects", for: 100)
         _ = await scheduler.release(initial)
         let id = UUID()
-        let context = V2NetworkWorkContext(service: "objects", kind: .byteTransfer)
+        let context = V2NetworkWorkContext(service: "objects", kind: .byteTransfer(.download))
         let restored = try await scheduler.adoptExistingByteTransfer(id: id, context: context)
         do {
-            _ = try await scheduler.adoptExistingByteTransfer(id: id, context: .init(service: "other", kind: .byteTransfer))
+            _ = try await scheduler.adoptExistingByteTransfer(id: id, context: .init(service: "other", kind: .byteTransfer(.download)))
             XCTFail("Expected identity mismatch")
         } catch V2AccountWorkScheduler.AdmissionError.invalidAdoption {}
         do {

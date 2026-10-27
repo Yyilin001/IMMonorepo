@@ -10,9 +10,9 @@ import UIKit
 struct V2GroupAvatarPipelineTests {
     @Test("a cached image still requires new display authorization after suspension")
     func cachedImageRequiresPermission() async throws {
-        let f = try GroupPipelineFixture()
+        let f = try await GroupPipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root])
         let pipeline = f.pipeline(thumbnails)
         let activation = try await pipeline.groups.activate(roomID: f.presentation.state.roomID)
         let result = try await pipeline.groupSnapshot(activation: activation, pixels: 16)
@@ -37,11 +37,11 @@ struct V2GroupAvatarPipelineTests {
     @Test("late decoded pixels cannot cross invalidation, background or account-close boundaries",
           arguments: ["invalidate", "suspend", "close"])
     func lateDecode(boundary: String) async throws {
-        let f = try GroupPipelineFixture()
+        let f = try await GroupPipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let entered = AsyncStream<Void>.makeStream(), gate = GroupPipelineDecodeGate()
         let image = V2SendableImage(image: UIImage())
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root) { _, _ in
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in
             await gate.wait(entered.continuation)
             return image
         }
@@ -71,18 +71,14 @@ private struct GroupPipelineFixture {
     let root: URL, cachedFile: URL
     let presentation: V2GroupAvatarPresentation
     let reader: GroupPipelineReader
-    let files: V2ForegroundConversationMediaDownloader
-    init() throws {
+    let files: V2ResourceMediaTestOwner
+    init() async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("group-pipeline-\(UUID())")
-        files = try .init(downloader: .init(targetResolver: NoGroupByteIO(), byteTransfer: NoGroupByteIO()), directory: root)
         let png = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).pngData { context in
             UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
         }
         let media = MediaID(uuid: UUID()), variant = ResourceVariantID(uuid: UUID())
         let checksum = try V2ResourceChecksum(value: SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined())
-        let key = media.rawValue + ":" + variant.rawValue + ":1:" + checksum.value
-        cachedFile = root.appendingPathComponent(SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined() + ".media")
-        try png.write(to: cachedFile)
         let now = Date()
         let plan = try V2ResourceTransferPlan(mode: .httpGet, url: #require(URL(string: "https://delivery.invalid/avatar")),
             expiresAt: now.addingTimeInterval(120), expectedByteCount: Int64(png.count), checksum: checksum)
@@ -91,13 +87,17 @@ private struct GroupPipelineFixture {
             canManage: false, avatar: .init(mediaID: media, variantID: variant, version: 1, checksum: checksum, plan: plan),
             observedAt: now, validUntil: now.addingTimeInterval(300), serverNow: now)
         reader = .init(value: presentation)
+        files = try await makeResourceMediaTestDownloader(downloader: .init(targetResolver: NoGroupByteIO(), byteTransfer: ResourceMediaSeedBytes(png)), directory: root)
+        let seeded = try await files.avatar(try #require(presentation.avatar), home: .room(presentation.state.roomID))
+        cachedFile = seeded.fileURL
+        await seeded.release()
     }
     func pipeline(_ thumbnails: V2LocalMediaThumbnailCache) -> V2AvatarPipeline {
         let groups = V2GroupAvatarPresentationRepository(actorUserID: presentation.actorUserID, deviceID: presentation.deviceID,
             reader: reader, minimumRevision: { _ in 0 })
         let profiles = V2ProfilePresentationRepository(actorUserID: presentation.actorUserID, deviceID: presentation.deviceID,
             reader: NoGroupByteIO())
-        return .init(profiles: profiles, groups: groups, files: files, thumbnails: thumbnails)
+        return .init(profiles: profiles, groups: groups, files: files.downloader, thumbnails: thumbnails)
     }
 }
 

@@ -10,7 +10,7 @@ struct V2TerminalCommandRetentionTests {
     func publicUnknownIsNotExpired() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let intent=try f.intent("unknown must survive")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let work=try await f.head()
         try await V2MessageSendOperationService(accountID:f.account,store:f.store,client:f.remote).execute(f.claim(work))
@@ -25,7 +25,7 @@ struct V2TerminalCommandRetentionTests {
     func invalidCleanupClock(value:Double) async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let intent=try f.intent("retain")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let work=try await f.head()
         await #expect(throws:V2ClientCommandError.commandConflict) { try await f.store.pruneCompletedOperationHistory(now:Date(timeIntervalSince1970:value)) }

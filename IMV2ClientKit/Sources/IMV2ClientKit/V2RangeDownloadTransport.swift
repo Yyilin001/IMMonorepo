@@ -33,7 +33,7 @@ public struct V2URLSessionRangeDownloadTransport: V2RangeDownloadTransport, Send
         guard request.timeoutInterval.isFinite,request.timeoutInterval > 0 else { throw V2ClientMediaTransferError.invalidTarget }
         let transportDeadline = ContinuousClock.now.advanced(by: .seconds(min(60, request.timeoutInterval)))
         let deadline = min(transportDeadline, V2HTTPRequestDeadline.deadline(for: request) ?? transportDeadline, V2HTTPRequestDeadline.current ?? transportDeadline)
-        let permit = try await scheduler?.acquire(.init(service: "mediaProvider", priority: .interactive, kind: .byteTransfer, isRetry: V2NetworkWorkScope.context?.isRetry ?? false), deadline: deadline)
+        let permit = try await scheduler?.acquire(.init(service: "mediaProvider", priority: V2NetworkWorkScope.context?.priority ?? .interactive, kind: .byteTransfer(.download), isRetry: V2NetworkWorkScope.context?.isRetry ?? false), deadline: deadline)
         do {
             let response = try await perform(request, maximumBytes: maximumBytes, deadline: deadline, receiveResponse: receiveResponse, consume: consume)
             if [429,503].contains(response.response.statusCode), let retry = V2RetryAfter.date(from: response.response.value(forHTTPHeaderField: "Retry-After")) {
@@ -79,8 +79,9 @@ public struct V2URLSessionRangeDownloadTransport: V2RangeDownloadTransport, Send
     }
 }
 
-private final class V2RangeTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class V2RangeTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
+    private let connectivity = V2ResourceConnectivityObservation()
     private let diagnostics: V2NetworkDiagnostics?
     private let mode: V2ResourceTransferMetric.Mode
     private let retry: Bool
@@ -103,14 +104,19 @@ private final class V2RangeTaskDelegate: NSObject, URLSessionDataDelegate, @unch
         task.resume(); if cancel { task.cancel() }
     }
     func cancel(error: (any Error)? = nil) {
+        connectivity.finish()
         let task = lock.withLock { cancelled = true; if failure == nil { failure = error }; return self.task }
         task?.cancel()
+    }
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        connectivity.waiting()
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         v2ForwardAuthenticationChallenge(session: session, task: task, challenge: challenge, completionHandler: completionHandler)
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        connectivity.finish()
         do {
             guard let http = response as? HTTPURLResponse else { throw V2ClientMediaTransferError.invalidResponse }
             lock.withLock { self.response = http }
@@ -136,6 +142,7 @@ private final class V2RangeTaskDelegate: NSObject, URLSessionDataDelegate, @unch
         } catch { cancel(error: error) }
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        connectivity.finish()
         let outcome = lock.withLock {
             let result = (continuation, response, failure ?? error)
             continuation = nil; self.task = nil

@@ -1,0 +1,58 @@
+{
+  "observedAt": "2026-10-27T04:28:11.093800+00:00",
+  "status": "native-verified-client-install-awaiting-device-connection",
+  "sourceSHA256": {
+    "IMApp/IMApp/V2/V2AppStore.swift": "6e2432811d6c38b1a1749aead5dfd81773f7638374c85b0cc159df15d0bf03ec",
+    "IMApp/IMApp/V2/V2ConversationFeatureEnvironment.swift": "e075f926cf27302744c029b50f1ce2e367ebec30871b697374a0b64ec2f21251",
+    "IMApp/IMApp/V2/V2ConversationDetailStore.swift": "56983fa73236f29d06003dc2eb2f0fd041c9ac06ae55260c6f63ef4fd7717cc3",
+    "IMApp/IMApp/V2/V2ConversationMediaViews.swift": "f52637e010aedc97800e98accdb40525c72800acefdfe01c7aa3f64a05074df3",
+    "IMApp/IMAppTests/V2PhotoLibraryImageTests.swift": "42342cc9e553575d888c355016751babb547dcda03f08fa1816bb2c2516b240c",
+    "IMApp/IMAppTests/V2ConversationStoreTests.swift": "c8f772f80e72cf3d67b5e65036d4915bc63cc792ed1a4305da05abe7607e379e"
+  },
+  "behavior": [
+    "Prepare up to two latest non-withdrawn image attachments from authorized local cache while first timeline metadata loads",
+    "Reuse existing file borrows and bounded 2048px decoder; never initiate a byte download on cache miss",
+    "Publish ready pixels, downloaded handles and timeline in one MainActor turn; seed SwiftUI image state before first render",
+    "180ms soft preparation budget, cooperative cancellation drains readers; misses/slow images keep normal placeholder path",
+    "Account-scoped existing cache close and normal invalidation remain in force; no persisted ready-image cache or authorization bypass"
+  ],
+  "tests": {
+    "passed": 15,
+    "suites": 2,
+    "includesOneParameterizedTestWithTwoCases": true,
+    "log": "/tmp/im-resource-image-first-frame-app-r4-20261027.log",
+    "xcresult": "/tmp/im-resource-image-first-frame-app-r4-20261027.xcresult",
+    "firstFrameRaster": "/tmp/im-resource-first-frame-render-20261027.png",
+    "firstFrameRasterSHA256": "96ac5ee7bcf36cd39729ea39aae857d13bcb2132a2b2cbcf775b7e2884ad09aa",
+    "publicationFixture": "Real verified file borrows and journal, deterministic decoder, fake cached handle lookup at network boundary. No additional download beyond fixture seeding.",
+    "coverage": [
+      "first rendered pixels are the prepared blue image",
+      "snapshot contains prepared image and downloaded state alongside initial message",
+      "timeout keeps fast image and cancels slow read",
+      "reader count bounded to two",
+      "parent cancellation suppresses preparation",
+      "cache hit/miss passive restore makes no download"
+    ]
+  },
+  "signedClient": {
+    "record": "/tmp/im-resource-client-signed-release-20261027-r25/result.json",
+    "binarySHA256": "e824402c46985ecdda2b87cd790384a7bd8c68c11fdef14c4ac27e5580b00522",
+    "sourceDrift": [],
+    "installed": false,
+    "installAttempt": "/tmp/im-resource-image-first-frame-phone-install-20261027.json",
+    "installLog": "/tmp/im-resource-image-first-frame-phone-install-20261027.log",
+    "failure": "CoreDevice 4016; paired device tunnel unavailable",
+    "deviceInventory": "/tmp/im-resource-image-first-frame-device-inventory-20261027.json"
+  },
+  "serverChanged": false,
+  "physicalFirstFrameAndEntryLatencyNotYetVerified": true,
+  "priorAttemptsRetained": [
+    "/tmp/im-resource-image-first-frame-app-20261027.log",
+    "/tmp/im-resource-image-first-frame-app-r2-20261027.log",
+    "/tmp/im-resource-image-first-frame-app-r3-20261027.log"
+  ],
+  "priorAttemptNotes": [
+    "Corrected MainActor state capture before async-let initializer.",
+    "First raster fixture used a bare path handle which correctly failed its required borrow and cleared the image; replaced it with a real verified local file owner and deterministic decoder. No production authorization was relaxed."
+  ]
+}

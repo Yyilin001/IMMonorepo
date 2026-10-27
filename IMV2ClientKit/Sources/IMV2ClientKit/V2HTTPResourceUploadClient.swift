@@ -18,10 +18,21 @@ public struct V2HTTPResourceUploadClient: V2BackgroundResourceUploadControlling,
                        capabilityEndpoint: endpoint.deletingLastPathComponent().appendingPathComponent("resource-capabilities"))
     }
     public func create(_ request: V2ResourceUploadRequest) async throws -> V2ResourceUploadSession {
-        try await send(path: nil, body: request)
+        let result: V2ResourceUploadSession = try await send(path: nil, body: request)
+        guard result.mediaID == request.mediaID else { throw V2ClientMediaTransferError.invalidMediaEdgeResponse }
+        switch request.usage {
+        case .messageAttachment(let room), .groupAvatar(let room):
+            guard result.locator.home == .room(room) else { throw V2ClientMediaTransferError.invalidMediaEdgeResponse }
+        case .userAvatar:
+            // Exact account identity is enforced by the account-bound journal.
+            guard case .account = result.locator.home else { throw V2ClientMediaTransferError.invalidMediaEdgeResponse }
+        }
+        return result
     }
     public func status(_ locator: V2ResourceUploadLocator) async throws -> V2ResourceUploadSession {
-        try await send(path: "status", body: locator)
+        let result: V2ResourceUploadSession = try await send(path: "status", body: locator)
+        guard result.locator == locator else { throw V2ClientMediaTransferError.invalidMediaEdgeResponse }
+        return result
     }
     public func target(_ session: V2ResourceUploadSession) async throws -> V2ResourceTransferPlan? {
         try await target(session, background: false)
@@ -40,14 +51,21 @@ public struct V2HTTPResourceUploadClient: V2BackgroundResourceUploadControlling,
         return plans.first
     }
     public func finalize(_ session: V2ResourceUploadSession) async throws -> V2ResourceUploadSession {
-        try await send(path: "finalize", body: V2ResourceUploadFinalizeRequest(locator: session.locator, generation: session.generation, parts: session.confirmedParts))
+        try requireBoundResponse(await send(path: "finalize", body: V2ResourceUploadFinalizeRequest(locator: session.locator, generation: session.generation, parts: session.confirmedParts)), for: session)
     }
     public func cancel(_ session: V2ResourceUploadSession) async throws -> V2ResourceUploadSession {
-        try await send(path: "cancel", body: V2ResourceUploadCancelRequest(locator: session.locator, generation: session.generation))
+        try requireBoundResponse(await send(path: "cancel", body: V2ResourceUploadCancelRequest(locator: session.locator, generation: session.generation)), for: session)
+    }
+    private func requireBoundResponse(_ result: V2ResourceUploadSession, for session: V2ResourceUploadSession) throws -> V2ResourceUploadSession {
+        guard result.locator == session.locator, result.mediaID == session.mediaID, result.generation >= session.generation else {
+            throw V2ClientMediaTransferError.invalidMediaEdgeResponse
+        }
+        return result
     }
     private func send<Request: Encodable & Sendable, Response: Decodable & Sendable>(path: String?, body: Request, capabilityEndpoint: URL? = nil, validating: (@Sendable (Response, String) throws -> Void)? = nil) async throws -> Response {
         try Task.checkCancellation()
         let credential = try await credentials.mediaEdgeCredentials()
+        try Task.checkCancellation()
         guard !credential.accessToken.isEmpty, !credential.accessToken.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw V2ClientMediaTransferError.authorizationUnavailable }
         var request = URLRequest(url: capabilityEndpoint ?? path.map { endpoint.appendingPathComponent($0) } ?? endpoint, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: capabilityEndpoint == nil ? 30 : 5)
         request.httpMethod = capabilityEndpoint == nil ? "POST" : "GET"
@@ -91,15 +109,11 @@ public actor V2URLSessionResourcePlanExecutor: V2ResourcePlanExecuting {
         guard plan.expiresAt > Date() else { throw V2ClientMediaTransferError.targetExpired }
         let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         guard let sourceBytes = (attributes[.size] as? NSNumber)?.int64Value else { throw V2ClientMediaTransferError.byteCountMismatch }
-        let transferFile: URL
-        if plan.mode == .httpPartPut {
-            guard let range = plan.byteRange, range.upperBound < sourceBytes, range.byteCount == plan.expectedByteCount else { throw V2ClientMediaTransferError.byteCountMismatch }
-            transferFile = try await V2ResourcePartFile.create(source: fileURL, lowerBound: range.lowerBound, byteCount: range.byteCount)
-        } else {
-            guard plan.byteRange == nil, sourceBytes == plan.expectedByteCount else { throw V2ClientMediaTransferError.byteCountMismatch }
-            transferFile = fileURL
-        }
-        defer { if transferFile != fileURL { try? FileManager.default.removeItem(at: transferFile) } }
+        // The engine supplies an immutable managed slice for multipart plans.
+        // Byte transport does not own any filesystem publication or cleanup.
+        guard sourceBytes == plan.expectedByteCount,
+              plan.mode == .httpPartPut ? plan.byteRange?.byteCount == sourceBytes : plan.byteRange == nil else { throw V2ClientMediaTransferError.byteCountMismatch }
+        let transferFile = fileURL
         try Task.checkCancellation()
         guard plan.expiresAt > Date() else { throw V2ClientMediaTransferError.targetExpired }
         var request = URLRequest(url: plan.url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 60)
@@ -107,7 +121,7 @@ public actor V2URLSessionResourcePlanExecutor: V2ResourcePlanExecuting {
         for header in plan.headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
         let transportDeadline = ContinuousClock.now.advanced(by: .seconds(min(60,plan.expiresAt.timeIntervalSinceNow)))
         let deadline = min(transportDeadline, V2HTTPRequestDeadline.deadline(for: request) ?? transportDeadline, V2HTTPRequestDeadline.current ?? transportDeadline)
-        let permit = try await scheduler?.acquire(.init(service: "mediaProvider",priority: .recovery,kind: .byteTransfer,isRetry: V2NetworkWorkScope.context?.isRetry ?? false),deadline: deadline)
+        let permit = try await scheduler?.acquire(.init(service: "mediaProvider",priority: V2NetworkWorkScope.context?.priority ?? .interactive,kind: .byteTransfer(.upload),isRetry: V2NetworkWorkScope.context?.isRetry ?? false),deadline: deadline)
         do {
             let http = try await V2BoundedFileUpload(session: session, diagnostics: diagnostics, metricMode: plan.mode == .httpPartPut ? .multipartUpload : .upload).send(request,file: transferFile,deadline: deadline)
             if [429,503].contains(http.statusCode), let retry = V2RetryAfter.date(from: http.value(forHTTPHeaderField: "Retry-After")) {

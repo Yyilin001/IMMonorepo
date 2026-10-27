@@ -24,15 +24,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             expiresAt: expiresAt, now: now)
     }
 
-    internal func prepareDownloadableResource(mediaID: MediaID, device: DeviceID, database: any Database) async throws {
+    internal func prepareDownloadableResource(mediaID: MediaID, device: DeviceID, database: any Database, dimensions: V2ResourceImageDimensions? = nil, contentType: String = "image/png", durationMilliseconds: Int64? = nil) async throws {
         let base = Date(timeIntervalSince1970: 1_750_000_000)
         let uploads = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
         let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: mediaID, usage: .messageAttachment(roomID),
-            contentType: "image/png", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
+            contentType: contentType, byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
         let upload = try await createResourceUpload(input, device: device, store: uploads, expiresAt: base.addingTimeInterval(600), now: base)
         let claim = try await uploads.claimFinalize(session: upload.sessionID, generation: 1, actor: senderUUID, device: device.uuidValue!, now: base)
         try await uploads.publish(claim, facts: .init(reference: claim.placement, byteCount: 42, sha256: Data(repeating: 0xaa, count: 32)),
             actor: senderUUID, device: device.uuidValue!, now: base)
+        if let dimensions {
+            let sql = try #require(database as? any SQLDatabase)
+            try await sql.raw("UPDATE im_v2.resource_catalog SET pixel_width=\(bind: dimensions.width),pixel_height=\(bind: dimensions.height) WHERE media_id=\(bind: mediaID.uuidValue!)").run()
+        }
+        if let durationMilliseconds {
+            let sql = try #require(database as? any SQLDatabase)
+            try await sql.raw("UPDATE im_v2.resource_catalog SET duration_ms=\(bind: durationMilliseconds) WHERE media_id=\(bind: mediaID.uuidValue!)").run()
+        }
         let scans = PostgresV2MediaScanStore(database: database)
         let lease = try #require(try await scans.claimPending(now: base, leaseDuration: 30, limit: 1).first)
         try await scans.complete(lease, result: .passed, now: base)

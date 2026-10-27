@@ -13,9 +13,9 @@ import Observation
 struct V2ProfileAvatarPipelineTests {
     @Test("nested list pages reuse signed-in authority and render cached names on reentry")
     func nestedListReentry() async throws {
-        let f = try ProfilePipelineFixture(direct: true)
+        let f = try await ProfilePipelineFixture(direct: true)
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
         let probe = ProfileListLifecycleProbe()
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
@@ -62,9 +62,9 @@ struct V2ProfileAvatarPipelineTests {
     }
     @Test("recipient authorized alias takes precedence over nickname and clears to nickname")
     func aliasDisplay() async throws {
-        let f = try ProfilePipelineFixture()
+        let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
         try await f.reader.replaceNickname("Room name")
         try await f.reader.replaceAlias("My private name")
         let first = await pipeline.profiles.activate()
@@ -78,10 +78,10 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("an alias replacement during image decode withdraws the old combined result")
     func aliasReplacementDuringDecode() async throws {
-        let f = try ProfilePipelineFixture()
+        let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let starts = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root) { _, _ in await gate.wait(starts.continuation); return V2SendableImage(image: UIImage()) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in await gate.wait(starts.continuation); return V2SendableImage(image: UIImage()) }
         let pipeline = f.pipeline(thumbnails), first = await pipeline.profiles.activate()
         let decode = Task { try await pipeline.snapshot(key: f.key, activation: first, pixels: 16) }
         var entered = starts.stream.makeAsyncIterator(); _ = await entered.next()
@@ -95,11 +95,11 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("name-only selector rows share authorization, skip byte work and reauthorize after reentry")
     func nameOnlySelector() async throws {
-        let f = try ProfilePipelineFixture(direct: true)
+        let f = try await ProfilePipelineFixture(direct: true)
         defer { try? FileManager.default.removeItem(at: f.root) }
         // Any accidental download now fails through NoProfileByteIO.
         try FileManager.default.removeItem(at: f.cachedFile)
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root) { _, _ in
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in
             Issue.record("A name-only label must not decode an image")
             return nil
         }
@@ -141,9 +141,9 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("a verified cached PNG still requires fresh page authorization")
     func cachedBytesNeedFreshAccess() async throws {
-        let f = try ProfilePipelineFixture()
+        let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
         let first = await pipeline.profiles.activate()
         let value = try #require(await pipeline.snapshot(key: f.key, activation: first, pixels: 16))
         #expect(value.name == "Original" && value.image?.image.cgImage?.width == 16)
@@ -157,11 +157,11 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("a delayed image decode cannot cross profile invalidation, suspension or close", arguments: ["invalidate", "suspend", "close"])
     func lateDecode(boundary: String) async throws {
-        let f = try ProfilePipelineFixture()
+        let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let starts = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()
         let image = V2SendableImage(image: UIImage())
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root) { _, _ in
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in
             await gate.wait(starts.continuation); return image
         }
         let pipeline = f.pipeline(thumbnails), activation = await pipeline.profiles.activate()
@@ -179,11 +179,11 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("newer profile or nickname data during decoding cannot be combined with the old name and image", arguments: [false, true])
     func replacementDuringDecode(nicknameOnly: Bool) async throws {
-        let f = try ProfilePipelineFixture()
+        let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let starts = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()
         let image = V2SendableImage(image: UIImage())
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root) { _, _ in
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in
             await gate.wait(starts.continuation); return image
         }
         let pipeline = f.pipeline(thumbnails), first = await pipeline.profiles.activate()
@@ -202,9 +202,9 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("authorized group nickname takes precedence and clearing it restores the public name")
     func nicknameDisplay() async throws {
-        let f = try ProfilePipelineFixture()
+        let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
         try await f.reader.replaceNickname("Room name")
         let first = await pipeline.profiles.activate()
         #expect(try await pipeline.snapshot(key: f.key, activation: first, pixels: 16)?.name == "Room name")
@@ -217,9 +217,9 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("visible group and direct rows share page authority and page reentry reauthorizes cached pixels", arguments: [false, true])
     func sharedVisiblePage(direct: Bool) async throws {
-        let f = try ProfilePipelineFixture(direct: direct)
+        let f = try await ProfilePipelineFixture(direct: direct)
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
         let scope = V2AuthorPresentationPageScope(context: f.pageContext)
         #expect(f.pageContext.authorRoomID == f.key.context.authorizationRoomID)
         let running = Task { await scope.run(pipeline: pipeline) }
@@ -250,10 +250,10 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("group and direct page hiding reject late decode while a row still holds interest", arguments: [false, true])
     func pageHideFencesDecode(direct: Bool) async throws {
-        let f = try ProfilePipelineFixture(direct: direct)
+        let f = try await ProfilePipelineFixture(direct: direct)
         defer { try? FileManager.default.removeItem(at: f.root) }
         let starts = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root) { _, _ in
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in
             await gate.wait(starts.continuation); return V2SendableImage(image: UIImage())
         }
         let pipeline = f.pipeline(thumbnails)
@@ -272,9 +272,9 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("the page observes a complete key revision snapshot without refreshing unaffected rows")
     func pageKeyInvalidations() async throws {
-        let f = try ProfilePipelineFixture()
+        let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
         let scope = V2AuthorPresentationPageScope(context: f.pageContext), running = Task { await scope.run(pipeline: pipeline) }
         try await waitForProfilePage { scope.activation != nil }
         let other = V2ProfileViewLookupKey(userID: .init(uuid: UUID()), context: f.key.context)
@@ -291,9 +291,9 @@ struct V2ProfileAvatarPipelineTests {
 
     @Test("a direct page rejects another peer and wrong lookup contexts before issuing requests")
     func directPageContextIsolation() async throws {
-        let f = try ProfilePipelineFixture(direct: true)
+        let f = try await ProfilePipelineFixture(direct: true)
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
         let scope = V2AuthorPresentationPageScope(context: f.pageContext)
         let running = Task { await scope.run(pipeline: pipeline) }
         try await waitForProfilePage { scope.activation != nil }
@@ -399,18 +399,14 @@ private struct ProfilePipelineFixture {
     let root: URL, cachedFile: URL, key: V2ProfileViewLookupKey
     let pageContext: V2AuthorPresentationPageScope.Context
     let actor = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
-    let reader: ProfilePipelineReader, files: V2ForegroundConversationMediaDownloader
-    init(direct: Bool = false) throws {
+    let reader: ProfilePipelineReader, files: V2ResourceMediaTestOwner
+    init(direct: Bool = false) async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("profile-pipeline-\(UUID())")
-        files = try .init(downloader: .init(targetResolver: NoProfileByteIO(), byteTransfer: NoProfileByteIO()), directory: root)
         let png = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).pngData { context in
             UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
         }
         let media = MediaID(uuid: UUID()), variant = ResourceVariantID(uuid: UUID())
         let checksum = try V2ResourceChecksum(value: SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined())
-        let fileKey = media.rawValue + ":" + variant.rawValue + ":1:" + checksum.value
-        cachedFile = root.appendingPathComponent(SHA256.hash(data: Data(fileKey.utf8)).map { String(format: "%02x", $0) }.joined() + ".media")
-        try png.write(to: cachedFile)
         let room = RoomID(uuid: UUID())
         key = .init(userID: .init(uuid: UUID()), context: .room(room))
         pageContext = direct ? .direct(roomID: room, actorUserID: actor, peerUserID: key.userID) : .group(room)
@@ -424,11 +420,15 @@ private struct ProfilePipelineFixture {
             plan: .init(mode: .httpGet, url: #require(URL(string: "https://delivery.invalid/avatar")),
                 expiresAt: now.addingTimeInterval(120), expectedByteCount: Int64(png.count), checksum: checksum))
         reader = .init(value: try .init(view: view, lease: lease), avatar: avatar)
+        files = try await makeResourceMediaTestDownloader(downloader: .init(targetResolver: NoProfileByteIO(), byteTransfer: ResourceMediaSeedBytes(png)), directory: root)
+        let seeded = try await files.avatar(avatar, home: .account(key.userID))
+        cachedFile = seeded.fileURL
+        await seeded.release()
     }
     func pipeline(_ thumbnails: V2LocalMediaThumbnailCache) -> V2AvatarPipeline {
         .init(profiles: .init(actorUserID: actor, deviceID: device, reader: reader),
             groups: .init(actorUserID: actor, deviceID: device, reader: NoProfileByteIO(), minimumRevision: { _ in 0 }),
-            files: files, thumbnails: thumbnails)
+            files: files.downloader, thumbnails: thumbnails)
     }
 }
 private actor ProfilePipelineReader: V2ProfilePresentationReading {

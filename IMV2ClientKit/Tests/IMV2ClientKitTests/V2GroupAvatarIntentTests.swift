@@ -13,16 +13,16 @@ struct V2GroupAvatarIntentTests {
         let upload = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
             usage: .groupAvatar(f.room), contentType: "image/png", byteCount: 3, checksum: .init(value: String(repeating: "a", count: 64)))
         let command = try f.command(media: upload.mediaID)
-        let value = try await f.store.freezeGroupAvatarUploadIntent(actorUserID: f.actor, command: command,
-            uploadJobID: jobID, request: upload, localFileToken: jobID.uuidString)
+        let value = try await f.store.freezeMetadataGroupAvatarUploadIntent(actorUserID: f.actor, command: command,
+            uploadJobID: jobID, request: upload, localAssetID: .init(jobID))
         #expect(value.uploadJobID == jobID)
-        #expect(try await f.store.freezeGroupAvatarUploadIntent(actorUserID: f.actor, command: command,
-            uploadJobID: jobID, request: upload, localFileToken: jobID.uuidString) == value)
+        #expect(try await f.store.freezeMetadataGroupAvatarUploadIntent(actorUserID: f.actor, command: command,
+            uploadJobID: jobID, request: upload, localAssetID: .init(jobID)) == value)
         let other = UUID(), conflicting = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
             usage: .groupAvatar(f.room), contentType: "image/png", byteCount: 3, checksum: upload.checksum)
         await #expect(throws: V2GroupAvatarIntentError.conflict) {
-            _ = try await f.store.freezeGroupAvatarUploadIntent(actorUserID: f.actor, command: f.command(media: conflicting.mediaID),
-                uploadJobID: other, request: conflicting, localFileToken: other.uuidString)
+            _ = try await f.store.freezeMetadataGroupAvatarUploadIntent(actorUserID: f.actor, command: f.command(media: conflicting.mediaID),
+                uploadJobID: other, request: conflicting, localAssetID: .init(other))
         }
         #expect(try await f.store.resourceTransfer(id: other) == nil)
         #expect(try await f.store.pendingGroupAvatarIntents(in: f.room) == [value])
@@ -67,7 +67,7 @@ struct V2GroupAvatarIntentTests {
         let expired = try V2ResourceUploadSession(locator: #require(job.session).locator, mediaID: job.request.mediaID,
             generation: 1, state: .expired, resourceState: .deleted, expiresAt: f.now)
         try await reopened.saveResourceSession(expired, for: job.id)
-        #expect(try await reopened.retainedResourceFileTokens().contains(job.localFileToken))
+        #expect(try await reopened.testHeldAssetIDs().contains(job.localAssetID))
         await #expect(throws: V2GroupAvatarIntentError.busy) {
             _ = try await reopened.claimGroupAvatarSubmission(command.operationID, now: f.now.addingTimeInterval(10))
         }
@@ -75,7 +75,7 @@ struct V2GroupAvatarIntentTests {
         #expect(retry.intent.command == command && retry.id != claim.id)
         try await reopened.finishGroupAvatarSubmission(retry, response: f.response(command), now: f.now)
         #expect(try await reopened.groupAvatarIntent(command.operationID)?.stage == .committed)
-        #expect(try await reopened.releasableResourceFileToken(id: job.id) == job.localFileToken)
+        #expect(try await reopened.releasableResourceAssetID(id: job.id) == job.localAssetID)
         #expect(try await reopened.resourceSendPayloads().isEmpty)
         try await reopened.close(); try f.removeFiles()
     }
@@ -146,36 +146,57 @@ struct V2GroupAvatarIntentTests {
         try await f.store.close(); try f.removeFiles()
     }
 
-    @Test("file cleanup waits for group and message consumers and fences new consumers before filesystem deletion")
+    @Test("releasing one upload claim cannot release another consumer of the same physical bytes")
     func sharedStaging() async throws {
-        let f = try IntentFixture(), groupJob = try await f.upload()
-        let messageJob = try await f.upload(usage: .messageAttachment(f.room), token: groupJob.localFileToken)
+        let f = try IntentFixture()
+        let resources = try await makeResourceTestCenter(store: f.store, root: f.directory)
+        let source = f.directory.appending(path: "shared.png"); try Data([1,2,3]).write(to: source)
+        func upload(_ usage: V2ResourceUsage, purpose: V2LocalResourceAssetPurpose) async throws -> V2ResourceTransferJob {
+            let asset = try await resources.importLocal(at: source, displayName: .init("shared.png"), contentType: .init("image/png"), purpose: purpose)
+            let id = UUID()
+            let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()), usage: usage,
+                contentType: asset.contentType.value, byteCount: asset.byteCount, checksum: asset.checksum, displayName: asset.displayName)
+            _ = try await f.store.prepareResourceTransfer(id: id, request: request, localAssetID: asset.id, now: f.now)
+            try await f.store.saveResourceSession(.init(locator: .init(home: .room(f.room), sessionID: .init(uuid: UUID())),
+                mediaID: request.mediaID, generation: 1, state: .completed, resourceState: .ready,
+                expiresAt: f.now.addingTimeInterval(100), bindableUntil: f.now.addingTimeInterval(100)), for: id)
+            return try #require(try await f.store.resourceTransfer(id: id))
+        }
+        let groupJob = try await upload(.groupAvatar(f.room), purpose: .groupAvatar(f.room))
+        let messageJob = try await upload(.messageAttachment(f.room), purpose: .messageDraft(f.room))
         let command = try f.command(media: groupJob.request.mediaID)
         _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: command, uploadJobID: groupJob.id)
         let message = try V2SendIntent(id: UUID(), roomID: f.room, clientMessageID: .init(uuid: UUID()), text: "shared source", attachmentJobIDs: [messageJob.id])
-        try await f.store.freezeSendIntent(message)
+        try await f.store.freezeMetadataSendIntent(message)
         _ = try await f.store.handOffSendIntent(message.id, now: f.now)
         let claim = try await f.store.claimGroupAvatarSubmission(command.operationID, now: f.now)
         try await f.store.finishGroupAvatarSubmission(claim, response: f.response(command), now: f.now)
-        #expect(try await f.store.claimReleasableResourceFileToken(id: groupJob.id) == nil)
-        try await f.store.completeResourceSendFixture(message.clientMessageID,result:.accepted(.init(messageID:.init(uuid:UUID()),roomSequence:1)))
-        #expect(try await f.store.claimReleasableResourceFileToken(id: groupJob.id) == groupJob.localFileToken)
+        #expect(try await f.store.releasableResourceAssetID(id: groupJob.id) == groupJob.localAssetID)
+        try await f.store.releaseResourceSource(id: groupJob.id)
+        let file = try #require(try await f.store.resourceFileJournal().localAsset(groupJob.localAssetID)?.fileID)
+        #expect(try await f.store.resourceFileJournal().record(file)?.retention == .original)
+        #expect(try await f.store.releasableResourceAssetID(id: messageJob.id) == nil)
+        try await f.store.completeResourceSendFixture(message.clientMessageID, result: .accepted(.init(messageID: .init(uuid: UUID()), roomSequence: 1)))
+        try await f.store.releaseResourceSource(id: messageJob.id)
         await #expect(throws: V2GroupAvatarIntentError.conflict) {
             _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: f.command(media: groupJob.request.mediaID, revision: 1), uploadJobID: groupJob.id)
         }
         let lateMessage = try V2SendIntent(id: UUID(), roomID: f.room, clientMessageID: .init(uuid: UUID()), text: "late", attachmentJobIDs: [messageJob.id])
-        await #expect(throws: V2ResourceJournalError.conflict) { try await f.store.freezeSendIntent(lateMessage) }
-        await #expect(throws: V2ResourceJournalError.conflict) {
-            _ = try await f.store.prepareResourceTransfer(id: UUID(), request: f.request(usage: .groupAvatar(f.room)), localFileToken: groupJob.localFileToken)
+        await #expect(throws: V2ResourceJournalError.conflict) { try await f.store.freezeMetadataSendIntent(lateMessage) }
+        await #expect(throws: V2ResourceStorageError.unavailable) {
+            let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()), usage: groupJob.request.usage,
+                contentType: groupJob.request.contentType, byteCount: groupJob.request.byteCount, checksum: groupJob.request.checksum, displayName: groupJob.request.displayName)
+            _ = try await f.store.prepareResourceTransfer(id: UUID(), request: request, localAssetID: groupJob.localAssetID)
         }
-        // Crash between filesystem removal and the completion record.
-        try FileManager.default.removeItem(at: f.directory.appendingPathComponent(groupJob.localFileToken))
-        try await f.store.close()
-        let reopened = try f.reopen(), transfers = f.transfers(store: reopened)
-        try await transfers.releaseAcceptedStaging()
+        await resources.close(); try await f.store.close()
+        let reopened = try f.reopen(), restoredResources = try await makeResourceTestCenter(store: reopened, root: f.directory)
+        let transfers = V2ResourceTransferEngine(store: reopened, control: IntentForbiddenTransfer(), executor: IntentForbiddenTransfer(), resources: restoredResources)
+        try await transfers.releaseFinishedSources()
         #expect(try await reopened.releasableResourceJobs().isEmpty)
-        #expect(try await reopened.retainedResourceFileTokens().isEmpty)
-        await transfers.close(); try await reopened.close(); try f.removeFiles()
+        #expect(try await reopened.testHeldAssetIDs().isEmpty)
+        #expect(try await reopened.resourceFileJournal().record(file)?.retention == .cache)
+        #expect(try await reopened.resourceFileJournal().record(file)?.storage == .cache)
+        await transfers.close(); await restoredResources.close(); try await reopened.close(); try f.removeFiles()
     }
 
     @Test("unknown sends back off, stop automatic retries, and preserve the same command on explicit retry")
@@ -183,7 +204,7 @@ struct V2GroupAvatarIntentTests {
         let f = try IntentFixture(), command = try f.command(media: nil), clock = IntentClock(fixed: Date())
         _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: command, uploadJobID: nil)
         let client = IntentSubmitter(reply: try f.response(command), failure: .outcomeUnknown)
-        let transfers = f.transfers()
+        let transfers = try await f.transfers()
         let engine = V2GroupAvatarIntentEngine(actorUserID: f.actor, store: f.store, transfers: transfers, submissions: client, now: { clock.now })
         for _ in 0..<5 { try await engine.recoverOnce(); clock.advance(61) }
         #expect(await client.commands.count == 5)
@@ -201,7 +222,7 @@ struct V2GroupAvatarIntentTests {
     func independentWaiters() async throws {
         let f = try IntentFixture(), command = try f.command(media: nil)
         _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: command, uploadJobID: nil)
-        let client = IntentGatedSubmitter(reply: try f.response(command)), transfers = f.transfers()
+        let client = IntentGatedSubmitter(reply: try f.response(command)), transfers = try await f.transfers()
         let engine = V2GroupAvatarIntentEngine(actorUserID: f.actor, store: f.store, transfers: transfers, submissions: client)
         let first = Task { try await engine.resume(command.operationID) }
         await client.waitUntilArrived()
@@ -269,12 +290,12 @@ struct IntentFixture {
         try .init(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()), usage: usage,
             contentType: "image/png", byteCount: 3, checksum: .init(value: String(repeating: "a", count: 64)))
     }
-    func upload(ready: Bool = true, usage: V2ResourceUsage? = nil, token: String? = nil) async throws -> V2ResourceTransferJob {
-        let id = UUID(), request = try request(usage: usage ?? .groupAvatar(room)), token = token ?? UUID().uuidString
-        try Data([1, 2, 3]).write(to: directory.appendingPathComponent(token))
-        _ = try await store.prepareResourceTransfer(id: id, request: request, localFileToken: token, now: now)
+    func upload(ready: Bool = true, usage: V2ResourceUsage? = nil, token: V2LocalResourceAssetID? = nil) async throws -> V2ResourceTransferJob {
+        let id = UUID(), request = try request(usage: usage ?? .groupAvatar(room)), token = token ?? V2LocalResourceAssetID()
+        try Data([1, 2, 3]).write(to: directory.appendingPathComponent(token.value.uuidString))
+        _ = try await store.prepareMetadataResourceTransfer(id: id, request: request, localAssetID: token, now: now)
         if ready {
-            try await store.saveResourceSession(.init(locator: .init(home: .room(room), sessionID: .init(uuid: UUID())),
+            try await store.saveResourceSession(.init(locator: .init(home: request.usage.home(actorUserID: actor), sessionID: .init(uuid: UUID())),
                 mediaID: request.mediaID, generation: 1, state: .completed, resourceState: .ready,
                 expiresAt: now.addingTimeInterval(100), bindableUntil: now.addingTimeInterval(100)), for: id)
         }
@@ -285,8 +306,9 @@ struct IntentFixture {
             outcome: .committed(.init(state: .init(roomID: room, mediaID: command.mutation.mediaID,
                 revision: command.expectedRevision + 1), roomSequence: 1, updatedAt: now)))
     }
-    func transfers(store: GRDBV2LocalSyncStore? = nil) -> V2ResourceTransferEngine {
-        .init(store: store ?? self.store, control: IntentForbiddenTransfer(), executor: IntentForbiddenTransfer(), directory: directory)
+    func transfers(store: GRDBV2LocalSyncStore? = nil) async throws -> V2ResourceTransferEngine {
+        let selectedStore = store ?? self.store
+        return .init(store: selectedStore, control: IntentForbiddenTransfer(), executor: IntentForbiddenTransfer(), resources: try await makeResourceTestCenter(store: selectedStore, root: directory))
     }
 }
 private struct IntentForbiddenTransfer: V2ResourceUploadControlling, V2ResourcePlanExecuting {

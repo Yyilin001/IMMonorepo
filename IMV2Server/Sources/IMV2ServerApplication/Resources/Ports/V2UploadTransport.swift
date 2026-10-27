@@ -29,10 +29,10 @@ public protocol V2MultipartUploadTransport: V2UploadTransport {
     func abortParts(mediaID: MediaID, byteCount: Int64, checksum: V2ResourceChecksum) async throws
 }
 
-/// Explicit delegation support: exact immutable attachment parts, finite signed leases,
+/// Explicit delegation support: exact immutable whole attachments or parts, finite signed leases,
 /// and a native PUT ingress which never redirects. No presentation/control lease is reused.
-public protocol V2BackgroundUploadTransport: V2MultipartUploadTransport {
-    func backgroundPartPlans(mediaID: MediaID, contentType: String, byteCount: Int64,
+public protocol V2BackgroundUploadTransport: V2UploadTransport {
+    func backgroundPlans(mode: V2ResourceTransferMode, mediaID: MediaID, contentType: String, byteCount: Int64,
         checksum: V2ResourceChecksum, requestedParts: [Int], sessionID: MediaUploadSessionID,
         generation: Int64, issuedAt: Date, expiresAt: Date) async throws -> [V2ResourceTransferPlan]
 }

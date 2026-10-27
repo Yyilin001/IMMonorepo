@@ -95,7 +95,7 @@ struct V2OfflineReadBootstrapTests {
         let records = OfflineReadCredentialStore(record: .init(credentials: credentials))
         let auth = V2AuthSession(credentialStore: records, transport: OfflineReadTransport())
         let bootstrap = V2ClientSessionBootstrapper(authSession: auth, localStoreBootstrapper: .init(bindingStore: OfflineReadBindingStore(binding: .init(value: UUID()))),
-            databaseURL: root.appending(path: "V2.sqlite"), accountStorageRoot: root.appending(path: "accounts"))
+            databaseURL: root.appending(path: "V2.sqlite"), accountStorageRoots: .init(persistent: root.appending(path: "accounts"), cache: root.appending(path: "caches")))
         let first = try await bootstrap.openEstablishedSession()
         try await bootstrap.closeLocalStore(first)
         let permit = try await bootstrap.localReadBootstrap(isLocalExitPending: { false })

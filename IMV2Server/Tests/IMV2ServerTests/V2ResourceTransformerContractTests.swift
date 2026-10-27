@@ -1,5 +1,21 @@
 @testable import IMV2ServerApplication
 @testable import IMV2ServerContracts
+import IMV2Core
+import Testing
+
+struct V2ResourceClientDimensionsValidationTests {
+    @Test func declarationsMustMatchMeasuredOrientedDimensions() throws {
+        let measured = try V2ResourceImageDimensions(width: 80, height: 120)
+        try measured.validate(clientDimensions: .init(width: 80, height: 120))
+        try measured.validate(clientDimensions: nil)
+        #expect(throws: V2ResourceTransformError.contentRejected) {
+            try measured.validate(clientDimensions: .init(width: 120, height: 80))
+        }
+        #expect(throws: V2ResourceTransformError.contentRejected) {
+            try measured.validate(clientDimensions: .init(width: 1, height: 1))
+        }
+    }
+}
 #if canImport(ImageIO) && canImport(CoreGraphics)
 import Crypto
 import CoreGraphics
@@ -11,6 +27,34 @@ import UniformTypeIdentifiers
 @testable import IMV2ServerInfrastructure
 
 struct V2ResourceTransformerContractTests {
+    @Test func workerReportsDimensionsAfterEXIFOrientation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let context = try #require(CGContext(data: nil, width: 120, height: 80, bitsPerComponent: 8, bytesPerRow: 480,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 120, height: 80))
+        let original = root.appendingPathComponent("rotated.jpg")
+        let destination = try #require(CGImageDestinationCreateWithURL(original as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try #require(context.makeImage()), [kCGImagePropertyOrientation: 6] as CFDictionary)
+        #expect(CGImageDestinationFinalize(destination))
+        let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let worker = Process(); worker.executableURL = package.appendingPathComponent(".build/debug/IMV2ResourceImageWorker")
+        worker.arguments = [original.path, root.path, "preview"]
+        try worker.run(); worker.waitUntilExit()
+        #expect(worker.terminationStatus == 0)
+        let facts = try JSONDecoder().decode(V2ResourceImageDimensions.self, from: Data(contentsOf: root.appendingPathComponent("source-dimensions.json")))
+        #expect(facts.width == 80 && facts.height == 120)
+    }
+    @Test(arguments: [(0, 1), (1, 0), (-1, 1), (16385, 1), (10000, 10000)])
+    func rejectsInvalidDimensions(dimensions: (Int, Int)) throws {
+        #expect(throws: V2ResourceTransformError.contentRejected) {
+            try V2ResourceImageDimensions(width: dimensions.0, height: dimensions.1)
+        }
+        let bytes = Data("{\"width\":\(dimensions.0),\"height\":\(dimensions.1)}".utf8)
+        #expect(throws: V2ResourceTransformError.contentRejected) { try JSONDecoder().decode(V2ResourceImageDimensions.self, from: bytes) }
+    }
     @Test func isolatedAvatarProcessorProducesFixedMetadataFreePNGs() async throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
@@ -32,7 +76,14 @@ struct V2ResourceTransformerContractTests {
         let outputs=try [128:storage.allocate(),256:storage.allocate()]
         let receipts=try await transformer.transform(input:input,recipe:.avatar,outputs:outputs,registry:registry)
         #expect(receipts.count==2)
+        // Exact reference/length is insufficient when the provider returns bytes
+        // inconsistent with the expected immutable digest. Never decode/publish it.
+        let wrongDigest = try V2StoredObjectFacts(reference: input.reference, byteCount: input.byteCount, sha256: Data(repeating: 0, count: 32))
+        await #expect(throws: V2ResourceProviderError.integrityMismatch) {
+            try await transformer.transform(input: wrongDigest, recipe: .avatar, outputs: outputs, registry: registry)
+        }
         for receipt in receipts {
+            #expect(receipt.sourceDimensions == (try V2ResourceImageDimensions(width: 300, height: 160)))
             let stream=try await storage.read(receipt.facts.reference)
             var bytes=Data();while let chunk=try await stream.next() {bytes.append(chunk)}
             let source=try #require(CGImageSourceCreateWithData(bytes as CFData,nil))

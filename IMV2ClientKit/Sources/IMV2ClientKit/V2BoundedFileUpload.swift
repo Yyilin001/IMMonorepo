@@ -10,7 +10,7 @@ struct V2BoundedFileUpload: Sendable {
         let deadline = min(deadline, V2HTTPRequestDeadline.deadline(for: request) ?? deadline, V2HTTPRequestDeadline.current ?? deadline)
         try Task.checkCancellation()
         guard ContinuousClock.now < deadline else { throw V2HTTPFailure(kind: .deadlineExceeded, service: "mediaProvider") }
-        let delegate = V2FileUploadDelegate(diagnostics: diagnostics, mode: metricMode, retry: V2NetworkWorkScope.context?.isRetry ?? false)
+        let delegate = V2FileUploadDelegate(diagnostics: diagnostics, mode: metricMode, retry: V2NetworkWorkScope.context?.isRetry ?? false, progress: V2ResourceTransferProgressScope.reporter)
         return try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: HTTPURLResponse.self) { group in
                 group.addTask {
@@ -32,14 +32,16 @@ struct V2BoundedFileUpload: Sendable {
         } onCancel: { delegate.cancel() }
     }
 }
-private final class V2FileUploadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+final class V2FileUploadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
+    private let connectivity = V2ResourceConnectivityObservation()
     private let diagnostics: V2NetworkDiagnostics?
     private let mode: V2ResourceTransferMetric.Mode
     private let retry: Bool
+    private let progress: V2ResourceTransferProgressReporter?
     private let started = ContinuousClock.now
-    init(diagnostics: V2NetworkDiagnostics?, mode: V2ResourceTransferMetric.Mode, retry: Bool) {
-        self.diagnostics = diagnostics; self.mode = mode; self.retry = retry
+    init(diagnostics: V2NetworkDiagnostics?, mode: V2ResourceTransferMetric.Mode, retry: Bool, progress: V2ResourceTransferProgressReporter?) {
+        self.diagnostics = diagnostics; self.mode = mode; self.retry = retry; self.progress = progress
     }
     private var task: URLSessionTask?
     private var cancelled = false
@@ -54,14 +56,24 @@ private final class V2FileUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         task.resume(); if cancel { task.cancel() }
     }
     func cancel(error: (any Error)? = nil) {
+        connectivity.finish()
         let task = lock.withLock { cancelled = true; if let error { failure = error }; return self.task }
         task?.cancel()
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        if totalBytesSent > 0 { connectivity.finish() }
+        progress?.report(transferredBytes: totalBytesSent)
+    }
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        connectivity.waiting()
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         v2ForwardAuthenticationChallenge(session: session, task: task, challenge: challenge, completionHandler: completionHandler)
     }
     func urlSession(_ session: URLSession,dataTask: URLSessionDataTask,didReceive response: URLResponse,completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        connectivity.finish()
         guard let http = response as? HTTPURLResponse else { cancel(error: V2ClientMediaTransferError.invalidResponse); completionHandler(.cancel); return }
         lock.withLock { self.response = http }
         if http.expectedContentLength > 512 * 1024 { cancel(error: V2RangeDownloadError.responseTooLarge); completionHandler(.cancel) }
@@ -72,6 +84,7 @@ private final class V2FileUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         if overflow { cancel(error: V2RangeDownloadError.responseTooLarge) }
     }
     func urlSession(_ session: URLSession,task: URLSessionTask,didCompleteWithError error: (any Error)?) {
+        connectivity.finish()
         let outcome: (CheckedContinuation<HTTPURLResponse,Error>?,HTTPURLResponse?,(any Error)?) = lock.withLock {
             let result = (continuation,response,failure ?? error)
             continuation = nil; self.task = nil

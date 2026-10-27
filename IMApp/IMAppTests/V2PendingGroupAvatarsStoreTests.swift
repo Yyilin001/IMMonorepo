@@ -99,7 +99,7 @@ struct V2PendingGroupAvatarsStoreTests {
         let actor = UserID(uuid: UUID()), now = Date()
         let entries = try (0..<count).map { _ -> V2PendingGroupAvatarPage.Entry in
             let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: .init(uuid: UUID()), expectedRevision: 0, mutation: .remove)
-            let intent = V2GroupAvatarIntent(actorUserID: actor, command: command, uploadJobID: nil, stage: .submitted,
+            let intent = V2GroupAvatarIntent(actorUserID: actor, command: command, preparation: nil, stage: .submitted,
                 submissionStarted: true, recoveryAction: nil, closedDisposition: .awaitingDecision,
                 attempts: 1, retryAt: now, issue: .outcomeUnknown, receipt: nil, closureProof: nil)
             return .init(intent: intent, createdAt: now)

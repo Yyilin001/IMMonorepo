@@ -7,6 +7,31 @@ import IMV2Core
 import Testing
 
 struct V2MessageProjectionStateTests {
+    @Test("attachment descriptors survive shared-state folding and are mandatory for accepted messages")
+    func attachmentResourceDescriptorContract() throws {
+        let room = RoomID(uuid: UUID()), media = MediaID(uuid: UUID())
+        let descriptor = try V2ResourceDescriptor(key: .init(home: .room(room), mediaID: media), revision: 1,
+            displayName: .init("资源.png"), contentType: "image/png", byteCount: 42,
+            checksum: .init(value: String(repeating: "a", count: 64)), state: .ready)
+        func accepted(_ value: V2MediaPresentation) -> V2AcceptedMessage {
+            .init(messageID: .init(uuid: UUID()), roomID: room, roomSequence: 1, senderUserID: .init(uuid: UUID()),
+                clientMessageID: .init(uuid: UUID()), text: "resource", media: [.init(mediaID: media)], mediaPresentations: [value], createdAt: Date())
+        }
+        let presentation = try V2MediaPresentation(mediaID: media, kind: .image, contentType: "image/png", byteCount: 42, resourceDescriptor: descriptor)
+        let original = try V2MessageProjectionState(accepted: accepted(presentation), forwardedFromMessageID: nil, forwardedFromUserID: nil)
+        let edited = try original.applyingEdit(revision: 2, text: "edited", entities: [])
+        #expect(try V2MessageProjectionState(payloadJSON: edited.encodedPayloadJSON()).mediaPresentations.first?.resourceDescriptor == descriptor)
+        let legacy = try V2MediaPresentation(mediaID: media, kind: .image, contentType: "image/png", byteCount: 42)
+        #expect(throws: V2MessageProjectionStateError.invalidPayload) {
+            try V2MessageProjectionState(accepted: accepted(legacy), forwardedFromMessageID: nil, forwardedFromUserID: nil)
+        }
+        var object = try #require(JSONSerialization.jsonObject(with: Data(original.encodedPayloadJSON().utf8)) as? [String: Any])
+        var items = try #require(object["media_presentations"] as? [[String: Any]])
+        items[0]["resource_descriptor"] = nil; object["media_presentations"] = items
+        let invalid = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        #expect(throws: V2MessageProjectionStateError.invalidPayload) { try V2MessageProjectionState(payloadJSON: invalid) }
+    }
+
     @Test("accepted timestamps reject rounded Int64 overflow", arguments: [
         Double(Int64.max) / 1_000, Double(Int64.min).nextDown / 1_000,
         Double.infinity, -Double.infinity, Double.nan

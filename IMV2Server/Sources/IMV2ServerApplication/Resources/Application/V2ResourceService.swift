@@ -35,7 +35,7 @@ public struct V2ResourceService: Sendable {
         let transport = transports[registry.defaultBinding]!
         let supported = transport.capabilities
         let limit = min(maximumBytes, supported.maximumBytes)
-        return try .init(version: 1, uploadModes: Self.sessionModes(transport), maximumBytes: limit,
+        return try .init(uploadModes: Self.sessionModes(transport), maximumBytes: limit,
             allowedUsages: supportsAvatars ? [.messageAttachment,.userAvatar,.groupAvatar] : [.messageAttachment],
             maximumParts: (transport as? any V2MultipartUploadTransport)?.maximumParts ?? 0, backgroundTransfer: transport is any V2BackgroundUploadTransport,
             maximumImageBytes: maximumImageBytes.map { min($0, limit) })
@@ -83,7 +83,7 @@ public struct V2ResourceService: Sendable {
         let instant = Date()
         let deadline: Date
         if input.background {
-            guard case .messageAttachment = request.usage, mode == .httpPartPut,
+            guard case .messageAttachment = request.usage, [.httpPut, .httpPartPut].contains(mode),
                   transport is any V2BackgroundUploadTransport,
                   let deviceExpiry = store.backgroundDelegationExpiresAt, deviceExpiry>instant
             else { throw V2ResourceProviderError.unsupportedCapability }
@@ -92,12 +92,20 @@ public struct V2ResourceService: Sendable {
         } else { deadline = min(row.expiresAt,store.authorizationExpiresAt ?? row.expiresAt,instant.addingTimeInterval(120)) }
         let plans: [V2ResourceTransferPlan]
         if input.background, let background = transport as? any V2BackgroundUploadTransport {
-            plans = try await background.backgroundPartPlans(mediaID:request.mediaID,contentType:request.contentType,
+            plans = try await background.backgroundPlans(mode: mode, mediaID:request.mediaID,contentType:request.contentType,
                 byteCount:request.byteCount,checksum:request.checksum,requestedParts:input.partNumbers,
                 sessionID:locator.sessionID,generation:row.generation,issuedAt:instant,expiresAt:deadline)
-            guard plans.allSatisfy({ plan in
+            guard (mode != .httpPut || (input.partNumbers.isEmpty && plans.count == 1)), plans.allSatisfy({ plan in
                 guard let grant=plan.backgroundAuthorization else { return false }
-                return plan.mode == .httpPartPut && grant.sessionID == locator.sessionID && grant.generation == row.generation && grant.mediaID == request.mediaID && grant.expiresAt<=deadline
+                guard plan.mode == mode, grant.sessionID == locator.sessionID, grant.generation == row.generation,
+                      grant.mediaID == request.mediaID, grant.expiresAt <= deadline else { return false }
+                switch grant.scope {
+                case .part(let number):
+                    return mode == .httpPartPut && plan.partNumber == number && plan.byteRange.map { $0.upperBound < request.byteCount } == true
+                case .whole(let bytes, let hash):
+                    return mode == .httpPut && bytes == request.byteCount && hash == request.checksum &&
+                        plan.expectedByteCount == bytes && plan.checksum == hash && plan.partNumber == nil && plan.byteRange == nil
+                }
             }) else { throw V2ResourceProviderError.integrityMismatch }
         } else if mode == .httpPartPut, let multipart = transport as? any V2MultipartUploadTransport {
             plans = try await multipart.partPlans(mediaID: request.mediaID, contentType: request.contentType, byteCount: request.byteCount, checksum: request.checksum, requestedParts: input.partNumbers, expiresAt: deadline)

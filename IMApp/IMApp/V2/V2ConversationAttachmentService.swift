@@ -1,21 +1,49 @@
 import Foundation
+import ImageIO
 import IMV2ClientKit
 import IMV2Core
 import UniformTypeIdentifiers
 
-/// 设备本地的导入副本及非持久化元数据。
-///
-/// 消息 outbox 只保存上传后的媒体引用，不保存此路径或显示名。
+/// Presentation metadata for a durable, account-local selection. Paths are not
+/// part of a draft or upload identity, and preview consumers borrow separately.
 struct V2StagedConversationAttachment: Hashable, Identifiable, Sendable {
     let id: UUID
-    let fileURL: URL
+    let localAssetID: V2LocalResourceAssetID
     let displayName: String
     let contentType: String
     let byteCount: Int64
+    let availability: V2LocalResourceAsset.Availability
+    let imageDimensions: V2LocalResourceImageDimensions?
+    init(asset: V2LocalResourceAsset) {
+        id = asset.id.value; localAssetID = asset.id; displayName = asset.displayName.value
+        contentType = asset.contentType.value; byteCount = asset.byteCount; availability = asset.availability
+        imageDimensions = asset.imageDimensions
+    }
+    init(id: UUID, localAssetID: V2LocalResourceAssetID, displayName: String, contentType: String, byteCount: Int64,
+         availability: V2LocalResourceAsset.Availability = .local, imageDimensions: V2LocalResourceImageDimensions? = nil) {
+        self.id = id; self.localAssetID = localAssetID; self.displayName = displayName
+        self.contentType = contentType; self.byteCount = byteCount; self.availability = availability
+        self.imageDimensions = imageDimensions
+    }
+    init(id: UUID, displayName: String, contentType: String, byteCount: Int64) {
+        self.init(id: id, localAssetID: .init(id), displayName: displayName, contentType: contentType, byteCount: byteCount)
+    }
+}
+
+nonisolated struct V2NormalizedPhoto: Sendable {
+    enum Format: Sendable { case jpeg, png }
+    let data: Data
+    let format: Format
+    var imageDimensions: V2LocalResourceImageDimensions? = nil
+    var displayName: String { format == .png ? "照片.png" : "照片.jpg" }
+    var contentType: String { format == .png ? "image/png" : "image/jpeg" }
 }
 
 protocol V2ConversationAttachmentStaging: Sendable {
-    func stageImportedFile(at sourceURL: URL) async throws -> V2StagedConversationAttachment
+    func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) async throws -> V2StagedConversationAttachment
+    func stageNormalizedPhoto(_ photo: V2NormalizedPhoto, purpose: V2LocalResourceAssetPurpose) async throws -> V2StagedConversationAttachment
+    func selectedAttachments(purpose: V2LocalResourceAssetPurpose) async throws -> [V2StagedConversationAttachment]
+    func borrow(_ context: V2LocalResourceReadContext) async throws -> V2ResourceFileLease
     func discard(_ attachment: V2StagedConversationAttachment) async
 }
 
@@ -38,279 +66,96 @@ enum V2ConversationAttachmentStagingError: Error, Equatable, Sendable {
 
 struct V2ConversationAttachmentStagingPolicy: Equatable, Sendable {
     let maximumFileBytes: Int64
-    let maximumDirectoryBytes: Int64
     let maximumFileCount: Int
-
-    init(maximumFileBytes: Int64, maximumDirectoryBytes: Int64, maximumFileCount: Int) {
-        precondition(
-            maximumFileBytes > 0
-                && maximumDirectoryBytes >= maximumFileBytes
-                && maximumFileCount > 0
-        )
-        self.maximumFileBytes = maximumFileBytes
-        self.maximumDirectoryBytes = maximumDirectoryBytes
-        self.maximumFileCount = maximumFileCount
+    init(maximumFileBytes: Int64, maximumFileCount: Int) {
+        precondition(maximumFileBytes > 0 && (1...256).contains(maximumFileCount))
+        self.maximumFileBytes = maximumFileBytes; self.maximumFileCount = maximumFileCount
     }
-
-    /// 默认的本机安全上限。
-    ///
-    /// 该设备本地安全边界刻意独立于提供方的权威限制。
-    /// 提供方可能拒绝更小的文件，但任何已配置的提供方都不能让 App 暂存无上限的文件。
-    static let standard = Self(
-        maximumFileBytes: 50 * 1_024 * 1_024,
-        maximumDirectoryBytes: 512 * 1_024 * 1_024,
-        maximumFileCount: 64
-    )
+    static let standard = Self(maximumFileBytes: 50 * 1_024 * 1_024, maximumFileCount: 64)
 }
 
-/// 账号暂存目录的所有者，执行受配额限制的文件导入。
-///
-/// 复制期间临时访问 security-scoped 源文件，按块检查容量与取消。
-/// 目录关闭是终态：等待 actor 中同步复制结束后删除副本，后续导入被拒绝。
+/// iOS selection boundary. ResourceCenter is the sole byte owner; this adapter
+/// owns the security-scoped input access and drains it before account teardown.
 actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
-    private var isClosed = false
-    private let directory: URL
-    private let fileManager: FileManager
+    private let resources: V2ResourceCenter
     private let policy: V2ConversationAttachmentStagingPolicy
-    private let makeUUID: @Sendable () -> UUID
-    private let protectionWriter:any V2ResourceFileProtectionWriting
-
-    init(
-        directory: URL,
-        fileManager: FileManager = .default,
-        policy: V2ConversationAttachmentStagingPolicy = .standard,
-        makeUUID: @escaping @Sendable () -> UUID = UUID.init,
-        protectionWriter:any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()
-    ) throws {
-        self.directory = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(
-            directory,
-            fileManager: fileManager
-        )
-        self.fileManager = fileManager
-        self.policy = policy
-        self.makeUUID = makeUUID
-        self.protectionWriter=protectionWriter
-        try V2ResourceStagingBudget.register(directory:self.directory)
+    private let operations = V2ResourceOperationScope(limit: 4)
+    private var closed = false
+    init(resources: V2ResourceCenter, policy: V2ConversationAttachmentStagingPolicy = .standard) {
+        self.resources = resources; self.policy = policy
     }
 
-    /// 把用户选择的文件复制到受保护的账号暂存目录。
-    ///
-    /// - Parameter sourceURL: 本地普通文件，可为 security-scoped 导入 URL。
-    /// - Returns: 随机暂存身份、路径、内容类型、显示名和实际复制字节数。
-    /// - Throws: 取消、关闭后的请求、文件类型／大小／配额错误或文件系统错误。
-    ///   复制失败会尝试清理目标副本，原始文件保持不变。
-    func stageImportedFile(at sourceURL: URL) throws -> V2StagedConversationAttachment {
-        try Task.checkCancellation()
-        guard !isClosed else { throw CancellationError() }
-        let accessGranted = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if accessGranted { sourceURL.stopAccessingSecurityScopedResource() }
-        }
-        let values: URLResourceValues
-        do {
-            values = try sourceURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .nameKey, .contentTypeKey])
-        } catch {
-            throw V2ConversationAttachmentStagingError.fileSystemFailure
-        }
-        guard values.isRegularFile == true else { throw V2ConversationAttachmentStagingError.notRegularFile }
-        guard let fileSize = values.fileSize, fileSize > 0 else { throw V2ConversationAttachmentStagingError.invalidByteCount }
-        guard Int64(fileSize) <= policy.maximumFileBytes else {
-            throw V2ConversationAttachmentStagingError.fileTooLarge
-        }
-        let usage = try stagingUsage()
-        guard usage.fileCount < policy.maximumFileCount,
-              usage.byteCount <= policy.maximumDirectoryBytes - Int64(fileSize)
-        else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
-        let id = makeUUID()
-        let destination = directory.appendingPathComponent(id.uuidString, isDirectory: false)
-        let partial = directory.appendingPathComponent(".partial-" + id.uuidString, isDirectory: false)
-        var copiedByteCount: Int64 = 0
-        do {
-            copiedByteCount = try V2ResourceStagingBudget.withCopy(directory:directory,additionalBytes:Int64(fileSize)) {
-                try copyWithinLimits(
-                sourceURL: sourceURL,
-                destination: partial,
-                maximumDirectoryAddition: min(policy.maximumDirectoryBytes - usage.byteCount, Int64(fileSize))
-                )
-            }
-            try Task.checkCancellation()
-            try fileManager.moveItem(at: partial, to: destination)
-            try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
-            try protectionWriter.apply(.complete,to:destination)
-        } catch is CancellationError {
-            try? fileManager.removeItem(at: partial)
-            try? fileManager.removeItem(at: destination)
-            throw CancellationError()
-        } catch let error as V2ConversationAttachmentStagingError {
-            try? fileManager.removeItem(at: partial)
-            try? fileManager.removeItem(at: destination)
-            throw error
-        } catch let error as V2DeviceLocalStorageError {
-            try? fileManager.removeItem(at: partial)
-            try? fileManager.removeItem(at: destination)
-            throw error
-        } catch {
-            try? fileManager.removeItem(at: partial)
-            try? fileManager.removeItem(at: destination)
-            throw V2ConversationAttachmentStagingError.fileSystemFailure
-        }
-        let contentType = values.contentType
-            ?? UTType(filenameExtension: sourceURL.pathExtension.lowercased())
-            ?? .data
-        let mimeType = contentType.preferredMIMEType ?? "application/octet-stream"
-        return .init(
-            id: id,
-            fileURL: destination,
-            displayName: values.name ?? sourceURL.lastPathComponent,
-            contentType: mimeType,
-            byteCount: copiedByteCount
-        )
+    func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) async throws -> V2StagedConversationAttachment {
+        try requireOpen()
+        return try await operations.run(onCancelledValue: { asset in
+            try? await self.resources.discardLocalSelection(asset.localAssetID)
+        }) { try await self.importFile(sourceURL, purpose: purpose) }
     }
-
-    private func copyWithinLimits(
-        sourceURL: URL,
-        destination: URL,
-        maximumDirectoryAddition: Int64
-    ) throws -> Int64 {
-        guard !fileManager.fileExists(atPath: destination.path),
-              fileManager.createFile(atPath: destination.path, contents: nil)
-        else { throw V2ConversationAttachmentStagingError.fileSystemFailure }
-        try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
-        let source: FileHandle
-        do {
-            source = try FileHandle(forReadingFrom: sourceURL)
-        } catch {
-            throw V2ConversationAttachmentStagingError.fileSystemFailure
-        }
-        defer { try? source.close() }
-        let target: FileHandle
-        do {
-            target = try FileHandle(forWritingTo: destination)
-        } catch {
-            throw V2ConversationAttachmentStagingError.fileSystemFailure
-        }
-        defer {
-            try? target.close()
-        }
-        var total: Int64 = 0
-        do {
-            while let bytes = try source.read(upToCount: 64 * 1_024), !bytes.isEmpty {
-                try Task.checkCancellation()
-                let count = Int64(bytes.count)
-                guard total <= policy.maximumFileBytes - count else {
-                    throw V2ConversationAttachmentStagingError.fileTooLarge
-                }
-                guard total <= maximumDirectoryAddition - count else {
-                    throw V2ConversationAttachmentStagingError.stagingQuotaExceeded
-                }
-                try target.write(contentsOf: bytes)
-                total += count
-            }
-            try Task.checkCancellation()
-            try target.synchronize()
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as V2ConversationAttachmentStagingError {
-            throw error
-        } catch {
-            throw V2ConversationAttachmentStagingError.fileSystemFailure
-        }
-        guard total > 0 else { throw V2ConversationAttachmentStagingError.invalidByteCount }
-        return total
-    }
-
-    private func stagingUsage() throws -> (fileCount: Int, byteCount: Int64) {
-        let entries: [URL]
-        do {
-            entries = try fileManager.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-                options: []
-            )
-        } catch {
-            throw V2ConversationAttachmentStagingError.fileSystemFailure
-        }
-        var byteCount: Int64 = 0
-        for entry in entries {
-            let values: URLResourceValues
+    func stageNormalizedPhoto(_ photo: V2NormalizedPhoto, purpose: V2LocalResourceAssetPurpose) async throws -> V2StagedConversationAttachment {
+        try requireOpen()
+        return try await operations.run(onCancelledValue: { asset in
+            try? await self.resources.discardLocalSelection(asset.localAssetID)
+        }) {
+            guard !photo.data.isEmpty else { throw V2ConversationAttachmentStagingError.invalidByteCount }
+            guard photo.data.count <= self.policy.maximumFileBytes else { throw V2ConversationAttachmentStagingError.fileTooLarge }
+            let asset: V2LocalResourceAsset
             do {
-                values = try entry.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            } catch {
-                throw V2ConversationAttachmentStagingError.fileSystemFailure
-            }
-            guard values.isRegularFile == true, let fileSize = values.fileSize, fileSize >= 0 else {
-                throw V2ConversationAttachmentStagingError.fileSystemFailure
-            }
-            let size = Int64(fileSize)
-            guard byteCount <= Int64.max - size else {
-                throw V2ConversationAttachmentStagingError.stagingQuotaExceeded
-            }
-            byteCount += size
-        }
-        return (entries.count, byteCount)
-    }
-
-    /// 终止暂存器并删除其受管目录，可重复调用。
-    ///
-    /// actor 串行化保证同步复制已结束；调用者必须先等待上传者结束文件读取。
-    ///
-    /// - Throws: 无法删除目录时抛出文件系统错误，不能把清理失败当成退出成功。
-    func close(preservingDurableFiles: Bool = false) throws {
-        isClosed = true
-        if preservingDurableFiles { return }
-        if fileManager.fileExists(atPath: directory.path) {
-            do { try fileManager.removeItem(at: directory) }
-            catch { throw V2ConversationAttachmentStagingError.fileSystemFailure }
+                asset = try await self.resources.importLocal(data: photo.data, displayName: .init(photo.displayName),
+                    contentType: .init(photo.contentType), purpose: purpose, imageDimensions: photo.imageDimensions,
+                    maximumBytes: self.policy.maximumFileBytes, maximumSelections: self.policy.maximumFileCount)
+            } catch V2ResourceStorageError.capacityExceeded { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
+            do { try await self.requireOpen() }
+            catch { try? await self.resources.discardLocalSelection(asset.id); throw error }
+            return .init(asset: asset)
         }
     }
-
-    func discard(_ attachment: V2StagedConversationAttachment) {
-        let candidate = attachment.fileURL.standardizedFileURL
-        guard candidate.deletingLastPathComponent() == directory else { return }
-        try? fileManager.removeItem(at: candidate)
+    private func importFile(_ source: URL, purpose: V2LocalResourceAssetPurpose) async throws -> V2StagedConversationAttachment {
+        try requireOpen()
+        let accessing = source.startAccessingSecurityScopedResource()
+        defer { if accessing { source.stopAccessingSecurityScopedResource() } }
+        let values = try source.resourceValues(forKeys: [.isRegularFileKey,.isSymbolicLinkKey,.fileSizeKey,.nameKey,.contentTypeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true else { throw V2ConversationAttachmentStagingError.notRegularFile }
+        guard let size = values.fileSize, size > 0 else { throw V2ConversationAttachmentStagingError.invalidByteCount }
+        guard Int64(size) <= policy.maximumFileBytes else { throw V2ConversationAttachmentStagingError.fileTooLarge }
+        let type = values.contentType ?? UTType(filenameExtension: source.pathExtension.lowercased()) ?? .data
+        let dimensions: V2LocalResourceImageDimensions?
+        if type.conforms(to: .image),
+           let source = CGImageSourceCreateWithURL(source as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let width = properties[kCGImagePropertyPixelWidth] as? Int,
+           let height = properties[kCGImagePropertyPixelHeight] as? Int {
+            let orientation = properties[kCGImagePropertyOrientation] as? Int ?? 1
+            dimensions = try .init(width: (5...8).contains(orientation) ? height : width,
+                                   height: (5...8).contains(orientation) ? width : height)
+        } else { dimensions = nil }
+        let asset: V2LocalResourceAsset
+        do {
+            asset = try await resources.importLocal(at: source, displayName: .init(values.name ?? source.lastPathComponent),
+                contentType: .init(type.preferredMIMEType ?? "application/octet-stream"), purpose: purpose, imageDimensions: dimensions,
+                maximumBytes: policy.maximumFileBytes, maximumSelections: policy.maximumFileCount)
+        } catch V2ResourceStorageError.capacityExceeded { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
+        do { try requireOpen() }
+        catch { try? await resources.discardLocalSelection(asset.id); throw error }
+        return .init(asset: asset)
     }
-
-    /// Startup only, after draining the previous account owner and before any
-    /// foreground activity starts. These incomplete copies never have durable tokens.
-    func discardInterruptedCopies() throws {
-        guard !isClosed else { throw CancellationError() }
-        guard let entries = fileManager.enumerator(at: directory,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-            options: [.skipsSubdirectoryDescendants]) else { throw V2ConversationAttachmentStagingError.fileSystemFailure }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        for case let entry as URL in entries {
-            try Task.checkCancellation()
-            guard ContinuousClock.now < deadline else { throw V2ConversationAttachmentStagingError.fileSystemFailure }
-            let name = entry.lastPathComponent
-            let prefix = name.hasPrefix(".part-") ? ".part-" : (name.hasPrefix(".partial-") ? ".partial-" : nil)
-            guard let prefix, UUID(uuidString: String(name.dropFirst(prefix.count))) != nil,
-                entry.standardizedFileURL.deletingLastPathComponent() == directory else { continue }
-            let values = try entry.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-            guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
-            try fileManager.removeItem(at: entry)
-        }
+    func selectedAttachments(purpose: V2LocalResourceAssetPurpose) async throws -> [V2StagedConversationAttachment] {
+        try requireOpen()
+        return try await resources.selectedLocalAssets(purpose: purpose).map(V2StagedConversationAttachment.init(asset:))
     }
-
-    /// 清理残留的暂存文件。
-    ///
-    /// 调用方从账号 journal 提供仍受引用的文件 token；只清理超过宽限期的孤儿。
-    /// 恢复中的上传与冻结发送意图不能被当成缓存淘汰，且绝不遍历目录之外。
-    func discardOrphanedStagedFiles(retaining tokens: Set<String> = [], olderThan cutoff: Date? = nil) {
-        guard let entries = try? fileManager.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-            options: []
-        ) else { return }
-        for entry in entries {
-            let candidate = entry.standardizedFileURL
-            guard candidate.deletingLastPathComponent() == directory,
-                  !tokens.contains(candidate.lastPathComponent),
-                  let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
-                  values.isRegularFile == true,
-                  cutoff.map({ (values.contentModificationDate ?? .distantFuture) < $0 }) ?? true
-            else { continue }
-            try? fileManager.removeItem(at: candidate)
-        }
+    func borrow(_ context: V2LocalResourceReadContext) async throws -> V2ResourceFileLease {
+        try requireOpen()
+        return try await resources.borrowLocalOriginal(for: context)
+    }
+    func discard(_ attachment: V2StagedConversationAttachment) async {
+        guard !closed else { return }
+        try? await resources.discardLocalSelection(attachment.localAssetID)
+    }
+    func close() async {
+        closed = true
+        await operations.close()
+    }
+    private func requireOpen() throws {
+        try Task.checkCancellation(); guard !closed else { throw CancellationError() }
     }
 }
 
@@ -374,7 +219,7 @@ actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUpload
 struct V2ProfileAvatarUploadAdapter: V2ProfileAvatarPreparing {
     let uploader: any V2ConversationAttachmentUploading
     func ensureReady(_ source: V2ProfileAvatarUpload) async throws -> V2AvatarReference {
-        let media = try await uploader.upload(.init(id: source.id, fileURL: source.fileURL,
+        let media = try await uploader.upload(.init(id: source.id, localAssetID: source.localAssetID,
             displayName: source.displayName, contentType: source.contentType, byteCount: source.byteCount))
         return .init(mediaID: media.mediaID)
     }

@@ -14,14 +14,14 @@ struct V2ResourceSendObservationTests {
         let request=try V2ResourceImportRequest(operationID:.init(uuid:UUID()),source:source,targetUsage:.messageAttachment(room),targetMediaID:.init(uuid:UUID()))
         try await store.prepareResourceImport(id:job,request:request)
         let intent=try V2SendIntent(id:UUID(),roomID:room,clientMessageID:.init(uuid:UUID()),text:"copy",attachmentJobIDs:[job])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         let observer=Task { for try await _ in store.resourceSendChanges(in:room) { events.continuation.yield(()) } }
         var seen=events.stream.makeAsyncIterator();_ = await seen.next()
-        try await store.saveResourceImport(.init(locator:.init(home:.room(room),operationID:request.operationID),mediaID:request.targetMediaID,state:.copying,bindableUntil:nil),id:job)
+        try await store.seedResourceImportStatus(.init(locator:.init(home:.room(room),operationID:request.operationID),mediaID:request.targetMediaID,state:.copying,bindableUntil:nil),id:job)
         _ = await seen.next()
         #expect(try await store.preparingSendIntents(in:room)==[intent])
         #expect(try await store.dueOperationWork(now:Date(),kinds:[.sendMessage]).isEmpty)
-        try await store.saveResourceImport(.init(locator:.init(home:.room(room),operationID:request.operationID),mediaID:request.targetMediaID,state:.ready,bindableUntil:Date().addingTimeInterval(60)),id:job)
+        try await store.seedResourceImportStatus(.init(locator:.init(home:.room(room),operationID:request.operationID),mediaID:request.targetMediaID,state:.ready,bindableUntil:Date().addingTimeInterval(60)),id:job)
         _ = await seen.next()
         #expect(try await store.preparingSendIntents(in:room)==[intent])
         observer.cancel();_ = await observer.result
@@ -37,7 +37,7 @@ struct V2ResourceSendObservationTests {
         var seen=events.stream.makeAsyncIterator()
         _ = await seen.next()
         let intent=try V2SendIntent(id:UUID(),roomID:room,clientMessageID:.init(uuid:UUID()),text:"frozen",attachmentJobIDs:[])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         _ = await seen.next()
         observer.cancel();_ = await observer.result
         #expect(try await store.preparingSendIntents(in:room)==[intent])

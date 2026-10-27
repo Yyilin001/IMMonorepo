@@ -15,12 +15,12 @@ struct V2MessageSendWorkTests {
         try await confirmPreference(f, pinned: true, archived: true, mute: mute)
         #expect(try await f.store.conversationState(roomID: f.room)?.isArchived == true)
         let intent = try f.intent("resume chat")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         let desired = try await f.store.personalPreferenceTarget(accountID: f.account,
             fallback: .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
         #expect(desired == .conversation(roomID: f.room, isPinned: true, isArchived: false, muteUntil: mute))
         // Replaying the same send must not create another preference operation.
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await confirmPreference(f, pinned: true, archived: false, mute: mute)
         let state = try #require(try await f.store.conversationState(roomID: f.room))
         #expect(!state.isArchived && state.isPinned && state.muteUntil == mute)
@@ -33,7 +33,7 @@ struct V2MessageSendWorkTests {
         let f = try SendWorkFixture(); defer { f.remove() }
         let archive = try await f.store.enqueuePersonalPreference(accountID: f.account,
             target: .conversation(roomID: f.room, isPinned: true, isArchived: true, muteUntil: nil))
-        try await f.store.freezeSendIntent(f.intent("resume pending archive"))
+        try await f.store.freezeMetadataSendIntent(f.intent("resume pending archive"))
         let desired = try await f.store.personalPreferenceTarget(accountID: f.account,
             fallback: .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
         #expect(desired == .conversation(roomID: f.room, isPinned: true, isArchived: false, muteUntil: nil))
@@ -51,7 +51,7 @@ struct V2MessageSendWorkTests {
         try await f.store.databasePool.write { db in
             try db.execute(sql: "CREATE TRIGGER fail_send BEFORE INSERT ON v2_send_intents BEGIN SELECT RAISE(ABORT,'send storage failure'); END")
         }
-        await #expect(throws: DatabaseError.self) { try await f.store.freezeSendIntent(f.intent("not saved")) }
+        await #expect(throws: DatabaseError.self) { try await f.store.freezeMetadataSendIntent(f.intent("not saved")) }
         let desired = try await f.store.personalPreferenceTarget(accountID: f.account,
             fallback: .conversation(roomID: f.room, isPinned: false, isArchived: false, muteUntil: nil))
         #expect(desired == .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
@@ -64,7 +64,7 @@ struct V2MessageSendWorkTests {
     func resendingRestoresArchivedConversation() async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let original = try f.intent("retry archived chat")
-        try await f.store.freezeSendIntent(original)
+        try await f.store.freezeMetadataSendIntent(original)
         try await f.store.handOffSendIntent(original.id)
         let work = try await f.head()
         guard case .expiredUnsubmitted = try await f.store.claimOperationWork(id: work.id, ownerID: UUID(), action: .submit,
@@ -108,7 +108,7 @@ struct V2MessageSendWorkTests {
         let f = try SendWorkFixture(); defer { f.remove() }
         let created = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) - 5)
         let intent = try f.intent("ordered message")
-        try await f.store.freezeSendIntent(intent, now: created)
+        try await f.store.freezeMetadataSendIntent(intent, now: created)
         let preparing = try await f.store.pendingResourceSendSnapshot(in: f.room, page: 0)
         #expect(preparing.preparing.first?.createdAt == created)
         try await f.store.handOffSendIntent(intent.id)
@@ -125,14 +125,14 @@ struct V2MessageSendWorkTests {
     func pausedSendDoesNotFreezeConversation(paused: Bool) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let first = try f.intent("unknown original")
-        try await f.store.freezeSendIntent(first)
+        try await f.store.freezeMetadataSendIntent(first)
         try await f.store.handOffSendIntent(first.id)
         let original = try await f.head(), claim = try await f.claim(original)
         try await f.store.deferOperationWork(claim, until: Date().addingTimeInterval(600), code: "MESSAGE_SEND_UNRESOLVED",
             scheduling: paused ? .needsAttention : .backingOff, nextAction: .reconcile)
         let retained = try #require(try await f.store.operationWork(id: original.id))
         let next = try f.intent("new message")
-        try await f.store.freezeSendIntent(next)
+        try await f.store.freezeMetadataSendIntent(next)
         try await f.store.handOffSendIntent(next.id)
         let due = try await f.store.dueOperationWork(now: .now, kinds: [.sendMessage])
         if paused {
@@ -158,7 +158,7 @@ struct V2MessageSendWorkTests {
     func pendingPresentationReflectsTransport(network: Bool) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let intent = try f.intent("parked message")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let work = try await f.head(), claim = try await f.claim(work)
         try await f.store.deferOperationWork(claim, until: .now, code: "WAITING",
@@ -172,7 +172,7 @@ struct V2MessageSendWorkTests {
     func offlineWorkResumesAfterColdConnection() async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let intent = try f.intent("offline original body")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let original = try await f.head()
         let command = try await f.store.messageSendCommand(workID: original.id)
@@ -208,7 +208,7 @@ struct V2MessageSendWorkTests {
     func networkWakeupDoesNotLoseLateParking(parkFirst: Bool) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let intent = try f.intent("connection race")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let work = try await f.head(), claim = try await f.claim(work)
         let park = {
@@ -248,7 +248,7 @@ struct V2MessageSendWorkTests {
     func legacyTransportPauseCanResume() async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let intent = try f.intent("legacy parked identity")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let work = try await f.head(), claim = try await f.claim(work)
         try await f.store.deferOperationWork(claim, until: Date(), code: "MESSAGE_SEND_TRANSPORT_UNAVAILABLE",
@@ -265,7 +265,7 @@ struct V2MessageSendWorkTests {
     func networkWakeupPreservesOtherFailureBoundaries(capacity: Bool) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let intent = try f.intent("other failure")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let work = try await f.head()
         let failure: V2MessageSendTransportError = capacity ? .busyBeforeSubmission(Date().addingTimeInterval(3)) : .outcomeUnknown
@@ -287,7 +287,7 @@ struct V2MessageSendWorkTests {
     func exhaustedSubmissionStillReconcilesOriginalIdentity(typedTransportFailure: Bool) async throws {
         let fixture = try SendWorkFixture(); defer { fixture.remove() }
         let intent = try fixture.intent("retained unknown result")
-        try await fixture.store.freezeSendIntent(intent)
+        try await fixture.store.freezeMetadataSendIntent(intent)
         try await fixture.store.handOffSendIntent(intent.id)
         let original = try await fixture.head()
         let command = try await fixture.store.messageSendCommand(workID: original.id)
@@ -318,7 +318,7 @@ struct V2MessageSendWorkTests {
     func transportCertaintyPersistsNextAction(_ failure: V2MessageSendTransportError) async throws {
         let fixture = try SendWorkFixture(); defer { fixture.remove() }
         let intent = try fixture.intent("same frozen payload")
-        try await fixture.store.freezeSendIntent(intent)
+        try await fixture.store.freezeMetadataSendIntent(intent)
         try await fixture.store.handOffSendIntent(intent.id)
         let work = try await fixture.head()
         let claim = try await fixture.claim(work)
@@ -336,7 +336,7 @@ struct V2MessageSendWorkTests {
     func correlatedTCPRejectionPreservesIdentityAndRetryFloor(code: String, action: V2OperationWorkAction) async throws {
         let fixture = try SendWorkFixture(); defer { fixture.remove() }
         let intent = try fixture.intent("same frozen TCP operation")
-        try await fixture.store.freezeSendIntent(intent)
+        try await fixture.store.freezeMetadataSendIntent(intent)
         try await fixture.store.handOffSendIntent(intent.id)
         let work = try await fixture.head()
         var claim = try await fixture.claim(work)
@@ -362,7 +362,7 @@ struct V2MessageSendWorkTests {
     func provenUnsentDispositionPreservesUnknownIdentity(_ scenario: String) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let intent = try f.intent("retained proposal")
-        try await f.store.freezeSendIntent(intent, now: scenario == "expired" ? Date().addingTimeInterval(-90_000) : Date())
+        try await f.store.freezeMetadataSendIntent(intent, now: scenario == "expired" ? Date().addingTimeInterval(-90_000) : Date())
         try await f.store.handOffSendIntent(intent.id)
         let work = try await f.head(), original = try await f.store.messageSendCommand(workID: work.id)
         if scenario == "expired" {
@@ -391,7 +391,7 @@ struct V2MessageSendWorkTests {
             #expect(replacementIntent?.clientMessageID != intent.clientMessageID)
             // Independently exercise discard using another proven-unsent intent.
             let discarded = try f.intent("discard proposal")
-            try await f.store.freezeSendIntent(discarded, now: Date().addingTimeInterval(-90_000))
+            try await f.store.freezeMetadataSendIntent(discarded, now: Date().addingTimeInterval(-90_000))
             try await f.store.handOffSendIntent(discarded.id)
             let discardWork = try await f.store.databasePool.read { db in
                 try #require(String.fetchOne(db, sql: "SELECT work_id FROM v2_send_intents WHERE intent_id=?", arguments: [discarded.id.uuidString]).flatMap(UUID.init(uuidString:)))
@@ -408,7 +408,7 @@ struct V2MessageSendWorkTests {
     func acceptedPresentationConvergesWithoutResurrection(_ order: String) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let intent = try f.intent("awaiting actual projection")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let work = try await f.head(), command = try await f.store.messageSendCommand(workID: work.id)
         _ = try await f.claim(work)
@@ -467,7 +467,7 @@ struct V2MessageSendWorkTests {
         var terminalIDs = Set<UUID>()
         for _ in 0..<201 {
             let intent = try f.intent("closed history")
-            try await f.store.freezeSendIntent(intent)
+            try await f.store.freezeMetadataSendIntent(intent)
             try await f.store.handOffSendIntent(intent.id)
             let work = try await f.head()
             _ = try await f.claim(work)
@@ -476,7 +476,7 @@ struct V2MessageSendWorkTests {
             terminalIDs.insert(intent.id)
         }
         let active = try f.intent("new active send")
-        try await f.store.freezeSendIntent(active)
+        try await f.store.freezeMetadataSendIntent(active)
         try await f.store.handOffSendIntent(active.id)
         let first = try await f.store.submittedSendIntents(in: f.room, limit: 201)
         #expect(first.count == 201 && first.first?.id == active.id && first.first?.status == .pending)
@@ -490,7 +490,7 @@ struct V2MessageSendWorkTests {
     func lostAcceptance() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let intent=try f.intent("immutable body")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         try await f.store.handOffSendIntent(intent.id)
         let work=try await f.head(),command=try await f.store.messageSendCommand(workID:work.id)
         let service=V2MessageSendOperationService(accountID:f.account,store:f.store,client:f.remote)
@@ -513,7 +513,7 @@ struct V2MessageSendWorkTests {
     func fullQuotaHandoff() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let intent=try f.intent("body")
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         let bytes=try await f.store.databasePool.read { try Int64.fetchOne($0,sql:"SELECT payload_bytes FROM v2_send_intents WHERE intent_id=?",arguments:[intent.id.uuidString])! }
         let count=try await f.store.databasePool.read { try Int.fetchOne($0,sql:"SELECT COUNT(*) FROM v2_operation_work")! }
         #expect(count == 0 && bytes>0)
@@ -531,7 +531,7 @@ struct V2MessageSendWorkTests {
     func delayedPreparation() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let created=Date().addingTimeInterval(-90_000),intent=try f.intent("stale draft")
-        try await f.store.freezeSendIntent(intent,now:created)
+        try await f.store.freezeMetadataSendIntent(intent,now:created)
         try await f.store.handOffSendIntent(intent.id)
         let work=try await f.head(),command=try await f.store.messageSendCommand(workID:work.id)
         #expect(command.firstSubmissionDeadlineMilliseconds == UInt64(created.timeIntervalSince1970*1_000)+86_395_000)
@@ -544,9 +544,9 @@ struct V2MessageSendWorkTests {
     @Test("200 pending messages per room are bounded independently of other rooms")
     func roomCapacity() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
-        for _ in 0..<200 { try await f.store.freezeSendIntent(f.intent("queued")) }
-        await #expect(throws:V2OperationWorkError.capacityExceeded) { try await f.store.freezeSendIntent(f.intent("overflow")) }
-        try await f.store.freezeSendIntent(.init(id:UUID(),roomID:.init(uuid:UUID()),clientMessageID:.init(uuid:UUID()),text:"independent",attachmentJobIDs:[]))
+        for _ in 0..<200 { try await f.store.freezeMetadataSendIntent(f.intent("queued")) }
+        await #expect(throws:V2OperationWorkError.capacityExceeded) { try await f.store.freezeMetadataSendIntent(f.intent("overflow")) }
+        try await f.store.freezeMetadataSendIntent(.init(id:UUID(),roomID:.init(uuid:UUID()),clientMessageID:.init(uuid:UUID()),text:"independent",attachmentJobIDs:[]))
         #expect(try await f.store.preparingSendIntents(limit:256).count == 201)
         try await f.store.close()
     }

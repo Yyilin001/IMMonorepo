@@ -1,0 +1,107 @@
+{
+  "observedAt": "2026-10-26T18:47:48.287770+00:00",
+  "status": "implemented-tested-signed-and-installed-physical-launch-locked",
+  "sourceSHA256": {
+    "IMApp/IMApp/V2/V2ConversationAttachmentService.swift": "05868f0998be757d9b8bc12cfb0f511e28604eae78909e6ddc44008b37270328",
+    "IMApp/IMApp/V2/V2ConversationDetailStore.swift": "6cb2e0dbe8caf0d27211c94983ea420d65f679821e061d881c067f9991d869bb",
+    "IMApp/IMApp/V2/V2ConversationMediaViews.swift": "d50628ac44cc17a7842168cf8aad929e3785c74145851a276f522fa43f8579b0",
+    "IMApp/IMApp/V2/V2ConversationUI.swift": "9d08442098f14cfba798c630aff16ef567715ca2bb94db708999277a40048bbc",
+    "IMApp/IMApp/V2/V2DurableConversationSendService.swift": "daeb94c763cda88a11209aca8e62a382a1db151b59413ca52cf350e9996afde0",
+    "IMApp/IMApp/V2/V2MessageTimelinePresentation.swift": "227904e827553c9832d5a57338b9d3668f2556fcda81852b8dc157bb940f5fd6",
+    "IMApp/IMApp/V2/V2PhotoLibraryPicker.swift": "d48040bed47d7b31d97e884b379aea1b6694be19c2de79502079449eacd8db72",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalSyncStore.swift": "c216d03ba95b5edf28e8793248b977f0b7ebc0d5e9a95b6e7b8293d4c19ec176",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2PendingResourceSendSnapshot.swift": "6020ea9f61a66a4210adc23c447ce569b5b722ea1084cfbb60a4292c89641681",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2LocalResourceAssets.swift": "6c6051af686983a9c6bc8bc1c81c0ad1a7864b4c94ce8da4ef9c38b84c962b52",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceSchema.swift": "154672edf08a88fbc3e8816c40bb9f614b7e266795a120c379143b03e73316cf",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2LocalResourceAsset.swift": "27fa7eaba02264747cfb05590d46c44e769f4ea0a8730116a7e7b9db143a42dd",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceCenter.swift": "0bfad113ef56436021158d6887fb13b0fc87c32557bae7a2e7c37903db46d2f1",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceFileStore.swift": "1d9a62b2f0404687ba167e7d557fe87ffd6b3b12c84fa5c1150af814749dac7e",
+    "IMV2ClientKit/Sources/IMV2ClientKit/V2ResourceTransferEngine.swift": "961e040fef743066b1d875840ed8fdec0ba526a26e12acde14a08812eb6eb918",
+    "IMApp/IMAppTests/V2PhotoLibraryImageTests.swift": "8f7aa91d5dd00580072b3dafab3d1cb103971eb09cb3e5f632f6250b855a20a5",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceImagePresentationTests.swift": "7308b3775aba4594dc069db47e21b177990f007138fb52ad03f3ad56e7e15238",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Networking/V2NetworkWorkPolicy.swift": "ffd24f12b7a0759c67f07d5b4590349ff076131fe3c65e70fbff20b69aa2497a"
+  },
+  "latestUserUploadBeforeThisFix": {
+    "content_type": "image/jpeg",
+    "byte_count": 3249592,
+    "state": "available",
+    "upload_seconds": 2.804,
+    "processing_seconds": 3.054,
+    "pixel_width": 3072,
+    "pixel_height": 4096,
+    "created_at": "2026-10-26T18:22:52.08019+00:00",
+    "ready_to_message_seconds": 4.467
+  },
+  "causes": [
+    "Default photo normalization retained 12.6MP/3.25MB in the latest user send.",
+    "Generic accepted-result polling used 2/5/10/30 second delays; latest server-ready-to-message gap was 4.467 seconds.",
+    "Chat image rows ignored verified descriptor dimensions and switched from a short placeholder to decoded intrinsic image height."
+  ],
+  "changes": [
+    "Photo normalization capped at 2048 pixels, JPEG quality 0.85. Actual normalized oriented width/height recorded before upload.",
+    "Optional bounded image dimensions persisted with local asset and included in bounded pending-send snapshots in attachment order.",
+    "Additive local SQLite migration preserves current account selections and validates against the same migrated reference DDL.",
+    "Pending local photo and all committed download/decode states use metadata-driven image Layout; decoded pixels never determine reserved size.",
+    "Resource-only processing polling starts at 0.5s with bounded backoff and respects server cooldowns; command recovery policy unchanged."
+  ],
+  "nativeValidation": [
+    {
+      "tests": 26,
+      "suites": 4,
+      "log": "/tmp/im-image-dimensions-client-native-r3-20261027.log"
+    },
+    {
+      "tests": 19,
+      "suites": 3,
+      "log": "/tmp/im-image-dimensions-migration-poll-r2-20261027.log",
+      "overlap": "Some image dimension tests overlap with the first run. Counts are not additive."
+    }
+  ],
+  "iosValidation": {
+    "tests": 38,
+    "suites": 6,
+    "log": "/tmp/im-photo-layout-speed-app-r2-20261027.log",
+    "xcresult": "/tmp/im-photo-layout-speed-app-r2-20261027.xcresult",
+    "actualRenderedPlaceholderAndDecodedSizesEqual": true
+  },
+  "controlledNormalizationProbe": {
+    "format": "jpeg",
+    "normalizedBytes": 427064,
+    "originalBytes": 13296890,
+    "pixelHeight": 2048,
+    "pixelWidth": 1536,
+    "seconds": 0.1817770004272461,
+    "sourceSHA256": "d48040bed47d7b31d97e884b379aea1b6694be19c2de79502079449eacd8db72",
+    "scope": "Exact current normalization bodies on native macOS; not iPhone timing. Private photo remains private."
+  },
+  "publicHTTPSAndOSSProbe": {
+    "status": "passed-real-2048-jpeg-upload-and-processing",
+    "bytes": 427064,
+    "observedReadySeconds": 2.135,
+    "stages": {
+      "uploadSeconds": 0.437902,
+      "processingSeconds": 1.386675,
+      "width": 1536,
+      "height": 2048
+    },
+    "probe": "Public HTTPS and OSS, actual private diagnostic source. No message or profile mutation; bounded resource status polling follows new client schedule. Not physical iPhone timing."
+  },
+  "serverChanged": false,
+  "serverImageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+  "phone": {
+    "releaseRecord": "/tmp/im-resource-client-signed-release-20261027-r19/result.json",
+    "binarySHA256": "ff64bdb37f1f1d6396abef50a813b82f0d807c74aec5ce4068cdf6f31c67a147",
+    "installRecord": "/tmp/im-photo-layout-speed-phone-install-20261027.json",
+    "launchRecord": "/tmp/im-photo-layout-speed-phone-launch-20261027.json",
+    "installed": true,
+    "launchSucceeded": false,
+    "reason": "Device locked",
+    "physicalSendTimingVerified": false
+  },
+  "priorFailuresRetained": [
+    "/tmp/im-image-dimensions-client-native-20261027.log",
+    "/tmp/im-image-dimensions-client-native-r2-20261027.log",
+    "/tmp/im-image-dimensions-migration-poll-20261027.log",
+    "/tmp/im-photo-layout-speed-app-20261027.log"
+  ]
+}

@@ -222,8 +222,9 @@ public final class V2HTTPExecutor: Sendable {
     }
 }
 
-private final class V2HTTPExecutionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+final class V2HTTPExecutionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let lock = NSLock()
+    private let connectivity = V2ResourceConnectivityObservation()
     private var task: URLSessionTask?
     private var isCancelled = false
     private var transactions = 0
@@ -233,10 +234,14 @@ private final class V2HTTPExecutionDelegate: NSObject, URLSessionTaskDelegate, @
     private var receivedBytes = 0
     private var responseStatus: Int?
     var observation: (Int, Bool, Int, Int?) { lock.withLock { (transactions, reused, receivedBytes, responseStatus) } }
-    func record(response: Int, bytes: Int) { lock.withLock { responseStatus = response; receivedBytes = bytes } }
+    func record(response: Int, bytes: Int) { connectivity.finish(); lock.withLock { responseStatus = response; receivedBytes = bytes } }
     func cancel() {
+        connectivity.finish()
         let task = lock.withLock { isCancelled = true; return self.task }
         task?.cancel()
+    }
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        connectivity.waiting()
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {

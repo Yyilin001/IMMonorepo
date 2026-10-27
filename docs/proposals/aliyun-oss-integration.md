@@ -69,7 +69,15 @@ python3 scripts/run_v2_oss_live_tests.py \
 
 输出目录必须不存在。脚本启动独立 PostgreSQL、placement、Account、Gateway 和 HTTPS 入口，运行真正的 ClientKit 网络验收并关闭所建本地服务。服务端使用独立 `validation/native-<uuid>/` 前缀，凭据仅经环境注入服务端。`oss-fixture.json` 记录非敏感的 Bucket 与前缀；云端合成对象需在验收后转成零字节删除标记，不能删除标记后允许旧 capability 重新写入。客户端对 localhost 使用测试 CA，对 OSS 使用系统证书校验。
 
-## 官方依据
+## 资源中心必选门槛（2026-10-25）
+
+当前资源中心和群头像两条必选真实云端路径已在独立原生栈通过，详见 [资源中心实施证据第62节](client-resource-center-plan.md#62-当前代码的真实oss资源中心与群头像必选验收2026-10-25)。现有原生命令追加 `--resource-center`，driver会要求两个场景均真实执行并通过；不把跳过场景算作完成。每次输出目录必须不存在，Python须支持TLS1.3。
+
+主场景现在实际经过ResourceCenter目录同步、持久下载请求、FileStore校验与借用、保留/清理/重新下载，以及TLS同步撤回后的本地读取拒绝。群头像场景检查上传、图片读取、移除及原操作恢复。`/tmp/im-resource-native-oss-20261025-gate-r2/summary.json`为本轮证据；未替代Linux、音视频实存、App持久发送及手机后台验收。
+
+后续同一门槛已扩展并通过文本、真实WAV、真实MP4三类资源；上传改走LocalAsset和持久传输执行器，并在创建远端会话后关闭/重开本地运行时，沿原操作继续。最终证据为`/tmp/im-resource-native-oss-20261025-media-r3`，详见[第63节](client-resource-center-plan.md#63-真实oss三类资源与持久上传重开验收2026-10-25)。真实音视频时长/尺寸、保留/清理/重下与撤回均通过；仍未替代App完整发送链、Linux、真机系统后台或发布验收。
+
+## 官方资料
 
 - [OSS V4 签名](https://www.alibabacloud.com/help/en/oss/developer-reference/recommend-to-use-signature-version-4)
 - [PutObject 防覆盖与版本控制限制](https://www.alibabacloud.com/help/en/oss/developer-reference/putobject)

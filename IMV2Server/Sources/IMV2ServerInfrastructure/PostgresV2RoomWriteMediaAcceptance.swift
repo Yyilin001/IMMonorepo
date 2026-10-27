@@ -96,21 +96,19 @@ enum RoomWriteMediaAcceptance {
                 FROM jsonb_to_recordset(\(bind: requestedJSON)::jsonb)
                      AS input(ordinal integer, media_id uuid)
             )
-            SELECT requested.ordinal, media.media_id, media.content_type, media.byte_count
+            SELECT requested.ordinal, media.media_id, media.content_type, media.byte_count,
+                   resource.home_id AS resource_room_id,resource.display_name,resource.generation,placement.sha256,resource.pixel_width,resource.pixel_height,resource.duration_ms
             FROM requested
             JOIN im_v2.media_objects AS media
               ON media.media_id = requested.media_id
              AND (\(authorization))
              AND media.state = 'available'
              AND (media.expires_at > \(bind: now) OR \(bind:reusesSourceBinding))
-             AND EXISTS (
-                 SELECT 1 FROM im_v2.resource_catalog resource
-                 JOIN im_v2.resource_blob_placements placement
-                   ON placement.media_id=resource.media_id AND placement.generation=resource.generation
-                  AND placement.state='active'
-                 WHERE resource.media_id=media.media_id AND resource.home_kind='room'
-                   AND resource.home_id=\(bind: roomID) AND resource.usage_kind='message_attachment'
-             )
+            JOIN im_v2.resource_catalog resource ON resource.media_id=media.media_id AND resource.home_kind='room'
+                AND resource.home_id=\(bind: roomID) AND resource.usage_kind='message_attachment'
+            JOIN im_v2.resource_blob_placements placement ON placement.media_id=resource.media_id
+                AND placement.generation=resource.generation AND placement.state='active'
+                AND placement.byte_count=media.byte_count
             -- Lock shared media in a canonical order so two concurrent sends
             -- cannot deadlock merely because their attachment order differs.
             ORDER BY media.media_id
@@ -134,12 +132,18 @@ private struct OrderedMessageMediaPresentationRow: Decodable {
     let mediaID: UUID
     let contentType: String
     let byteCount: Int64
+    let resourceRoomID: UUID
+    let displayName: String
+    let generation: Int64
+    let sha256: Data
+    let pixelWidth: Int?; let pixelHeight: Int?; let durationMilliseconds: Int64?
 
     enum CodingKeys: String, CodingKey {
         case ordinal
         case mediaID = "media_id"
         case contentType = "content_type"
         case byteCount = "byte_count"
+        case resourceRoomID = "resource_room_id", displayName = "display_name", generation, sha256, pixelWidth = "pixel_width", pixelHeight = "pixel_height", durationMilliseconds = "duration_ms"
     }
 
     var presentation: V2MediaPresentation {
@@ -148,7 +152,10 @@ private struct OrderedMessageMediaPresentationRow: Decodable {
                 mediaID: .init(uuid: mediaID),
                 kind: V2MediaPresentation.kind(forContentType: contentType),
                 contentType: contentType,
-                byteCount: byteCount
+                byteCount: byteCount,
+                resourceDescriptor: .init(key: .init(home: .room(.init(uuid: resourceRoomID)), mediaID: .init(uuid: mediaID)),
+                    revision: generation, displayName: .init(displayName), contentType: contentType, byteCount: byteCount,
+                    checksum: .init(value: sha256.map { String(format: "%02x", $0) }.joined()), state: .ready, pixelWidth: pixelWidth, pixelHeight: pixelHeight, durationMilliseconds: durationMilliseconds)
             )
         }
     }

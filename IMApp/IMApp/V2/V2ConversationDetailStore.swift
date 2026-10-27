@@ -2,6 +2,7 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 import Observation
+import UIKit
 
 @MainActor
 @Observable
@@ -58,6 +59,7 @@ final class V2ConversationDetailStore {
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let resourceSender: (any V2DurableConversationSending)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
+    private let mediaThumbnails: V2LocalMediaThumbnailCache?
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     private let roomSubscriptions: V2RoomSubscriptionCoordinator?
     private let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
@@ -112,7 +114,9 @@ final class V2ConversationDetailStore {
     private(set) var isChangingGroupMembership = false
     private(set) var isApplyingGroupModeration = false
     private(set) var attachments: [V2ConversationAttachmentItem] = []
+    @ObservationIgnored private var didRestoreAttachmentDraft = false
     private(set) var mediaDownloadStates: [MediaID: V2ConversationMediaDownloadState] = [:]
+    private(set) var initialImagePreviews: [MediaID: V2SendableImage] = [:]
     private(set) var groupReadReceiptPage: V2ReadReceiptReadersPage?
     private(set) var hasEarlierGroupReadReceipts = false
     private(set) var isLoadingGroupReadReceipts = false
@@ -345,6 +349,7 @@ final class V2ConversationDetailStore {
         attachmentStager = environment.media.attachmentStager
         resourceSender = environment.media.resourceSender
         mediaDownloader = environment.media.downloader
+        mediaThumbnails = environment.media.thumbnails
         projectionChangeNotifier = environment.runtime.projectionChangeNotifier
         activeHybridGroupSynchronizer = environment.runtime.activeHybridGroupSynchronizer
         roomSubscriptions = environment.runtime.roomSubscriptions
@@ -382,6 +387,40 @@ final class V2ConversationDetailStore {
             } else { page = nil }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
+            let refreshedTimeline = page?.items ?? timeline
+            let refreshedMessages = refreshTimeline ? Self.messages(in: refreshedTimeline) : messages
+            // Publish the local timeline before unrelated profile/policy reads.
+            // Redaction cleanup still precedes publication of image pixels.
+            if refreshTimeline { await discardMediaRevokedByRedaction(previous: messages, refreshed: refreshedMessages) }
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
+            if refreshTimeline, timeline.isEmpty {
+                await seedDecodedImagePreviews(from: refreshedMessages, generation: generation)
+                try Task.checkCancellation()
+                guard generation == refreshGeneration else { return }
+            }
+            let timelineChanged = refreshTimeline && refreshedTimeline != timeline
+            if refreshTimeline {
+                if timelineChanged {
+                    messages = refreshedMessages
+                    timeline = refreshedTimeline
+                    timelineRevision &+= 1
+                }
+                canLoadOlderTimeline = page?.olderCursor != nil
+            }
+            if refreshTimeline {
+                let visibleMediaIDs = Set(refreshedMessages.lazy
+                    .filter { !$0.isWithdrawn }
+                    .flatMap(\.media)
+                    .map(\.mediaID))
+                mediaDownloadStates = mediaDownloadStates.filter { visibleMediaIDs.contains($0.key) }
+                imagePreviewStates = imagePreviewStates.filter { visibleMediaIDs.contains($0.key) }
+                initialImagePreviews = initialImagePreviews.filter { visibleMediaIDs.contains($0.key) }
+            }
+            if refreshTimeline { state = .loaded }
+            _ = await restoreAttachmentDraft()
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
             let refreshedHistoryIncomplete = refreshTimeline ? ((try? await dataSource.roomLogHistoryIsIncomplete(roomID: roomID)) ?? isHistoryIncomplete) : isHistoryIncomplete
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
@@ -391,8 +430,6 @@ final class V2ConversationDetailStore {
                 guard generation == refreshGeneration else { return }
                 title = updatedTitle
             }
-            let refreshedTimeline = page?.items ?? timeline
-            let refreshedMessages = refreshTimeline ? Self.messages(in: refreshedTimeline) : messages
             let refreshedCanSend: Bool? = if refreshMetadata, !isGroupConversation, let sendingCapabilityReader {
                 try await sendingCapabilityReader.directSendingCapability(in: roomID)
             } else {
@@ -414,18 +451,6 @@ final class V2ConversationDetailStore {
             } else { nil }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            if refreshTimeline { await discardMediaRevokedByRedaction(previous: messages, refreshed: refreshedMessages) }
-            try Task.checkCancellation()
-            guard generation == refreshGeneration else { return }
-            let timelineChanged = refreshTimeline && refreshedTimeline != timeline
-            if refreshTimeline {
-                if timelineChanged {
-                    messages = refreshedMessages
-                    timeline = refreshedTimeline
-                    timelineRevision &+= 1
-                }
-                canLoadOlderTimeline = page?.olderCursor != nil
-            }
             // 标记只增不减：一旦确认缺过历史，就不因一次读失败或旧快照而"变完整"。
             isHistoryIncomplete = isHistoryIncomplete || refreshedHistoryIncomplete
             isBrowsingHistoricalTimeline = newerTimelineBoundary != nil
@@ -433,13 +458,6 @@ final class V2ConversationDetailStore {
                 canSendInDirectConversation = refreshedCanSend
                 groupAnnouncement = refreshedAnnouncement
                 if policyReadGeneration == rolePolicyReadGeneration, let refreshedPolicies { updateGroupRolePolicyState(refreshedPolicies) }
-            }
-            if refreshTimeline {
-                let visibleMediaIDs = Set(refreshedMessages.lazy
-                    .filter { !$0.isWithdrawn }
-                    .flatMap(\.media)
-                    .map(\.mediaID))
-                mediaDownloadStates = mediaDownloadStates.filter { visibleMediaIDs.contains($0.key) }
             }
             state = .loaded
             // The applied room cursor can advance for invisible or metadata-only
@@ -1197,6 +1215,7 @@ final class V2ConversationDetailStore {
     }
 
     func sendDraft() async {
+        guard await restoreAttachmentDraft() else { return }
         guard !isSending else { return }
         guard isGroupConversation || canSendInDirectConversation != false else {
             sendFeedback = "当前无法向此会话发送消息。"
@@ -1209,6 +1228,9 @@ final class V2ConversationDetailStore {
             return
         }
         let frozenAttachments = attachments.map(\.attachment)
+        guard frozenAttachments.allSatisfy({ $0.availability == .local }) else {
+            sendFeedback = "部分附件原件不可用，请移除后重新选择。"; return
+        }
         let frozenReplyTarget = replyTarget
         isSending = true
         defer { isSending = false }
@@ -1230,7 +1252,8 @@ final class V2ConversationDetailStore {
                 draft = ""
                 mentionHandlesText = ""
                 replyTarget = nil
-                sendFeedback = "已保存发送意图，附件准备完成后自动发送。"
+                // The durable pending bubble owns preparation and confirmation progress.
+                sendFeedback = nil
                 return
             }
             let replyTo = replyTarget.flatMap { try? V2MessageReplyReference(messageID: .init($0.id)) }
@@ -1364,6 +1387,17 @@ final class V2ConversationDetailStore {
     }
 
     func stageAttachment(from sourceURL: URL) async {
+        await stageAttachment(.file(sourceURL))
+    }
+
+    func stageAttachment(photo: V2NormalizedPhoto) async {
+        await stageAttachment(.photo(photo))
+    }
+
+    private enum AttachmentImportSource { case file(URL), photo(V2NormalizedPhoto) }
+
+    private func stageAttachment(_ source: AttachmentImportSource) async {
+        guard await restoreAttachmentDraft() else { return }
         guard canAddAttachment else {
             sendFeedback = "每条消息最多可添加 \(V2MessageCommandLimits.maxMediaAttachments) 个附件。"
             return
@@ -1373,8 +1407,16 @@ final class V2ConversationDetailStore {
             return
         }
         do {
-            let attachment = try await attachmentStager.stageImportedFile(at: sourceURL)
-            try Task.checkCancellation()
+            let purpose = V2LocalResourceAssetPurpose.messageDraft(try .init(roomID))
+            let attachment: V2StagedConversationAttachment
+            switch source {
+            case .file(let url): attachment = try await attachmentStager.stageImportedFile(at: url, purpose: purpose)
+            case .photo(let photo): attachment = try await attachmentStager.stageNormalizedPhoto(photo, purpose: purpose)
+            }
+            if Task.isCancelled {
+                await attachmentStager.discard(attachment)
+                return
+            }
             attachments.append(.init(attachment: attachment, state: .staged))
             sendFeedback = nil
         } catch is CancellationError {
@@ -1390,6 +1432,40 @@ final class V2ConversationDetailStore {
         } catch {
             sendFeedback = "无法准备附件。"
         }
+    }
+
+    @discardableResult
+    private func restoreAttachmentDraft() async -> Bool {
+        if didRestoreAttachmentDraft { return true }
+        guard let attachmentStager else { didRestoreAttachmentDraft = true; return true }
+        do {
+            let selected = try await attachmentStager.selectedAttachments(purpose: .messageDraft(try .init(roomID)))
+            try Task.checkCancellation()
+            guard !didRestoreAttachmentDraft else { return true }
+            let known = Set(attachments.map { $0.attachment.localAssetID })
+            attachments.append(contentsOf: selected.filter { !known.contains($0.localAssetID) }.map {
+                .init(attachment: $0, state: $0.availability == .local ? .staged : .failed)
+            })
+            didRestoreAttachmentDraft = true
+            if selected.contains(where: { $0.availability != .local }) { sendFeedback = "部分附件原件不可用，请移除后重新选择。" }
+            return true
+        } catch is CancellationError { return false }
+        catch { sendFeedback = "无法读取本机附件草稿，请重试。"; return false }
+    }
+
+    func borrowAttachment(id: UUID) async throws -> V2ResourceFileLease {
+        guard let item = attachments.first(where: { $0.id == id }), let attachmentStager else { throw V2ResourceStorageError.unavailable }
+        let lease = try await attachmentStager.borrow(.selection(item.attachment.localAssetID))
+        guard !Task.isCancelled, attachments.contains(where: { $0.id == id }) else { await lease.release(); throw CancellationError() }
+        return lease
+    }
+
+    func borrowPendingImage(jobID: UUID) async throws -> V2ResourceFileLease {
+        guard pendingResourceSends.contains(where: { $0.images.contains(where: { $0.jobID == jobID }) }),
+              let attachmentStager else { throw V2ResourceStorageError.unavailable }
+        let lease = try await attachmentStager.borrow(.upload(jobID))
+        guard !Task.isCancelled else { await lease.release(); throw CancellationError() }
+        return lease
     }
 
     func removeAttachment(id: UUID) async {
@@ -1411,9 +1487,120 @@ final class V2ConversationDetailStore {
         mediaDownloadStates[media.mediaID] ?? .notDownloaded
     }
 
+    private(set) var imagePreviewStates: [MediaID: V2ConversationMediaDownloadState] = [:]
+    @ObservationIgnored private var imagePreviewRequestIDs: [MediaID: UUID] = [:]
+
+    /// Strict cache-only first snapshot: no authorization request, file read,
+    /// decode, shared-flight wait or network operation is admitted here.
+    private func seedDecodedImagePreviews(from snapshot: [V2ConversationMessageItem], generation: Int) async {
+        guard let mediaDownloader, let mediaThumbnails else { return }
+        var inspected = 0
+        for message in snapshot.reversed() where !message.isWithdrawn {
+            for media in message.media {
+                guard !Task.isCancelled, generation == refreshGeneration, inspected < 8 else { return }
+                guard message.mediaPresentations.contains(where: {
+                    $0.mediaID == media.mediaID && ($0.kind == .image || $0.kind == .animatedImage)
+                }) else { continue }
+                inspected += 1
+                do {
+                    let location = try V2MediaMessageLocation(roomID: RoomID(roomID), messageID: MessageID(message.id))
+                    guard let file = try await mediaDownloader.cachedImagePreview(media, message: location),
+                          let image = await mediaThumbnails.cachedThumbnail(fileURL: file.fileURL, maximumPixelSize: 1280)
+                    else { continue }
+                    try Task.checkCancellation()
+                    guard generation == refreshGeneration else { return }
+                    let cost = image.image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+                    guard retainedImagePreviewBytes + cost <= 16 * 1_024 * 1_024 else { return }
+                    retainImagePreview(image, for: media.mediaID)
+                    imagePreviewStates[media.mediaID] = .downloaded(file)
+                } catch is CancellationError { return }
+                catch { continue }
+            }
+        }
+    }
+
+    private var retainedImagePreviewBytes: Int {
+        initialImagePreviews.values.reduce(0) { $0 + ($1.image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0) }
+    }
+
+    private func retainImagePreview(_ image: V2SendableImage, for mediaID: MediaID) {
+        let seedBudget = 16 * 1_024 * 1_024
+        let cost = image.image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+        initialImagePreviews[mediaID] = nil
+        while retainedImagePreviewBytes + cost > seedBudget || initialImagePreviews.count >= 32 {
+            guard let oldest = initialImagePreviews.keys.first else { break }
+            initialImagePreviews[oldest] = nil
+        }
+        if cost <= seedBudget { initialImagePreviews[mediaID] = image }
+    }
+
+    func loadImagePreview(_ media: V2MediaReference, from message: V2ConversationMessageItem) async {
+        guard !message.isWithdrawn, message.media.contains(media), let mediaDownloader, let mediaThumbnails,
+              !Task.isCancelled else { return }
+        if case .downloaded = imagePreviewStates[media.mediaID] { return }
+        let requestID = UUID()
+        imagePreviewRequestIDs[media.mediaID] = requestID
+        defer { if imagePreviewRequestIDs[media.mediaID] == requestID { imagePreviewRequestIDs[media.mediaID] = nil } }
+        imagePreviewStates[media.mediaID] = .downloading
+        do {
+            let location = try V2MediaMessageLocation(roomID: RoomID(roomID), messageID: MessageID(message.id))
+            let file = try await mediaDownloader.imagePreview(media, message: location)
+            let lease = try await file.borrowFile()
+            let image = await mediaThumbnails.thumbnail(fileURL: lease.fileURL, maximumPixelSize: 1280)
+            await lease.release()
+            try Task.checkCancellation()
+            guard imagePreviewRequestIDs[media.mediaID] == requestID else { return }
+            guard messages.contains(where: { $0.id == message.id && $0.revision == message.revision && !$0.isWithdrawn && $0.media.contains(media) }),
+                  let image else { throw V2MediaFileAccessError.unavailable }
+            // Keep only a small seed window; row-owned pixels and the account
+            // thumbnail cache handle older rows without retaining the whole history.
+            retainImagePreview(image, for: media.mediaID)
+            imagePreviewStates[media.mediaID] = .downloaded(file)
+        } catch is CancellationError {
+            if imagePreviewRequestIDs[media.mediaID] == requestID { imagePreviewStates[media.mediaID] = nil }
+        } catch {
+            if imagePreviewRequestIDs[media.mediaID] == requestID { imagePreviewStates[media.mediaID] = .failed }
+        }
+    }
+
+    func imagePreviewUnavailable(_ file: V2DownloadedConversationMedia) {
+        guard imagePreviewStates[file.mediaID] == .downloaded(file) else { return }
+        imagePreviewStates[file.mediaID] = .failed
+        initialImagePreviews[file.mediaID] = nil
+    }
+
+    func originalImage(_ media: V2MediaReference, from message: V2ConversationMessageItem) async -> UIImage? {
+        await downloadMedia(media, from: message)
+        guard case .downloaded(let file) = mediaDownloadState(for: media), let mediaThumbnails else { return nil }
+        do {
+            let lease = try await file.borrowFile()
+            let image = await mediaThumbnails.thumbnail(fileURL: lease.fileURL, maximumPixelSize: 2048)
+            await lease.release()
+            guard !Task.isCancelled, messages.contains(where: { $0.id == message.id && !$0.isWithdrawn && $0.media.contains(media) }) else { return nil }
+            return image?.image
+        } catch { return nil }
+    }
+
+    func restoreCachedMedia(_ media: V2MediaReference, from message: V2ConversationMessageItem) async {
+        guard !message.isWithdrawn, message.media.contains(media), let mediaDownloader,
+              mediaDownloadState(for: media) == .notDownloaded else { return }
+        do {
+            guard let file = try await mediaDownloader.cachedFile(media,
+                message: .init(roomID: RoomID(roomID), messageID: MessageID(message.id))) else { return }
+            try Task.checkCancellation()
+            guard mediaDownloadState(for: media) == .notDownloaded,
+                  messages.contains(where: { $0.id == message.id && $0.revision == message.revision && !$0.isWithdrawn && $0.media.contains(media) }) else { return }
+            mediaDownloadStates[media.mediaID] = .downloaded(file)
+        } catch {
+            // A passive cache lookup never overrides an explicit download or
+            // turns an offline/unauthorized cache miss into a failed transfer.
+        }
+    }
+
     func mediaFileUnavailable(_ downloaded: V2DownloadedConversationMedia) {
         guard mediaDownloadStates[downloaded.mediaID] == .downloaded(downloaded) else { return }
         mediaDownloadStates[downloaded.mediaID] = .notDownloaded
+        initialImagePreviews[downloaded.mediaID] = nil
         messageActionFeedback = "本地附件已不可用，请重新下载。"
     }
 

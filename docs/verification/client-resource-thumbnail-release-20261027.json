@@ -1,0 +1,127 @@
+{
+  "status": "server-deployed-and-client-testflight-available",
+  "requested": "Deploy thumbnail-first server and upload client to TestFlight",
+  "observedAt": "2026-10-27T12:10:42.987565+00:00",
+  "server": {
+    "controller": "/tmp/im-thumbnail-linux-20261027/release-result.json",
+    "sourceManifest": "/tmp/im-thumbnail-linux-20261027/source-manifest.json",
+    "buildResult": "/tmp/im-thumbnail-linux-20261027/build-result.json",
+    "currentImage": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+    "databaseUnchanged": true,
+    "schemaChanges": false,
+    "liveImageFixturesAvailable": 5,
+    "packagedProducts": [
+      "IMV2AccountServerApp"
+    ],
+    "otherSixProgramsPreserved": true,
+    "deployment": {
+      "status": "deployed-six-healthy-services-public-https-verified",
+      "imageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+      "previousImageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+      "databaseUnchanged": true,
+      "schemaChanged": false,
+      "services": [
+        {
+          "service": "placement-a",
+          "imageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+          "health": "healthy"
+        },
+        {
+          "service": "placement-b",
+          "imageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+          "health": "healthy"
+        },
+        {
+          "service": "placement-c",
+          "imageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+          "health": "healthy"
+        },
+        {
+          "service": "account",
+          "imageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+          "health": "healthy"
+        },
+        {
+          "service": "gateway",
+          "imageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+          "health": "healthy"
+        },
+        {
+          "service": "operator",
+          "imageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+          "health": "healthy"
+        }
+      ],
+      "publicHTTPSSystemTrust": true,
+      "caddyNamespaceVerified": true
+    },
+    "functional": {
+      "status": "passed-live-message-thumbnail-oss-and-authorization",
+      "imageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+      "cases": [
+        {
+          "thumbnailBytes": 109252,
+          "originalBytes": 10452368,
+          "width": 240,
+          "height": 320,
+          "declaredWidth": 3024,
+          "declaredHeight": 4032,
+          "digestVerified": true,
+          "seconds": 0.423
+        },
+        {
+          "thumbnailBytes": 126854,
+          "originalBytes": 3249592,
+          "width": 240,
+          "height": 320,
+          "declaredWidth": 3072,
+          "declaredHeight": 4096,
+          "digestVerified": true,
+          "seconds": 0.326
+        },
+        {
+          "thumbnailBytes": 632,
+          "originalBytes": 52078,
+          "width": 240,
+          "height": 320,
+          "declaredWidth": 3072,
+          "declaredHeight": 4096,
+          "digestVerified": true,
+          "seconds": 0.306
+        }
+      ],
+      "invalidSizeAndMissingMessageRejected": true,
+      "wrongMessageRejected": true,
+      "originalPlanSeparate": true
+    },
+    "finishedAt": "2026-10-27T09:10:32.574864+00:00"
+  },
+  "client": {
+    "archive": "/tmp/im-testflight-thumbnail-20261027/IMApp.xcarchive",
+    "archiveResult": "/tmp/im-testflight-thumbnail-20261027/archive-result.json",
+    "bundleID": "com.stskcxfz.imapp",
+    "teamID": "T79S2V9A32",
+    "version": "1.0",
+    "provisionalBuild": "7",
+    "archiveVerified": true,
+    "dSYM": true,
+    "sourceDrift": [],
+    "uploaded": true,
+    "pending": null,
+    "cliExportAttempt": {
+      "exitCode": 70,
+      "errors": [
+        "No Accounts",
+        "No iOS Distribution private key"
+      ],
+      "log": "/tmp/im-testflight-thumbnail-20261027/export.log",
+      "resolution": "Use authenticated Xcode Organizer cloud signing after Mac unlock"
+    },
+    "actualBuild": "7",
+    "appleProcessingCompleted": true,
+    "availableForTesting": true,
+    "testerGroup": "IMTest",
+    "testFlightRecord": "docs/verification/client-resource-thumbnail-testflight-20261027.json",
+    "signedAPSEnvironment": "production"
+  }
+}

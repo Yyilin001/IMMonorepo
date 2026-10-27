@@ -331,6 +331,10 @@ enum IMV2AccountServerApp {
                         temporaryDirectory: resourceConfiguration.rootDirectory.appendingPathComponent("processing"))
                 } else { transformer = nil }
                 if let transformer { try await transformer.verifyReadiness() }
+                let mediaProbe = try V2LocalResourceMediaProbe(
+                    executable: ProcessInfo.processInfo.environment["IMV2_RESOURCE_FFPROBE"].map { URL(fileURLWithPath: $0) } ?? V2LocalResourceMediaProbe.defaultExecutable,
+                    temporaryDirectory: resourceConfiguration.rootDirectory.appendingPathComponent("media-processing"), maximumBytes: resourceConfiguration.maximumBytes)
+                try await mediaProbe.verifyReadiness()
                 let resourceService = try V2ResourceService(resolve: { home, usage, user, device in
                     try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
                 }, registry: resourceRegistry,
@@ -341,6 +345,9 @@ enum IMV2AccountServerApp {
                         return try storageAssembly.allocate(binding: binding)
                     })
                 V2VaporResourceRoutes(authenticator: authenticator, service: resourceService).register(on: authenticatedAccountRoutes)
+                V2VaporRoomResourceDirectoryRoutes(authenticator: authenticator,
+                    service: try .init(authorization: .init(directory: actor.directory),
+                        signingKey: resourceConfiguration.signingKey)).register(on: authenticatedAccountRoutes)
                 let resourceProfiles = V2ResourceProfilePresentationService(controlDatabase: database,
                     authorization: .init(directory: actor.directory), avatars: .init(delivery: resourceDelivery))
                 resourceProfileRuntime = resourceProfiles
@@ -388,7 +395,7 @@ enum IMV2AccountServerApp {
                     }
                     let scanner = try V2MediaScanWorker(store: PostgresV2MediaScanStore(database: ownerDatabase),
                         provider: V2PlacementMediaScanner(database: ownerDatabase, registry: resourceRegistry,
-                            scanner: V2LocalResourceScanner(), variants: variants))
+                            scanner: V2LocalResourceScanner(), variants: variants, mediaProbe: mediaProbe), leaseDuration: 300)
                     let purger = try V2MediaPurgeWorker(store: PostgresV2MediaPurgeStore(database: ownerDatabase),
                         provider: V2PlacementMediaPurger(database: ownerDatabase, registry: resourceRegistry,
                             uploads: try V2BoundMediaProvider(database: ownerDatabase, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports)))

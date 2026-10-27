@@ -11,7 +11,12 @@ public struct V2BackgroundSystemTask: Sendable, Equatable {
     public let identifier: Int
     public let mappingID: UUID?
     public let suspended: Bool
-    public init(identifier:Int,mappingID:UUID?,suspended:Bool=false) { self.identifier=identifier;self.mappingID=mappingID;self.suspended=suspended }
+    public let sentBytes: Int64?
+    public let receivedBytes: Int64?
+    public init(identifier:Int,mappingID:UUID?,suspended:Bool=false,sentBytes:Int64?=nil,receivedBytes:Int64?=nil) {
+        self.identifier=identifier;self.mappingID=mappingID;self.suspended=suspended
+        self.sentBytes=sentBytes;self.receivedBytes=receivedBytes
+    }
 }
 /// A durable inbox entry contains no request, URL, credential, headers or response body.
 public struct V2BackgroundTransferResult: Codable, Sendable, Equatable {
@@ -45,7 +50,8 @@ public protocol V2BackgroundDownloadSessionDriving: V2BackgroundTaskSessionDrivi
 }
 public struct V2BackgroundTaskMapping: Sendable, Equatable {
     public let id:UUID,sessionID:UUID,jobID:UUID,activationID:UUID,sourceToken:UUID
-    public let taskIdentifier:Int,partNumber:Int
+    public let taskIdentifier:Int
+    public let partNumber:Int?
     public let expectedBytes:Int64
     public let expiresAt:Date
     public let originDigest:String

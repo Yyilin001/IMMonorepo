@@ -1,0 +1,235 @@
+{
+  "status": "native-cross-release-built-packaged-and-linux-verified",
+  "observedAt": "2026-10-27T10:11:34.760899+00:00",
+  "request": "Use native macOS ARM Swift compiler to cross-compile Linux x86_64 releases",
+  "host": {
+    "chip": "Apple M4 Pro",
+    "architecture": "arm64",
+    "cores": 14,
+    "memoryGiB": 48
+  },
+  "compiler": "Swift 6.4.0 open-source arm64 macOS toolchain",
+  "target": "x86_64-unknown-linux-gnu",
+  "sdkLock": "scripts/linux-sdk/toolchain.json",
+  "compilerRunsInsideEmulatedLinux": false,
+  "sdkRuntimeSamplesMatchPinnedRuntime": true,
+  "initialAccountBuildSeconds": 277.61,
+  "previousEmulatedAccountBuildSeconds": 4083.475142792,
+  "timingLimit": "Seven-product native cold/warm wall time includes resolution, packaging and hashing; excludes SDK setup and Docker image packaging. The emulated comparison used a different cache state and is not a controlled speedup benchmark.",
+  "formalRun": "build/native-linux-release/runs/20261027T100443Z-822a1c91",
+  "guardTests": {
+    "passed": 11
+  },
+  "rejectedRoutes": [
+    {
+      "sdk": "Static Linux musl 6.4.0/6.4.1",
+      "reason": "Missing Distributed decodeNextArgument dispatch thunk at link time; no fabricated symbols added."
+    },
+    {
+      "compiler": "6.4.1",
+      "reason": "Pinned HTTP server dependency fails iterator sending isolation diagnostics; checks not disabled."
+    },
+    {
+      "cache": "Old /tmp cache",
+      "reason": "Mixing /tmp and canonical /private/tmp caused duplicate Clang PCM; new default uses a fixed dedicated path."
+    }
+  ],
+  "linuxRuntimeVerification": {
+    "status": "passed-linux-loader-and-worker",
+    "runtimeImageID": "sha256:bc5ef298a2861460bd79f7ee4cbd4b0b5f0eb7db57e0b4932c54d8404d1015c1",
+    "manifestSHA256": "921f8fbabecfb3617fe3335524dda6843151a56db08efbf65a7234b1e12bba2a",
+    "products": [
+      {
+        "product": "IMV2AccountServerApp",
+        "sha256": "05736b1d764c6ad6a4a8dbfdbf2154e2200e967920e74240903df67d00734cb3",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2ServerApp",
+        "sha256": "6e17156aa204d0d96b8f1faa1bccc7bd8270aa981109f39709134067acb3825f",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2OperatorServerApp",
+        "sha256": "d541566a2526b63e3a6919359d45035a30ca8308689691e83f8ebf1d38f14ae2",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2PlacementControlApp",
+        "sha256": "b63ec41105b4b87330b85549fed6b746dbbc9ab3b2598270c356a1a2474e8288",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2RoomHostSupervisorApp",
+        "sha256": "698f6f1e6c8a3bef444e673d39945efbedc3fe6553e59e30f61754ed6c33ec95",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2ResourceImageWorker",
+        "sha256": "f313c33fbba0751a16ee490c2c5352232b7c5d874d412c9efe942b948d318637",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2LocalGatewayProbe",
+        "sha256": "490b87d813836d09037ab6588311da7eee88e9e06fe0fb782b6eb8c0532bd3c5",
+        "librariesResolved": true
+      }
+    ],
+    "worker": {
+      "sourceDimensions": {
+        "width": 640,
+        "height": 480
+      },
+      "previews": {
+        "320": {
+          "width": 320,
+          "height": 240,
+          "bytes": 104
+        },
+        "1280": {
+          "width": 640,
+          "height": 480,
+          "bytes": 133
+        }
+      }
+    },
+    "network": "none",
+    "serviceEndToEndTest": false
+  },
+  "deploymentOfCrossCompiledImage": false,
+  "guide": "docs/guides/native-linux-release.md",
+  "freshCacheBuild": {
+    "seconds": 374.73,
+    "manifest": "build/native-linux-release/runs/20261027T095728Z-5692cfdb/manifest.json",
+    "productCount": 7,
+    "sourceDrift": []
+  },
+  "warmBuild": {
+    "seconds": 43.832,
+    "manifest": "build/native-linux-release/runs/20261027T100443Z-822a1c91/manifest.json",
+    "productCount": 7,
+    "sourceDrift": [],
+    "includesArtifactStrippingAndLoadSegmentVerification": true
+  },
+  "products": [
+    {
+      "product": "IMV2AccountServerApp",
+      "seconds": 6.178,
+      "binary": "bin/IMV2AccountServerApp",
+      "sha256": "05736b1d764c6ad6a4a8dbfdbf2154e2200e967920e74240903df67d00734cb3",
+      "bytes": 90603816,
+      "loadSegmentsVerified": true,
+      "unstrippedBinary": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/.build-linux-glibc-6.4.0/out/Products/Release-linux-x86_64/IMV2AccountServerApp",
+      "unstrippedSHA256": "c03dade34b51337745b861562b0b954290f5ebf39384e1d7f84959e03b778eab",
+      "format": "ELF64",
+      "architecture": "x86_64",
+      "static": false,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2"
+    },
+    {
+      "product": "IMV2ServerApp",
+      "seconds": 6.114,
+      "binary": "bin/IMV2ServerApp",
+      "sha256": "6e17156aa204d0d96b8f1faa1bccc7bd8270aa981109f39709134067acb3825f",
+      "bytes": 91676984,
+      "loadSegmentsVerified": true,
+      "unstrippedBinary": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/.build-linux-glibc-6.4.0/out/Products/Release-linux-x86_64/IMV2ServerApp",
+      "unstrippedSHA256": "b3171766fb938c0a252deaea495a427118ea586674ccd16cfe176e1e0d9ac7f7",
+      "format": "ELF64",
+      "architecture": "x86_64",
+      "static": false,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2"
+    },
+    {
+      "product": "IMV2OperatorServerApp",
+      "seconds": 5.9,
+      "binary": "bin/IMV2OperatorServerApp",
+      "sha256": "d541566a2526b63e3a6919359d45035a30ca8308689691e83f8ebf1d38f14ae2",
+      "bytes": 90382624,
+      "loadSegmentsVerified": true,
+      "unstrippedBinary": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/.build-linux-glibc-6.4.0/out/Products/Release-linux-x86_64/IMV2OperatorServerApp",
+      "unstrippedSHA256": "133e931cb4b914edd26c1b404a32509c568b5b29d470a801ea12fab603fad1fc",
+      "format": "ELF64",
+      "architecture": "x86_64",
+      "static": false,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2"
+    },
+    {
+      "product": "IMV2PlacementControlApp",
+      "seconds": 5.154,
+      "binary": "bin/IMV2PlacementControlApp",
+      "sha256": "b63ec41105b4b87330b85549fed6b746dbbc9ab3b2598270c356a1a2474e8288",
+      "bytes": 81944336,
+      "loadSegmentsVerified": true,
+      "unstrippedBinary": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/.build-linux-glibc-6.4.0/out/Products/Release-linux-x86_64/IMV2PlacementControlApp",
+      "unstrippedSHA256": "3cd764d1e65abdd76a34468a57a0b4e2e85e562ab23eb7ba5c6a8b0a0777eb34",
+      "format": "ELF64",
+      "architecture": "x86_64",
+      "static": false,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2"
+    },
+    {
+      "product": "IMV2RoomHostSupervisorApp",
+      "seconds": 4.955,
+      "binary": "bin/IMV2RoomHostSupervisorApp",
+      "sha256": "698f6f1e6c8a3bef444e673d39945efbedc3fe6553e59e30f61754ed6c33ec95",
+      "bytes": 82267048,
+      "loadSegmentsVerified": true,
+      "unstrippedBinary": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/.build-linux-glibc-6.4.0/out/Products/Release-linux-x86_64/IMV2RoomHostSupervisorApp",
+      "unstrippedSHA256": "cb47b63d148540585ea87bf4c4627af8549be0359d1b7e5fc4cb0ebf6e15e298",
+      "format": "ELF64",
+      "architecture": "x86_64",
+      "static": false,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2"
+    },
+    {
+      "product": "IMV2ResourceImageWorker",
+      "seconds": 2.65,
+      "binary": "bin/IMV2ResourceImageWorker",
+      "sha256": "f313c33fbba0751a16ee490c2c5352232b7c5d874d412c9efe942b948d318637",
+      "bytes": 32088,
+      "loadSegmentsVerified": true,
+      "unstrippedBinary": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/.build-linux-glibc-6.4.0/out/Products/Release-linux-x86_64/IMV2ResourceImageWorker",
+      "unstrippedSHA256": "e9053fa035339995d0863efb56ded7b3be9e4c9f9ecffbc724bd0365bcacd692",
+      "format": "ELF64",
+      "architecture": "x86_64",
+      "static": false,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2"
+    },
+    {
+      "product": "IMV2LocalGatewayProbe",
+      "seconds": 4.769,
+      "binary": "bin/IMV2LocalGatewayProbe",
+      "sha256": "490b87d813836d09037ab6588311da7eee88e9e06fe0fb782b6eb8c0532bd3c5",
+      "bytes": 81022768,
+      "loadSegmentsVerified": true,
+      "unstrippedBinary": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/.build-linux-glibc-6.4.0/out/Products/Release-linux-x86_64/IMV2LocalGatewayProbe",
+      "unstrippedSHA256": "96de8dd9f3c6e78aa0b23778252630d6ff45b98b4c9a5b323d880af3f16aa4c1",
+      "format": "ELF64",
+      "architecture": "x86_64",
+      "static": false,
+      "interpreter": "/lib64/ld-linux-x86-64.so.2"
+    }
+  ],
+  "runtimeRecord": "build/native-linux-release/runs/20261027T100443Z-822a1c91/runtime-verification.json",
+  "runtimeImage": "imv2localaccount-v2server:native-cross-20261027",
+  "pairedThumbnailSourceDrift": [],
+  "actualChecks": {
+    "guardTestsPassed": 11,
+    "pythonSyntax": true,
+    "shellSyntax": true,
+    "documentationLinks": true,
+    "documentationStructure": true,
+    "diffWhitespace": true
+  },
+  "sourceSHA256": {
+    "scripts/build_v2_linux_release.py": "bfc80b69147814c32e9b71fe150ff8dff9bab1cae99a8552154d08ecaed156ae",
+    "scripts/prepare_v2_linux_sdk.py": "3b3783437bebcc613982600778b7c93db85c2d089efd1d47fe3df22aac3515ed",
+    "scripts/verify_v2_linux_release.py": "2871223d10d707a86bc6a18955b3104f44a8b5dabe58e7969a81a039a32e90ea",
+    "scripts/test_build_v2_linux_release.py": "2718df5e7f23311840c6442004c75d32f82645344e6dd2b64257ed254cae10cf",
+    "scripts/linux-sdk/toolchain.json": "4361c89c0863598f0cd996bdfce467e9ea3ab825370865e8fa6d9be3f4eb81c4",
+    "scripts/linux-sdk/swift-nio-2.104.0-imports.json": "626e5700f9816de1f9005435cc81544133ac7bc839efd625939fc509a249ae1e",
+    "IMV2/Dockerfile.account.prebuilt": "0c10a1fdf338e557ba93cecbad48519f84591d41a914dee50cfbf366bee58e62",
+    "IMV2/scripts/run_v2_local_account_stack.sh": "fd722d9e6d7ba1f6232142697691115c0ab27a8990a11705de430c13b744c422"
+  }
+}

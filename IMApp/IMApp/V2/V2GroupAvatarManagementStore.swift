@@ -2,6 +2,7 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 import Observation
+import UIKit
 
 @MainActor
 @Observable
@@ -12,6 +13,7 @@ final class V2GroupAvatarManagementStore {
     private(set) var isPerformingAction = false
     private(set) var didReadPending = false
     private(set) var isStale = false
+    private(set) var drafts: [V2StagedConversationAttachment] = []
     private(set) var presentationInvalidationGeneration: UInt64 = 0
     let roomID: RoomID
     let focusedOperationID: GroupAvatarOperationID?
@@ -22,6 +24,7 @@ final class V2GroupAvatarManagementStore {
     private var activation: UUID?
     private var authorityRead: UUID?
     private var pendingRead: UUID?
+    private var selectionRead: UUID?
     private var actionTask: Task<Void, Never>?
 
     init(roomID: RoomID, manager: any V2GroupAvatarManaging, stager: any V2ConversationAttachmentStaging,
@@ -54,6 +57,8 @@ final class V2GroupAvatarManagementStore {
     func observe() async {
         let epoch = UUID()
         activation = epoch; state = .loading; feedback = nil; didReadPending = false
+        await reloadSelections(epoch: epoch)
+        guard activation == epoch, !Task.isCancelled else { return }
         guard let notifier else { await reload(epoch: epoch); return }
         async let permissions: Void = observePermissions(notifier, epoch: epoch)
         async let intents: Void = observePending(notifier, epoch: epoch)
@@ -62,7 +67,7 @@ final class V2GroupAvatarManagementStore {
     }
 
     func suspend() {
-        activation = nil; authorityRead = nil; pendingRead = nil
+        activation = nil; authorityRead = nil; pendingRead = nil; selectionRead = nil
         actionTask?.cancel()
         state = .inactive; feedback = nil; didReadPending = false; isStale = false
     }
@@ -80,7 +85,7 @@ final class V2GroupAvatarManagementStore {
     func importImage(from url: URL) {
         guard canUpload, let expected = authority?.state.revision else { return }
         startAction { epoch in
-            let image = try await self.stager.stageImportedFile(at: url)
+            let image = try await self.stager.stageImportedFile(at: url, purpose: .groupAvatar(self.roomID))
             do {
                 try Task.checkCancellation()
                 guard self.activation == epoch else { throw CancellationError() }
@@ -89,12 +94,50 @@ final class V2GroupAvatarManagementStore {
                 await self.stager.discard(image)
                 throw error
             }
-            // After handoff, even cancellation may race a committed journal
-            // transaction. Referenced files survive; aged unclaimed drafts use
-            // the account's bounded orphan cleanup on next activation.
+            // Import is durable before any authority/network call. A failure
+            // before freezing leaves a recoverable selection; after freezing
+            // the journal removes that selection and owns an upload claim.
+            await self.reloadSelections(epoch: epoch)
             try await self.manager.change(roomID: self.roomID, expectedRevision: expected, image: image)
             await self.reload(epoch: epoch)
         }
+    }
+
+    func useResource(_ selection: V2AvatarResourceSelection) {
+        guard canChange, let expected = authority?.state.revision else { return }
+        startAction { epoch in
+            try await self.manager.changeUsingResource(roomID: self.roomID, expectedRevision: expected, selection: selection)
+            await self.reload(epoch: epoch)
+        }
+    }
+
+    func submitDraft(_ image: V2StagedConversationAttachment) {
+        guard canUpload, image.availability == .local, drafts.contains(where: { $0.localAssetID == image.localAssetID }),
+              let expected = authority?.state.revision else { return }
+        startAction { epoch in
+            try await self.manager.change(roomID: self.roomID, expectedRevision: expected, image: image)
+            await self.reload(epoch: epoch)
+        }
+    }
+
+    func discardDraft(_ image: V2StagedConversationAttachment) {
+        guard drafts.contains(where: { $0.localAssetID == image.localAssetID }) else { return }
+        startAction { epoch in
+            await self.stager.discard(image)
+            await self.reloadSelections(epoch: epoch)
+        }
+    }
+
+    func preview(_ image: V2StagedConversationAttachment, cache: V2LocalMediaThumbnailCache) async -> UIImage? {
+        guard drafts.contains(where: { $0.localAssetID == image.localAssetID }) else { return nil }
+        do {
+            let lease = try await stager.borrow(.selection(image.localAssetID))
+            if Task.isCancelled { await lease.release(); return nil }
+            let preview = await cache.thumbnail(fileURL: lease.fileURL, maximumPixelSize: 256)?.image
+            await lease.release()
+            guard !Task.isCancelled, drafts.contains(where: { $0.localAssetID == image.localAssetID }) else { return nil }
+            return preview
+        } catch { return nil }
     }
 
     func remove() {
@@ -139,6 +182,7 @@ final class V2GroupAvatarManagementStore {
             catch {
                 guard activation == epoch, !Task.isCancelled else { return }
                 feedback = Self.message(for: error)
+                await reloadSelections(epoch: epoch)
                 await reloadPending(epoch: epoch)
             }
         }
@@ -159,6 +203,8 @@ final class V2GroupAvatarManagementStore {
     }
 
     private func reload(epoch: UUID, authorizationChanged: Bool = false) async {
+        guard activation == epoch, !Task.isCancelled else { return }
+        await reloadSelections(epoch: epoch)
         guard activation == epoch, !Task.isCancelled else { return }
         let read = UUID(), pendingAtStart = pendingRead
         authorityRead = read
@@ -197,6 +243,8 @@ final class V2GroupAvatarManagementStore {
 
     private func reloadPending(epoch: UUID) async {
         guard activation == epoch, !Task.isCancelled else { return }
+        await reloadSelections(epoch: epoch)
+        guard activation == epoch, !Task.isCancelled else { return }
         let read = UUID(); pendingRead = read
         do {
             let values = try await includingFocus(manager.pending(roomID: roomID))
@@ -211,6 +259,20 @@ final class V2GroupAvatarManagementStore {
         catch {
             guard activation == epoch, pendingRead == read, !Task.isCancelled else { return }
             feedback = "无法读取更改记录，请刷新后重试。"
+        }
+    }
+
+    private func reloadSelections(epoch: UUID) async {
+        guard activation == epoch, !Task.isCancelled else { return }
+        let read = UUID(); selectionRead = read
+        do {
+            let values = try await stager.selectedAttachments(purpose: .groupAvatar(roomID))
+            guard activation == epoch, selectionRead == read, !Task.isCancelled else { return }
+            drafts = values
+        } catch is CancellationError { }
+        catch {
+            guard activation == epoch, selectionRead == read, !Task.isCancelled else { return }
+            feedback = "无法读取本机头像草稿，请刷新后重试。"
         }
     }
 

@@ -1,10 +1,58 @@
 import Foundation
+import CoreGraphics
 import MessagingTimelineCore
 import Testing
 @testable import IMApp
 
 @MainActor
 struct V2MessageTimelinePresentationTests {
+    @Test func firstEntryCorrectsImageGrowthAndComposerViewportChanges() {
+        var pin = V2MessageTimelineInitialBottomAnchor()
+        let atBottom = V2MessageTimelineInitialBottomAnchor.Geometry(contentSize: .init(width: 393, height: 2100),
+            visibleSize: .init(width: 393, height: 650), bottomInset: 0, pointsFromBottom: 0)
+        let correction0 = pin.needsCorrection(atBottom, hasItems: true)
+        #expect(!correction0)
+        let expandedImage = V2MessageTimelineInitialBottomAnchor.Geometry(contentSize: .init(width: 393, height: 2164),
+            visibleSize: atBottom.visibleSize, bottomInset: 0, pointsFromBottom: 64)
+        let correction1 = pin.needsCorrection(expandedImage, hasItems: true)
+        #expect(correction1)
+        let correction2 = pin.needsCorrection(expandedImage, hasItems: true)
+        #expect(!correction2) // No no-op geometry loop.
+        let correction3 = pin.needsCorrection(atBottom, hasItems: true)
+        #expect(!correction3)
+        let composerLaidOut = V2MessageTimelineInitialBottomAnchor.Geometry(contentSize: expandedImage.contentSize,
+            visibleSize: .init(width: 393, height: 600), bottomInset: 34, pointsFromBottom: 84)
+        let correction4 = pin.needsCorrection(composerLaidOut, hasItems: true)
+        #expect(correction4)
+    }
+
+    @Test func initialPinNeverPullsAHistoryReaderBackToTheTail() {
+        let gap = V2MessageTimelineInitialBottomAnchor.Geometry(contentSize: .init(width: 393, height: 2100),
+            visibleSize: .init(width: 393, height: 650), bottomInset: 0, pointsFromBottom: 400)
+        var pin = V2MessageTimelineInitialBottomAnchor()
+        pin.release() // Same event used for actual dragging and focused-message navigation.
+        let correction5 = pin.needsCorrection(gap, hasItems: true)
+        #expect(!correction5)
+        #expect(!pin.isActive)
+        var focusedEntry = V2MessageTimelineInitialBottomAnchor(isActive: false)
+        let correction6 = focusedEntry.needsCorrection(gap, hasItems: true)
+        #expect(!correction6)
+    }
+
+    @Test func initialPinWaitsForRealContentAndANonzeroViewport() {
+        var pin = V2MessageTimelineInitialBottomAnchor()
+        let unlaidOut = V2MessageTimelineInitialBottomAnchor.Geometry(contentSize: .init(width: 393, height: 2100),
+            visibleSize: .zero, bottomInset: 0, pointsFromBottom: 100)
+        let correction7 = pin.needsCorrection(unlaidOut, hasItems: true)
+        #expect(!correction7)
+        let ready = V2MessageTimelineInitialBottomAnchor.Geometry(contentSize: unlaidOut.contentSize,
+            visibleSize: .init(width: 393, height: 650), bottomInset: 0, pointsFromBottom: 100)
+        let correction8 = pin.needsCorrection(ready, hasItems: false)
+        #expect(!correction8)
+        let correction9 = pin.needsCorrection(ready, hasItems: true)
+        #expect(correction9)
+    }
+
     @Test func historyAndLiveUpdatesPreserveRendererIdentity() {
         let model = V2MessageTimelinePresentation()
         let identity = model.dataSource.id

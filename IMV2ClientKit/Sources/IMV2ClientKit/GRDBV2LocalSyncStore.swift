@@ -122,6 +122,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         do {
             try databasePool.write { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
             try Self.migrator.migrate(databasePool)
+            try databasePool.read { try Self.validateCurrentResourceSchema($0) }
             let searchPool = try DatabasePool(path: messageSearchDatabaseURL.path, configuration: configuration)
             openedSearchPool = searchPool
             try searchPool.write { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
@@ -160,6 +161,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                       (row["user_id"] as String?) == userID.rawValue else {
                     throw V2OfflineReadBootstrapError.installationBindingMismatch
                 }
+                try Self.validateCurrentResourceSchema(db)
             }
             // The required stored property remains read-only too. If no derived search
             // file exists, it points at the primary file; offline UI does not run search.
@@ -1154,6 +1156,15 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                 entries: Self.snapshotShadowTable(for: "v2_conversation_list_entries"),
                 db: db
             )
+            // Queue metadata work before ACK; activation only swaps this bank.
+            // Descriptors stay in the authoritative message projection, never
+            // in a second independently writable resource payload queue.
+            try db.execute(sql: """
+                INSERT OR REPLACE INTO \(Self.snapshotShadowTable(for: "v2_resource_projection_index_jobs"))
+                    (message_id,room_id,queued_revision)
+                SELECT message_id,room_id,message_revision FROM \(Self.snapshotShadowTable(for: "v2_message_projections"))
+                WHERE media_ids<>'[]' AND is_withdrawn=0
+                """)
             try Self.prepareContactSearchShadow(db: db)
             try Self.prepareMessageSearchControlShadow(db: db)
             try Self.createSnapshotShadowIndexes(db: db)
@@ -1228,6 +1239,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         "v2_sync_events",
         "v2_message_search_jobs",
         "v2_message_search_state",
+        "v2_resource_projection_index_jobs",
     ]
 
     private static let snapshotVirtualBankTables = ["v2_contact_profile_search"]
@@ -4296,6 +4308,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             guard roomID == projection.roomID.rawValue, revision > (try storageInteger(projection.messageRevision)) else { throw V2ClientProjectionError.invalidMessagePayload }
             try redactLocalMessageProjection(messageID: projection.messageID, revision: revision, target: target, db: db)
         }
+        if case .live = target { try indexMessageResources(projection, db: db) }
+        else if !projection.media.isEmpty {
+            try db.execute(sql: "INSERT OR REPLACE INTO \(target.table("v2_resource_projection_index_jobs"))(message_id,room_id,queued_revision) VALUES(?,?,?)",
+                arguments: [projection.messageID.rawValue,projection.roomID.rawValue,try storageInteger(projection.messageRevision)])
+        }
         if updateConversationSummary {
             try upsertConversationSummary(for: projection, db: db)
         }
@@ -4686,6 +4703,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         )
         if case .live = target,
            let room = try String.fetchOne(db, sql: "SELECT room_id FROM v2_message_projections WHERE message_id = ?", arguments: [messageID.rawValue]) {
+            try db.execute(sql: "UPDATE v2_resource_references SET is_revoked=1,business_revision=MAX(business_revision,?) WHERE context_kind='message' AND context_id=?",
+                arguments: [revision,messageID.rawValue])
             try refreshEffectiveConversationSummary(roomID: RoomID(room), db: db)
         }
     }
@@ -4712,6 +4731,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         }
         try db.execute(sql: "UPDATE v2_message_projections SET message_revision = ?, text_body = ?, media_ids = ?, media_presentations = ?, mention_targets = ?, entities = ?, reply_to_message_id = ?, forwarded_from_message_id = ?, forwarded_from_user_id = ? WHERE message_id = ?",
             arguments: [incoming, value.text, try encodeMedia(value.media), try encodeMediaPresentations(value.mediaPresentations), try encodeMentions(value.mentions), try encodeEntities(value.entities, text: value.text), value.replyTo?.messageID.rawValue, value.forwardedFrom?.messageID.rawValue, value.forwardedFrom?.senderUserID.rawValue, value.messageID.rawValue])
+        try indexMessageResources(value, db: db)
         try enqueueMessageSearchIndexJob(messageID: value.messageID, db: db)
     }
 
@@ -4746,6 +4766,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         }
         guard revision < Int64.max, incoming == revision + 1 else { throw V2ClientProjectionError.invalidMessagePayload }
         try db.execute(sql: "UPDATE v2_message_projections SET text_body = ?, entities = '[]', message_revision = ? WHERE message_id = ?", arguments: [edit.text, incoming, edit.messageID.rawValue])
+        if let updated = try Row.fetchOne(db, sql: "SELECT * FROM v2_message_projections WHERE message_id=?", arguments: [edit.messageID.rawValue]) {
+            try indexMessageResources(decodeMessageProjection(updated), db: db)
+        }
         try enqueueMessageSearchIndexJob(messageID: edit.messageID, db: db)
     }
 
@@ -4952,16 +4975,18 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         let kind: V2MediaPresentation.Kind
         let contentType: String
         let byteCount: Int64
+        let resourceDescriptor: V2ResourceDescriptor?
 
         init(_ presentation: V2MediaPresentation) {
             mediaID = presentation.mediaID.rawValue
             kind = presentation.kind
             contentType = presentation.contentType
             byteCount = presentation.byteCount
+            resourceDescriptor = presentation.resourceDescriptor
         }
 
         func presentation() throws -> V2MediaPresentation {
-            try .init(mediaID: .init(mediaID), kind: kind, contentType: contentType, byteCount: byteCount)
+            try .init(mediaID: .init(mediaID), kind: kind, contentType: contentType, byteCount: byteCount, resourceDescriptor: resourceDescriptor)
         }
 
         enum CodingKeys: String, CodingKey {
@@ -4969,6 +4994,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             case kind
             case contentType = "content_type"
             case byteCount = "byte_count"
+            case resourceDescriptor = "resource_descriptor"
         }
     }
 
@@ -5101,17 +5127,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             try db.execute(sql: groupCreationWorkSchemaSQL)
             try db.execute(sql: directRoomWorkSchemaSQL)
             try db.execute(sql: messageModerationWorkSchemaSQL)
-            try db.execute(sql: resourceJournalSchemaSQL)
-            try db.execute(sql: resourceImportSchemaSQL)
+            for statement in resourceSchemaStatements { try db.execute(sql: statement) }
             try db.execute(sql: groupAvatarInvalidationSchemaSQL)
             try db.execute(sql: groupAvatarIntentsSchemaSQL)
             try db.execute(sql: groupNicknameInvalidationSchemaSQL)
-        }
-        migrator.registerMigration("addV2BackgroundDownloadJobs") { db in
-            try db.execute(sql: backgroundDownloadSchemaSQL)
-        }
-        migrator.registerMigration("addV2LocalDirectMessages") { db in
             try db.execute(sql: localDirectMessagesSchemaSQL)
+        }
+        migrator.registerMigration("resourceLocalImageDimensions") { db in
+            try db.execute(sql: localResourceImageDimensionsSchemaSQL)
         }
         return migrator
     }()
@@ -5237,6 +5260,7 @@ public enum V2LocalBackupExclusion {
 }
 
 public enum V2ClientLocalStorageError: Error, Equatable, Sendable {
+    case unsupportedResourceSchema
     case backupExclusionVerificationFailed
     case installationBindingMismatch
 }

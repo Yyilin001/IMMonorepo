@@ -14,7 +14,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
     private let database: any Database
     private let token: V2RoomActivationToken
     private let lifetime: V2RoomActivationLifetime
-    private let scope: V2RoomActivationWriteScope
+    let scope: V2RoomActivationWriteScope
 
     init(database: any Database, token: V2RoomActivationToken, lifetime: V2RoomActivationLifetime) throws {
         guard lifetime.token == token else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
@@ -29,6 +29,8 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
             throw V2RoomActorStateError.activationChanged
         }
         switch query {
+        case .resourceDirectory(let request):
+            return try await resourceDirectory(request)
         case .groupAvatar(let request):
             return try await groupAvatar(request)
         case .profileVisibilityBatch(let request):
@@ -80,7 +82,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
         }
     }
 
-    private func ownedTransaction<Value: Sendable>(
+    func ownedTransaction<Value: Sendable>(
         _ body: @escaping @Sendable (any Database, ContinuousClock.Instant) async throws -> Value
     ) async throws -> Value {
         try await lifetime.withPin(deadline: V2RoomSQLDeadline.boundedTransactionDeadline()) { validUntil in

@@ -2,9 +2,85 @@ import Foundation
 import Crypto
 import IMV2Core
 import Testing
+import Synchronization
 @testable import IMV2ClientKit
 
 struct V2RangeDownloadTests {
+    @Test func responseProgressMeasuresEachAcceptedRangeAndFullResponseRebuildSeparately() async throws {
+        let destination = try destination()
+        defer { try? FileManager.default.removeItem(at: destination.deletingLastPathComponent()) }
+        let hub = V2ResourceTransferProgressHub(), id = UUID()
+        let capture = RangeProgressCapture(hub: hub, id: id)
+        let transport = CapturedRangeTransport(base: RangeFixture(body: body), capture: capture)
+        try await V2ResourceDownloadProgressScope.$context.withValue(.init(job: id, hub: hub)) {
+            try await V2URLSessionMediaByteTransfer(transport: transport, chunkBytes: 4).download(target: target(body), destinationURL: destination)
+        }
+        #expect(capture.headers.compactMap { $0?.expectedBytes } == [4,4,2])
+        #expect(capture.bodies.compactMap { $0?.transferredBytes } == [4,4,2])
+        #expect(Set(capture.headers.compactMap { $0?.attemptID }).count == 3)
+        #expect(hub.snapshot().isEmpty)
+        #expect(try Data(contentsOf: destination) == body)
+        hub.close()
+    }
+
+    @Test func interruptedResponseEndsItsProgressAnd200RebuildDoesNotAddOldPrefix() async throws {
+        let destination = try destination()
+        defer { try? FileManager.default.removeItem(at: destination.deletingLastPathComponent()) }
+        let hub = V2ResourceTransferProgressHub(), id = UUID()
+        let initial = RangeProgressCapture(hub: hub, id: id)
+        await #expect(throws: URLError.self) {
+            try await V2ResourceDownloadProgressScope.$context.withValue(.init(job: id, hub: hub)) {
+                try await V2URLSessionMediaByteTransfer(transport: CapturedRangeTransport(base: RangeFixture(body: body, failAfterBytes: 2), capture: initial), chunkBytes: 4)
+                    .download(target: target(body), destinationURL: destination)
+            }
+        }
+        #expect(initial.bodies.compactMap { $0?.transferredBytes } == [2])
+        #expect(hub.snapshot().isEmpty)
+        let resumed = RangeProgressCapture(hub: hub, id: id)
+        try await V2ResourceDownloadProgressScope.$context.withValue(.init(job: id, hub: hub)) {
+            try await V2URLSessionMediaByteTransfer(transport: CapturedRangeTransport(base: RangeFixture(body: body, fullResponse: true), capture: resumed), chunkBytes: 4)
+                .download(target: target(body), destinationURL: destination)
+        }
+        #expect(resumed.headers.compactMap { $0?.expectedBytes } == [10])
+        #expect(resumed.bodies.compactMap { $0?.transferredBytes } == [10])
+        #expect(initial.headers.compactMap { $0 }.first?.attemptID != resumed.headers.compactMap { $0 }.first?.attemptID)
+        #expect(hub.snapshot().isEmpty)
+        hub.close()
+    }
+
+    @Test func rejectedVersionNeverStartsAResponseProgressAttempt() async throws {
+        let destination = try destination()
+        defer { try? FileManager.default.removeItem(at: destination.deletingLastPathComponent()) }
+        await #expect(throws: URLError.self) {
+            try await V2URLSessionMediaByteTransfer(transport: RangeFixture(body: body, failAfterBytes: 2), chunkBytes: 4).download(target: target(body), destinationURL: destination)
+        }
+        let hub = V2ResourceTransferProgressHub(), id = UUID()
+        let capture = RangeProgressCapture(hub: hub, id: id)
+        await #expect(throws: V2RangeDownloadError.versionChanged) {
+            try await V2ResourceDownloadProgressScope.$context.withValue(.init(job: id, hub: hub)) {
+                try await V2URLSessionMediaByteTransfer(transport: CapturedRangeTransport(base: RangeFixture(body: body, etag: "\"other-version\""), capture: capture), chunkBytes: 4)
+                    .download(target: target(body), destinationURL: destination)
+            }
+        }
+        #expect(capture.headers.isEmpty && capture.bodies.isEmpty && hub.snapshot().isEmpty)
+        hub.close()
+    }
+    @Test func everyRangeRequestRetainsNetworkRestrictionsAndCannotRelaxAnExistingRestriction() async throws {
+        let destination = try destination()
+        defer { try? FileManager.default.removeItem(at: destination.deletingLastPathComponent()) }
+        let expected = V2ResourceDownloadNetworkConstraints(allowsCellular: false, allowsExpensive: false, allowsConstrained: false)
+        let restricted = try target(body).restrictingNetwork(to: expected).restrictingNetwork(to: .unrestricted)
+        let transport = RangeFixture(body: body)
+        try await V2URLSessionMediaByteTransfer(transport: transport, chunkBytes: 4).download(target: restricted, destinationURL: destination)
+        let requests = await transport.recorded
+        #expect(requests.count == 3)
+        for request in requests {
+            #expect(!request.allowsCellularAccess)
+            #expect(!request.allowsExpensiveNetworkAccess)
+            #expect(!request.allowsConstrainedNetworkAccess)
+        }
+        #expect(try Data(contentsOf: destination) == body)
+    }
     @Test(arguments: ["rebuild", "rebuild-corrupt", "rebuild-changed"])
     func verifiedPrefixRequiresSameEntityAndFinalChecksum(path: String) async throws {
         let body = Data("abcdefghij".utf8), root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -121,6 +197,28 @@ struct V2RangeDownloadTests {
         #expect(try Data(contentsOf:destination) == body)
     }
 }
+private final class RangeProgressCapture: Sendable {
+    private struct State: Sendable { var headers: [V2ResourceTransferAttemptProgress?] = []; var bodies: [V2ResourceTransferAttemptProgress?] = [] }
+    private let state = Mutex(State())
+    let hub: V2ResourceTransferProgressHub
+    let id: UUID
+    init(hub: V2ResourceTransferProgressHub, id: UUID) { self.hub = hub; self.id = id }
+    var headers: [V2ResourceTransferAttemptProgress?] { state.withLock { $0.headers } }
+    var bodies: [V2ResourceTransferAttemptProgress?] { state.withLock { $0.bodies } }
+    func header() { let sample = hub.snapshot()[.download(id)]; state.withLock { $0.headers.append(sample) } }
+    func body() { let sample = hub.snapshot()[.download(id)]; state.withLock { $0.bodies.append(sample) } }
+}
+private struct CapturedRangeTransport: V2RangeDownloadTransport {
+    let base: RangeFixture
+    let capture: RangeProgressCapture
+    func stream(_ request: URLRequest, maximumBytes: Int64, receiveResponse: @escaping @Sendable (HTTPURLResponse) throws -> Void,
+                consume: @escaping @Sendable (Data) throws -> Void) async throws -> V2RangeDownloadResponse {
+        try await base.stream(request, maximumBytes: maximumBytes, receiveResponse: {
+            try receiveResponse($0); capture.header()
+        }, consume: { try consume($0); capture.body() })
+    }
+}
+
 private actor RangeFixture: V2RangeDownloadTransport {
     let body: Data
     let failAfterBytes: Int?
@@ -150,6 +248,98 @@ private actor RangeFixture: V2RangeDownloadTransport {
 }
 
 struct V2RangeNativeTransportTests {
+    @Test func sharedPriorityPromotionReachesRealRangeTransportWithoutASecondTransfer() async throws {
+        let session = session(); defer { session.invalidateAndCancel() }
+        let root = FileManager.default.temporaryDirectory.appending(path: "promoted-native-range-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scheduler = V2AccountWorkScheduler(), demand = V2ByteTransferDemand(priority: .background)
+        let occupied = try await scheduler.acquire(.init(service: "mediaProvider", priority: .background, kind: .byteTransfer(.download)))
+        let download = V2URLSessionMediaByteTransfer(session: session, scheduler: scheduler)
+        let target = try target(), file = root.appending(path: "download")
+        let queued = Task {
+            try await V2NetworkWorkScope.$context.withValue(.init(service: "resources", priority: .background)) {
+                try await V2ByteTransferWorkScope.$demand.withValue(demand) {
+                    try await download.download(target: target, destinationURL: file)
+                }
+            }
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while await scheduler.snapshot().waitingByteTransfers != 1 {
+            try #require(ContinuousClock.now < deadline); try await Task.sleep(for: .milliseconds(10))
+        }
+        demand.promote(to: .interactive)
+        try await queued.value
+        #expect(try Data(contentsOf: file) == Data("abcdefghij".utf8))
+        #expect(demand.observerCount == 0)
+        let state = await scheduler.snapshot()
+        #expect(state.activeDownloads == 1 && state.waitingByteTransfers == 0)
+        _ = await scheduler.release(occupied)
+        await scheduler.closeAndDrain()
+    }
+
+    @Test func nativeForegroundUploadAndDownloadShareDirectionalAndTotalLimits() async throws {
+        let session = session(); defer { session.invalidateAndCancel() }
+        let root = FileManager.default.temporaryDirectory.appending(path: "mixed-native-bytes-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "upload-source")
+        try Data("file".utf8).write(to: source)
+        let scheduler = V2AccountWorkScheduler()
+        let upload = V2URLSessionResourcePlanExecutor(session: session, scheduler: scheduler)
+        let download = V2URLSessionMediaByteTransfer(session: session, scheduler: scheduler)
+        let plan = try V2ResourceTransferPlan(mode: .httpPut, url: #require(URL(string: "https://provider.invalid/blackhole")), expiresAt: .now.addingTimeInterval(60), expectedByteCount: 4)
+        let target = try target(path: "blackhole")
+        var tasks: [Task<Void, any Error>] = []
+        for index in 0..<3 {
+            tasks.append(Task { try await upload.upload(fileURL: source, plan: plan) })
+            tasks.append(Task { try await download.download(target: target, destinationURL: root.appending(path: "download-\(index)")) })
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while true {
+            let state = await scheduler.snapshot()
+            if state.activeUploads == 2 && state.activeDownloads == 2 && state.waitingByteTransfers == 2 { break }
+            try #require(ContinuousClock.now < deadline); await Task.yield()
+        }
+        for task in tasks { task.cancel() }
+        for task in tasks {
+            await #expect(throws: CancellationError.self) { try await task.value }
+        }
+        let drained = await scheduler.snapshot()
+        #expect(drained.active == 0 && drained.waiting == 0)
+        await scheduler.closeAndDrain()
+    }
+
+    @Test func foregroundAutomaticDownloadKeepsItsScopePriorityAndUserReservation() async throws {
+        let session = session(); defer { session.invalidateAndCancel() }
+        let root = FileManager.default.temporaryDirectory.appending(path: "priority-native-bytes-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scheduler = V2AccountWorkScheduler(), target = try target(path: "blackhole")
+        let download = V2URLSessionMediaByteTransfer(session: session, scheduler: scheduler)
+        let first = Task {
+            try await V2NetworkWorkScope.$context.withValue(.init(service: "resources", priority: .background)) {
+                try await download.download(target: target, destinationURL: root.appending(path: "automatic-1"))
+            }
+        }
+        let second = Task {
+            try await V2NetworkWorkScope.$context.withValue(.init(service: "resources", priority: .background)) {
+                try await download.download(target: target, destinationURL: root.appending(path: "automatic-2"))
+            }
+        }
+        let deadline = ContinuousClock.now + .seconds(10)
+        while await scheduler.snapshot().waitingByteTransfers != 1 {
+            try #require(ContinuousClock.now < deadline); await Task.yield()
+        }
+        let user = Task { try await download.download(target: target, destinationURL: root.appending(path: "user")) }
+        while await scheduler.snapshot().activeDownloads != 2 {
+            try #require(ContinuousClock.now < deadline); await Task.yield()
+        }
+        let admitted = await scheduler.snapshot()
+        #expect(admitted.activeBackgroundTransfers == 1 && admitted.waitingByteTransfers == 1)
+        for task in [first, second, user] { task.cancel() }
+        for task in [first, second, user] { await #expect(throws: CancellationError.self) { try await task.value } }
+        #expect(await scheduler.snapshot().active == 0)
+        await scheduler.closeAndDrain()
+    }
     private func session() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [NativeRangeProtocol.self]
@@ -198,8 +388,11 @@ struct V2RangeNativeTransportTests {
         #expect(diagnostics.snapshot().resources.last?.response == .successStatus)
         let part = try V2ResourceTransferPlan(mode:.httpPartPut,url:success.url,expiresAt:success.expiresAt,
             expectedByteCount:2,byteRange:.init(lowerBound:1,upperBound:2),partNumber:1)
+        await #expect(throws: V2ClientMediaTransferError.byteCountMismatch) { try await executor.upload(fileURL: file, plan: part) }
+        let slice = directory.appending(path: "prepared-part")
+        try Data("il".utf8).write(to: slice)
         try await V2NetworkWorkScope.$context.withValue(.init(service:"mediaProvider",isRetry:true)) {
-            try await executor.upload(fileURL:file,plan:part)
+            try await executor.upload(fileURL:slice,plan:part)
         }
         #expect(diagnostics.snapshot().resources.last?.mode == .multipartUpload)
         #expect(diagnostics.snapshot().resources.last?.retryAttempt == true)

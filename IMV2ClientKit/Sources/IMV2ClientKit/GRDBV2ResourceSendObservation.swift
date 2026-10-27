@@ -34,7 +34,7 @@ extension GRDBV2LocalSyncStore {
                               EXISTS(SELECT 1 FROM v2_message_projections p WHERE p.message_id=m.accepted_message_id AND p.room_id=m.room_id AND p.room_sequence=m.accepted_room_sequence)
                               OR EXISTS(SELECT 1 FROM v2_message_tombstones t WHERE t.message_id=m.accepted_message_id AND t.room_id=m.room_id)
                               OR EXISTS(SELECT 1 FROM v2_room_membership_states a WHERE a.room_id=m.room_id AND a.is_member=0)
-                              OR EXISTS(SELECT 1 FROM v2_room_event_authorizations a WHERE a.room_id=m.room_id AND a.is_authorized=0))
+                              OR EXISTS(SELECT 1 FROM v2_room_event_authorizations a WHERE a.room_id=m.room_id AND a.is_authorized=0)) || printf('|%s|%s',j.user_control,r.user_control)
                             FROM ids JOIN v2_send_intents i USING(intent_id)
                             LEFT JOIN v2_operation_work w ON w.work_id=i.work_id
                             LEFT JOIN v2_message_send_operations m ON m.work_id=w.work_id

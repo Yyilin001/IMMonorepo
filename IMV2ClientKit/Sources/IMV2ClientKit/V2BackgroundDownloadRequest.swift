@@ -17,6 +17,7 @@ enum V2BackgroundDownloadRequest {
         else { throw V2BackgroundTransferError.invalidAuthorization }
         var request = URLRequest(url: target.url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
                                  timeoutInterval: min(30, target.expiresAt.timeIntervalSince(now)))
+        target.networkConstraints.apply(to: &request)
         request.httpMethod = "GET"
         for (name, value) in target.headers { request.setValue(value, forHTTPHeaderField: name) }
         return request

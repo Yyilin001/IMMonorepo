@@ -4,7 +4,7 @@ import Foundation
 import Crypto
 import IMV2Core
 
-extension V2LocalResourceUploadTransport: V2BackgroundUploadTransport {
+extension V2LocalResourceUploadTransport: V2MultipartUploadTransport, V2BackgroundUploadTransport {
     public var maximumParts: Int { 32 }
     private static let partBytes: Int64 = 8 * 1_024 * 1_024
     private func partCount(_ count: Int64) throws -> Int {
@@ -21,9 +21,10 @@ extension V2LocalResourceUploadTransport: V2BackgroundUploadTransport {
         try await makePartPlans(mediaID:mediaID,contentType:contentType,byteCount:byteCount,checksum:checksum,
             requestedParts:requestedParts,expiresAt:expiresAt,grant:{ _ in nil })
     }
-    public func backgroundPartPlans(mediaID:MediaID,contentType:String,byteCount:Int64,checksum:V2ResourceChecksum,
+    public func backgroundPlans(mode: V2ResourceTransferMode, mediaID:MediaID,contentType:String,byteCount:Int64,checksum:V2ResourceChecksum,
         requestedParts:[Int],sessionID:MediaUploadSessionID,generation:Int64,issuedAt:Date,expiresAt:Date) async throws -> [V2ResourceTransferPlan] {
-        try await makePartPlans(mediaID:mediaID,contentType:contentType,byteCount:byteCount,checksum:checksum,
+        guard mode == .httpPartPut else { throw V2ResourceProviderError.unsupportedCapability }
+        return try await makePartPlans(mediaID:mediaID,contentType:contentType,byteCount:byteCount,checksum:checksum,
             requestedParts:requestedParts,expiresAt:expiresAt,grant:{ number in
                 try .init(id:UUID(),sessionID:sessionID,generation:generation,mediaID:mediaID,partNumber:number,issuedAt:issuedAt,expiresAt:expiresAt)
             })

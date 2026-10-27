@@ -134,11 +134,17 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
             else { throw V2ResourceValidationError.invalidTransferPlan }
         }
         if let backgroundAuthorization {
-            guard mode == .httpPartPut, expectedByteCount>0, expectedByteCount<=8*1_024*1_024,
-                  partNumber == backgroundAuthorization.partNumber,
-                  expiresAtUnixMilliseconds == backgroundAuthorization.expiresAtMilliseconds,
+            guard expiresAtUnixMilliseconds == backgroundAuthorization.expiresAtMilliseconds,
                   headers.allSatisfy({ $0.kind == .content && $0.name.lowercased() != "authorization" })
             else { throw V2ResourceValidationError.invalidTransferPlan }
+            switch backgroundAuthorization.scope {
+            case .part(let number):
+                guard mode == .httpPartPut, expectedByteCount > 0, expectedByteCount <= 8 * 1_024 * 1_024,
+                      partNumber == number else { throw V2ResourceValidationError.invalidTransferPlan }
+            case .whole(let bytes, let hash):
+                guard mode == .httpPut, byteRange == nil, partNumber == nil,
+                      expectedByteCount == bytes, checksum == hash else { throw V2ResourceValidationError.invalidTransferPlan }
+            }
         }
         if let grant = backgroundDownloadAuthorization {
             guard backgroundAuthorization == nil, mode == .httpGet,

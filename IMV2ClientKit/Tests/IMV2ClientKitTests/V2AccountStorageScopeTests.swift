@@ -19,7 +19,7 @@ struct V2AccountStorageScopeTests {
     func removesWholeIncarnationAfterClosing() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let catalog = V2AccountStorageDirectory(root: root)
+        let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let scope = try await catalog.openScope(accountID: .init("account-a"))
         let store = try GRDBV2LocalSyncStore(databaseURL: scope.database.primary, installationBinding: .init(value: UUID()))
         try await store.messageSearchDatabasePool.write { db in
@@ -28,9 +28,14 @@ struct V2AccountStorageScopeTests {
         }
         let partial = scope.directory.appending(path: "download.partial")
         try Data("partial body".utf8).write(to: partial)
+        try Data("cached private bytes".utf8).write(to: scope.cacheDirectory.appending(path: "cached.bin"))
+        try FileManager.default.createDirectory(at: scope.backgroundDirectory, withIntermediateDirectories: false)
+        try Data("background part".utf8).write(to: scope.backgroundDirectory.appending(path: "part"))
         try await catalog.retire(scope)
         try await catalog.completeCleanup(scope) { try await store.close() }
         #expect(!FileManager.default.fileExists(atPath: scope.directory.path))
+        #expect(!FileManager.default.fileExists(atPath: scope.cacheDirectory.path))
+        #expect(!FileManager.default.fileExists(atPath: scope.backgroundDirectory.path))
         await #expect(throws: DatabaseError.self) { _ = try await store.cursor() }
         await #expect(throws: DatabaseError.self) {
             try await store.messageSearchDatabasePool.write { db in try db.execute(sql: "INSERT INTO erase_probe VALUES ('late old write')") }
@@ -42,7 +47,7 @@ struct V2AccountStorageScopeTests {
     func indexerAndObservationShutdown() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let catalog = V2AccountStorageDirectory(root: root)
+        let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let scope = try await catalog.openScope(accountID: .init("account-a"))
         let store = try GRDBV2LocalSyncStore(databaseURL: scope.database.primary, installationBinding: .init(value: UUID()))
         let updates = store.messageSearchIndexUpdates()
@@ -67,7 +72,7 @@ struct V2AccountStorageScopeTests {
     func failedClosePreservesCleanupIntent() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let catalog = V2AccountStorageDirectory(root: root)
+        let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let scope = try await catalog.openScope(accountID: .init("account-a"))
         try Data("private body".utf8).write(to: scope.database.search)
         try await catalog.retire(scope)
@@ -75,29 +80,36 @@ struct V2AccountStorageScopeTests {
             try await catalog.completeCleanup(scope) { throw CleanupFailure.closeFailed }
         }
         #expect(FileManager.default.fileExists(atPath: scope.database.search.path))
-        let restarted = V2AccountStorageDirectory(root: root)
+        let restarted = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let replacement = try await restarted.openScope(accountID: .init("account-a"))
         #expect(replacement.incarnation != scope.incarnation)
         #expect(!FileManager.default.fileExists(atPath: scope.directory.path))
     }
 
-    @Test("restart handles each committed cleanup boundary", arguments: [0, 1, 2])
+    @Test("restart handles each committed cleanup boundary including background handoff", arguments: [0, 1, 2, 3, 4])
     func resumesEachDeletionBoundary(step: Int) async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let catalog = V2AccountStorageDirectory(root: root)
+        let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let scope = try await catalog.openScope(accountID: .init("account-a"))
         let active = root.appending(path: "active.json")
         let originalActive = try Data(contentsOf: active)
         try Data("search body".utf8).write(to: scope.database.search)
+        try Data("cache body".utf8).write(to: scope.cacheDirectory.appending(path: "cached.bin"))
+        try FileManager.default.createDirectory(at: scope.backgroundDirectory, withIntermediateDirectories: false)
+        try Data("background part".utf8).write(to: scope.backgroundDirectory.appending(path: "part"))
         try await catalog.retire(scope)
         if step == 0 { try originalActive.write(to: active, options: .atomic) }
         if step == 2 { try FileManager.default.removeItem(at: scope.directory) }
-        let restarted = V2AccountStorageDirectory(root: root)
+        if step == 3 { try FileManager.default.removeItem(at: scope.cacheDirectory) }
+        if step == 4 { try FileManager.default.removeItem(at: scope.backgroundDirectory) }
+        let restarted = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         try await restarted.resumeCleanupBeforeOpeningStores()
         let newScope = try await restarted.openScope(accountID: .init("account-b"))
         #expect(newScope.incarnation != scope.incarnation)
         #expect(!FileManager.default.fileExists(atPath: scope.directory.path))
+        #expect(!FileManager.default.fileExists(atPath: scope.cacheDirectory.path))
+        #expect(!FileManager.default.fileExists(atPath: scope.backgroundDirectory.path))
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "retired").path).isEmpty)
     }
 
@@ -105,7 +117,7 @@ struct V2AccountStorageScopeTests {
     func delayedCleanupCannotDeleteReplacementAccount() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let catalog = V2AccountStorageDirectory(root: root)
+        let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let firstA = try await catalog.openScope(accountID: .init("account-a"))
         try await catalog.retire(firstA)
         let gate = CleanupCloseGate()
@@ -116,9 +128,16 @@ struct V2AccountStorageScopeTests {
         try await catalog.completeCleanup(b) {}
         let newA = try await catalog.openScope(accountID: .init("account-a"))
         try Data("new private body".utf8).write(to: newA.database.search)
+        let cache = newA.cacheDirectory.appending(path: "cached.bin")
+        try Data("new cached body".utf8).write(to: cache)
+        try FileManager.default.createDirectory(at: newA.backgroundDirectory, withIntermediateDirectories: false)
+        let background = newA.backgroundDirectory.appending(path: "part")
+        try Data("new background part".utf8).write(to: background)
         await gate.release()
         try await cleanup.value
         #expect(try Data(contentsOf: newA.database.search) == Data("new private body".utf8))
+        #expect(try Data(contentsOf: cache) == Data("new cached body".utf8))
+        #expect(try Data(contentsOf: background) == Data("new background part".utf8))
         #expect(!FileManager.default.fileExists(atPath: firstA.directory.path))
         #expect(try await catalog.openScope(accountID: .init("account-a")) == newA)
     }
@@ -127,7 +146,7 @@ struct V2AccountStorageScopeTests {
     func cannotSilentlyEraseUnsentAccountData() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let catalog = V2AccountStorageDirectory(root: root)
+        let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         _ = try await catalog.openScope(accountID: .init("account-a"))
         await #expect(throws: V2AccountStorageError.cleanupRequired) { _ = try await catalog.openScope(accountID: .init("account-b")) }
         await #expect(throws: V2AccountStorageError.storesAlreadyOpened) { try await catalog.resumeCleanupBeforeOpeningStores() }
@@ -137,12 +156,12 @@ struct V2AccountStorageScopeTests {
     func invalidMarkerDoesNotDeleteOtherDirectories() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let catalog = V2AccountStorageDirectory(root: root)
+        let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let scope = try await catalog.openScope(accountID: .init("account-a"))
         try Data("preserve".utf8).write(to: scope.database.search)
         let marker = root.appending(path: "retired/invalid.json")
         try Data("{\"directory\":\"../\"}".utf8).write(to: marker)
-        let restarted = V2AccountStorageDirectory(root: root)
+        let restarted = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         await #expect(throws: V2AccountStorageError.invalidManifest) { try await restarted.resumeCleanupBeforeOpeningStores() }
         #expect(FileManager.default.fileExists(atPath: scope.database.search.path))
     }

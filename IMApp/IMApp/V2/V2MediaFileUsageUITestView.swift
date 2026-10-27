@@ -12,13 +12,15 @@ struct V2MediaFileUsageUITestView: View {
     let scope: UUID
     let cleanup: Bool
     private enum Sheet: Identifiable {
-        case player, share(V2ConversationMediaFileLease)
-        var id: String { switch self { case .player: "player"; case .share(let lease): lease.id.uuidString } }
+        case player, share(V2ConversationMediaFileLease), export(V2ConversationMediaFileLease), urlShare(V2ConversationMediaFileLease)
+        var id: String { switch self { case .player: "player"; case .share(let lease), .export(let lease), .urlShare(let lease): lease.id.uuidString } }
     }
     @State private var fixture: FileUsageUIFixture?
     @State private var sheet: Sheet?
     @State private var status = "正在准备"
     @State private var shareRequested = false
+    @State private var exportRequested = false
+    @State private var shareAsURL = false
 
     var body: some View {
         NavigationStack {
@@ -26,7 +28,9 @@ struct V2MediaFileUsageUITestView: View {
                 Text(status).accessibilityIdentifier("v2.file-use.status")
                 if let fixture {
                     Button("打开播放器") { sheet = .player }.accessibilityIdentifier("v2.file-use.player")
-                    Button("打开系统分享") { shareRequested = true }.accessibilityIdentifier("v2.file-use.share")
+                    Button("打开系统分享") { shareAsURL = false; shareRequested = true }.accessibilityIdentifier("v2.file-use.share")
+                    Button("打开文件 URL 分享") { shareAsURL = true; shareRequested = true }.accessibilityIdentifier("v2.file-use.url-share")
+                    Button("打开系统文件导出") { exportRequested = true }.accessibilityIdentifier("v2.file-use.export")
                     Button("验证账户关闭") {
                         Task {
                             do {
@@ -46,7 +50,9 @@ struct V2MediaFileUsageUITestView: View {
                         case .player:
                             V2LocalMediaPlayerSheet(downloaded: fixture.downloaded, kind: .audio,
                                 accessibilityIdentifier: "v2.file-use.audio", onUnavailable: { status = "借用失败" })
-                        case .share(let lease): V2LocalMediaShareSheet(lease: lease, kind: .audio, contentType: "audio/wav")
+                        case .share(let lease): V2LocalMediaShareSheet(lease: lease)
+                        case .export(let lease): FileUsageUIDocumentExport(lease: lease)
+                        case .urlShare(let lease): FileUsageUIURLShare(lease: lease)
                         }
                     }
                     .safeAreaInset(edge: .bottom) {
@@ -81,12 +87,57 @@ struct V2MediaFileUsageUITestView: View {
         .task(id: shareRequested) {
             guard shareRequested, let fixture else { return }
             do {
-                let lease = try await fixture.downloaded.borrowFile()
+                let original = try await fixture.downloaded.borrowFile()
+                let lease = try await original.forPresentation(fileExtension: "wav")
+                await original.release()
                 guard !Task.isCancelled else { await lease.release(); return }
-                sheet = .share(lease)
+                if shareAsURL { sheet = .urlShare(lease) }
+                else {
+                    let name = try V2ResourceDisplayName("资源导出-" + scope.uuidString + ".wav")
+                    sheet = .share(try await V2LocalMediaShareSheet.prepareLease(lease, kind: .audio, contentType: "audio/wav", displayName: name))
+                }
             } catch { status = "借用失败" }
             shareRequested = false
         }
+        .task(id: exportRequested) {
+            guard exportRequested, let fixture else { return }
+            do {
+                let original = try await fixture.downloaded.borrowFile()
+                let lease = try await original.forPresentation(fileExtension: "wav")
+                await original.release()
+                guard !Task.isCancelled else { await lease.release(); return }
+                sheet = .export(lease)
+            } catch { status = "借用失败" }
+            exportRequested = false
+        }
+    }
+}
+
+/// Diagnostic control: the same real lease reaches DocumentManager directly,
+/// without the share extension or NSItemProvider. No destination is selected.
+private struct FileUsageUIDocumentExport: UIViewControllerRepresentable {
+    let lease: V2ConversationMediaFileLease
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller(forExporting: [lease.fileURL], asCopy: true)
+        controller.lease = lease
+        return controller
+    }
+    func updateUIViewController(_ controller: Controller, context: Context) { }
+    final class Controller: UIDocumentPickerViewController {
+        var lease: V2ConversationMediaFileLease?
+    }
+}
+
+private struct FileUsageUIURLShare: UIViewControllerRepresentable {
+    let lease: V2ConversationMediaFileLease
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller(activityItems: [lease.fileURL], applicationActivities: nil)
+        controller.lease = lease
+        return controller
+    }
+    func updateUIViewController(_ controller: Controller, context: Context) { }
+    final class Controller: UIActivityViewController {
+        var lease: V2ConversationMediaFileLease?
     }
 }
 
@@ -99,7 +150,13 @@ struct V2MediaFileUsageUITestView: View {
     }
     static func make(directory: URL) async throws -> FileUsageUIFixture {
         let boundary = FileUsageUIBytes()
-        let files = try V2ForegroundConversationMediaDownloader(downloader: .init(targetResolver: boundary, byteTransfer: boundary), directory: directory)
+        let user = UserID(uuid: UUID())
+        let scope = try await V2AccountStorageDirectory(root: directory, cacheRoot: directory.appending(path: "cache-scopes")).openScope(accountID: user)
+        let journal = try await V2LocalStoreBootstrapper(bindingStore: FileUsageUIBinding())
+            .open(databaseURL: scope.database.primary, userID: user)
+        let center = try await V2ResourceCenter.make(scope: scope, store: journal)
+        let cache = try await center.downloadCache(using: .init(targetResolver: boundary, byteTransfer: boundary))
+        let files = V2ForegroundConversationMediaDownloader(cache: cache, center: center)
         do {
             let downloaded = try await files.download(.init(mediaID: .init(uuid: UUID())))
             return .init(files: files, downloaded: downloaded)
@@ -109,6 +166,12 @@ struct V2MediaFileUsageUITestView: View {
         await files.discard(.init(mediaID: downloaded.mediaID))
         retirementStatus = FileManager.default.fileExists(atPath: downloaded.fileURL.path) ? "使用中的文件已保留" : "文件被提前删除"
     }
+}
+
+private struct FileUsageUIBinding: V2InstallationBindingStore {
+    func load() -> V2LocalInstallationBinding? { nil }
+    func save(_ binding: V2LocalInstallationBinding) {}
+    func delete() {}
 }
 
 private struct FileUsageUIBytes: V2ClientMediaDownloadTargetResolver, V2ClientMediaByteTransfer {

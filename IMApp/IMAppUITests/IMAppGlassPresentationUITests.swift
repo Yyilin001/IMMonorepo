@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 final class IMAppGlassPresentationUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
@@ -129,6 +130,111 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         XCTAssertTrue(app.switches["v2.privacy.allow-stranger-messages"].waitForExistence(timeout: 5))
         app.buttons["v2.privacy.done"].tap()
         XCTAssertTrue(privacy.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testHostedMessageAuthorCanPresentAndDismissProfile() {
+        let app = launch("chat")
+        let author = app.buttons["v2.message.author-profile.mock-message-1"]
+        XCTAssertTrue(author.waitForExistence(timeout: 15)); author.tap()
+        let profile = app.navigationBars["用户资料"]
+        XCTAssertTrue(profile.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["小林"].waitForExistence(timeout: 5))
+        let shown = XCTAttachment(screenshot: app.screenshot())
+        shown.name = "Hosted message author profile sheet"; shown.lifetime = .keepAlways; add(shown)
+        profile.buttons["关闭"].tap()
+        XCTAssertTrue(profile.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["v2.message.draft"].exists)
+        XCTAssertTrue(author.exists)
+    }
+
+    @MainActor
+    func testSystemPhotoSelectionPersistsAndRemovalSurvivesRelaunch() {
+        let app = XCUIApplication(), scope = UUID().uuidString
+        app.launchArguments = ["-v2-mock-preview", "-v2-mock-hide-controls", "-v2-mock-screen", "chat",
+            "-v2-mock-resource-staging-scope", scope, "-AppleLanguages", "(zh-Hans)"]
+        app.launch()
+        let draft = app.textFields["v2.message.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 15)); draft.tap(); draft.typeText("photo selection draft")
+        app.buttons["v2.message.composer.options"].tap()
+        app.buttons["v2.message.photo.add"].tap()
+        let cell = app.scrollViews["photosView_content_scroll_view"].images.matching(identifier: "PXGGridLayout-Info").firstMatch
+        XCTAssertTrue(cell.waitForExistence(timeout: 20))
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "System photo picker asset hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
+        cell.tap()
+        let confirm = app.navigationBars["照片"].buttons["完成"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5)); XCTAssertTrue(confirm.isEnabled); confirm.tap()
+        let remove = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.attachment.remove.")).firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@ AND value == %@", "附件 ", "已添加，发送时上传")).firstMatch.exists)
+        XCTAssertEqual(draft.value as? String, "photo selection draft")
+        let selected = XCTAttachment(screenshot: app.screenshot())
+        selected.name = "System selected photo becomes a managed chat attachment"; selected.lifetime = .keepAlways; add(selected)
+        app.terminate(); app.launch()
+        XCTAssertTrue(remove.waitForExistence(timeout: 20))
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.attachment.remove.")).count, 1)
+        let restoredPixels = NSPredicate { _, _ in Self.containsImportedPhotoPreview(app.screenshot()) }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: restoredPixels, object: nil)], timeout: 10), .completed)
+        let restored = XCTAttachment(screenshot: app.screenshot())
+        restored.name = "Reopened draft renders original photo bytes"; restored.lifetime = .keepAlways; add(restored)
+        remove.tap()
+        XCTAssertTrue(remove.waitForNonExistence(timeout: 10))
+        app.terminate(); app.launch()
+        XCTAssertTrue(draft.waitForExistence(timeout: 15))
+        // Timeline publication follows durable attachment restoration. Waiting
+        // for real messages avoids accepting a transient empty composer.
+        XCTAssertTrue(app.staticTexts["好的，下午三点一起讨论～"].waitForExistence(timeout: 15))
+        XCTAssertFalse(remove.exists)
+        let removed = XCTAttachment(screenshot: app.screenshot())
+        removed.name = "Removed attachment stays absent after restored timeline"; removed.lifetime = .keepAlways; add(removed)
+        app.terminate(); app.launchArguments += ["-v2-mock-resource-staging-cleanup"]; app.launch()
+        XCTAssertTrue(app.staticTexts["附件测试数据已清理"].waitForExistence(timeout: 10)); app.terminate()
+    }
+
+    private static func containsImportedPhotoPreview(_ screenshot: XCUIScreenshot) -> Bool {
+        guard let image = UIImage(data: screenshot.pngRepresentation)?.cgImage else { return false }
+        let width = 64, height = 128
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        return pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            let bytes = buffer.bindMemory(to: UInt8.self)
+            var blue = 0
+            for offset in stride(from: 0, to: bytes.count, by: 4) {
+                if bytes[offset] < 80 && bytes[offset + 1] > 60 && bytes[offset + 1] < 180 && bytes[offset + 2] > 170 { blue += 1 }
+            }
+            // The seeded photo's blue 48pt preview is the only blue payload
+            // in this neutral chat fixture. A name/icon alone cannot pass.
+            return blue > width * height / 500
+        }
+    }
+
+    @MainActor
+    func testChatPhotoPickerCanOpenAndCancelWithoutLosingDraft() {
+        let app = launch("chat")
+        let draft = app.textFields["v2.message.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        draft.tap()
+        draft.typeText("photo draft")
+        app.buttons["v2.message.composer.options"].tap()
+        let photos = app.buttons["v2.message.photo.add"]
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        photos.tap()
+        let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["取消", "Cancel"])).firstMatch
+        XCTAssertTrue(cancel.waitForExistence(timeout: 10))
+        let loading = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@ OR label BEGINSWITH %@", "正在加载", "Loading")).firstMatch
+        XCTAssertTrue(loading.waitForNonExistence(timeout: 20))
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "System photo library picker"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        cancel.tap()
+        XCTAssertTrue(draft.waitForExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, "photo draft")
+        XCTAssertFalse(app.otherElements["v2.message.attachments"].exists)
     }
 
     @MainActor

@@ -31,7 +31,8 @@ public struct PostgresV2ResourceLifecycleStore: Sendable {
     public func create(homeKind: String, homeID: UUID, usageKind: String, actor: UUID, device: UUID, operation: UUID,
                        mediaID: UUID, contentType: String, byteCount: Int64, requestJSON: String,
                        allocate: @escaping @Sendable () throws -> V2StoredObjectReference,
-                       expiresAt: Date, now: Date) async throws -> V2PersistedResourceUpload {
+                       expiresAt: Date, now: Date, displayName: V2ResourceDisplayName? = nil) async throws -> V2PersistedResourceUpload {
+        let name = try displayName ?? V2ResourceDisplayName("附件")
         return try await database.transaction { transaction in
             try await authorize(transaction)
             guard let sql = transaction as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
@@ -71,8 +72,9 @@ public struct PostgresV2ResourceLifecycleStore: Sendable {
                 VALUES(\(bind: mediaID),\(bind: actor),\(bind: contentType),\(bind: byteCount),'pending_upload',\(bind: session),\(bind: expiresAt),\(bind: now),\(bind: now))
                 """).run()
             try await sql.raw("""
-                INSERT INTO im_v2.resource_catalog(media_id,home_kind,home_id,usage_kind,generation,created_at)
-                VALUES(\(bind:mediaID),\(bind:homeKind),\(bind:homeID),\(bind:usageKind),1,\(bind:now))
+                INSERT INTO im_v2.resource_catalog(media_id,home_kind,home_id,usage_kind,generation,created_at,display_name)
+                VALUES(\(bind:mediaID),\(bind:homeKind),\(bind:homeID),\(bind:usageKind),1,\(bind:now),
+                    \(bind: name.value))
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.resource_upload_sessions(session_id,media_id,home_kind,home_id,actor_user_id,device_id,operation_id,request_json,storage_binding_id,storage_configuration_revision,placement_json,expires_at,created_at,updated_at)

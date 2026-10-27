@@ -13,9 +13,23 @@ parser.add_argument("--region", required=True)
 parser.add_argument("--aliyun-profile", help="Use an already authenticated local aliyun CLI profile")
 parser.add_argument("--http-pipeline", action="store_true", help="Run the HTTP/PostgreSQL pipeline against IMV2_RESOURCE_TEST_DATABASE_URL")
 parser.add_argument("--native-output", type=Path, help="Run the owned Account/Gateway/ClientKit acceptance and save evidence here")
+parser.add_argument("--oss-test-parent", help="Authorized native test parent ending in validation/, e.g. ecs-test/validation/")
+parser.add_argument("--resource-center", action="store_true", help="Require both resource-center and group-avatar native cloud scenarios")
+parser.add_argument("--app-xctestrun", type=Path, help="prebuilt iOS App integration test manifest")
+parser.add_argument("--app-simulator", help="dedicated simulator UDID")
+parser.add_argument("--app-ui-simulator", help="dedicated simulator for real two-account photo UI")
+parser.add_argument("--app-ui-derived-data", type=Path, help="owned Xcode build directory for the UI scenario")
 args = parser.parse_args()
+if args.oss_test_parent and not args.native_output:
+    parser.error("--oss-test-parent requires --native-output")
+if bool(args.app_xctestrun) != bool(args.app_simulator) or (args.app_xctestrun and not args.resource_center):
+    parser.error("App integration requires resource-center and both App options")
+if bool(args.app_ui_simulator) != bool(args.app_ui_derived_data) or (args.app_ui_simulator and not args.resource_center):
+    parser.error("App UI closure requires resource-center and both UI options")
 if args.http_pipeline and args.native_output:
     parser.error("select only one pipeline")
+if args.resource_center and not args.native_output:
+    parser.error("--resource-center requires --native-output")
 if args.http_pipeline and not os.environ.get("IMV2_RESOURCE_TEST_DATABASE_URL"):
     parser.error("--http-pipeline requires an isolated IMV2_RESOURCE_TEST_DATABASE_URL")
 environment = os.environ.copy()
@@ -35,6 +49,8 @@ if args.aliyun_profile:
     environment.pop("IM_V2_OSS_CREDENTIAL_EXPIRATION", None)
     expiration = profile.get("sts_expiration")
     if profile.get("sts_token") and expiration:
+        if int(expiration) <= int(datetime.now(timezone.utc).timestamp()) + 90:
+            parser.error("The cached OSS credentials are expired or about to expire; refresh the existing aliyun CLI profile before running the gate")
         environment["IM_V2_OSS_CREDENTIAL_EXPIRATION"] = datetime.fromtimestamp(
             int(expiration), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 for required in ["IM_V2_OSS_ACCESS_KEY_ID", "IM_V2_OSS_ACCESS_KEY_SECRET"]:
@@ -44,8 +60,16 @@ environment.update(IM_V2_OSS_LIVE_TEST="1", IM_V2_OSS_BUCKET=args.bucket, IM_V2_
 root = Path(__file__).resolve().parents[1]
 if args.native_output:
     import sys
-    result = subprocess.run([sys.executable, str(root / "scripts/verify_v2_live_resource_authors.py"),
-        "--oss", "--output", str(args.native_output)], env=environment)
+    command = [sys.executable, str(root / "scripts/verify_v2_live_resource_authors.py"), "--oss", "--output", str(args.native_output)]
+    if args.oss_test_parent:
+        command += ["--oss-test-parent", args.oss_test_parent]
+    if args.resource_center:
+        command.append("--resource-center")
+    if args.app_xctestrun:
+        command += ["--app-xctestrun", str(args.app_xctestrun), "--app-simulator", args.app_simulator]
+    if args.app_ui_simulator:
+        command += ["--app-ui-simulator", args.app_ui_simulator, "--app-ui-derived-data", str(args.app_ui_derived_data)]
+    result = subprocess.run(command, env=environment)
     raise SystemExit(result.returncode)
 result = subprocess.run([
     "swift", "test", "--package-path", str(root / "IMV2Server"), "--disable-automatic-resolution", "--jobs", "4",

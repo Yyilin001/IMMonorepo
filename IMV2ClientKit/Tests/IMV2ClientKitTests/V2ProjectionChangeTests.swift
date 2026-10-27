@@ -117,7 +117,7 @@ struct V2ProjectionChangeTests {
         try await store.databasePool.write { db in
             try db.execute(sql: "UPDATE v2_message_projections SET is_withdrawn = 1, text_body = '' WHERE message_id = 'message-1'")
         }
-        #expect(await updates.next() == .init(scopes: [.conversations, .conversationTimeline], requiresImmediateRefresh: true, roomIDs: ["room"]))
+        #expect(await updates.next() == .init(scopes: [.conversations, .conversationTimeline, .resources], requiresImmediateRefresh: true, roomIDs: ["room"]))
         try await store.databasePool.write { db in try db.execute(sql: "DELETE FROM v2_message_projections") }
         #expect(await updates.next() == .init(scopes: [.conversations, .conversationTimeline], requiresImmediateRefresh: true))
         try await store.databasePool.write { db in

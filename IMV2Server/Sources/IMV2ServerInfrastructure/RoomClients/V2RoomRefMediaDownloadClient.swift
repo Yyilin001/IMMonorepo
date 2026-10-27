@@ -73,6 +73,24 @@ public struct V2RoomRefMediaDownloadClient: V2MediaDownloadTargetResolving {
         }
         return target
     }
+    public func imagePreviewTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation, size: V2MediaImagePreviewSize) async throws -> V2MediaDownloadTargetEnvelope {
+        let deadline = ContinuousClock.now + callTimeout
+        let route: V2RoomShardRoute
+        do { route = try await rooms.route(for: message.roomID) }
+        catch V2RoomShardRouteError.roomNotFound { throw V2MediaStoreError.downloadNotAuthorized }
+        guard let owner = owners[route.shardID], let provider = owner.provider as? any V2MediaImagePreviewProviding
+        else { throw V2MediaStoreError.downloadNotAuthorized }
+        let context = try RoomRefMediaContext(actor: actorUserID, device: deviceID, media: mediaID, message: message, route: route)
+        let guardrail = RoomRefMediaGuard(controlDatabase: controlDatabase, rooms: rooms, authorization: authorization, context: context, deadline: deadline)
+        let snapshot = try await guardrail.capture()
+        let target = try await provider.issueImagePreviewTarget(mediaID: mediaID, roomID: message.roomID, size: size,
+            expiresAt: now().addingTimeInterval(V2MediaDownloadLimits.standard.grantLifetime))
+        try await guardrail.recheck(snapshot)
+        try Task.checkCancellation()
+        guard target.plan.expiresAt > now(), ContinuousClock.now < deadline else { throw V2MediaStoreError.downloadNotAuthorized }
+        return target
+    }
+
 }
 
 private struct RoomRefMediaContext: Sendable {

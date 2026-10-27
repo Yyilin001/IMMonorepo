@@ -1,0 +1,47 @@
+{
+  "status": "testflight-internal-testing-available",
+  "bundleID": "com.stskcxfz.imapp",
+  "appStoreConnectObservedAppID": "6765884624",
+  "version": "1.0",
+  "provisionalArchiveBuild": "1",
+  "finalBuildNumber": "6",
+  "archive": "/tmp/im-testflight-resource-20261027/IMApp.xcarchive",
+  "compile": "/tmp/im-testflight-resource-20261027/compile-result.json",
+  "archiveProof": "/tmp/im-testflight-resource-20261027/archive-inspection.json",
+  "nativeUIState": "Xcode: IMApp 1.0 (6) uploaded; App Store Connect IMTest build 1.0 (6): Testing, expires in 90 days",
+  "uploaded": true,
+  "observedAt": "2026-10-27T05:34:17.148949+00:00",
+  "sourceManifest": "/tmp/im-testflight-resource-20261027/source-manifest.json",
+  "exportLog": "/tmp/im-testflight-resource-20261027/export.log",
+  "archiveResult": "/tmp/im-testflight-resource-20261027/archive-result.json",
+  "completed": [
+    "Current-source TestFlight network/push configuration compiled",
+    "Signed intermediate archive built with dSYM and inspected identity",
+    "App Store Connect iIMli app ID observed in Safari; current build list requires renewed authentication",
+    "Authenticated Safari and confirmed existing iIMli build 5 and IMTest group",
+    "Xcode Organizer automatically assigned build 6 and distribution signed",
+    "Apple ContentDelivery returned UPLOAD SUCCEEDED with no errors",
+    "Verified Xcode upload-complete UI showing 1.0 (6)",
+    "Verified App Store Connect processed build automatically assigned to IMTest",
+    "Verified IMTest build 1.0 (6) status Testing with 90 days remaining"
+  ],
+  "pending": [],
+  "noDeveloperCredentialsPersistedToRepository": true,
+  "distributionLogDirectory": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/IMApp_2026-10-27_13-08-54.865.xcdistributionlogs",
+  "uploadResult": "UPLOAD SUCCEEDED with no errors",
+  "deliveryUUID": "d57b1b8c-24ef-4592-a53c-bae092267197",
+  "previousLatestBuild": "5",
+  "existingInternalGroup": "IMTest",
+  "appleProcessingCompleted": true,
+  "testerAvailability": "Available to existing IMTest internal group (1 tester)",
+  "screenshot": "/tmp/im-testflight-resource-20261027/testflight-build-6-ready.png",
+  "appStoreConnectBuildURL": "https://appstoreconnect.apple.com/teams/321f9024-9d4e-4424-b973-aeb50e173983/apps/6765884624/testflight/ios/d57b1b8c-24ef-4592-a53c-bae092267197",
+  "previousCLIExportAttempt": {
+    "exitCode": 70,
+    "errors": [
+      "No Accounts",
+      "No iOS Distribution certificate with private key found"
+    ],
+    "resolvedBy": "Xcode Organizer authenticated automatic distribution signing and upload"
+  }
+}

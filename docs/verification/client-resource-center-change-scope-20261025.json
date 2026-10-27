@@ -1,0 +1,3004 @@
+{
+  "formatVersion": 1,
+  "generatedAt": "2026-10-27T15:24:25.995369+00:00",
+  "baseline": "63968959e7392cefca7dcb345a9b7f92096d193f",
+  "status": "inventory-and-targeted-entry-audit; full-R0-semantic-audit-incomplete",
+  "counts": {
+    "generated-workspace-exclusion": 1,
+    "app-resource-release-configuration": 2,
+    "app-resource-attachment-avatar-integration": 42,
+    "app-account-device-exit-notice": 1,
+    "resource-verification-and-test-fixtures": 132,
+    "resource-design-and-verification-evidence": 33,
+    "resource-worker-runtime-packaging": 3,
+    "native-linux-release-tooling": 7,
+    "server-resource-schema-contract": 3,
+    "client-resource-storage-transfers-account-lifecycle": 90,
+    "shared-resource-wire-contract": 9,
+    "server-resource-directory-metadata-message-integration": 35,
+    "server-control-runtime-release-prerequisite": 1,
+    "resource-live-and-export-verification-tools": 8
+  },
+  "unclassifiedPaths": [],
+  "generatedXcodePathsExcluded": true,
+  "targetedChecks": {
+    "oldMediaCacheDirectoryAndPartFileSymbols": "No production references after old scope property removal",
+    "productionFileIOReview": "App imports own security-scoped access; decoders consume leases. Account root/protection and credential deletion journals remain outside resource byte storage; scoped test cleanup is separate.",
+    "runtimeAssembly": "Realtime runtime receives ResourceCenter and attaches uploads/downloads to it; no media staging/cache root injection",
+    "rootNavigation": "Contacts route, settings and root destinations integrate resource routes",
+    "backgroundDelegate": "Background delegate uses registered session directory mapping",
+    "productionMaintenancePolicy": "Production adapter delegates to the center default; old App policy removed; tunable limits retained only for real-owner test fixtures",
+    "maintenanceLifecycle": "Registered with center operation scope; cancellation checkpoints between expiry deletions; optional busy deferral does not replace explicit cleanup or byte quota enforcement",
+    "readConsumerOwnershipReview": "Named management/chat/QuickLook/share/audio/avatar and account teardown paths reviewed; 58 current simulator tests include actual decoder lease and revoke/cancel cleanup cases. Not whole-scope semantic acceptance.",
+    "batchActionAdmission": "Selection/transfer pending versus running and loaded-query paging reviewed; actual duplicate SQL requests and stale cursor reproduced and fixed,45 unit and2 UI tests pass. Full scope semantic acceptance remains open.",
+    "importHTTPResultContract": "create operation/media/target scope, status/cancel locator and typed malformed responses verified; journal exact account/home/op/media remains authoritative.18 native tests pass, not all APIs.",
+    "uploadResponseBinding": "HTTP create/status/finalize/cancel and both journal save/cancel entry points reviewed and fixed; bound account/home, media, known locator and nonregressing version.22 scoped and115 expanded tests pass with overlap; full API review remains open.",
+    "uploadPlanAdmission": "Frozen clientModes, whole size/hash, expiry and bounded part ranges checked; actual slices/AFU copies checked against optional plan hash before executor/driver.32 and69 overlapping native tests pass; actual OS/device and whole-scope review remain open.",
+    "downloadAuthorizationCancellation": "Download resolver now checks cancellation after credentials and HTTP results; actual request count reproduced unauthorized continuation.100 native tests7suites pass,12 cancellation combinations across4 clients. Current unsigned device Release13278 passes; hardware/deployment gates open.",
+    "detailSourcePaging": "Loaded cursor gates both More button and action; late old-page reload ignored.101 actual references50/50/1 and46 management Store tests pass; full UI/device gates remain open.",
+    "retentionWriteAuthority": "True retention shares current visibility check and mutation transaction; revoked writes reject without changing intent count/UUID, false release allowed.2 new cases,48 native tests7suites pass. Not full semantic/physical acceptance.",
+    "sourceAuthorityOperationOwnership": "Reviewed center entry/stream/close and management consumer ordering. containsSource now scoped and checks closed after query; pre-cancel reproduced.77 native and62 App consumer tests pass, actual file/controller lifetimes retained. Full downstream/API and physical review remain open.",
+    "deployedRuntimeReadiness": "Current native candidate used only as independent caller, unavailable30.568s; no service recreation or voter file replacement,10/6/5. Full7-product local Linux build active.",
+    "raftElectionBudget": "Slow actual production-module probe reproduced expired outbound votes after150ms durability; current Driver deadline moved after write.3 native Driver tests pass; Linux r4 and control cross-build remain running, not deployed.",
+    "currentReleaseAndLinuxRequiredSuites": "Current unsigned device Release passed with215 guards. Exact Linux media/public API/Driver suites passed against3664 current per-source objects; fresh isolated PostgreSQL10 definitions,16 receipt combinations,no skips. Deployment/physical/full AX remain incomplete.",
+    "storageChangeOnlyPublication": "Baseline46 pass1 fail with3 assertions; Equatable Content fixes real Observation behavior, all47 Store tests pass. Default full AX failures persist; reverted all layout/native diagnostic trials.",
+    "realSimulatorVoiceOverAndControlRollout": {
+      "voiceOver": "passed1-no-skips",
+      "productionInputDrift": [],
+      "controlImagesActuallyUpdated": 3,
+      "clusterReadiness": "failed-unavailable",
+      "manualVoterFileReplacement": false,
+      "fullSemanticOwnershipAudit": "incomplete"
+    },
+    "peerDurabilityBudgetAndBaselineRecovery": {
+      "nativeDriverDefinitionsPassed": 4,
+      "linuxFullCurrentClusterModuleDefinitionsPassed": 4,
+      "controlCertifiedReadsPassed": 2,
+      "sixBaselineRolesHealthy": true,
+      "publicTLSChainAndIPVerified": true,
+      "currentResourcePairedRelease": "incomplete",
+      "semanticOwnershipAudit": "incomplete"
+    },
+    "eagerSettings": {
+      "status": "passed-scoped-simulator",
+      "uiPassed": 6,
+      "liveSystemFontPassed": 3,
+      "contrastAndEnabledControlsPassed": 3,
+      "expandedFourViewportAuditsPassed": 2,
+      "fullSemanticOwnershipAudit": "incomplete"
+    },
+    "directoryStartupContract": {
+      "sqlCases": 9,
+      "swiftTestDefinitions": 1,
+      "swiftArgumentCases": 8,
+      "skipped": 0,
+      "status": "passed-scoped",
+      "fullSemanticOwnershipAudit": "incomplete"
+    },
+    "backgroundResultOwnership": {
+      "status": "passed-scoped-native-and-simulator",
+      "regressionDefinitions": 8,
+      "regressionCases": 13,
+      "expandedNativeDefinitions": 99,
+      "simulatorBridgeDefinitions": 5,
+      "unsignedRelease": "passed",
+      "fullSemanticOwnershipAudit": "incomplete"
+    },
+    "currentCrossLayerStorageVerification": {
+      "evidence": "/tmp/im-resource-cross-layer-verification-20261026.json",
+      "nativeReportedTests": 400,
+      "nativeConditionalSkipNotifications": 17,
+      "appDefinitions": 130,
+      "appExecutions": 167,
+      "actualScaleAndENOSPC": 2,
+      "repositoryVerifier": "scripts/verify_v2_resource_storage.py",
+      "fullSemanticOwnershipAudit": "incomplete"
+    },
+    "actualSchemaReleasePreparation": {
+      "verification": "/tmp/im-resource-release-preparation-verification-20261026.json",
+      "syntheticCases": 11,
+      "actualBackupTables": 180,
+      "actualBackupRows": 3154,
+      "primarySchemaChanged": false,
+      "runtimeToolsOnlyImage": "sha256:eeb15af1860e3abd6d8743a58f4e89ec9d106ca476fcbf9b05caad6be3a2a53d",
+      "originalSixRolesUnchangedAndHealthy": true,
+      "fullSemanticOwnershipAudit": "incomplete"
+    },
+    "actualDeviceReleasePushEnvironment": {
+      "evidence": "/tmp/im-resource-device-release-environment-verification-20261026.json",
+      "networkCases": 17,
+      "actualSignedArtifactPassed": true,
+      "actualOldArtifactRejected": true,
+      "sourceGuards": 217,
+      "installed": false,
+      "fullSemanticOwnershipAudit": "incomplete"
+    },
+    "trackedReleaseProjectIncluded": "Tracked project is part of current217 input guards and313 scope entries; generated user workspace state alone remains excluded.",
+    "finalRuntimePackaging": "Actual old image fails worker launch/permission verifier; corrected current7 binaries retain source-bound hashes and pass all executable bits,4bundle files,4 image outputs and2timed-media probe fixtures. No full service/OSS/phone claim.",
+    "persistedPayloadAdmission": "13 real PG cases and5 exact startup control branches; actual primary false; refuses activation before local seeds/provision/app start, no migration/deletion.",
+    "trackedPathCasing": "Normalized network validator scope entry to tracked IMApp/Scripts casing after complete git status inventory found alias mismatch. Signed build source bytes unchanged.",
+    "resourceImageProcessLifetime": "Actual already-exited child wait sample; callback/Mutex/physical-exit drain fix.6 definitions2suites pass including64 immediate exits; focused old call timeout has no confirmed test-entry marker.",
+    "scopedCloudAndSystemPicker": "No RAM policy expansion; exact allowed parent plus random UUID. Current native2 scenarios and2 real system photo/file iOS flows pass with0source drift; physical device/Linux deployed runtime not asserted.",
+    "foregroundFileOwnershipReview": "Named import/publication/consumer retention/cleanup/relocation/drain paths reviewed against current four files and matching three already-executed test inputs. No whole-R0 or physical performance claim.",
+    "sharedResourceContractReview": "6 changed Core contracts +4 accepted-wire/indexing boundaries reviewed;142/658 inputs match actual passed records. Not whole semantic audit.",
+    "currentLinuxRuntimeRealOSS": "Current1985-input7-product image321c3ade verified and R6 isolated Linux+real OSS PNG/file TLS/protobuf sends, member exact bytes/nonmember denial, directory2 and avatar variants2 passed; independent PostgreSQL.11 exact owned containers independently stopped0exit. Main6 healthy and counts10/30/6 unchanged. Not phone/public activation.",
+    "ownedDockerSpaceRecovery": "Actual full-copy Docker build disk-full retained; only exact owned build CLI interrupted. Reused7-hash-verified completed bin layer and1093-byte resource/policy context. No image pruning/data deletion. Current674799616Bfree is not sustained-load capacity proof.",
+    "serverChangedIntegrationContracts": "All30 changed server integration paths covered by current-hash earlier reviews plus8 fresh boundary reads; typed import/forward names, accepted descriptors, measured metadata and assembly ownership. Not whole unchanged server or App/ClientKit acceptance.",
+    "ownedStagingDeduplication": "13 exact inactive filenames, local hashes+full internal hard-link topology+no container mount references.1075601408 allocated bytes reclaimed; artifacts/images retained, main6healthy. Initial nlink1 admission failed before any file deletion and was corrected to prove complete link set.",
+    "runtimeModeStage": "Actual baseline/fixed0600 fixture images both execute7 programs0755; direct container diff runtime binary changes7->0. Original slow baseline build reused after actual success, not restarted. Invalid size-derived check retained and replaced with filesystem evidence. No Swift source changes.",
+    "accountLifecycleOwnership": "Named account roots/bootstrap/prepared activation/normal teardown and initial local reads reviewed. Actual31native+18App existing tests pass with841 current input guards and0drift, no skip. No whole large-file or remaining UI/domain-intent ownership claim.",
+    "photoSendFix": "Opaque RGBA -> JPEG regression and single-transparent-pixel preservation; 14 iOS tests pass. Old Linux worker fails generated 12MP RGBA; fixed worker passes both actual failed photos, synthetic preview/avatar and deployed OSS message/recipient bytes.",
+    "photoMetadataLayoutAndPolling": "R19: 38 iOS tests incl rendered placeholder/decoded dimensions; native local schema migration, persisted dimensions, bounded send snapshot and resource step/cooldown tests passed; public OSS 2048 JPEG probe; installed, phone locked.",
+    "nativeLinuxRelease": {
+      "record": "docs/verification/native-linux-cross-build-20261027.json",
+      "status": "native-cross-release-built-packaged-and-linux-verified"
+    },
+    "thumbnailPairedRelease": {
+      "record": "docs/verification/client-resource-thumbnail-release-20261027.json",
+      "status": "server-live-and-testflight-internal-testing-available",
+      "build": "7"
+    },
+    "retinaPreviewFirstSnapshot": "53 native and 149 simulator tests pass; production Release archive signed and source-matched. User requested direct install: Release build 8 installed in place on the physical iPhone, version read back and launch succeeded, development APS matches device-test configuration. TestFlight unchanged at build 7; physical latency unmeasured.",
+    "initialChatBottomAnchor": "12 targeted tests and 2 UI regressions pass. Initial layout gap is corrected until actual user scroll/history navigation, with duplicate geometry suppressed; real hosted timeline and safe-area change checked. Release 9 installed in place on physical iPhone, launched and version read back; original physical-photo scenario not yet reproduced.",
+    "preCommitInventory": "All current changed source/test/tool/document paths mapped; 367-path snapshot has no unresolved conflicts, oversized binaries, private signing artifacts or high-confidence credential patterns. JSON/Python syntax and git diff whitespace checks pass. Existing validation records retain their scoped limits; no new claim of full semantic acceptance."
+  },
+  "entries": [
+    {
+      "path": ".gitignore",
+      "gitStatus": " M",
+      "category": "generated-workspace-exclusion",
+      "currentSHA256": "e9d209077b9ce334d61e813c6d28b7b04369066c894f778be07bb8ecba9989de",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp.xcodeproj/project.pbxproj",
+      "gitStatus": " M",
+      "category": "app-resource-release-configuration",
+      "scopeAssessment": "Tracked direct-managed Xcode project: only Release security-gate whitelist gains device-test; signing identity/team/profile unchanged.",
+      "releaseBuildReview": {
+        "evidence": "/tmp/im-resource-device-release-environment-verification-20261026.json",
+        "scope": "Named changed build gate and delivery verification; not whole-project semantic acceptance"
+      },
+      "currentSHA256": "58ca3d830cadba9279250a8c7bf6fc49d69e472afeaf39fb3c792d646e5cd7b0"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2AvatarResourcePicker.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "8a812ea608a6d8a928ab53c43d22f96a5b3974f2a1c31f468e99d2ac6b033b73",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceBusinessOwnersView.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "482948bfa625bf978fe634ade550ea95dca6ca2a4f3cccf12717053c46da613e",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceByteLimitPicker.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "2aa2ed949e4ffe1e0fdedb12fd29dd30768c9e1a39341da1189355075f11c3e7",
+      "scopeAssessment": "Bounded settings eager grouped layout and stable-identity navigation picker; six actual UI checks, three live-font checks, three contrast/all-enabled checks passed. No new business-state owner."
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceCenterUITestView.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "f3d0c23ca4c4034abedbe6a828294027a4af4f0e254cf2b8ae453e0285d9467d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceDetailStore.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "2ea1efa48f9c81e69f6538002b6123be24b2142f4b603f3366e024ac6a1e8158",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceDetailView.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "32eeec1a3b0379e42da8adcbd1479d6a6ec5d920a2ffb2c24ce3e63324ff67f5",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceLibraryStore.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "2ae40c4dae2c6f5e8317bd9838ae03f8ff2bc0ca45e78297c2e5f42a76ecfabf",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceManagementService.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "f991aba26d8af6eef13f1c2bd4372f5c8a86ec8fddc5603f4e5daf7f93611a4d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceMediaCell.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "ad42592527145cec5dea2a70ec1aac3889b2cfb1060e7d13e4851b20cc1ad883",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceProfileIntentView.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "8af5c5737d03f43acf2cfbb17dee5d0b3fbd571973319ebd83b1c0ae92f5e120",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceSelectionCleanupView.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "fa85adee5d696dd375fa5d4a3ee6162d788b966ca633152d1561456299eb1ff2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceSelectionStore.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "ed9ac4e4ba4b9858395419e333f510b400fe4f0abf94319f672e8e9788cde60b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceStorageStore.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "6fb2580061df7f0c21171d784549851f008fc802c26b1e527ac4097c07c8538d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceStorageView.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "ea61b11279a150243cc32150a087b11c9de131c6fec1b931b5add93c0eb6103e",
+      "scopeAssessment": "Bounded settings eager grouped layout and stable-identity navigation picker; six actual UI checks, three live-font checks, three contrast/all-enabled checks passed. No new business-state owner."
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceTransferBatch.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "38622c483d3727d7bb40571af7ddfc75aedb2cb1509325b0a8e33f86d73b05b5",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceTransferStore.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "ae26e260d2436e2a0e25eec8e72b5e2e2e916bd4c848ad1d17d4886684b55deb",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceTransferView.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "01f3521f7859e87116dc8e95d42c7f3c1bedaefe8144d5fb0500633cca6ea9b4",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/Resources/V2ResourceViews.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "9e6f593c228650cfed473f0541c7d0e227a81667cc28cdaa41f463cce3d2e975",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2AppRealtimeRuntime.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "5ea3a0e0d17c4124c6f45704a66f02fa6fb3175c94e294028729ec39ae83405c",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2AppStore.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "6e2432811d6c38b1a1749aead5dfd81773f7638374c85b0cc159df15d0bf03ec",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2AvatarPipeline.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "de5370a429f685b786b75515bc0ff8b92752ca8c8564d99522558e884b2e13dd",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2ContactsUI.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "704d65cb12b430fdc84ec5a799f88b5452818405019a5fdfcced72ad41eecad7",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2ConversationAttachmentService.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "05868f0998be757d9b8bc12cfb0f511e28604eae78909e6ddc44008b37270328",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2ConversationDetailStore.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "e9593f51fab3ed41a2e2feb279e14cc92228e36899f1c0696dcfd08a0d92f61b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2ConversationFeatureEnvironment.swift",
+      "category": "app-resource-attachment-avatar-integration",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "gitStatus": " M",
+      "currentSHA256": "e075f926cf27302744c029b50f1ce2e367ebec30871b697374a0b64ec2f21251"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2ConversationMediaDownloadService.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "088d372c8fc65565d655dbd75ef523dbdee1fc6cfd68ba0063c0dd175d3286d8",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2ConversationMediaViews.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "1f5d3ef8c9e208f4053acceeaf7c3c2652ff0300917a42d2db25f2bd8056d519",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2ConversationSettingsView.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "6619dce38848fa21cc5e521ae8766f69016773a204824e5f8cd35271c09778e3",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2ConversationUI.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "fb8137d4c8405ecea135c5e6c640939cbc4e47d1be22481f2b7f5e739586a5d3",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2DeviceSessions.swift",
+      "gitStatus": " M",
+      "category": "app-account-device-exit-notice",
+      "currentSHA256": "2834fb19f3b796d719b32e9f57ad9b046c03d714922afa48cb426abcc1514b37",
+      "scopeAssessment": "App-only previous-exit notice placement; record /tmp/im-device-exit-notice-fix-20261027.json"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2DurableConversationSendService.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "6fe29e5ce6bfa2d33261087053e75f4243962ae2c38810c2b3242bfcb6c057fd",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2GroupAvatarManagementService.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "0f967b2e9178e536326abfc61ad47034682f8c9860c9cdc6032fb008180bd06b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2GroupAvatarManagementStore.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "170dbd54dda601edafdf638647ba779261447282b4a9fc8b3bd4b82bc83090a2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2GroupAvatarManagementView.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "59195e1d50718d40090c3b55cef47115241edb63162ac2d52c47c5c8bf158b86",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2GroupAvatarRecoveryUITestView.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "040a1e527f1e13ccbceadaf9578ff0baf1e8b27b5d3e4b466bda0d79b5fe4dd6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2MediaFileUsageUITestView.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "1989cb423a28c1b482440f231cdec32e862263a205f8a9e1ec07ed76c225f75f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2MessageTimelinePresentation.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "1f824ef4ee5b7f46d7412a211152ffcdfee90abb84254d488c495d9bc6b80ad5",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2MockPreview.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "f4dbe4e59673e6c386f1fc29fab5f85ca913ebf92b217f8cd6cccc8b4a93c242",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2NativePresentation.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "8b72d1c6210b665fdded54044468c09f34393c6bb16c9554ac72df263bef7aa4",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2PhotoLibraryPicker.swift",
+      "gitStatus": "??",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "0ff06ce9ced1b68586e114323253f196307a6d53761e0541059bfe9ccff8884b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2PublicIdentitySettingsUI.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "fcd69833947f67ac0addf9db32964b78edc1d3eec1541a328e9c9ae361da90de",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2PushWakeSettings.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "e8e8c017fa68f64a48365d5778921c925aef64f71b52332bed3a96dd94ace2a7",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMApp/V2/V2RootView.swift",
+      "gitStatus": " M",
+      "category": "app-resource-attachment-avatar-integration",
+      "currentSHA256": "6b9980d24e736696b71e14ff085b81dc677b332632260d090f25622707bfd6ec",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppLocalAccountE2ETests/IMAppLiveResourceUITests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "19ffed002a1eb650f3d725712bb843f952b1d0cbf47aee74c939df1172aa235e",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppLocalAccountE2ETests/IMAppLocalAccountUITests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "3918030752692b4660ec354d4246eb6a5e890d44d5b81bbb843fd35a85e45672",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppLocalAccountE2ETests/LocalE2ETypedOperations.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "cf568443f0796e60621345eae58ff68c86052dd63cd8e8b9fc14e58d0c271c05",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2AttachmentStagingLifecycleTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "a028f13a5e81895165d4c8173f7c617e93aae80d058bbca704de3681757d00a6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2AttachmentUploadLifecycleTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "361bbc3dacb7b9c64eb5a9e5a67056ea1a169f8754be9d586bc9f4ed05dfe1ad",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2BackgroundTransferBridgeTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "637e546e0cbece15340e9b89f94d8621883d751e8c2ac35ddf997ee82e32d90a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2BackgroundUploadSourceTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "501cbe1c4cb5943483694252ef39c1e72aa2d2a926af913cafadad2405012ead",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2ChatResourceQueueTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "48681986e8d6100aae699eade27c967735762b7ad0df0c859dd83db02dc4a621",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2ConversationStoreTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "6fdd28017271d7e965c6763d9d87ecdb93df4fa3edb432e37cb8d3c82ce6e23a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2DurableResourceLifecycleTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "cfc60673506885c7de2ccc1d1d989626f16b1289396b0abc42cfdb544d2436f3",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2GroupAvatarManagementStoreTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "a64c705de143a1cb36725a4309cfce3be5324d91676e827dd11501a60955c098",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2GroupAvatarManagementTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "cea98d9474dc465611c5676c99cbb4a1550bebfdf858792a475f7df0d085ee5a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2GroupAvatarPipelineTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "d36884703e8f3d9f16701d6a4c77f8ceafe973a65470ff8fafff7ab121c1c34c",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2LiveResourceAppSendTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "0223939005617fd86647be76f03e261ea47c5ee99a256aec2ebf910338e9abe8",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2LocalMediaThumbnailCacheTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "d547c4684581ea3b737adecec3fad5f0301aba54b225db43a72033fc2bdb6d76",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2MediaDownloadLifecycleTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "0f7c05412f0d37ec843bc12d2c5b7dfc1d1634abb5dff4ce4c03879b68bf6dac",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2MediaFileLeaseTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "4e60cfc0073a8f00171e9b2af613042ce9fd8d2de72a028f3d84c91fae86408f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2MessageTimelinePresentationTests.swift",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "31b97e5fae3802ea2d7a242ff501650f36e474780d508992d17d75d526e2e569"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2OfflineStartupTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "f7f7af0441e930f691109bad5e59f37e780ac22a1bae6ffef605cb9f18565dee",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2OriginalResourceTestFixture.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "32425546df195bd92ce15eaad333ea8df7c2f8f7d8ad686e1a9d43ad98b4f9c9",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2PendingGroupAvatarsStoreTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "867f1d65b79b3a6346cc44a346b8b5202e51471ee8cbc67bf7b157785fcf970f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2PhotoLibraryImageTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "f523a96e6b920c3e207b9237c303184d481283eb76b0b43a39e858ce3a97ee57",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2ProfileAvatarPipelineTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "7cd81090a80c597f1f653758cf0dd962146459304da1a42862e493f0a7c0f340",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2PublicIdentitySettingsStoreTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "10989e378b2ac6d42dcd4d161c7ef20759e4b46df7d36b2e385cfe9297dba37b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2ResourceBusinessOwnerStoreTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "46e9d6b9180b0cf9cfd102ce0c88483a49b254205781945a224ab0f1efe04937",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2ResourceManagementStoreTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "b01042d2b2200efcdb905392746b0e2c09d6a5020eb04104ce0630f99ccb85cd",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2ResourceMediaTestFixture.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ded4a73ee40c90d967d214ee6f7d57658106c1c1e24cd0c9e880f70d3deb3042",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2ResourceStoragePolicyTestSupport.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "7f722c1d7a2263ae66bb0152daa200f6ad4058cc63304d14622b6f836967e6b6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppTests/V2RoomProgressNotificationLossIntegrationTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "7c043acfc86915e3935689dabdfea2e4a02756ce964fa99955914685a0365004",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppUITests/IMAppGlassPresentationUITests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "d0fda4a9d1fbdd0be981c3aba32b8256195d1cba8504e31f90ca89fc9b9a57c0",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppUITests/IMAppMediaFileUsageUITests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "d14e951a744f20a6beb9920580cd6f967bc70e06787c17f72e9d8b82eb447ba4",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/IMAppUITests/IMAppResourceCenterUITests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "b97c383644837110ad8c23bc8f65931b0dc2692b4f8924f6468dd319a15fa30f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMApp/Scripts/validate_network_configuration.sh",
+      "gitStatus": " M",
+      "category": "app-resource-release-configuration",
+      "scopeAssessment": "Explicit device-test Release public HTTPS and matching development APS/Info gate;17 self-test cases pass; no production/TestFlight relaxation.",
+      "releaseBuildReview": {
+        "evidence": "/tmp/im-resource-device-release-environment-verification-20261026.json",
+        "scope": "Named changed build gate and delivery verification; not whole-project semantic acceptance"
+      },
+      "currentSHA256": "efbde5c9053a0a8bee12fde0e88ba83a266b320fc7739ed54d55ed9739244022",
+      "pathNormalization": "Tracked Git casing; previous lowercase scripts alias resolves to same inode on build host. No content or build input changed."
+    },
+    {
+      "path": "IMV2/Dockerfile.account",
+      "gitStatus": " M",
+      "category": "resource-worker-runtime-packaging",
+      "currentSHA256": "7a6af86b657247f7f63c33386a544e61ad969cb942fd8e5ff2c7e1ab84f37324",
+      "scopeAssessment": "Normalize0755 before final COPY, final RUN only test-x. Actual0600 fixture builds execute7 binaries and direct runtime diff changes7->0; production321c3ade image independently verified.",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2/Dockerfile.account.prebuilt",
+      "gitStatus": "??",
+      "category": "native-linux-release-tooling",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "0c10a1fdf338e557ba93cecbad48519f84591d41a914dee50cfbf366bee58e62"
+    },
+    {
+      "path": "IMV2/Dockerfile.isolated-tests",
+      "gitStatus": " M",
+      "category": "resource-worker-runtime-packaging",
+      "currentSHA256": "b03c22d3b61c1f864dced918069555d2418f9226f99940566b97930fe64d60e0",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2/scripts/current_v2_resource_payload_contract.sql",
+      "category": "server-resource-schema-contract",
+      "gitStatus": "??",
+      "currentSHA256": "f3861578f8794881d0aff98f36355c32875412931193c25e30e658fb3499da72",
+      "scopeAssessment": "Scoped current resource payload/runtime activation admission; full remaining ownership audit not asserted"
+    },
+    {
+      "path": "IMV2/scripts/current_v2_schema_contract.sql",
+      "gitStatus": " M",
+      "category": "server-resource-schema-contract",
+      "currentSHA256": "b75fc47fd5f72741fb329b80b34be4553d5a309eb3e47feef281760c0bb51d27",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "schema-admission",
+        "assessment": "Missing/disabled/replaced directory trigger and missing/wrong index were accepted. Exact current function/trigger/column mask/index contract now required by psql and application readiness; real PostgreSQL red-to-green evidence.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2/scripts/run_v2_local_account_stack.sh",
+      "category": "resource-worker-runtime-packaging",
+      "gitStatus": " M",
+      "currentSHA256": "fd722d9e6d7ba1f6232142697691115c0ab27a8990a11705de430c13b744c422",
+      "scopeAssessment": "Scoped current resource payload/runtime activation admission; full remaining ownership audit not asserted"
+    },
+    {
+      "path": "IMV2/sql/schema.sql",
+      "gitStatus": " M",
+      "category": "server-resource-schema-contract",
+      "currentSHA256": "b0af648442cf93b9ffbf19f8f4e626908fe2032d684b3a7ccf77b4ff5c1ff5e6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "schema-admission",
+        "assessment": "Missing/disabled/replaced directory trigger and missing/wrong index were accepted. Exact current function/trigger/column mask/index contract now required by psql and application readiness; real PostgreSQL red-to-green evidence.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2BackgroundDownloads.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "b6d3c6bc08cef89a1633ca325ecbb8cd677c2391cca41e556a8bbfdd6f17b14a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2BackgroundTransfers.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "eeb8b706bbaaa29690bd669276bb5e01fa6c6f35f8e411f8fe794b7902d21471",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2GroupAvatarClosures.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "f51f7127ce6f90f56357622ad336099b23999e01b2b80b92328a79ed08223ade",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2GroupAvatarIntents.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "a3df01085db7e483b439b38821ce4871f49fad99050ce536a3595832b43dbe6a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalSyncStore.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "c216d03ba95b5edf28e8793248b977f0b7ebc0d5e9a95b6e7b8293d4c19ec176",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2OperationWorkRetention.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "fa6666f9d4611904f1f0f57bdfe4bc4a6fd9b4ee21224ddd3ffe854cea8f9639",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2PendingResourceSendSnapshot.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "6020ea9f61a66a4210adc23c447ce569b5b722ea1084cfbb60a4292c89641681",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ProfileIntentStore.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "628f328246bf35ecdb4eff24ed748cafad0f662cd701dc8a76d250668e1f023b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ProjectionChanges.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "90167915133eac7ab4a7b1e0486d3bbd690a2ce4a38ec29ca32cd8a8e50156af",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ResourceJournal.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "0dbb31caa77c9ca6d0c8445c977752abadbb4914b81e204ee74157c55a743f1d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ResourcePreparationSchedule.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "868cdc2b4c3ab6714c9e0a9bbedda5f7fc5b1d72c96e117539596e91016d9856",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ResourceSendObservation.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "20c160ddc2798cb2795c29d06f647b1ff026b253814d7a8d2c73af4fc55cd045",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ResourceWork.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "e3caacf479d1685dac372c17c49b3737e6a0a3c2b24f8a53c29d008b21b62391",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Networking/V2AccountWorkScheduler.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "f74a08cfed5821535363161bd8766c0bcb4c81eb3a4485842772d5b4ada0f591",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Networking/V2BackgroundTransferMetric.swift",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "scopeAssessment": "Native completion diagnostics; scoped verification only",
+      "gitStatus": " M",
+      "currentSHA256": "14a2fe1033e19e27809a4d7742f363c2cfe2b8eaee86afc93672ba50d62af2d0"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Networking/V2ByteTransferDemand.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "9186fad830a472ed07897fd19afec2f0f7842f3715191c54ff81a09c242c5004",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "range-and-network-wait",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed range journal/response/body/deadline/cancellation and connectivity-observation portions: 200 resets, 206 range/validator binding, 416 full checkpoint then SHA validation, physical permit drain and late wait suppression. Byte demand promotion is monotonic; no broad unchanged networking subsystem claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Networking/V2HTTPExecutor.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "965160bfd36f7dc0ddc5faba55433c197cfcb7f257fc938aeaf3f44423e8569e",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "range-and-network-wait",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed range journal/response/body/deadline/cancellation and connectivity-observation portions: 200 resets, 206 range/validator binding, 416 full checkpoint then SHA validation, physical permit drain and late wait suppression. Byte demand promotion is monotonic; no broad unchanged networking subsystem claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Networking/V2NetworkWorkPolicy.swift",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "gitStatus": " M",
+      "currentSHA256": "ffd24f12b7a0759c67f07d5b4590349ff076131fe3c65e70fbff20b69aa2497a"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2AcceptedResourceBindings.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "8b45e9d221c21ad5007c67ebd7604e2cb1781fc8005ab7a63cb99db8ca80f761",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2AutomaticDownloads.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "00134591c1264202aa3aa891b0580ee8d971bb88deeaa06e1da305f7fdf82a66",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2DownloadRecovery.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "f6c78be1b7258dec9631653b18da3662dd38bdf9fde006733cfaedc3a13282a6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ForegroundDownloads.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "73ee35b880f66b9813082636b08caf869d568b5d59145aa01bfbabf8cbde4d86",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2LocalResourceAssets.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "6c6051af686983a9c6bc8bc1c81c0ad1a7864b4c94ce8da4ef9c38b84c962b52",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ManualDownloads.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "a4c4548bacf224b243af83d71f0d9b2fe4d8ebb464645d1c6225b7544fc70e89",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2MessageResourceIndex.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "a1aca9c3ff80546a88d777b8b399e5f767427c9e8c6e2034ce83894caaea1f9d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceBackgroundSources.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "3765506d1aaa2bc45da5e2b1540e279e7d2d33165949a6105f5b83bbc45008e6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceBusinessOwners.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "497ff2bc55312e9f3a93b9eb29508b01c281ccbb1fc7858ace024425edee8150",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceCatalog.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "69c8afefead007e4aca6a7d85e4ee9909a90c76e63128ccc82f7351211e39306",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceDirectory.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "3353d5e614b231627c70a94c12e1f42d9f6412952e2d75c3687f0fc79b829446",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceDirectorySync.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "146c6de44bfcc05ef7b0cc9edb78ce3a86d0f34307dd3fdb6327221c65488983",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "authorized-directory",
+        "assessment": "Read paths reviewed: current membership/activation fenced transaction, signed actor/room/filter/upper cursor, reauthorization each page, home/filter/order validation, local scan-generation and denial fencing.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourcePreparationCancellation.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "73b67b859b160e3fa82b0c1803c474e09c4af000341359e3e02f28d6cc75d832",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceSchema.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "154672edf08a88fbc3e8816c40bb9f614b7e266795a120c379143b03e73316cf",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceStoragePolicy.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "347b2ec8972fe69df185c0f92e221a021a7cfd52806047df8ab5db2090e3a25d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceTransferHistory.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "dafcebd024f0c145dd5938a59dc4aa2b8626dc480324b89f20fedc9b823199c6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceTransfers.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "21dd3d45260e54388d3dac23ea1733714e56b7510399c0c08165798397f24da1",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceUnboundCancellation.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "d785c2d3a61acb996a756f9472a44ba979fb6f12c26f93acc75d08a38d40c942",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/GRDBV2ResourceVariants.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "68dd5bc18d390843f91e15813ab5d9d9bce51ffe5d276b1e9dc2b7dff8211e4a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2HTTPRoomResourceDirectoryClient.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "128cb3981ea20b88916f0601148ad1e0cce7e4e05ab8b9cc38839b7ed8a7e675",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "authorized-directory",
+        "assessment": "Read paths reviewed: current membership/activation fenced transaction, signed actor/room/filter/upper cursor, reauthorization each page, home/filter/order validation, local scan-generation and denial fencing.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2LocalResourceAsset.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "088bf7c855f8bdc0739481409857d43b81239739faa874678da78708493bfaf6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceAutomaticNetworkSource.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "fb95f412d05fa0f24050dc1764266e30b08ca5a444474d419e787f07daf2ae4f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceBackgroundDownloadInbox.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "a9e3435471697758730726a27d6b045c24cb1c90588282e618d37c38ab093e14",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "native-background-boundary",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed opaque session routing, canonical paths, native callback receipt/drain, AFU-only handoff and result writer/read/remove ownership. Symlink and failed-write deletion defects reproduced and fixed; macOS and five real iOS bridge tests pass. No physical lock/background claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceBusinessOwner.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "9e14c30416254156545e5d837804d1dcc24fe95d364bb5dfa4e3aa89655125fc",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceCatalog.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "7482260839d4969100bf5138123a81f126d11b5a0a614d2473fc6a2c9ae2995a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceCenter.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "0bfad113ef56436021158d6887fb13b0fc87c32557bae7a2e7c37903db46d2f1",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDetail.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "bd50b7241a2de9459236f87f0322631e1726e49ca62ba0305b9aa5506f5ea161",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDirectory.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "eae7c011351da8a46027ad0a3d3d3b5130c64c0a6a0300c9548ebd47e392f312",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDirectoryIO.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "7f34cd733bc56219281455e5e618ead54446474852f1a99718e46679d45195e0",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDownloadCache.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "c3b77d6d08cec0c369c3713a7c7b7569b4543de8d705b38c0b8bca078113c932",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDownloadNetworkPreferences.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "fcac90e178f8b86761eb3b8434a5f846875deb4dd76af310305f50e9ea3f9cde",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceExportFileName.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "5ef5c6302e824355efc5e12748137eb80d7496c80848fd3f76d63799471b5e99",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceFileStore.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "1d9a62b2f0404687ba167e7d557fe87ffd6b3b12c84fa5c1150af814749dac7e",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "cache-recreation",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Read prepare/reconcile path: a purged cache directory is recreated on prepare while closed owner is rejected; existing placement purge test protects originals/retained bytes. No new defect claimed or unrelated rewrite."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceNativeProgress.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "74d1118121fee571344c123c308c07f187ec868f2ee964750d17a0155fff7167",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourcePublicationInput.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "9f80fce09e38d4abbf1e00ed6f39ea789d2e6c86318e99488cafb0463bb869d6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceStoragePolicy.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "4d1e2c8a537932730c3365fbdc2de7ec3cb7b324d021d53d6da18a370eab61ea",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceTemporaryReservation.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "e598a07780da848c869929c047bae21102a7fee3dcc061096de1a62728f63434",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceTransferProgress.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "ed0075675dcee8bfad66b9fac04e5b500c9eb4148c5a48787c889e850fa74905",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceTransferWaiting.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "47bf3cdfea7989727f7bed47e86527b402cd03101ad262421027395aef6f70fd",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "range-and-network-wait",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed range journal/response/body/deadline/cancellation and connectivity-observation portions: 200 resets, 206 range/validator binding, 416 full checkpoint then SHA validation, physical permit drain and late wait suppression. Byte demand promotion is monotonic; no broad unchanged networking subsystem claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceTransfers.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "46ee7b1e67b139bb361bc5bb2e32e224133feef4c2f78ca1e778bb91ca971148",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceUnavailableRetention.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "8e1b2d187e98fc3c2989e7ae341196ca4ba5b6c1969ab0dfc515dbe23c21025b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceVariant.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "fa0669b736cd8c3c434cd9a0639a4fb1437c8f1c883e62b1e7f892f2f3077586",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2AccountLocalStoreOwner.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "3fc0345b0194c37504ace5bd09284d2360751099e1f51063014545f52250006e",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "operation-and-account-ownership",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed named operation admission/cancel/drain, cancelled-value disposal, exact-store close tail and persistent/cache scope retirement portions. Does not assert unrelated whole-file workflow acceptance."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2AccountStorageScope.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "747a758dd80ad22409347b2ec0106c6fd8048eb02bbaa9cbb93d4cf369e25cea",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "operation-and-account-ownership",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed named operation admission/cancel/drain, cancelled-value disposal, exact-store close tail and persistent/cache scope retirement portions. Does not assert unrelated whole-file workflow acceptance."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2BackgroundDownloadCoordinator.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "1fb9df0ff9cef37cbfaf76ee53136db2b0b8a79f8a8480e6755decced4fab831",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2BackgroundDownloadJob.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "28c464bee499afc2cadece039731cfdc6c052932c4441418c7751229874b6699",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2BackgroundDownloadRequest.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "7282425895a4bebcecce08ed8e37621a9bb0ab06b2017ebfff1858324e94ed47",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "native-background-boundary",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed opaque session routing, canonical paths, native callback receipt/drain, AFU-only handoff and result writer/read/remove ownership. Symlink and failed-write deletion defects reproduced and fixed; macOS and five real iOS bridge tests pass. No physical lock/background claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2BackgroundResultInbox.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "5c449587bc3418e3567d805b6557d696330e2cccf1815a1595e1be2d62010989",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "native-background-boundary",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed opaque session routing, canonical paths, native callback receipt/drain, AFU-only handoff and result writer/read/remove ownership. Symlink and failed-write deletion defects reproduced and fixed; macOS and five real iOS bridge tests pass. No physical lock/background claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2BackgroundSessionDirectory.swift",
+      "gitStatus": "??",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "b3b6e6bcdf7a8113c42e9823a554872711088db2890112d373bcb697a7468acb",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "native-background-boundary",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed opaque session routing, canonical paths, native callback receipt/drain, AFU-only handoff and result writer/read/remove ownership. Symlink and failed-write deletion defects reproduced and fixed; macOS and five real iOS bridge tests pass. No physical lock/background claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2BackgroundTransferCoordinator.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "3aab2386b10233cdae2c2393535dc318164b500db78d8066ea172ba23b169c7f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2BackgroundTransferTypes.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "78d86f32a272a72647979a8ae861685f23106f6ca1075d1e9522489454b00f4b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "native-background-boundary",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed opaque session routing, canonical paths, native callback receipt/drain, AFU-only handoff and result writer/read/remove ownership. Symlink and failed-write deletion defects reproduced and fixed; macOS and five real iOS bridge tests pass. No physical lock/background claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2BoundedFileUpload.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "6364901e5c09cc142e4479a35da67db79598b408d7a3ea99ad67eb1b611f1537",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ClientSessionBootstrapper.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "75654881cc73cd6f2cd6e0c3b78ac658593e0dd956f76a26a856c6eef5298355",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2CommandRetryScheduler.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "29ee7fddef361e6bfb08c920a8cda937e3247866b23e47a731b47bea584d7525",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2GroupAvatarIntent.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "7497fdd62f5a4d1eec5d596c8fe5204354c7ddcf4bfb3cf415ff33211e178cef",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2GroupAvatarIntentEngine.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "8210fb88ebea9696b69b76648953a40e5233bf18ddf19b90e5425849e82024cd",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2HTTPResourceUploadClient.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "7b9c221be93bd35016df7af089cb94046665d394cc13772d577d870dafc08963",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2MediaTransfer.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "cc3ac2f40c9c06a3e8db916895d2e73202e13df9dc090184620625190c9e47af",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "range-and-network-wait",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed range journal/response/body/deadline/cancellation and connectivity-observation portions: 200 resets, 206 range/validator binding, 416 full checkpoint then SHA validation, physical permit drain and late wait suppression. Byte demand promotion is monotonic; no broad unchanged networking subsystem claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2MessageProjection.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "ebfcf733b31d194388217a9f444c58b024b09a5b5c1623f2858ccab47da8fb81",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2MessageSendWork.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "51ff933c550b5206802cb958672ff6fe553391b2fe7721e8484138871c12a89d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2NativeBackgroundSession.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "28daf898358742bf87f8f0115301c22e661f7b592fb17e42210f41583c817f2c",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "native-background-boundary",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed opaque session routing, canonical paths, native callback receipt/drain, AFU-only handoff and result writer/read/remove ownership. Symlink and failed-write deletion defects reproduced and fixed; macOS and five real iOS bridge tests pass. No physical lock/background claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ProfileIntent.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "fd568bf2798839d66f82f3b8d77db83267bede3fb0399e689d1f7474cf583992",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ProfileIntentService.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "9ea4968c72f2c114167a62c3b1680d841baccf0079b2cc94b1fb4ea643086dea",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ProjectionChanges.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "0e7ac3d47bb0275f6ba73c63daeeeedbd4678bdf3d9cd4a6dfce093132c318ff",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2RangeDownloadJournal.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "bd1631ae2f64eba7f2ab6f6b46925736327648e6c12f7b2f0f9257d4065f5c62",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "range-and-network-wait",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed range journal/response/body/deadline/cancellation and connectivity-observation portions: 200 resets, 206 range/validator binding, 416 full checkpoint then SHA validation, physical permit drain and late wait suppression. Byte demand promotion is monotonic; no broad unchanged networking subsystem claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2RangeDownloadTransport.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "05a45b08d1e46423be96f3009fe9090ec418f290cb56096e9173247da56268fb",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "range-and-network-wait",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed range journal/response/body/deadline/cancellation and connectivity-observation portions: 200 resets, 206 range/validator binding, 416 full checkpoint then SHA validation, physical permit drain and late wait suppression. Byte demand promotion is monotonic; no broad unchanged networking subsystem claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ResourceImportClient.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "e444d5ee1de101693bc41c4d4669b91b2052b10e9d72556e8ee06bbe22804f71",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ResourceOperationScope.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "56ccaaaf257ac9b9cf4122611761ab668253f210e68a1fab2c081620d9c03100",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "operation-and-account-ownership",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed named operation admission/cancel/drain, cancelled-value disposal, exact-store close tail and persistent/cache scope retirement portions. Does not assert unrelated whole-file workflow acceptance."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ResourcePartFile.swift",
+      "gitStatus": " D",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": null,
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "baselineSHA256": "615394b1d1126a9013e16e1c027a9585087d8ae8419a2c9c2f618324e5bedc35",
+      "deletionReason": "Superseded part-file owner; resource transfers use the account FileStore"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ResourceTransferEngine.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "961e040fef743066b1d875840ed8fdec0ba526a26e12acde14a08812eb6eb918",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2ResourceTransferJob.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "079db9ebe60b400d90829eba3a9e72f242b96e6926b49c309754866008f7f25e",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Sources/IMV2ClientKit/V2SecureURLSession.swift",
+      "gitStatus": " M",
+      "category": "client-resource-storage-transfers-account-lifecycle",
+      "currentSHA256": "74d43efee21075aa1d15fe530b6ec4a83522e5e73df734b9de02a330dc635bb0",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "range-and-network-wait",
+        "scope": "named methods/current changed contract only",
+        "assessment": "Reviewed range journal/response/body/deadline/cancellation and connectivity-observation portions: 200 resets, 206 range/validator binding, 416 full checkpoint then SHA validation, physical permit drain and late wait suppression. Byte demand promotion is monotonic; no broad unchanged networking subsystem claim."
+      }
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/DurableMessageFixture.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "e1e67a605cd923252bb45b4c8db8517ea1c48532c10c02ec0ef33614fb868792",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2AcceptedResourceBindingTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "a7d93244a9721f6d35ff8c8900c7a7200ca84ca40f3a06720dbcd966c570c01b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2AccountLocalStoreOwnerTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "a4a6571b88949126ad47d965676d7c5f4e1316424b4fb65d47b53d0f7c9f71ae",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2AccountStorageScopeTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "02958e050bacc9e587e6ab92b908da242b4fc780ebdcd7e5969cf919ba5eb472",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2AccountWorkSchedulerTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "15d5000d185e2168981e6056ec6a2488a163ebc1af461867472314e4b46ba928",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2BackgroundDownloadCoordinatorTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "5fc634969c24615e078493695ee60f88eb941bce6daebef247b859ebf9e789df",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2BackgroundDownloadPersistenceTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "9c66549a91f5f4cd39b4216623e46f4815bfe428d19c2e1890fa0b6075f1417a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2BackgroundResultInboxTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "Real receipt-directory symlink, failed-write deletion, mapping identity and bounded-capacity regression;8 definitions13 cases pass after17 baseline issues.",
+      "currentSHA256": "4464ff59bf28b988c51a6b4d710a8df497be0c00a3fb3189fe1c57c047b095de"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2BackgroundSessionDirectoryTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "9d8ac4a1f9bc08f2e9cb82ef27250e9eba6461be828750c472d52cdd1249c0e4",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2BackgroundSessionSetupTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "3545518c5a194282d71c6f61230e3b4f4a24f006a1c585eef06e89f52b1c755d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2BackgroundTransferTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "d244a4dafae0c0a116cf5e2d2b764722067ad4ec64ee1597cf4c30e397497e94",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2CanonicalDownloadJournalTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "6b4ed25118ea7720a66da8d54d148cf821b98b859ede53c27169a0e2740b8676",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ClientSessionBootstrapperTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ffa13f05023adc7fe94c2f95d3860a5b8728f951087d28f0cf1cff0b66a531c3",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2CommandOutboxTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "89609dbf85a5a24b98b2c393e5648caa02792e3ab6133738fbc223b68d0a9e5d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2GroupAvatarClosureTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "605828cb2c486dec07671ded893c642bea5131aebb585c09fe366229e888d73f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2GroupAvatarImportTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ea32fe00ed71d32da5d0900f5b7d0c58340982eeb4a1d101dcd56b9e4d9917e3",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2GroupAvatarIntentTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "79464d9e277364f5f7e0c64d5a8f30136784b0a31dd2b0e02245872be01e1084",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2LiveResourceAuthorTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "30b342f2f02f9b4f6b70490d02bb59ce466ab9543bec066ad6c74651e7c30357",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2LocalDirectMessageTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "17450f7be2429e5492a4246afaedd62a2939cf52a0c53ec5620a3875ca2fc307",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2LocalResourceAssetTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "bb1e44cecca29c1836693e4ab7758fed6c557c4572e6c777cdd61583d3582ff2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2LocalSchemaContractTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "aa64f9b282b279c17afa1898ee0d20f2449abc9892b165a11cf08cc04faeb369",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ManagedResourceTransferTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ad35ba0e509982526f682b750cc01fa538318fe11bbedb08f131232b54cab705",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2MediaTransferTests.swift",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "5d57b2194ecc6aacd3c854064d1ae72ac1b75f0ca97b456afddb6d0ec2af3e6e",
+      "scopeAssessment": "thumbnail-first regression verification; live paired release pending"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2MessageOperationRecoveryTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "56c7d1daaaa5e2ec41dcf9a7a031145d1bcb8c3080b17699db04dc448ad793b2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2MessageResourceIndexTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "b8ba35c2bd8c294dec186b9353db5a4069c0e72f6abd07043c09a4ff6f5dd7dd",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2MessageSearchTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "5f4a866fcd22ae17beef8b565bed2b5a835dfdd32f7105357c05529a4250bfe6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2MessageSendWorkTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ee11971fd89dacc04f4c87a56e168d494d41ad54d251e05f72f93ecc4605dbf9",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2NetworkDiagnosticsTests.swift",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "Native completion diagnostics; scoped verification only",
+      "gitStatus": " M",
+      "currentSHA256": "41c77ec477666a8c85f48c4d7e3f6652ecc607a94c2958899a84c1a1b7177d5a"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2OfflineReadBootstrapTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "0bdb827f1750fc8cdcecd15c9fc6623f33807ac483823fb71ca5b90991c7ea10",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2OperationWorkTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "43b226001fc223efe2f54222942d3effdb7a0fd958955aa5c5ce143a90844f21",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2PendingResourceSendSnapshotTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "daa8d2a9c10940ef0af8ae2d9c808bc303773ed35ccb7ae63112dee79a62ad11",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ProfileAvatarImportTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "b25545234ec1a1e616a5e8659f52ecf20e71003242010d553a324635952d5f33",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ProfileIntentTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "932de675f401aa6f89e89b2cacb7bc0f7b95137669c1c37b63af5a0c035c14aa",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ProjectionChangeTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "dbd6727f8ce1a6f9969a2270cadd91ebbdff5c2bcffe87e254e40a45c7a3739c",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2RangeDownloadTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "94127b53416cf2012f28a65485e8c6261ca6cb34a3b1f5752aa2f51eb5b273ee",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceAccessTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "5f1d335e5f5222d3d252e2667664c5329c4e944a8f110f46fc4aa90f820e004a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceAdmissionTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "14eae5a5ff8383535a792ca9fbd7149b196895d2bea1f714b04a092e8f375704",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceAssetFixtures.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "4e048acece778e3ebc898d6b0ca94142c6d08ceb7fa441da8d4ee7c83d386731",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceBackgroundDownloadInboxTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "27bc594425737c2d175995154c6c494df476d5c538a539641ba0df1e94fa9d92",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceBackgroundSourceTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "3c2cf797c56faa17c5aa19d2b8125b5db31b01efc9a55aefdd0af9d88c85ca06",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceBusinessOwnerTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "26c910881c4eccafbc6de592e9b266785762d14aaf9887efd354484d9df9a12f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceCapabilitiesTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "7760378a56ec01b0ca71a990cbd586e77d1b4e268d296864f796bc7490e77319",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceCenterTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "3d8a31f469e7b837f0ee0f1beec8a6d89c978dd770f38aade21faa274c2cf158",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceConnectivityTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "072a2b08b99c637d6cd03134b8465094bf5aa0e2c511a99f61a69bd07c403c93",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDetailTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "7dbfca6678ec5d37c0691c807ae468fe3e8e32387835ce61f72230cee61854e7",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDirectoryScaleTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "cdd1dba9414c532596eff31c83156854331287350c4182245574c147fc30ecc0",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDirectorySyncTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ba2f9ea68c745958e9e133bf9f8ea6e1d229264766ad31782ad6c6e9a838e88d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDirectoryTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "34a0ef57b257cb695f5533215f49b4848c79d674ee5726d2a2ef65eee97c2fe3",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDiskFullTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "9cfe7509efb71801b7111c5d52851b2d4f77d155f5d69d2b0613b7207623ef9f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDownloadCacheTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "9a3507903faf7d80d9c58739d54804ad10d16947534e0f07f94a2441b893b970",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDownloadNetworkPreferencesTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "b2e7c69e3abe6f1efe42fab98ecbf391a025824bb59ea56505ea255d9ba2d148",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceFileStoreTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "e6c9e8377456fc195ecfc82631346215e4d237d0fa146cc157fcb7c95e1755b5",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceHTTPAdmissionCancellationTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "de045d7493bab9f2bfd0ef06df81bb8058164949d6f782bf0757be80ab805b4d"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceImagePresentationTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "Image dimensions persistence/migration, pending and committed layout, photo normalization and bounded processing-poll regression. Full ownership audit is not asserted.",
+      "currentSHA256": "7267bb4129e6937afbd9f7ec2c09edc96f4e4889d418702d6a178548c9208819"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceImportAuthorityTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "8d2d5712222de42d531db6d08e5d45338e0b5067152f523750236191b7fab338",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceImportHTTPContractTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "7e0ec76da8cbc3f26b7e600fddaba4cb6f118f373ac718237fc39afc2864ef95"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceImportPauseTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "c5a01e05657c871624c6045246fb63e893f024ba0929ae60dc92d40ece40c9be",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceJournalTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "9678ad2809fdc06e2964c18451ddfb940765adbf494c190c5412e81d1f9ad63e",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceNativeProgressTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "fd59e6396ea766c5c60d7cdb43ac381dbbb5f25e1758ed698d248d77ba417d6a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceOperationScopeTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "beb9c766e7bd1c1f10275e4b93bdc9237a3a8aae1c98d5b016a72dd28fe91a7d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourcePeakReservationTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "7d83dbba0a7cc0509182dcea5ed883f8cd9b8f17a618e9892de3bba184dbf640",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourcePlacementTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "dde5c7cc78524b2cb008d1a8129f059212de66e9459d36a32bd8878e7bcdfeb5",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourcePreparationCancellationTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ca6e02adce9192fac781d8226ecabd28ca8df5d6c5a14fb29b79855bed78cf0d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourcePreparationTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "a9cc938efdb0b1ccab7e7834cc69308656aa3d95fee3bd827612dd50a27f329c",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceRetentionTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "2dba5d8f38cbc9c4b39248ec4a7fd004a71669eeb2a404633e314ff405b4cff3",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceSendObservationTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "2348c14badc732d7e35cbe1acf671a260ad3a1aa4ab8b06adc3f9b4720252f22",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceSendWorkFixture.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ae4b0b0755e2176dc69a59daf258d297f4bb427f5fea0986921dbc74fb617178",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceStepTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "0aa5afc43c1f9a4b2a939c4203bc0af4f2e74847a72fadc02b54f74f214f92a8",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceStoragePolicyTestSupport.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "7f722c1d7a2263ae66bb0152daa200f6ad4058cc63304d14622b6f836967e6b6",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceStoragePolicyTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "9f94f374e189fa8aa761c39800cf353eed970b4e702bd49ab4be573b994d0db4",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceTransferHistoryTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "c59dea784202fec4d88258066a858b4c605f864fed4537205868d41dd730d208",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceTransferProgressTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "002f9533f046defbf97f90bdee02e760f27b935461e0949d197458d2a6d25e44",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceTransferWaitingTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "b53a55b9a767c774570e1cebbac0fdcc40ee61e1ddf23fc3e0803953738d6dbd",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceUnboundCancellationTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "6d1d9933dc723776e32b21a866ed5ffd4509d69533f4a38feea629bc46b13e6f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceUploadCancellationTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "d33b299d308173b8ee805ef971cda2836d424ee7f8102172d3b4aac810f14a2f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceUploadContractTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "4e54b9820a0cc26ec6ed7bdae3b53b20a4fb02e1bbedf703f41f2c1ed22cf731"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceUploadPauseTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "4118d4ed10226981bb91bdeff48ba52a98ffb759ac699fb85980825b50040721",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2RoomResourceDirectoryClientTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "3e73225c6ad434ec080b3839a4922d307d6ffab9e7a46b4be19f65832dc313da",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2SyncEngineTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "4c27bf1d2d3bffabff8b8c07ca59bad7eeca0168b110cf700d1098ac4a1bb05a",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2TerminalCommandRetentionTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "feab23f154c5e2ae9c20abc1fc7ae89a8ec8b34c6dda3700dbe27ef05e5034c3",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2ClientKit/Tests/IMV2ClientKitTests/V2UploadPlanAdmissionTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "64c83619aa292f8aa1a708047299003bc04852ddaa308cf35d9f17375f902ffe"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
+      "gitStatus": " M",
+      "category": "shared-resource-wire-contract",
+      "currentSHA256": "6d8d3779a10936c06190745e932479b3e7375165eda6d867d4be7dde51ae903f",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "shared-resource-wire-contract",
+        "scope": "Changed/new DTO declarations, initializers and wire decode contracts; old unrelated APIs not asserted",
+        "assessment": "Changed/new durable metadata, display names, presentation envelope consistency, upload-name required wire field, immutable variant identities and bounded opaque room-page DTOs. Local drafts may omit descriptor; accepted sync payload still requires it and current room home. Does not assert all old unchanged APIs reviewed.",
+        "evidence": "/tmp/im-resource-core-contract-verification-20261026.json"
+      }
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/ResourceBackgroundAuthorization.swift",
+      "category": "shared-resource-wire-contract",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "a468d3bdfff565ed2e3d8149b4e5fe4d6387f15380c327a29a9182692eb0d602"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/ResourceCapabilities.swift",
+      "category": "shared-resource-wire-contract",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "631441b594b22b1d97f741b7cb2a5432f4fac50a51991e0369f8a6c4ad3b7aef"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/ResourceDescriptor.swift",
+      "gitStatus": "??",
+      "category": "shared-resource-wire-contract",
+      "currentSHA256": "1f14bf1a20d88c6887eb0e1d741ae1653d75e65010ed1ffbf6c6b3c19744413c",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "shared-resource-wire-contract",
+        "scope": "Changed/new DTO declarations, initializers and wire decode contracts; old unrelated APIs not asserted",
+        "assessment": "Changed/new durable metadata, display names, presentation envelope consistency, upload-name required wire field, immutable variant identities and bounded opaque room-page DTOs. Local drafts may omit descriptor; accepted sync payload still requires it and current room home. Does not assert all old unchanged APIs reviewed.",
+        "evidence": "/tmp/im-resource-core-contract-verification-20261026.json"
+      }
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/ResourceIdentity.swift",
+      "gitStatus": " M",
+      "category": "shared-resource-wire-contract",
+      "currentSHA256": "c525a168e97687e6417cbea98e248cb4cfd8582e972918c9fe9b8a98dda82211",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "shared-resource-wire-contract",
+        "scope": "Changed/new DTO declarations, initializers and wire decode contracts; old unrelated APIs not asserted",
+        "assessment": "Changed/new durable metadata, display names, presentation envelope consistency, upload-name required wire field, immutable variant identities and bounded opaque room-page DTOs. Local drafts may omit descriptor; accepted sync payload still requires it and current room home. Does not assert all old unchanged APIs reviewed.",
+        "evidence": "/tmp/im-resource-core-contract-verification-20261026.json"
+      }
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/ResourceTransferPlan.swift",
+      "category": "shared-resource-wire-contract",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "85cf96cec55978f004d57e08209005a1684d0de34bca95da9fe4edf3e5bcd997"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/ResourceUpload.swift",
+      "gitStatus": " M",
+      "category": "shared-resource-wire-contract",
+      "currentSHA256": "1afcda055f648b2c6950319f0587e76d2b428e29be7dc0ee9f18fd5cb47f69a9",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "shared-resource-wire-contract",
+        "scope": "Changed/new DTO declarations, initializers and wire decode contracts; old unrelated APIs not asserted",
+        "assessment": "Changed/new durable metadata, display names, presentation envelope consistency, upload-name required wire field, immutable variant identities and bounded opaque room-page DTOs. Local drafts may omit descriptor; accepted sync payload still requires it and current room home. Does not assert all old unchanged APIs reviewed.",
+        "evidence": "/tmp/im-resource-core-contract-verification-20261026.json"
+      }
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/ResourceVariant.swift",
+      "gitStatus": "??",
+      "category": "shared-resource-wire-contract",
+      "currentSHA256": "5166607962a97182cabe0371cb7fbd1c06bfaa749982c6593b1a166f381930b2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "shared-resource-wire-contract",
+        "scope": "Changed/new DTO declarations, initializers and wire decode contracts; old unrelated APIs not asserted",
+        "assessment": "Changed/new durable metadata, display names, presentation envelope consistency, upload-name required wire field, immutable variant identities and bounded opaque room-page DTOs. Local drafts may omit descriptor; accepted sync payload still requires it and current room home. Does not assert all old unchanged APIs reviewed.",
+        "evidence": "/tmp/im-resource-core-contract-verification-20261026.json"
+      }
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/RoomResourceQuery.swift",
+      "gitStatus": "??",
+      "category": "shared-resource-wire-contract",
+      "currentSHA256": "14ed91de7b37db2f976ca77a8cbe02a04df9eafe1309bdb3483bce6e0a104fd2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "changedContractReview": {
+        "group": "shared-resource-wire-contract",
+        "scope": "Changed/new DTO declarations, initializers and wire decode contracts; old unrelated APIs not asserted",
+        "assessment": "Changed/new durable metadata, display names, presentation envelope consistency, upload-name required wire field, immutable variant identities and bounded opaque room-page DTOs. Local drafts may omit descriptor; accepted sync payload still requires it and current room home. Does not assert all old unchanged APIs reviewed.",
+        "evidence": "/tmp/im-resource-core-contract-verification-20261026.json"
+      }
+    },
+    {
+      "path": "IMV2Core/Tests/IMV2CoreTests/ResourceContractTests.swift",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "1adff2899d5a1be8ad56500024c1bac0af3db5e3f79147f528bc68a9d5c802e5"
+    },
+    {
+      "path": "IMV2Core/Tests/IMV2CoreTests/ResourceDescriptorTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "1d3e0b50d9f28bea5b5f4cb492fec3fb71b43d4486720e24638182e90d259cc9",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Core/Tests/IMV2CoreTests/ResourceVariantTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "e367c4c2f66cf7c19f0a67ad47fa1e14d1d00a6a31a1f12911336da3d30ab68e",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Core/Tests/IMV2CoreTests/RoomResourceQueryTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "6a69c7da2dd997cbf54cb43047c5a41630635dece77787fa7df8e1af0203b62b",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2AccountServerApp/main.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "eeb9b09f23384fff86b3d802468e6a374d742cfe5b1a721f32f93a0c2d7def03",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim."
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ActorCluster/Placement/V2PlacementRaftDriver.swift",
+      "gitStatus": " M",
+      "category": "server-control-runtime-release-prerequisite",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "fccb63006d411e8f75d7e777d446591400ca27cb5fe884cae8f2a93fdaa86a8d"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ActorContracts/Wire/Forwarding/V2ActorRoomForwardWire.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "fc3985c11858fc42838c7200b49c574ea291a76a501e30fb86e5bdb9bfc21dcd",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim."
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ActorContracts/Wire/MediaAuthorization/V2ActorRoomMediaAuthorizationWire.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "f32190d605d72c09cb8227cf2657c11c66edc9c281bef5eeddaeb29b677ed1ed",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim."
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ActorContracts/Wire/MediaAuthorization/V2ActorRoomResourceDirectoryWire.swift",
+      "gitStatus": "??",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "ecc39082e7fefa8f15abc3e5158db4755211379a5e5e7d2123efb2e5edfa0821",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "authorized-directory",
+        "assessment": "Read paths reviewed: current membership/activation fenced transaction, signed actor/room/filter/upper cursor, reauthorization each page, home/filter/order validation, local scan-generation and denial fencing.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ResourceImageWorker/main.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "89cc9e0344bec5656b6e704243f1d18bb744dce74ece518ad1b533adbf0a2f64",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApp/GatewayForwardDeliveryAssembly.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "0f0974f62ca9fed6fe54c3b80a57bdb9d071a321fe1fbbe69c7626c8d48982d4",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim."
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceImportService.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "46e0e51f91032f6df0ee000e250b9bcfca51f3b994ea3749c1f4c88238492165",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceService.swift",
+      "category": "server-resource-directory-metadata-message-integration",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "cd85456c764ebb7079be84478e47557311da6c69d3bf9186a0f1cb12f81db7e9"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2RoomResourceDirectoryService.swift",
+      "gitStatus": "??",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "8bb274653b3712df7d3b51a1019b43f3e04e6442b4c92792d4ae0a6acbc4ea89",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "authorized-directory",
+        "assessment": "Read paths reviewed: current membership/activation fenced transaction, signed actor/room/filter/upper cursor, reauthorization each page, home/filter/order validation, local scan-generation and denial fencing.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2ResourceMediaProbe.swift",
+      "gitStatus": "??",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "970a3f31c8575079b9fda2708bfde458900531b66611a936ea285ae3bbec4739",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2ResourceTransformer.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "73675a1ad399351d5b5569c8a9a9406cb4f8c5a557380da14ecde9b70b0333d8",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2UploadTransport.swift",
+      "category": "server-resource-directory-metadata-message-integration",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "cbb6154ed628f9b47e9959dcfd8151cc54dc575505d28a24a52e829b4e150e67"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/MediaAuthorization/V2ActorRoomMediaAuthorizationPort.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "0e620356dbf44b6daf8d3e7d9cdcc9b6321d7b6c9d8bafacb746cd1f798a6d6a",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "authorized-directory",
+        "assessment": "Read paths reviewed: current membership/activation fenced transaction, signed actor/room/filter/upper cursor, reauthorization each page, home/filter/order validation, local scan-generation and denial fencing.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorForwardWireMapping.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "9fc9c931596ec7c55bc45a00c2520da818e51e41f3171831f398f39bd924d776",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorMessagingMapper.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "30da581dbf7462f2598e80be0387c5d3cda1821089583dc06a5cbc4d6a04a961",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MediaEdgeDownloadService.swift",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "f04365119e1d5e6576cc29965f59627bc9c46622a40b8c9c171b20a52961193a",
+      "scopeAssessment": "thumbnail-first regression verification; live paired release pending"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2ForwardExport.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "e500ec9feb0df1300ecff799b2d406f6687eb12a68eb36c7a3f5ee9dd743c3fe",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2MessageProjectionState.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "4799763dfa8480fb7af2fc6aef5a833c2519d76d315191b292c46ad41b7becb4",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2MediaEdgeHTTPHandler.swift",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "7883df0d13986ab6d20812e7de8fbdb8cdaf00b04a632b8d92f77528bda3f6d9",
+      "scopeAssessment": "thumbnail-first regression verification; live paired release pending"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporMediaEdgeRoutes.swift",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "0d35ec73ade8c39b1b09c82c919c1b40c4c2bc5c942d155d0fa37a8f9fbc7e92",
+      "scopeAssessment": "thumbnail-first regression verification; live paired release pending"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporRoomResourceDirectoryRoutes.swift",
+      "gitStatus": "??",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "dfa75e075162b1a17026dbcf11db596f18838da7652f9a79ac0cd0d3d0bfefa1",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "authorized-directory",
+        "assessment": "Read paths reviewed: current membership/activation fenced transaction, signed actor/room/filter/upper cursor, reauthorization each page, home/filter/order validation, local scan-generation and denial fencing.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardExportStore.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "ddb32d2229249647ac8d9356ae99295dd4c48a972acd2970d4508559ba53e649",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim."
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardMediaImportStore.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "a9fbd439e1b76b795049712f9d660efbd7a710c3a3632e776f82c590c675945f",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim."
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteMediaAcceptance.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "ee69dff693708ab66483e46d36bc26753bbf26cfeeb2b549f4fde3e9815199fe",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteScalarPersistence.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "12f867809c2b4f9dfa5742f094bb16554a8bc1af4624e0dad41316f280d21003",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalMultipartUpload.swift",
+      "category": "server-resource-directory-metadata-message-integration",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "96e216f2d6d8ba112d53708a4ad7176d85a49bf8f3bd78da87410833fcf4f4a0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceMediaProbe.swift",
+      "gitStatus": "??",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "199dd877490650fd0add0648c5047cc7a1370853fb95bea7e9880748eb29e05a",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceTransformer.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "fbdcccc0b57916159633b2457cad66ca9435c18e8096c204c561915833fe8c56",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSUploadTransport.swift",
+      "category": "server-resource-directory-metadata-message-integration",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "b993a427629bf761a19985edabd018c477f6848a7649d055e25775818aea769b"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceImportStore.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "ab4bc109757d0192fa7d37f059e6bb5fc99165beda284745da37966abd850c20",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceLifecyclePort.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "2641308f4fe94242259910e06f62384b6f01608e05d1b3bf4b6a1c5939887044",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceLifecycleStore.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "229e6654869f6b1508e47cdc97ced195e68a38cb9fa61fe2ea0a47389f340cf9",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "binding-and-import",
+        "assessment": "Changed portions reviewed: server-generated room descriptor, exact target-home binding and digest facts, required persistent presentation, typed display-name propagation through import/forward; not full unchanged forwarding subsystem acceptance.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/V2BoundMediaProvider.swift",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "0329ca83b52cbe5e917302c5599a24f767347177f7717f4080b197fd8eba3261",
+      "scopeAssessment": "thumbnail-first regression verification; live paired release pending"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/V2PlacementMediaProviders.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "54e695af867be5c1a9a6de078371415c80b328ea85c3d8e66d00bad7708cf99f",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceVariantProcessor.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "43bf6d3820b5bcde8fe6cf22c9db5484aba7ff6e2949000d212fb2eb4123f5fd",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "measured-metadata",
+        "assessment": "Changed metadata path reviewed: server-measured original facts, bounded format/probe/decoder outputs, digest validation and generation-checked persistence; packaging installs ffprobe. No claim of full unchanged process-lifecycle audit.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/MediaAuthorization/PostgresV2RoomMediaAuthorizationAdapter.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "de3834b910948cf18f64b2112a708b7434bd42a47e4bd35d59f3d5a8ace5c2d2",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim."
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/MediaAuthorization/PostgresV2RoomResourceDirectory.swift",
+      "gitStatus": "??",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "08e9d6c9f95851881865a131915044e0569c4cf8a57eb7954387f0a8b8efec24",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "authorized-directory",
+        "assessment": "Read paths reviewed: current membership/activation fenced transaction, signed actor/room/filter/upper cursor, reauthorization each page, home/filter/order validation, local scan-generation and denial fencing.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomClients/V2RoomRefMediaDownloadClient.swift",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "947eed4e8eecd4fed42737784770e6aa0071009cf8982bfd5602ac62fa196b4b",
+      "scopeAssessment": "thumbnail-first regression verification; live paired release pending"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2LocalFilesystemMediaProvider.swift",
+      "category": "server-resource-directory-metadata-message-integration",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "34cbfec7b0bcf9e3e38fb48ee7b7e5182cd4a0a4970faaf6b1934000f2002bd7"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2SchemaReadiness.swift",
+      "gitStatus": " M",
+      "category": "server-resource-directory-metadata-message-integration",
+      "currentSHA256": "7c99643e2a6684c573096d23d4b96449754e755230cfede415fd293e76ca62d3",
+      "scopeAssessment": "Changed resource integration contracts reviewed against current source and prior current-hash directory/metadata/binding review; /tmp/im-resource-server-integration-contract-review-20261026.json. No unchanged subsystem or whole App/ClientKit review claim.",
+      "changedContractReview": {
+        "group": "schema-admission",
+        "assessment": "Missing/disabled/replaced directory trigger and missing/wrong index were accepted. Exact current function/trigger/column mask/index contract now required by psql and application readiness; real PostgreSQL red-to-green evidence.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      }
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ActorClusterTests/V2PlacementRaftDriverTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "1605fa90d42bf2e9988144f44a846fbcd8a8608a679eb6ad7682c8d4fbe2a3fe"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomRecoverySchemaTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "Actual eight-argument PostgreSQL startup-contract regression; absent DB explicitly disables discovery, actual isolated execution requires configured disposable DB and rejects skips.",
+      "changedContractReview": {
+        "group": "schema-admission",
+        "assessment": "Missing/disabled/replaced directory trigger and missing/wrong index were accepted. Exact current function/trigger/column mask/index contract now required by psql and application readiness; real PostgreSQL red-to-green evidence.",
+        "scope": "current changed contract only; full whole-scope acceptance remains open"
+      },
+      "currentSHA256": "a0c75575438d85bc21e49dc1d24b9dabd2c7d3d94d3bd18e4663e43e37a409dc"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomWriteStoreIntegrationFixtures.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "8466786c34da4bb3d5d3fc8015f5fc8069f4b96d729539cd85e60e841774e5c2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ActorMessagingMapperTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "4f1eedefd8b85ff8fab4460f1a460f6d83f4cb340762041d4be28ca5790c3a16",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2LocalMultipartUploadTests.swift",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "94f2f9c7d5bc7b2ad64bdb79c13f3a68e80e4151ea180d4fd4e82a5e8ffaaeae"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2MediaEdgeDownloadServiceTests.swift",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "4a1a92b9b26ec905c4f10b2c21644d52ce6b8edab309268501c80698df0ec361",
+      "scopeAssessment": "thumbnail-first regression verification; live paired release pending"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2MessageProjectionStateTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "956cb950aea2977b96f819a0aa0cf8187608517ca76ee2f87b5d70f8471ebfb2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2OSSSignerTests.swift",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "Whole PUT addition; scoped tests do not assert full semantic audit",
+      "gitStatus": " M",
+      "currentSHA256": "84ad08716e419303d7d810db9208ab8dc47586275ac535b6d2940367abbc5691"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceAdapterPublicAPITests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "7289f8c355e05c219966d66b09ab4b80996c125ee02374d9f5c1b2c685b77766",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceHTTPPostgresTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "be4d12fe70a864df62ec55b1da243aa99f25eb16529fa664d0d2e15d2546a304",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceImageProcessTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "fb45528859f56fba1984c573dac0b8e228433d03abb4a620fa6340b693af016a",
+      "scopeAssessment": "Resource image subprocess immediate/failure/cancel/pre-cancel lifetime regression; no full semantic ownership claim."
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceLifecycleReviewRegressionTests.swift",
+      "category": "resource-verification-and-test-fixtures",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "gitStatus": " M",
+      "currentSHA256": "8eeacc83bb439bebf5aef1c67df775a86f5e9147e73874addca5bb5e0b01fa15"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceLogicalIdentityPostgresTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "4ef047b1014404b69b708ca8d0d9fd228d4c04e7b87ae99532c9bdc6b77fe968",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceMediaProbePostgresTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "403ab7ab92078baaec90bddd47a00c4f601b9652dddde02e85da4633dda1b633",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceMediaProbeTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "ae13ef6e9e3620f023f70ad96d4d6dee6f4271aa28037ce8b422491e081b1e06",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceTransformerContractTests.swift",
+      "gitStatus": " M",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "0baf7025ccaafb86a10bbfb2ab6f2ef1be3129a3a5862747ad9456118590d7b5",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomResourceDirectoryPostgresTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "5f5aa9858ee5197ec74092916228e176d7522c298ef33aa568b8b33e24e15140",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomResourceDirectoryTests.swift",
+      "gitStatus": "??",
+      "category": "resource-verification-and-test-fixtures",
+      "currentSHA256": "49aad27921167ec220ad9b650d2325f12c716380bf20e49e6a86d5d11efd0bc1",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "docs/README.md",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "001254c41222ec21b306c7c52753d827c896f03c70ec6ee008d6316ae18049e2"
+    },
+    {
+      "path": "docs/guides/native-linux-release.md",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "0a431697da572eb8505e8a0068d066aa7464a88939e3cb8eda47c7cd128cb9a9"
+    },
+    {
+      "path": "docs/proposals/aliyun-oss-integration.md",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "b104f6d1178db228906b212c90683eec4fb2b6dfce4e3c39991c02d8a8e23a46",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "docs/proposals/client-resource-center-blueprint.md",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "00edf87dbe8011028da473d0f2ff197233731e37746b252dc0617f193e662381"
+    },
+    {
+      "path": "docs/proposals/client-resource-center-delivery-plan.md",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Consolidated code-grounded delivery plan; planning artifact, not implementation-completion evidence.",
+      "currentSHA256": "c423da97ea8ea252f937ffc7c5bb4909ab2ebc6875c2840251b6179e0a8eb96d"
+    },
+    {
+      "path": "docs/proposals/client-resource-center-delivery-roadmap.md",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "936e054ad953aaf1f9dc9277c71e67f0d25bbfedb38e4f8db2413c8b34966122",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "docs/proposals/client-resource-center-implementation.md",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "5d25db80c376a740440da847b7c9fcce23fbf681d3309c0860292027d04fabeb",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "docs/proposals/client-resource-center-plan.md",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "148db270e9eeead904bb9018534be555f3a0ae834e09ffbc4552435e42038cbc",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "docs/proposals/resource-provider-adapter-contract.md",
+      "gitStatus": " M",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "91c1ac4f62f4fa1cfcb63e5d8b1bee1642daf21df8e9d34e7b9c985f89be2071",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "docs/verification/client-chat-initial-bottom-anchor-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "currentSHA256": "f93003dd35b58fec6eb25666636a454ffe75c986920f5f2c320635a60de9aa18"
+    },
+    {
+      "path": "docs/verification/client-resource-center-20261025.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "e90c9cdd0f9438f87a375c1b04c0481ee35ac14ad095b4bf1b741f0c6a76d38d",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted",
+      "hashNote": "Generated evidence is updated during verification; not an immutable source binding"
+    },
+    {
+      "path": "docs/verification/client-resource-center-change-scope-20261025.json",
+      "category": "resource-design-and-verification-evidence",
+      "gitStatus": "??",
+      "hashNote": "Self entry excluded from content digest",
+      "hashExclusionReason": "Self-referential inventory; all other current file hashes verified separately.",
+      "hashExclusion": "Self-referential inventory hash excluded"
+    },
+    {
+      "path": "docs/verification/client-resource-client-metadata-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Client oriented image-size declaration, frozen/retry persistence, existing server decode verification and paired release evidence; does not assert the full ownership audit.",
+      "currentSHA256": "f7ca0cdde5f113d17d23b3e92f3b060b5ef044973301721cdaf698b6e17ff6d3"
+    },
+    {
+      "path": "docs/verification/client-resource-image-cache-placeholder-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Image local cache lookup presentation, no-text stable placeholder geometry, passive cache hit/miss regression, current signed app install. No backend change.",
+      "currentSHA256": "ae5b187deff953d91edbce668a3af94b02c2c623bcba21fa018e863028ac1a22"
+    },
+    {
+      "path": "docs/verification/client-resource-image-first-frame-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Bounded authorized first-frame image preparation, atomic UI publication, file ownership/first-pixel and cancellation regressions; signed client install pending device connectivity. No backend change.",
+      "currentSHA256": "41bed46cf144755601e1071298c4afb04a33c6d8f3f1e36ee7525fadef2e6479"
+    },
+    {
+      "path": "docs/verification/client-resource-image-zoom-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Image viewer, native zoom navigation transition, UIKit zoom/viewport regression, existing bounded-thumbnail checks and current client install. No backend changes.",
+      "currentSHA256": "9f4af106dec75ccd1da6a94af7d8009cfb44e17d3824cba36bfa88fa3ffbf271"
+    },
+    {
+      "path": "docs/verification/client-resource-message-presentation-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Timeline resource placeholders, share labels, layout regression and signed client installation; no backend changes.",
+      "currentSHA256": "e53c5238298c4c48a3aff1cebee7a8185f96b1cc0982330866353f8a72a96da5"
+    },
+    {
+      "path": "docs/verification/client-resource-photo-layout-speed-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Image dimensions persistence/migration, pending and committed layout, photo normalization and bounded processing-poll regression. Full ownership audit is not asserted.",
+      "currentSHA256": "2cb7f803493d2c63d1ab396518c6d87a71d27b1038be33a4c249aeb3ea270008"
+    },
+    {
+      "path": "docs/verification/client-resource-photo-send-fix-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Photo encoding and bounded Linux preview regression; no full ownership audit assertion.",
+      "currentSHA256": "7975f08728e763fd368c8031fd058c1335e894eff2a800ca6c23f7c0405b02fc"
+    },
+    {
+      "path": "docs/verification/client-resource-retina-preview-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "3b437985774cd59aa5ecb87203f99257943bb0a7d7f3266409a8a2dff30f40d9",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "docs/verification/client-resource-testflight-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Requested TestFlight distribution readiness: current-source archive and production runtime configuration verified; Apple distribution authentication blocked, no upload claimed.",
+      "currentSHA256": "173c3b9aeadd5b3d5e06b568260cb2022b72385157256e8ec32b333b0573eb70"
+    },
+    {
+      "path": "docs/verification/client-resource-thumbnail-first-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "currentSHA256": "672c2abc6034aa8093da529e818369b695277896e4ba92790b86bc792f76ce58",
+      "scopeAssessment": "thumbnail-first regression verification; live paired release pending"
+    },
+    {
+      "path": "docs/verification/client-resource-thumbnail-release-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "c6dac5a7a3f2169a9a475d397af5862fce82ba5509d4d018fdf32544214748cb"
+    },
+    {
+      "path": "docs/verification/client-resource-thumbnail-testflight-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Thumbnail release identity, source/signature guards, App Store upload result and observed IMTest build 7 Testing status; does not claim a physical latency test.",
+      "currentSHA256": "e3b9d4e1633c87c17c416a2a095b89fbca74824846d7152992a375905097ffad"
+    },
+    {
+      "path": "docs/verification/native-linux-cross-build-20261027.json",
+      "gitStatus": "??",
+      "category": "resource-design-and-verification-evidence",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "ebcb567a23d5d363bbb957928556de72581dc998f40771bf2939363c00aae263"
+    },
+    {
+      "path": "scripts/build_v2_linux_release.py",
+      "gitStatus": "??",
+      "category": "native-linux-release-tooling",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "bfc80b69147814c32e9b71fe150ff8dff9bab1cae99a8552154d08ecaed156ae"
+    },
+    {
+      "path": "scripts/linux-sdk/swift-nio-2.104.0-imports.json",
+      "gitStatus": "??",
+      "category": "native-linux-release-tooling",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "626e5700f9816de1f9005435cc81544133ac7bc839efd625939fc509a249ae1e"
+    },
+    {
+      "path": "scripts/linux-sdk/toolchain.json",
+      "gitStatus": "??",
+      "category": "native-linux-release-tooling",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "4361c89c0863598f0cd996bdfce467e9ea3ab825370865e8fa6d9be3f4eb81c4"
+    },
+    {
+      "path": "scripts/prepare_v2_linux_sdk.py",
+      "gitStatus": "??",
+      "category": "native-linux-release-tooling",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "3b3783437bebcc613982600778b7c93db85c2d089efd1d47fe3df22aac3515ed"
+    },
+    {
+      "path": "scripts/run_v2_oss_live_tests.py",
+      "gitStatus": " M",
+      "category": "resource-live-and-export-verification-tools",
+      "currentSHA256": "c13208ba34a6667eef19c18e82f30323e92abcbf5152eefc4256bf258b07ecc0",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "scripts/test_build_v2_linux_release.py",
+      "gitStatus": "??",
+      "category": "native-linux-release-tooling",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "2718df5e7f23311840c6442004c75d32f82645344e6dd2b64257ed254cae10cf"
+    },
+    {
+      "path": "scripts/verify_v2_apple_signed_app.py",
+      "gitStatus": "??",
+      "category": "resource-live-and-export-verification-tools",
+      "scopeAssessment": "Actual signature/profile/APS delivery check: real mismatch and wrong-channel packages rejected; current217-guard signed device Release accepted; no private identity output.",
+      "releaseBuildReview": {
+        "evidence": "/tmp/im-resource-device-release-environment-verification-20261026.json",
+        "scope": "Named changed build gate and delivery verification; not whole-project semantic acceptance"
+      },
+      "currentSHA256": "182bf09889d3ff6f8d2f89ca27e2cc6bbac3f18b07f2eb23b5af5f32bbf41497"
+    },
+    {
+      "path": "scripts/verify_v2_linux_release.py",
+      "gitStatus": "??",
+      "category": "native-linux-release-tooling",
+      "scopeAssessment": "Native macOS ARM to Linux x86_64 release workflow, pinned SDK/import patch, artifact guards and isolated runtime verification; does not assert a complete semantic audit of other changes.",
+      "currentSHA256": "2871223d10d707a86bc6a18955b3104f44a8b5dabe58e7969a81a039a32e90ea"
+    },
+    {
+      "path": "scripts/verify_v2_live_resource_authors.py",
+      "gitStatus": " M",
+      "category": "resource-live-and-export-verification-tools",
+      "currentSHA256": "3bca402161bae69a5b014e59a19f8edfbed0523782413ab10cc2dc033ce00df2",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    },
+    {
+      "path": "scripts/verify_v2_resource_dynamic_type.py",
+      "gitStatus": "??",
+      "category": "resource-live-and-export-verification-tools",
+      "scopeAssessment": "Actual simulator system-font driver; exception cleanup refinements not asserted as a fresh passing full run.",
+      "currentSHA256": "2ad7228b49cd08d30c60789e1b8928fe4217c9dfdf2fcfbb15708ef3f284ab39"
+    },
+    {
+      "path": "scripts/verify_v2_resource_image_permissions.sh",
+      "category": "resource-live-and-export-verification-tools",
+      "gitStatus": "??",
+      "currentSHA256": "b5f9553cc86b840585420e730a34368d1ea719b7bad5d903d9d5558d005f4cda",
+      "scopeAssessment": "Scoped current resource payload/runtime activation admission; full remaining ownership audit not asserted"
+    },
+    {
+      "path": "scripts/verify_v2_resource_photo_worker.py",
+      "gitStatus": "??",
+      "category": "resource-live-and-export-verification-tools",
+      "scopeAssessment": "Photo encoding and bounded Linux preview regression; no full ownership audit assertion.",
+      "currentSHA256": "43c5e0d955cd4af3a1193c97a3f78019fc3917b9515273c19f313d87281bdf0d"
+    },
+    {
+      "path": "scripts/verify_v2_resource_storage.py",
+      "gitStatus": "??",
+      "category": "resource-live-and-export-verification-tools",
+      "scopeAssessment": "Reproducible native10000 keyset walk and true64MiB owned-volume ENOSPC; actual run passes2 tests,no skips,strict input guards and exact-image detach; no physical performance assertion.",
+      "currentSHA256": "f371d2f29a049200cf7c3ab2a247b2044cd6413c2035b2613a7c0df072f04aef"
+    },
+    {
+      "path": "scripts/verify_v2_resource_system_export.py",
+      "gitStatus": "??",
+      "category": "resource-live-and-export-verification-tools",
+      "currentSHA256": "c3f12c190f77090e335903a79140b50b59d1d3003ccb4b2a7ba848608b7b129c",
+      "scopeAssessment": "technical scope mapped; full semantic/ownership audit is not asserted"
+    }
+  ]
+}

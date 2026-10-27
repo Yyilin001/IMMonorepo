@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-27",
+  "status": "implemented_tests_passed_release_9_installed_and_launched",
+  "reportedBuild": "1.0 (8)",
+  "preparedBuild": "1.0 (9)",
+  "problem": "First chat entry could leave part of the final image message below the viewport after later self-sizing or composer/safe-area layout.",
+  "findings": [
+    "Chat disabled the renderer initial-replace bottom layout fallback.",
+    "Initial explicit last-item scroll was a one-shot command; geometry updates only changed the append-follow flag and did not correct a remaining bottom gap."
+  ],
+  "changes": [
+    "Enable the renderer initial-load bottom fallback when opening at the latest end, while focused/history entry starts with that fallback disabled.",
+    "Keep initial latest-end anchoring through measured content/viewport/inset changes; correct to the actual content edge if more than one point remains.",
+    "Suppress repeated corrections for unchanged geometry. Real user scroll input, focused-message navigation and history browsing release the initial pin.",
+    "Leave the existing stable-ID own-send/history transaction logic and the external MessagingUI checkout unchanged."
+  ],
+  "verification": {
+    "unitAndHostedRendererTests": {
+      "passed": 12,
+      "log": "/tmp/im-initial-bottom-anchor-tests-r2.log",
+      "xcresult": "/tmp/im-initial-bottom-anchor-tests-r2.xcresult",
+      "cases": [
+        "Actual conversation view with nine image rows: entire last row settles inside the unobscured collection viewport.",
+        "Same hosted view after adding an 80pt bottom safe-area inset: last row remains fully visible.",
+        "Image content height growth and composer viewport changes correct remaining gaps.",
+        "Repeated unchanged geometry does not loop; empty/zero-sized layout is ignored.",
+        "User scroll and focused/history entry prevent forced tail restoration.",
+        "Existing timeline identity and acknowledgement transactions remain stable."
+      ]
+    },
+    "uiRegressionTests": {
+      "passed": 2,
+      "log": "/tmp/im-initial-bottom-anchor-ui-tests.log",
+      "xcresult": "/tmp/im-initial-bottom-anchor-ui-tests.xcresult",
+      "attachments": "/tmp/im-initial-bottom-anchor-20261027/ui-attachments/manifest.json",
+      "visualInspection": [
+        "Incoming at latest: message 17 and its timestamp fully above composer.",
+        "After user scroll and incoming append: history messages 7–11 remain visible, not forced to newest 29.",
+        "Three consecutive sends: last outgoing message and timestamp remain fully above composer."
+      ]
+    },
+    "deviceBuild": {
+      "result": "/tmp/im-initial-bottom-anchor-20261027/device-build-result.json",
+      "inspection": "/tmp/im-initial-bottom-anchor-20261027/device-build-inspection.json",
+      "configuration": "Release",
+      "build": "9",
+      "signatureVerified": true,
+      "sourceDrift": []
+    },
+    "deviceInstall": {
+      "deviceName": "徐徐年年的iPhone",
+      "versionReadback": "1.0 (9)",
+      "install": "success",
+      "launch": "success",
+      "method": "in-place update without uninstall",
+      "records": [
+        "/tmp/im-initial-bottom-anchor-20261027/device-install.json",
+        "/tmp/im-initial-bottom-anchor-20261027/device-launch.json",
+        "/tmp/im-initial-bottom-anchor-20261027/device-installed-after.json"
+      ]
+    }
+  },
+  "limitations": [
+    "Hosted simulator geometry validation is not a physical-device reproduction of the user screenshot.",
+    "Hosted image rows use synthetic media references and layout placeholders; actual phone-photo decoding was not reproduced in that test."
+  ],
+  "sourceSHA256": {
+    "IMApp/IMApp/V2/V2ConversationUI.swift": "fb8137d4c8405ecea135c5e6c640939cbc4e47d1be22481f2b7f5e739586a5d3",
+    "IMApp/IMApp/V2/V2MessageTimelinePresentation.swift": "1f824ef4ee5b7f46d7412a211152ffcdfee90abb84254d488c495d9bc6b80ad5",
+    "IMApp/IMAppTests/V2MessageTimelinePresentationTests.swift": "31b97e5fae3802ea2d7a242ff501650f36e474780d508992d17d75d526e2e569",
+    "IMApp/IMAppTests/V2ConversationStoreTests.swift": "6fdd28017271d7e965c6763d9d87ecdb93df4fa3edb432e37cb8d3c82ce6e23a"
+  }
+}

@@ -1904,26 +1904,35 @@ struct V2ConversationDetailView: View {
         }
     }
 
+    @Environment(\.v2ResourceManagement) private var resourceManagement
+    @Environment(\.v2ResourceNavigation) private var resourceNavigation
     @Environment(\.v2UserInteractionContext) private var userContext
     @State private var userProfile: V2UserProfileTarget?
     @State private var peerActions: V2UserProfileActionStore?
     @State private var store: V2ConversationDetailStore
+    @State private var openResourcesAfterSheet = false
     @State private var presentedDetailSheet: PresentedDetailSheet?
     @State private var isPresentingAttachmentImporter = false
+    @State private var isPresentingPhotoPicker = false
+    @State private var isImportingPhotos = false
+    @State private var photoSelectionLimit = 1
     @State private var messageSearchStore: V2ConversationSearchStore?
     @State private var isPresentingMessageSearch = false
     @State private var focusedMessageID: String?
     @State private var showsMentionInput = false
     @State private var followsOwnSend = false
     @State private var timelinePresentation = V2MessageTimelinePresentation()
-    @State private var timelinePosition = TiledScrollState<String>(
-        autoScrollsToBottomOnAppend: true, scrollsToBottomOnReplace: false
-    )
+    @State private var timelinePosition = TiledScrollState<String>()
+    @State private var initialBottomAnchor = V2MessageTimelineInitialBottomAnchor()
     private let groupInvitationStore: V2GroupInvitationStore?
 
     init(store: V2ConversationDetailStore, initiallyFocusedMessageID: String? = nil, groupInvitationStore: V2GroupInvitationStore? = nil) {
         _store = State(initialValue: store)
         _focusedMessageID = State(initialValue: initiallyFocusedMessageID)
+        let opensAtLatest = initiallyFocusedMessageID == nil && !store.isBrowsingHistoricalTimeline
+        _initialBottomAnchor = State(initialValue: .init(isActive: opensAtLatest))
+        _timelinePosition = State(initialValue: .init(
+            autoScrollsToBottomOnAppend: opensAtLatest, scrollsToBottomOnReplace: opensAtLatest))
         self.groupInvitationStore = groupInvitationStore
     }
 
@@ -2116,10 +2125,11 @@ struct V2ConversationDetailView: View {
                                         case .pending(let pending):
                                             V2PendingMessageRow(pending: pending,
                                                 retry: { Task { await store.retryResourceSend(pending.id) } },
-                                                cancel: { Task { await store.cancelResourceSend(pending.id) } })
+                                                cancel: { Task { await store.cancelResourceSend(pending.id) } },
+                                                borrowImage: { try await store.borrowPendingImage(jobID: $0) })
                                             }
                                 }
-                                .environment(\.self, environment)
+                                .modifier(V2MessageTimelineInheritedEnvironment(source: environment))
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
                             }
@@ -2154,15 +2164,27 @@ struct V2ConversationDetailView: View {
                                         .frame(maxWidth: .infinity)
                                         .accessibilityIdentifier("v2.message.load-older")
                                     }
-                                }.environment(\.self, environment).padding(.horizontal, 16)
+                                }.modifier(V2MessageTimelineInheritedEnvironment(source: environment)).padding(.horizontal, 16)
                             })
                             .onTiledScrollGeometryChange { geometry in
+                                if store.isBrowsingHistoricalTimeline || focusedMessageID != nil {
+                                    initialBottomAnchor.release()
+                                }
+                                if initialBottomAnchor.needsCorrection(.init(
+                                    contentSize: geometry.contentSize, visibleSize: geometry.visibleSize,
+                                    bottomInset: geometry.contentInset.bottom, pointsFromBottom: geometry.pointsFromBottom
+                                ), hasItems: !timelinePresentation.dataSource.items.isEmpty) {
+                                    // Correct against the actual content edge after sizing,
+                                    // not a last-row frame captured before the final layout.
+                                    timelinePosition.scrollTo(edge: .bottom, animated: false)
+                                }
                                 // Follow both incoming and outgoing messages only while
                                 // reading the tail. Browsing history keeps its anchor.
-                                timelinePosition.autoScrollsToBottomOnAppend = geometry.pointsFromBottom < 80
+                                timelinePosition.autoScrollsToBottomOnAppend = (initialBottomAnchor.isActive || geometry.pointsFromBottom < 80)
                                     && !store.isBrowsingHistoricalTimeline && focusedMessageID == nil
                             }
                             .onTiledUserScrollInput {
+                                initialBottomAnchor.release()
                                 focusedMessageID = nil
                                 followsOwnSend = false
                             }
@@ -2181,6 +2203,7 @@ struct V2ConversationDetailView: View {
                             }
                             .onChange(of: focusedMessageID) { _, messageID in
                                 if messageID != nil {
+                                    initialBottomAnchor.release()
                                     followsOwnSend = false
                                 }
                                 scrollToFocusedMessage()
@@ -2214,11 +2237,17 @@ struct V2ConversationDetailView: View {
                         }
                     }
                     if !store.attachments.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(store.attachments) { attachment in
-                                V2ConversationAttachmentRow(store: store, attachment: attachment)
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 10) {
+                                ForEach(store.attachments) { attachment in
+                                    V2ConversationAttachmentRow(store: store, attachment: attachment)
+                                        .frame(width: 240)
+                                        .padding(8)
+                                        .background(V2VisualStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+                                }
                             }
                         }
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal)
                         .padding(.vertical, 8)
                         .accessibilityIdentifier("v2.message.attachments")
@@ -2255,10 +2284,16 @@ struct V2ConversationDetailView: View {
                     GlassEffectContainer(spacing: 12) {
                         HStack(alignment: .bottom, spacing: 12) {
                             Menu {
-                                Button("添加附件", systemImage: "paperclip") {
+                                Button("照片", systemImage: "photo.on.rectangle") {
+                                    photoSelectionLimit = V2MessageCommandLimits.maxMediaAttachments - store.attachments.count
+                                    isPresentingPhotoPicker = true
+                                }
+                                .disabled(!store.canAddAttachment || store.directAccountKind == .system || isImportingPhotos)
+                                .accessibilityIdentifier("v2.message.photo.add")
+                                Button("文件", systemImage: "paperclip") {
                                     isPresentingAttachmentImporter = true
                                 }
-                                .disabled(!store.canAddAttachment || store.directAccountKind == .system)
+                                .disabled(!store.canAddAttachment || store.directAccountKind == .system || isImportingPhotos)
                                 .accessibilityIdentifier("v2.message.attachment.add")
                                 if store.isGroupConversation {
                                     Button(showsMentionInput ? "收起提及" : "提及成员", systemImage: "at") {
@@ -2267,13 +2302,18 @@ struct V2ConversationDetailView: View {
                                     .accessibilityIdentifier("v2.message.mentions.toggle")
                                 }
                             } label: {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundStyle(.primary)
-                                    .frame(width: 32, height: 32)
-                                    .background(Color.secondary.opacity(0.08), in: Circle())
-                                    .frame(width: 44, height: 44)
-                                    .contentShape(Rectangle())
+                                if isImportingPhotos {
+                                    ProgressView().frame(width: 44, height: 44)
+                                        .accessibilityLabel("正在准备图片")
+                                } else {
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 18, weight: .medium))
+                                        .foregroundStyle(.primary)
+                                        .frame(width: 32, height: 32)
+                                        .background(Color.secondary.opacity(0.08), in: Circle())
+                                        .frame(width: 44, height: 44)
+                                        .contentShape(Rectangle())
+                                }
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("消息附件与提及")
@@ -2393,9 +2433,18 @@ struct V2ConversationDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .toolbar { conversationToolbar }
-        .sheet(item: $presentedDetailSheet) { sheet in
+        .sheet(item: $presentedDetailSheet, onDismiss: {
+            if openResourcesAfterSheet, let room = try? RoomID(store.roomID) {
+                openResourcesAfterSheet = false
+                resourceNavigation?.showResources(roomID: room)
+            }
+        }) { sheet in
             switch sheet {
-            case .settings: V2ConversationSettingsView(roomID: store.roomID, peerKey: store.presentationKey)
+            case .settings:
+                V2ConversationSettingsView(roomID: store.roomID, peerKey: store.presentationKey,
+                    openResources: resourceManagement == nil ? nil : {
+                        openResourcesAfterSheet = true; presentedDetailSheet = nil
+                    })
             case .groupMembers:
                 V2GroupMembersSheet(store: store)
             case .groupAvatar:
@@ -2443,6 +2492,10 @@ struct V2ConversationDetailView: View {
         ) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
             Task { await store.stageAttachment(from: url) }
+        }
+        .v2PhotoLibraryPicker(isPresented: $isPresentingPhotoPicker, isImporting: $isImportingPhotos,
+                              maximumSelectionCount: photoSelectionLimit) { photo in
+            await store.stageAttachment(photo: photo)
         }
         .task { await store.observeProjectionChanges() }
         .task { await store.pollVisibleHybridGroupEvents() }
@@ -2545,6 +2598,7 @@ struct V2ConversationDetailView: View {
 
     private var canSendDraft: Bool {
         !store.isSending
+            && !isImportingPhotos
             && store.directAccountKind != .system
             && store.canSendInDirectConversation != false
             && (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.attachments.isEmpty)
@@ -2567,6 +2621,10 @@ struct V2ConversationDetailView: View {
                 Menu {
                     Button("聊天详情", systemImage: "info.circle") { presentedDetailSheet = .settings }
                         .accessibilityIdentifier("v2.chat.details")
+                    if resourceManagement != nil, let room = try? RoomID(store.roomID) {
+                        Button("聊天文件", systemImage: "folder") { resourceNavigation?.showResources(roomID: room) }
+                            .accessibilityIdentifier("v2.resources.chat.open")
+                    }
                     Button("多选转发", systemImage: "arrowshape.turn.up.right") { store.beginForwardSelection() }
                         .disabled(store.messages.allSatisfy(\.isWithdrawn))
                         .accessibilityIdentifier("v2.message.forward.begin")
@@ -2648,14 +2706,22 @@ struct V2ComposerTextInput: View {
 private struct V2ConversationAttachmentRow: View {
     @Bindable var store: V2ConversationDetailStore
     let attachment: V2ConversationAttachmentItem
+    @State private var preview: UIImage?
 
     var body: some View {
         let removalLabel = "移除附件 " + attachment.displayName
         let removeIdentifier = "v2.message.attachment.remove." + attachment.id.uuidString
         HStack(spacing: 8) {
-            Image(systemName: attachmentIcon(for: attachment.state))
-                .foregroundStyle(attachmentColor(for: attachment.state))
-                .accessibilityHidden(true)
+            if let preview {
+                Image(uiImage: preview).resizable().scaledToFill()
+                    .frame(width: 48, height: 48)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: attachmentIcon(for: attachment.state))
+                    .foregroundStyle(attachmentColor(for: attachment.state))
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.displayName)
                     .lineLimit(1)
@@ -2674,6 +2740,16 @@ private struct V2ConversationAttachmentRow: View {
             .disabled(store.isSending)
             .accessibilityLabel(removalLabel)
             .accessibilityIdentifier(removeIdentifier)
+        }
+        .task(id: attachment.id) {
+            guard attachment.attachment.contentType.hasPrefix("image/") else { return }
+            do {
+                let lease = try await store.borrowAttachment(id: attachment.id)
+                let result = await V2PhotoLibraryImage.preview(at: lease.fileURL)
+                await lease.release()
+                guard !Task.isCancelled else { return }
+                preview = result?.image
+            } catch { preview = nil }
         }
     }
 
@@ -2697,7 +2773,7 @@ private struct V2ConversationAttachmentRow: View {
 
     private func attachmentStatusText(for state: V2ConversationAttachmentItem.State) -> String {
         switch state {
-        case .staged: "等待上传"
+        case .staged: "已添加，发送时上传"
         case .uploading: "正在上传并等待安全扫描"
         case .available: "已准备发送"
         case .failed: "上传失败，可重试"
@@ -2861,13 +2937,6 @@ private struct V2ConversationMessageBubble: View {
                 }
                 if !message.media.isEmpty {
                     VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 6) {
-                        Label(attachmentSummary, systemImage: "paperclip")
-                            .font(.subheadline)
-                            .foregroundStyle(message.isOutgoing && !message.isWithdrawn ? Color.white : Color.secondary)
-                            .accessibilityLabel("消息附件")
-                            .accessibilityValue(message.text.isEmpty
-                                ? attachmentSummary + ", " + message.createdAt.formatted(.dateTime.hour().minute())
-                                : attachmentSummary)
                         ForEach(Array(message.media.enumerated()), id: \.element.mediaID) { index, media in
                             V2ConversationMediaAttachmentRow(
                                 store: store,
@@ -2879,6 +2948,10 @@ private struct V2ConversationMessageBubble: View {
                         }
                     }
                     .accessibilityElement(children: .contain)
+                    .accessibilityLabel("消息附件")
+                    .accessibilityValue(message.text.isEmpty
+                        ? attachmentSummary + ", " + message.createdAt.formatted(.dateTime.hour().minute())
+                        : attachmentSummary)
                     .accessibilityIdentifier("v2.message.attachments.\(message.id)")
                 }
             }

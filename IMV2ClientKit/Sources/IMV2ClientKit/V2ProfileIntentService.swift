@@ -3,6 +3,7 @@ import GRDB
 import IMV2Core
 
 private enum V2ProfilePreparationError: Error { case dependencyDeferred, deadlineExpired }
+private struct V2ProfilePreparationHead: Equatable, Sendable { let id: String; let due: Double }
 
 /// Account-owned single-step adapter; page lifetime never owns network submission.
 public actor V2ProfileIntentService: V2ProfileIntentManaging {
@@ -48,6 +49,11 @@ public actor V2ProfileIntentService: V2ProfileIntentManaging {
         await wake()
         return intent
     }
+    public func enqueueImportedAvatar(expectedRevision: V2ProfileRevision, patch: V2ProfilePatch, source: V2ProfileAvatarImport) async throws -> V2ProfileIntent {
+        let intent = try await store.enqueueProfileImportIntent(accountID: accountID, expectedRevision: expectedRevision, patch: patch, source: source)
+        await wake()
+        return intent
+    }
     public func resumeOrReapply(intentID: UUID) async throws -> V2ProfileIntent {
         guard let intent = try await store.profileIntent(id: intentID), intent.accountID == accountID else { throw V2OperationWorkError.accountMismatch }
         if let workID = intent.workID, let work = try await store.operationWork(id: workID), !work.execution.isTerminal {
@@ -63,7 +69,33 @@ public actor V2ProfileIntentService: V2ProfileIntentManaging {
         // replica response must not freeze a replacement against an older base.
         let latest = try await refreshProfile()
         try Task.checkCancellation()
-        let replacement = try await enqueue(expectedRevision: latest.revision, patch: intent.patch, avatarUpload: intent.avatarUpload)
+        let replacement: V2ProfileIntent
+        if let source = intent.avatarImport {
+            let request = try V2ResourceImportRequest(operationID: .init(uuid: UUID()), source: source.request.source,
+                targetUsage: .userAvatar, targetMediaID: .init(uuid: UUID()))
+            replacement = try await store.enqueueProfileImportIntent(accountID: accountID, expectedRevision: latest.revision,
+                patch: intent.patch, source: .init(id: UUID(), request: request))
+        } else {
+            var upload = intent.avatarUpload
+            if let source = upload, let job = try await store.resourceTransfer(id: source.id) {
+                let now = Date()
+                let renew: Bool
+                switch job.stage {
+                case .cancelled, .rejected, .expired: renew = true
+                case .ready: renew = job.cancellationRequested || job.session?.bindableUntil.map { $0 <= now } != false
+                default: renew = job.cancellationRequested || job.session.map { $0.expiresAt <= now } == true
+                }
+                if renew {
+                    // A new, known-unsubmitted profile operation may need new
+                    // upload admission. Keep the original asset: enqueue binds
+                    // its replacement consumer before the old one is released.
+                    upload = try .init(id: UUID(), localAssetID: source.localAssetID,
+                        displayName: source.displayName, contentType: source.contentType, byteCount: source.byteCount)
+                }
+            }
+            replacement = try await store.enqueueProfileIntent(accountID: accountID, expectedRevision: latest.revision, patch: intent.patch, avatarUpload: upload, adoptingFromIntentID: intentID)
+        }
+        await wake()
         try await store.discardProfileIntentSource(id: intentID)
         return replacement
     }
@@ -93,7 +125,31 @@ public actor V2ProfileIntentService: V2ProfileIntentManaging {
             return true
         }
         let avatar: V2AvatarReference?
-        if let source = intent.avatarUpload {
+        if let source = intent.avatarImport {
+            guard let job = try await store.resourceImport(id: source.id), job.request == source.request,
+                  !job.cancellationRequested, job.attempts < 5,
+                  job.status.map({ ![.cancelled,.failed].contains($0.state) }) ?? true else {
+                try await store.failUnfrozenProfilePreparation(id: intent.id)
+                return true
+            }
+            guard let status = job.status, status.state == .ready else {
+                try await store.deferProfilePreparation(intent: intent, now: now)
+                return false
+            }
+            guard let until = status.bindableUntilUnixMilliseconds, Double(until) / 1000 > now.timeIntervalSince1970 else {
+                try await store.expireUnfrozenProfileIntent(id: intent.id)
+                return true
+            }
+            avatar = .init(mediaID: source.request.targetMediaID)
+        } else if let source = intent.avatarUpload {
+            if let job = try await store.resourceTransfer(id: source.id),
+               job.cancellationRequested || [.cancelled, .rejected, .expired].contains(job.stage) {
+                // A terminal transfer cannot satisfy this unsubmitted change.
+                // Retain its draft/source for explicit reapplication instead of
+                // deferring the same impossible dependency until the deadline.
+                try await store.failUnfrozenProfilePreparation(id: intent.id)
+                return true
+            }
             do {
                 guard let avatars else { throw V2OperationWorkError.dependencyUnavailable }
                 let remaining = max(0, intent.deadline.timeIntervalSince(Date()))
@@ -121,7 +177,13 @@ public actor V2ProfileIntentService: V2ProfileIntentManaging {
         } else { avatar = nil }
         guard try await store.firstUnfinishedProfileIntent(accountID: accountID)?.id == intent.id else { return false }
         if intent.deadline <= Date() { try await store.expireUnfrozenProfileIntent(id: intent.id); return true }
-        _ = try await store.freezeProfileIntent(id: intent.id, avatar: avatar, now: Date())
+        do { _ = try await store.freezeProfileIntent(id: intent.id, avatar: avatar, now: Date()) }
+        catch V2ResourceJournalError.bindingExpired {
+            try await store.expireUnfrozenProfileIntent(id: intent.id)
+        } catch V2OperationWorkError.dependencyUnavailable {
+            try await store.deferProfilePreparation(intent: intent, now: Date())
+            return false
+        }
         return true
     }
     public func execute(_ claim: V2OperationWorkClaim) async throws {
@@ -183,14 +245,17 @@ extension GRDBV2LocalSyncStore {
         try databasePool.write { db in
             try Self.completeOperationWork(outcome, now: now, db: db)
             if let snapshot = result.currentSnapshot { try Self.persistOwnProfileSnapshot(snapshot, db: db) }
-            if state == .committed { try db.execute(sql: "UPDATE v2_profile_intents SET source_released=1 WHERE intent_id=?", arguments: [intent.id.uuidString]) }
+            if state == .committed {
+                if let source = intent.avatarUpload { try Self.releaseLocalResourceAssetConsumer(source.localAssetID, consumer: .profileIntent(intent.id), db: db) }
+                try db.execute(sql: "UPDATE v2_profile_intents SET source_released=1 WHERE intent_id=?", arguments: [intent.id.uuidString])
+            }
         }
     }
     func deferProfilePreparation(intent: V2ProfileIntent, now: Date) throws {
         try databasePool.write { db in
             let attempts = try Int.fetchOne(db, sql: "SELECT preparation_attempts FROM v2_profile_intents WHERE intent_id=?", arguments: [intent.id.uuidString]) ?? 0
             let next = attempts >= 4 ? intent.deadline : min(intent.deadline, now.addingTimeInterval(pow(2, Double(attempts + 1))))
-            try db.execute(sql: "UPDATE v2_profile_intents SET preparation_attempts=preparation_attempts+1,preparation_next_at=?,preparation_error='PROFILE_UPLOAD_PENDING' WHERE intent_id=? AND work_id IS NULL AND local_terminal IS NULL", arguments: [next.timeIntervalSince1970, intent.id.uuidString])
+            try db.execute(sql: "UPDATE v2_profile_intents SET preparation_attempts=preparation_attempts+1,preparation_next_at=?,preparation_error='PROFILE_AVATAR_PENDING' WHERE intent_id=? AND work_id IS NULL AND local_terminal IS NULL", arguments: [next.timeIntervalSince1970, intent.id.uuidString])
         }
     }
     func resumeProfilePreparation(id: UUID) throws -> Bool {
@@ -201,12 +266,21 @@ extension GRDBV2LocalSyncStore {
         }
     }
     public func discardProfileIntentSource(id: UUID) throws {
-        try databasePool.write { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT i.work_id,w.scheduling_state FROM v2_profile_intents i LEFT JOIN v2_operation_work w ON w.work_id=i.work_id WHERE i.intent_id=?", arguments: [id.uuidString]) else { throw V2OperationWorkError.invalidRecord }
-            let workID: String? = row["work_id"]
-            guard workID == nil || row["scheduling_state"] as String? == "finished" else { throw V2OperationWorkError.invalidTransition }
-            try db.execute(sql: "UPDATE v2_profile_intents SET source_released=1,local_terminal=CASE WHEN work_id IS NULL THEN 'cancelledLocally' ELSE local_terminal END,preparation_next_at=NULL WHERE intent_id=?", arguments: [id.uuidString])
+        try databasePool.write { try Self.discardProfileIntentSource(id: id, db: $0) }
+    }
+    static func discardProfileIntentSource(id: UUID, db: Database) throws {
+        guard let row = try Row.fetchOne(db, sql: "SELECT i.work_id,i.local_asset_id,i.upload_job_id,i.import_job_id,w.scheduling_state FROM v2_profile_intents i LEFT JOIN v2_operation_work w ON w.work_id=i.work_id WHERE i.intent_id=?", arguments: [id.uuidString]) else { throw V2OperationWorkError.invalidRecord }
+        let workID: String? = row["work_id"]
+        guard workID == nil || row["scheduling_state"] as String? == "finished" else { throw V2OperationWorkError.invalidTransition }
+        if let raw: String = row["local_asset_id"], let assetID = UUID(uuidString: raw) {
+            try Self.releaseLocalResourceAssetConsumer(.init(assetID), consumer: .profileIntent(id), db: db)
         }
+        try db.execute(sql: "UPDATE v2_profile_intents SET source_released=1,local_terminal=CASE WHEN work_id IS NULL THEN 'cancelledLocally' ELSE local_terminal END,preparation_next_at=NULL WHERE intent_id=?", arguments: [id.uuidString])
+        if let raw: String = row["upload_job_id"], let job = UUID(uuidString: raw) { try Self.requestUnboundAvatarUploadCancellation(job, db: db) }
+        if let raw: String = row["import_job_id"], let job = UUID(uuidString: raw) { try Self.requestUnboundAvatarImportCancellation(job, db: db) }
+    }
+    func failUnfrozenProfilePreparation(id: UUID) throws {
+        try databasePool.write { try $0.execute(sql: "UPDATE v2_profile_intents SET local_terminal='preparationFailed',preparation_next_at=NULL WHERE intent_id=? AND work_id IS NULL AND local_terminal IS NULL", arguments: [id.uuidString]) }
     }
     func expireUnfrozenProfileIntent(id: UUID) throws {
         try databasePool.write { db in
@@ -216,19 +290,23 @@ extension GRDBV2LocalSyncStore {
     public func profilePreparationSchedule(accountID: UserID) -> V2CommandRetrySchedule {
         let pool = databasePool
         let query = """
-            SELECT MIN(i.preparation_next_at) FROM v2_profile_intents i
-            WHERE i.account_id=? AND i.work_id IS NULL AND i.local_terminal IS NULL
+            SELECT i.intent_id,CASE WHEN r.stage IN ('ready','cancelled','failed') OR r.attempts>=5 THEN 0 ELSE i.preparation_next_at END AS preparation_next_at
+            FROM v2_profile_intents i LEFT JOIN v2_resource_import_jobs r ON r.job_id=i.import_job_id
+            WHERE i.account_id=? AND i.work_id IS NULL AND i.local_terminal IS NULL AND i.preparation_next_at IS NOT NULL
                 AND NOT EXISTS(SELECT 1 FROM v2_profile_intents predecessor LEFT JOIN v2_operation_work w ON w.work_id=predecessor.work_id
                     WHERE predecessor.account_id=i.account_id AND predecessor.local_sequence<i.local_sequence
                     AND predecessor.local_terminal IS NULL AND (predecessor.work_id IS NULL OR w.scheduling_state<>'finished'))
+            ORDER BY i.preparation_next_at,i.local_sequence LIMIT 1
             """
         return .init(nextAttemptAt: {
-            try await pool.read { try Double.fetchOne($0, sql: query, arguments: [accountID.rawValue]).map(Date.init(timeIntervalSince1970:)) }
+            try await pool.read { try Row.fetchOne($0, sql: query, arguments: [accountID.rawValue]).map { Date(timeIntervalSince1970: $0["preparation_next_at"]) } }
         }, updates: {
             AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
                 let task = Task {
                     do {
-                        let observation = ValueObservation.tracking { try Double.fetchOne($0, sql: query, arguments: [accountID.rawValue]) }.removeDuplicates()
+                        let observation = ValueObservation.tracking { db -> V2ProfilePreparationHead? in
+                            try Row.fetchOne(db, sql: query, arguments: [accountID.rawValue]).map { .init(id: $0["intent_id"], due: $0["preparation_next_at"]) }
+                        }.removeDuplicates()
                         for try await _ in observation.values(in: pool, bufferingPolicy: .bufferingNewest(1)) { continuation.yield(()) }
                         continuation.finish()
                     } catch { continuation.finish(throwing: error) }

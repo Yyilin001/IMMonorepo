@@ -37,6 +37,13 @@ public struct V2NetworkWorkPolicy: Sendable {
         let defaults: [TimeInterval] = [2, 5, 10, 30]
         return max(defaults[min(3, max(0, attempt))], serverDelay ?? 0)
     }
+
+    /// Image processing normally completes in seconds. Keep a short bounded
+    /// initial observation window, then back off; server cooldown always wins.
+    public static func resourceProcessingPollDelay(attempt: Int, serverDelay: TimeInterval? = nil) -> TimeInterval {
+        let delays: [TimeInterval] = [0.5, 0.5, 0.5, 0.5, 0.75, 1, 2, 5, 10, 30]
+        return max(delays[min(delays.count - 1, max(0, attempt))], serverDelay ?? 0)
+    }
 }
 
 /// Failed-history retry quota; initial interactive attempts do not consume this bucket.

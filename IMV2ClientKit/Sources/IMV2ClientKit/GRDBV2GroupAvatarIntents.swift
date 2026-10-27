@@ -8,6 +8,7 @@ extension GRDBV2LocalSyncStore {
             operation_id TEXT PRIMARY KEY NOT NULL,
             actor_user_id TEXT NOT NULL, room_id TEXT NOT NULL, command BLOB NOT NULL,
             upload_job_id TEXT REFERENCES v2_resource_transfer_jobs(job_id),
+            import_job_id TEXT REFERENCES v2_resource_import_jobs(job_id),
             stage TEXT NOT NULL CHECK(stage IN ('preparing','submitted','needsAttention','committed','cancelled','closed')),
             submission_started INTEGER NOT NULL DEFAULT 0 CHECK(submission_started IN (0,1)),
             attempts INTEGER NOT NULL DEFAULT 0 CHECK(typeof(attempts)='integer' AND attempts>=0),
@@ -17,6 +18,7 @@ extension GRDBV2LocalSyncStore {
             closure_proof BLOB,
             closed_disposition TEXT NOT NULL DEFAULT 'awaitingDecision' CHECK(closed_disposition IN ('awaitingDecision','abandoned','replaced')),
             replacement_of TEXT,
+            CHECK(upload_job_id IS NULL OR import_job_id IS NULL),
             CHECK((claim_id IS NULL)=(claim_until IS NULL)),
             CHECK((stage='committed')=(receipt IS NOT NULL)),
             CHECK((stage='closed')=(closure_proof IS NOT NULL)),
@@ -30,6 +32,7 @@ extension GRDBV2LocalSyncStore {
         CREATE INDEX v2_group_avatar_intent_due ON v2_group_avatar_intents(retry_at,created_at)
             WHERE stage IN ('preparing','submitted');
         CREATE INDEX v2_group_avatar_intent_upload ON v2_group_avatar_intents(upload_job_id,stage);
+        CREATE INDEX v2_group_avatar_intent_import ON v2_group_avatar_intents(import_job_id,stage);
         CREATE UNIQUE INDEX v2_group_avatar_replacement ON v2_group_avatar_intents(replacement_of) WHERE replacement_of IS NOT NULL;
         CREATE INDEX v2_group_avatar_pending_account ON v2_group_avatar_intents(actor_user_id,created_at,operation_id)
             WHERE stage NOT IN ('committed','cancelled','closed')
@@ -41,7 +44,7 @@ extension GRDBV2LocalSyncStore {
     public func freezeGroupAvatarIntent(actorUserID: UserID, command: V2GroupAvatarCommand,
                                         uploadJobID: UUID?, now: Date = Date()) throws -> V2GroupAvatarIntent {
         try databasePool.write { db in
-            try Self.freezeGroupAvatarIntent(actorUserID: actorUserID, command: command, uploadJobID: uploadJobID, now: now, db: db)
+            try Self.freezeGroupAvatarIntent(actorUserID: actorUserID, command: command, preparation: uploadJobID.map(V2GroupAvatarPreparation.upload), now: now, db: db)
         }
     }
 
@@ -50,22 +53,35 @@ extension GRDBV2LocalSyncStore {
     @discardableResult
     public func freezeGroupAvatarUploadIntent(actorUserID: UserID, command: V2GroupAvatarCommand,
                                                uploadJobID: UUID, request: V2ResourceUploadRequest,
-                                               localFileToken: String, now: Date = Date()) throws -> V2GroupAvatarIntent {
+                                               localAssetID: V2LocalResourceAssetID, now: Date = Date()) throws -> V2GroupAvatarIntent {
         try Task.checkCancellation()
         guard command.mutation.mediaID == request.mediaID, request.usage == .groupAvatar(command.roomID) else {
             throw V2GroupAvatarIntentError.conflict
         }
         return try databasePool.write { db in
-            _ = try Self.prepareResourceTransfer(id: uploadJobID, request: request, localFileToken: localFileToken, now: now, db: db)
-            return try Self.freezeGroupAvatarIntent(actorUserID: actorUserID, command: command, uploadJobID: uploadJobID, now: now, db: db)
+            _ = try Self.prepareResourceTransfer(id: uploadJobID, request: request, localAssetID: localAssetID, now: now, db: db)
+            return try Self.freezeGroupAvatarIntent(actorUserID: actorUserID, command: command, preparation: .upload(uploadJobID), now: now, db: db)
+        }
+    }
+
+    /// The target import and its consumer are admitted atomically. No orphan
+    /// import can race the avatar command's persistence boundary.
+    @discardableResult
+    public func freezeGroupAvatarImportIntent(actorUserID: UserID, command: V2GroupAvatarCommand,
+                                              importJobID: UUID, request: V2ResourceImportRequest, now: Date = Date()) throws -> V2GroupAvatarIntent {
+        try Task.checkCancellation()
+        guard command.mutation.mediaID == request.targetMediaID, request.targetUsage == .groupAvatar(command.roomID) else { throw V2GroupAvatarIntentError.conflict }
+        return try databasePool.write { db in
+            try Self.prepareResourceImport(id: importJobID, request: request, now: now, db: db)
+            return try Self.freezeGroupAvatarIntent(actorUserID: actorUserID, command: command, preparation: .serverImport(importJobID), now: now, db: db)
         }
     }
 
     private static func freezeGroupAvatarIntent(actorUserID: UserID, command: V2GroupAvatarCommand,
-                                                uploadJobID: UUID?, now: Date, db: Database) throws -> V2GroupAvatarIntent {
+                                                preparation: V2GroupAvatarPreparation?, now: Date, db: Database) throws -> V2GroupAvatarIntent {
         try Self.requireGroupAvatarAccount(actorUserID, db: db)
         if let prior = try Self.readGroupAvatarIntent(command.operationID, db: db) {
-            guard prior.actorUserID == actorUserID, prior.command == command, prior.uploadJobID == uploadJobID
+            guard prior.actorUserID == actorUserID, prior.command == command, prior.preparation == preparation
             else { throw V2GroupAvatarIntentError.conflict }
             return prior
         }
@@ -73,19 +89,29 @@ extension GRDBV2LocalSyncStore {
             arguments: [command.roomID.rawValue]) != true else { throw V2GroupAvatarIntentError.conflict }
         switch command.mutation {
         case .remove:
-            guard uploadJobID == nil else { throw V2GroupAvatarIntentError.conflict }
+            guard preparation == nil else { throw V2GroupAvatarIntentError.conflict }
         case .set(let media):
-            guard let jobID = uploadJobID, let job = try Self.readResourceTransfer(jobID, db: db),
+            switch preparation {
+            case .upload(let jobID):
+            guard let job = try Self.readResourceTransfer(jobID, db: db),
                   job.request.mediaID == media, job.request.usage == .groupAvatar(command.roomID),
                   !job.cancellationRequested, ![.cancelled, .expired, .rejected].contains(job.stage),
-                  try Bool.fetchOne(db, sql: "SELECT staging_released=0 AND staging_release_started=0 FROM v2_resource_transfer_jobs WHERE job_id=?",
+                  try Bool.fetchOne(db, sql: "SELECT source_released=0 FROM v2_resource_transfer_jobs WHERE job_id=?",
                     arguments: [jobID.uuidString]) == true else { throw V2GroupAvatarIntentError.conflict }
+            case .serverImport(let jobID):
+                guard let job = try Self.readResourceImport(jobID, db: db), job.request.targetMediaID == media,
+                      job.request.targetUsage == .groupAvatar(command.roomID), !job.cancellationRequested,
+                      job.status.map({ ![.cancelled,.failed].contains($0.state) }) ?? true else { throw V2GroupAvatarIntentError.conflict }
+            case nil: throw V2GroupAvatarIntentError.conflict
+            }
         }
+        let uploadJobID: UUID? = if case .upload(let id) = preparation { id } else { nil }
+        let importJobID: UUID? = if case .serverImport(let id) = preparation { id } else { nil }
         try db.execute(sql: """
-            INSERT INTO v2_group_avatar_intents(operation_id,actor_user_id,room_id,command,upload_job_id,stage,created_at)
-            VALUES(?,?,?,?,?,'preparing',?)
+            INSERT INTO v2_group_avatar_intents(operation_id,actor_user_id,room_id,command,upload_job_id,import_job_id,stage,created_at)
+            VALUES(?,?,?,?,?,?,'preparing',?)
             """, arguments: [command.operationID.rawValue, actorUserID.rawValue, command.roomID.rawValue,
-                try JSONEncoder().encode(command), uploadJobID?.uuidString, try Self.commandRetryTimestamp(now)])
+                try JSONEncoder().encode(command), uploadJobID?.uuidString, importJobID?.uuidString, try Self.commandRetryTimestamp(now)])
         return try Self.requireGroupAvatarIntent(command.operationID, db: db)
     }
 
@@ -166,7 +192,7 @@ extension GRDBV2LocalSyncStore {
             return try String.fetchAll(db, sql: """
                 SELECT operation_id FROM v2_group_avatar_intents g
                 WHERE stage IN ('preparing','submitted') AND retry_at<=? AND (claim_until IS NULL OR claim_until<=?)
-                AND (submission_started=1 OR upload_job_id IS NULL OR EXISTS (SELECT 1 FROM v2_resource_transfer_jobs r WHERE r.job_id=g.upload_job_id AND (r.stage IN ('ready','cancelled','rejected','expired') OR r.needs_attention=1)))
+                AND (submission_started=1 OR (upload_job_id IS NULL AND import_job_id IS NULL) OR EXISTS (SELECT 1 FROM v2_resource_transfer_jobs r WHERE r.job_id=g.upload_job_id AND (r.stage IN ('ready','cancelled','rejected','expired') OR r.needs_attention=1)) OR EXISTS(SELECT 1 FROM v2_resource_import_jobs r WHERE r.job_id=g.import_job_id AND (r.stage IN ('ready','cancelled','failed') OR r.attempts>=5)))
                 ORDER BY retry_at,created_at,operation_id LIMIT ?
                 """, arguments: [time, time, limit]).map(GroupAvatarOperationID.init)
         }
@@ -187,6 +213,12 @@ extension GRDBV2LocalSyncStore {
                     throw V2ResourceJournalError.dependencyNotReady
                 }
                 guard let until = job.session?.bindableUntil, until > now else { throw V2ResourceJournalError.bindingExpired }
+            }
+            if !value.submissionStarted, let jobID = value.importJobID {
+                guard let job = try Self.readResourceImport(jobID, db: db), let status = job.status,
+                      status.state == .ready, !job.cancellationRequested else { throw V2ResourceJournalError.dependencyNotReady }
+                guard let expiry = status.bindableUntilUnixMilliseconds,
+                      Double(expiry) / 1000 > now.timeIntervalSince1970 else { throw V2ResourceJournalError.bindingExpired }
             }
             guard value.attempts < 5 else { throw V2GroupAvatarIntentError.busy }
             let claim = UUID()
@@ -233,7 +265,7 @@ extension GRDBV2LocalSyncStore {
     func pauseGroupAvatarPreparation(_ id: GroupAvatarOperationID) throws {
         try databasePool.write { db in
             _ = try Self.requireGroupAvatarIntent(id, db: db)
-            try db.execute(sql: "UPDATE v2_group_avatar_intents SET stage='needsAttention',issue='uploadUnavailable' WHERE operation_id=? AND stage='preparing'",
+            try db.execute(sql: "UPDATE v2_group_avatar_intents SET stage='needsAttention',issue='preparationUnavailable' WHERE operation_id=? AND stage='preparing'",
                 arguments: [id.rawValue])
         }
     }
@@ -254,6 +286,7 @@ extension GRDBV2LocalSyncStore {
             if value.stage == .cancelled { return }
             guard !value.submissionStarted else { throw V2GroupAvatarIntentError.alreadySubmitted }
             try db.execute(sql: "UPDATE v2_group_avatar_intents SET stage='cancelled',issue=NULL WHERE operation_id=?", arguments: [id.rawValue])
+            if let job = value.importJobID { try Self.requestUnboundAvatarImportCancellation(job, db: db) }
             if let job = value.uploadJobID {
                 // Persist cleanup demand in the same transaction as local cancellation.
                 try Self.requestUnboundAvatarUploadCancellation(job, db: db)
@@ -309,6 +342,7 @@ extension GRDBV2LocalSyncStore {
         let actor = try UserID(row["actor_user_id"])
         try requireGroupAvatarAccount(actor, db: db)
         let command = try JSONDecoder().decode(V2GroupAvatarCommand.self, from: row["command"])
+        let rawImport: String? = row["import_job_id"]
         let rawJob: String? = row["upload_job_id"], rawIssue: String? = row["issue"]
         let bytes: Data? = row["receipt"]
         let receipt = try bytes.map { try JSONDecoder().decode(V2GroupAvatarChange.self, from: $0) }
@@ -320,8 +354,10 @@ extension GRDBV2LocalSyncStore {
               let disposition = V2GroupAvatarIntent.ClosedDisposition(rawValue: row["closed_disposition"]),
               rawAction == nil || rawAction.flatMap(V2GroupAvatarRecoveryRequest.Action.init(rawValue:)) != nil,
               rawJob == nil || rawJob.flatMap(UUID.init(uuidString:)) != nil,
+              rawImport == nil || rawImport.flatMap(UUID.init(uuidString:)) != nil,
+              rawJob == nil || rawImport == nil,
               rawIssue == nil || rawIssue.flatMap(V2GroupAvatarIntent.Issue.init(rawValue:)) != nil,
-              retry.isFinite, (command.mutation.mediaID == nil) == (rawJob == nil),
+              retry.isFinite, (command.mutation.mediaID == nil) == (rawJob == nil && rawImport == nil),
               (stage == .closed) == (proof != nil), (stage == .committed) == (receipt != nil),
               stage == .closed || disposition == .awaitingDecision
         else { throw V2GroupAvatarIntentError.invalidRecord }
@@ -333,7 +369,7 @@ extension GRDBV2LocalSyncStore {
             guard proof.actorUserID == actor, proof.request.command == command, proof.result == .closed
             else { throw V2GroupAvatarIntentError.invalidRecord }
         }
-        return .init(actorUserID: actor, command: command, uploadJobID: rawJob.flatMap(UUID.init(uuidString:)), stage: stage,
+        return .init(actorUserID: actor, command: command, preparation: rawJob.flatMap(UUID.init(uuidString:)).map(V2GroupAvatarPreparation.upload) ?? rawImport.flatMap(UUID.init(uuidString:)).map(V2GroupAvatarPreparation.serverImport), stage: stage,
             submissionStarted: row["submission_started"], recoveryAction: rawAction.flatMap(V2GroupAvatarRecoveryRequest.Action.init(rawValue:)),
             closedDisposition: disposition, attempts: row["attempts"], retryAt: Date(timeIntervalSince1970: retry),
             issue: rawIssue.flatMap(V2GroupAvatarIntent.Issue.init(rawValue:)), receipt: receipt, closureProof: proof)

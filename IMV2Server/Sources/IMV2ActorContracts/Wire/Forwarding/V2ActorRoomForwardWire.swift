@@ -70,12 +70,14 @@ public struct V2ActorForwardExportMediaWire: Codable, Equatable, Sendable {
     public let uploadSessionID: UUID
     public let contentType: String
     public let byteCount: Int64
+    public let displayName: V2ResourceDisplayName
 
-    public init(mediaID: UUID, uploadSessionID: UUID, contentType: String, byteCount: Int64) {
+    public init(mediaID: UUID, uploadSessionID: UUID, contentType: String, byteCount: Int64, displayName: V2ResourceDisplayName = .attachment) {
         self.mediaID = mediaID
         self.uploadSessionID = uploadSessionID
         self.contentType = contentType
         self.byteCount = byteCount
+        self.displayName = displayName
     }
 }
 

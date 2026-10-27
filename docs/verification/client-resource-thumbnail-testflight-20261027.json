@@ -1,0 +1,46 @@
+{
+  "status": "testflight-internal-testing-available",
+  "observedAt": "2026-10-27T12:10:42.987565+00:00",
+  "appStoreConnectAppID": "6765884624",
+  "appName": "iIMli",
+  "bundleID": "com.stskcxfz.imapp",
+  "teamID": "T79S2V9A32",
+  "version": "1.0",
+  "build": "7",
+  "archive": "/tmp/im-testflight-thumbnail-20261027/IMApp.xcarchive",
+  "sourceDrift": [],
+  "archiveStrictSignatureVerified": true,
+  "distribution": {
+    "observedAt": "2026-10-27T12:01:23.806785+00:00",
+    "distributionLogs": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/IMApp_2026-10-27_19-59-23.941.xcdistributionlogs",
+    "app": {
+      "CFBundleIdentifier": "com.stskcxfz.imapp",
+      "CFBundleShortVersionString": "1.0",
+      "CFBundleVersion": "7",
+      "IMV2AccountBaseURL": "https://120.77.66.38",
+      "IMV2PushEnvironment": "production"
+    },
+    "signedAPSEnvironment": "production",
+    "signedTeamIdentifier": "T79S2V9A32"
+  },
+  "internalGroup": "IMTest",
+  "groupAutomaticDistributionEnabled": true,
+  "appleProcessingCompleted": true,
+  "availableForTesting": true,
+  "productionAppStoreSubmission": false,
+  "uploadResult": {
+    "uploadSucceeded": true,
+    "explicitFailure": false,
+    "itmsErrorCodes": [],
+    "observedAt": "2026-10-27T12:03:38.672253+00:00"
+  },
+  "uploaded": true,
+  "groupBuildStatus": "正在测试",
+  "expiryDays": 90,
+  "appStoreConnectReportsTesterInstalledBuild": true,
+  "screenshot": "/tmp/im-testflight-thumbnail-20261027/testflight-ready.png",
+  "uploadCompletionScreenshot": "/tmp/im-testflight-thumbnail-20261027/xcode-upload-complete.png",
+  "limitations": [
+    "No agent-run physical UI or first-frame latency test after TestFlight installation"
+  ]
+}

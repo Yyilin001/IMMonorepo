@@ -5,6 +5,34 @@ import IMV2Core
 import Testing
 
 struct V2BackgroundDownloadPersistenceTests {
+    @Test func demandPromotionPersistsBudgetAndControlsAndCannotCrossAccountOrRevivePause() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let binding = V2LocalInstallationBinding(value: UUID()), account = UserID(uuid: UUID())
+        let url = root.appending(path: "db.sqlite"), id = UUID()
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: account)
+        _ = try await store.beginBackgroundDownload(id: id, mediaID: .init(uuid: UUID()), message: nil, accountID: account, priority: .background)
+        try await store.databasePool.write { db in
+            try db.execute(sql: "UPDATE v2_resource_download_jobs SET attempt_count=3,retry_at_milliseconds=12345 WHERE job_id=?", arguments: [id.uuidString])
+        }
+        #expect(try await store.promoteBackgroundDownload(id: id, accountID: account, priority: .interactive) == .interactive)
+        #expect(try await store.promoteBackgroundDownload(id: id, accountID: account, priority: .background) == .interactive)
+        await #expect(throws: V2ClientLocalStorageError.installationBindingMismatch) {
+            _ = try await store.promoteBackgroundDownload(id: id, accountID: .init(uuid: UUID()), priority: .critical)
+        }
+        try await store.close()
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: account)
+        let saved = try #require(try await reopened.backgroundDownloads(accountID: account).first)
+        #expect(saved.id == id && saved.priority == .interactive && saved.attemptCount == 3 && saved.retryAtMilliseconds == 12345 && saved.state == .preparing)
+        // An automatic policy pause is a domain outcome, not promotion's retry.
+        try await reopened.restrictAutomaticBackgroundDownload(id: id, accountID: account)
+        #expect(try await reopened.promoteBackgroundDownload(id: id, accountID: account, priority: .critical) == nil)
+        #expect(try await reopened.backgroundDownloads(accountID: account).first?.state == .paused)
+        try await reopened.cancelBackgroundDownload(id: id, accountID: account)
+        #expect(try await reopened.promoteBackgroundDownload(id: id, accountID: account, priority: .critical) == nil)
+        try await reopened.close()
+    }
+
     @Test func restartPreservesOriginalIntentAndAttemptWhileOtherAccountsCannotReadIt() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -54,24 +82,23 @@ struct V2BackgroundDownloadPersistenceTests {
         try await store.close()
     }
 
-    @Test func anExistingDatabaseGetsTheNewTableWithoutLosingItsInstallation() async throws {
+    @Test func canonicalSchemaRequiresResolvedBytesBeforePhysicalTransfer() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let url = root.appendingPathComponent("db.sqlite"), binding = V2LocalInstallationBinding(value: UUID())
-        let account = UserID(uuid: UUID())
-        let original = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: account)
-        try await original.close()
-        // Construct the actual preceding schema state, keeping all prior tables/data.
-        let old = try DatabaseQueue(path: url.path)
-        try await old.write { db in
-            try db.execute(sql: "DROP TABLE v2_background_download_jobs")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier='addV2BackgroundDownloadJobs'")
+        let account = UserID(uuid: UUID()), id = UUID()
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appendingPathComponent("db.sqlite"), installationBinding: .init(value: UUID()), userID: account)
+        try await store.databasePool.write { db in
+            try db.execute(sql: "INSERT INTO v2_resource_download_jobs(job_id,media_id,room_id,message_id,transport,identity,resume_requested,state,created_at) VALUES(?,?,'room','message','foreground',?,1,'paused',0)",
+                arguments: [id.uuidString,UUID().uuidString,"demand:" + id.uuidString])
         }
-        try old.close()
-        let upgraded = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: account)
-        #expect(try await upgraded.boundAccountID() == account)
-        #expect(try await upgraded.backgroundDownloads(accountID: account).isEmpty)
-        try await upgraded.close()
+        await #expect(throws: DatabaseError.self) {
+            try await store.databasePool.write { try $0.execute(sql: "UPDATE v2_resource_download_jobs SET state='transferring' WHERE job_id=?", arguments: [id.uuidString]) }
+        }
+        await #expect(throws: DatabaseError.self) {
+            try await store.databasePool.write { try $0.execute(sql: "UPDATE v2_resource_download_jobs SET byte_count=4 WHERE job_id=?", arguments: [id.uuidString]) }
+        }
+        #expect(try await store.boundAccountID() == account)
+        try await store.close()
     }
 
     @Test func automaticRetriesPauseButAnExplicitRequestPreservesAndRestartsTheIntent() async throws {

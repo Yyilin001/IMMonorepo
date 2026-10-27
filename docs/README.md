@@ -25,6 +25,7 @@
 
 ## 其他入口
 
+- [Mac 原生交叉编译 Linux 服务端](guides/native-linux-release.md)：固定工具链与 glibc SDK、增量缓存、Linux 验证和预编译镜像打包。
 - [当前消息发送与结果恢复合同](reviews/message-send-contract.md)：房间顺序、内存权限、原子提交、单份成功记录和只读恢复。
 - [消息发送性能记录](reviews/send-throughput-5000-20261008.zh-CN.md)：当前 Actor 链路各轮运行条件、结果及失败边界。
 

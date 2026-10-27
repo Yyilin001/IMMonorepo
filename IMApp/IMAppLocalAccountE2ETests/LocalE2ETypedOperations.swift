@@ -77,7 +77,7 @@ extension LocalE2EAccountCredentials {
                         throw V2OperationWorkError.invalidTransition
                     }
                     let original = try await client.recover(.init(identity: command.identity, fingerprint: command.fingerprint,
-                        domainFingerprint: command.command.fingerprint, action: .query))
+                        domainFingerprint: command.command.fingerprint))
                     let persisted = try await store.databasePool.read { db in
                         try XCTUnwrap(Data.fetchOne(db, sql: "SELECT terminal_receipt FROM v2_operation_work WHERE work_id=?",
                             arguments: [workID.uuidString]))

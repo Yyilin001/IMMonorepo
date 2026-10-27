@@ -34,6 +34,7 @@ protocol V2GroupAvatarManaging: Sendable {
     func pending(roomID: RoomID) async throws -> [V2GroupAvatarIntent]
     func pendingIntent(roomID: RoomID, operationID: GroupAvatarOperationID) async throws -> V2GroupAvatarIntent?
     func change(roomID: RoomID, expectedRevision: UInt64, image: V2StagedConversationAttachment?) async throws
+    func changeUsingResource(roomID: RoomID, expectedRevision: UInt64, selection: V2AvatarResourceSelection) async throws
     func act(roomID: RoomID, operationID: GroupAvatarOperationID, action: V2GroupAvatarManagementAction) async throws
 }
 
@@ -41,7 +42,7 @@ protocol V2PendingGroupAvatarReading: Sendable {
     func pendingPage(after: V2PendingGroupAvatarPage.Cursor?) async throws -> V2PendingGroupAvatarPage
 }
 
-/// Account lifetime orchestration. Only logical commands and copied file tokens
+/// Account lifetime orchestration. Only logical commands and local asset IDs
 /// enter the journal; readers and transfer engines contain the transport choice.
 actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvatarReading {
     private let actorUserID: UserID
@@ -50,7 +51,7 @@ actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvata
     private let intents: V2GroupAvatarIntentEngine
     private let reader: any V2GroupAvatarPresentationReading
     private let capabilities: any V2ResourceCapabilityReading
-    private let directory: URL
+    private let resources: V2ResourceCenter
     private let now: @Sendable () -> ContinuousClock.Instant
     private let operations = V2ResourceOperationScope(limit: 16)
     private var changingRooms: Set<RoomID> = []
@@ -59,15 +60,39 @@ actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvata
     init(actorUserID: UserID, deviceID: DeviceID, store: GRDBV2LocalSyncStore,
          intents: V2GroupAvatarIntentEngine,
          reader: any V2GroupAvatarPresentationReading, capabilities: any V2ResourceCapabilityReading,
-         directory: URL, now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
+         resources: V2ResourceCenter, now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         self.actorUserID = actorUserID; self.deviceID = deviceID; self.store = store
         self.intents = intents; self.reader = reader
-        self.capabilities = capabilities; self.directory = directory.standardizedFileURL; self.now = now
+        self.capabilities = capabilities; self.resources = resources; self.now = now
     }
 
     func load(roomID: RoomID) async throws -> V2GroupAvatarManagementSnapshot {
         try requireOpen()
         return try await operations.run { try await self.performLoad(roomID: roomID) }
+    }
+
+    func changeUsingResource(roomID: RoomID, expectedRevision: UInt64, selection: V2AvatarResourceSelection) async throws {
+        try requireOpen()
+        try await operations.run {
+            try await self.performResourceChange(roomID: roomID, expectedRevision: expectedRevision, selection: selection)
+        }
+    }
+    private func performResourceChange(roomID: RoomID, expectedRevision: UInt64, selection: V2AvatarResourceSelection) async throws {
+        try requireOpen()
+        guard changingRooms.insert(roomID).inserted else { throw V2GroupAvatarIntentError.busy }
+        defer { changingRooms.remove(roomID) }
+        guard try await readPending(roomID: roomID).isEmpty else { throw V2GroupAvatarManagementError.pendingDecision }
+        let access = try await requireManagement(roomID: roomID, expectedRevision: expectedRevision)
+        guard let detail = try await resources.details(for: selection.key), detail.descriptor.state == .ready,
+              ["image/jpeg", "image/png"].contains(detail.descriptor.contentType), detail.descriptor.byteCount <= 50 * 1_024 * 1_024,
+              try await resources.containsSource(selection.source, for: selection.key) else { throw V2GroupAvatarManagementError.invalidDraft }
+        let request = try V2ResourceImportRequest(operationID: .init(uuid: UUID()), source: selection.importSource,
+            targetUsage: .groupAvatar(roomID), targetMediaID: .init(uuid: UUID()))
+        let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: roomID, expectedRevision: expectedRevision, mutation: .set(request.targetMediaID))
+        try requireOpen()
+        guard access.deadline > now() else { throw V2GroupAvatarManagementError.unavailable }
+        _ = try await store.freezeGroupAvatarImportIntent(actorUserID: actorUserID, command: command, importJobID: UUID(), request: request)
+        try? await intents.start(command.operationID)
     }
 
     func pending(roomID: RoomID) async throws -> [V2GroupAvatarIntent] {
@@ -190,12 +215,12 @@ actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvata
         let jobID: UUID?, mutation: V2GroupAvatarMutation
         if let image {
             try validateImage(contentType: image.contentType, byteCount: image.byteCount, authority: access)
-            guard image.fileURL.standardizedFileURL == directory.appendingPathComponent(image.id.uuidString),
-                  try await store.resourceTransfer(id: image.id) == nil else { throw V2GroupAvatarManagementError.invalidDraft }
-            let checksum = try V2ResourceFileDigest.sha256(fileURL: image.fileURL, expectedByteCount: image.byteCount)
+            guard let asset = try await resources.localAsset(image.localAssetID), asset.availability == .local,
+                  asset.purpose == .groupAvatar(roomID), try await store.resourceTransfer(id: image.id) == nil else { throw V2GroupAvatarManagementError.invalidDraft }
+            try validateImage(contentType: asset.contentType.value, byteCount: asset.byteCount, authority: access)
             let upload = try V2ResourceUploadRequest(operationID: .init(uuid: image.id), mediaID: .init(uuid: image.id),
-                usage: .groupAvatar(roomID), contentType: image.contentType, byteCount: image.byteCount,
-                checksum: .init(value: checksum), clientModes: [.httpPut])
+                usage: .groupAvatar(roomID), contentType: asset.contentType.value, byteCount: asset.byteCount,
+                checksum: asset.checksum, clientModes: [.httpPut], displayName: asset.displayName, clientImageDimensions: asset.imageDimensions)
             try requireOpen()
             request = upload; jobID = image.id; mutation = .set(upload.mediaID)
         } else { request = nil; jobID = nil; mutation = .remove }
@@ -203,9 +228,9 @@ actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvata
             expectedRevision: expectedRevision, mutation: mutation)
         try requireOpen()
         guard access.deadline > now() else { throw V2GroupAvatarManagementError.unavailable }
-        if let request, let jobID {
+        if let request, let jobID, let image {
             _ = try await store.freezeGroupAvatarUploadIntent(actorUserID: actorUserID, command: command,
-                uploadJobID: jobID, request: request, localFileToken: jobID.uuidString)
+                uploadJobID: jobID, request: request, localAssetID: image.localAssetID)
         } else {
             _ = try await store.freezeGroupAvatarIntent(actorUserID: actorUserID, command: command, uploadJobID: nil)
         }
@@ -229,12 +254,12 @@ actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvata
             defer { changingRooms.remove(roomID) }
             let access = try await requireManagement(roomID: roomID, expectedRevision: expectedRevision)
             if let jobID = original.uploadJobID {
-                guard let job = try await store.resourceTransfer(id: jobID), UUID(uuidString: job.localFileToken) != nil else {
+                guard let job = try await store.resourceTransfer(id: jobID) else {
                     throw V2GroupAvatarManagementError.invalidDraft
                 }
                 try validateImage(contentType: job.request.contentType, byteCount: job.request.byteCount, authority: access)
-                let digest = try V2ResourceFileDigest.sha256(fileURL: directory.appendingPathComponent(job.localFileToken), expectedByteCount: job.request.byteCount)
-                guard digest == job.request.checksum.value else { throw V2GroupAvatarManagementError.invalidDraft }
+                let lease = try await resources.borrowLocalOriginal(for: .upload(jobID))
+                await lease.release()
             }
             try requireOpen()
             guard access.deadline > now() else { throw V2GroupAvatarManagementError.unavailable }

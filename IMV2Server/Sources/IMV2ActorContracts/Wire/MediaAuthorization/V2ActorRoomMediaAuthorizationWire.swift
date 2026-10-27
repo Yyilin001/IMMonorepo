@@ -21,6 +21,7 @@ public enum V2RoomMediaAuthorizationQuery: Codable, Equatable, Sendable {
     case resourceUpload(V2ActorResourceUploadAuthorizationWire)
     case profileVisibilityBatch(V2ActorProfileVisibilityBatchWire)
     case groupAvatar(V2ActorGroupAvatarVisibilityWire)
+    case resourceDirectory(V2ActorRoomResourceDirectoryWire)
 
     public var roomID: RoomID {
         switch self {
@@ -28,6 +29,7 @@ public enum V2RoomMediaAuthorizationQuery: Codable, Equatable, Sendable {
         case .resourceUpload(let value): value.roomID
         case .profileVisibilityBatch(let value): value.roomID
         case .groupAvatar(let value): value.roomID
+        case .resourceDirectory(let value): value.roomID
         }
     }
     public var actorUserID: UserID {
@@ -36,6 +38,7 @@ public enum V2RoomMediaAuthorizationQuery: Codable, Equatable, Sendable {
         case .resourceUpload(let value): value.actorUserID
         case .profileVisibilityBatch(let value): value.actorUserID
         case .groupAvatar(let value): value.actorUserID
+        case .resourceDirectory(let value): value.actorUserID
         }
     }
     public var retryPolicy: V2RoomReplayPolicy { .readOnly }
@@ -68,6 +71,7 @@ public enum V2RoomMediaAuthorizationResult: Codable, Equatable, Sendable {
     case profilesVisible(V2ActorProfileVisibilityBatchSnapshotWire)
     case groupAvatarVisible(V2ActorGroupAvatarVisibilitySnapshotWire)
     case notVisible
+    case resourceDirectory(V2ActorRoomResourceDirectoryPageWire)
 }
 
 /// A room-authoritative read; control/device authorization remains at the service boundary.

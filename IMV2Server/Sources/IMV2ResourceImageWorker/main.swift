@@ -30,6 +30,10 @@ guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, [kCGImageSourc
       let height = properties[kCGImagePropertyPixelHeight] as? Int,
       width > 0, height > 0, width <= 16_384, height <= 16_384,
       Int64(width) * Int64(height) <= 40_000_000 else { exit(3) }
+let swapsAxes = (5...8).contains(properties[kCGImagePropertyOrientation] as? Int ?? 1)
+let metadata = Data("{\"width\":\(swapsAxes ? height : width),\"height\":\(swapsAxes ? width : height)}".utf8)
+do { try metadata.write(to: directory.appendingPathComponent("source-dimensions.json"), options: .atomic) }
+catch { exit(8) }
 let sizes = args[3] == "avatar" ? [128,256] : [320,1280]
 for size in sizes {
     guard let image = CGImageSourceCreateThumbnailAtIndex(source,0,[
@@ -70,14 +74,23 @@ func execute(_ path:String,_ arguments:[String],capture:Bool=false) -> Data? {
     do { try process.run();let result=capture ? pipe.fileHandleForReading.readDataToEndOfFile() : Data();process.waitUntilExit();return process.terminationStatus==0 && result.count<=128 ? result : nil }
     catch { return nil }
 }
-guard let facts=execute("/usr/bin/identify",["-ping","-format","%w %h",args[1]+"[0]"],capture:true),
-      let dimensions=String(data:facts,encoding:.utf8)?.split(separator:" "),dimensions.count==2,
+guard let facts=execute("/usr/bin/identify",["-ping","-format","%w %h %[orientation]",args[1]+"[0]"],capture:true),
+      let dimensions=String(data:facts,encoding:.utf8)?.split(separator:" "),dimensions.count==3,
       let width=Int64(dimensions[0]),let height=Int64(dimensions[1]),width>0,height>0,width<=16384,height<=16384,width*height<=40_000_000 else { exit(3) }
+let swapsAxes = ["LeftTop","RightTop","RightBottom","LeftBottom"].contains(String(dimensions[2]))
+let metadata = Data("{\"width\":\(swapsAxes ? height : width),\"height\":\(swapsAxes ? width : height)}".utf8)
+do { try metadata.write(to: URL(fileURLWithPath: args[2]).appendingPathComponent("source-dimensions.json"), options: .atomic) }
+catch { exit(8) }
 let sizes=args[3]=="avatar" ? [128,256] : [320,1280]
 for size in sizes {
     var parameters=["-limit","memory","128MiB","-limit","map","128MiB","-limit","disk","256MiB","-limit","time","15",args[1]+"[0]","-auto-orient","-strip"]
     if args[3]=="avatar" { parameters += ["-thumbnail","\(size)x\(size)^","-gravity","center","-extent","\(size)x\(size)"] }
-    else { parameters += ["-thumbnail","\(size)x\(size)>"] }
+    else {
+        // Lanczos thumbnailing a full RGBA photo can require several original-
+        // sized pixel caches. Area-reduce to twice the preview size first so
+        // normal camera images fit the existing decoder memory/disk ceilings.
+        parameters += ["-scale","\(size * 2)x\(size * 2)>","-thumbnail","\(size)x\(size)>"]
+    }
     parameters += ["PNG:"+URL(fileURLWithPath:args[2]).appendingPathComponent("\(size).png").path]
     guard execute("/usr/bin/convert",parameters) != nil else { exit(4) }
 }

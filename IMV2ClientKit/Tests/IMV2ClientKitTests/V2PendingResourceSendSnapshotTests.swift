@@ -17,7 +17,7 @@ struct V2PendingResourceSendSnapshotTests {
         let upload = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
             usage: .messageAttachment(room), contentType: "image/png", byteCount: 3,
             checksum: .init(value: String(repeating: "a", count: 64)))
-        _ = try await store.prepareResourceTransfer(id: uploadID, request: upload, localFileToken: UUID().uuidString)
+        _ = try await store.prepareMetadataResourceTransfer(id: uploadID, request: upload, localAssetID: .init())
         let uploadLocator = V2ResourceUploadLocator(home: .room(room), sessionID: try .init(uuid: UUID()))
         try await store.saveResourceSession(.init(locator: uploadLocator, mediaID: upload.mediaID, generation: 1,
             state: .completed, resourceState: .ready, expiresAt: Date().addingTimeInterval(300),
@@ -29,14 +29,14 @@ struct V2PendingResourceSendSnapshotTests {
             targetUsage: .messageAttachment(room), targetMediaID: .init(uuid: UUID()))
         try await store.prepareResourceImport(id: importID, request: imported)
         let importLocator = V2ResourceImportLocator(home: .room(room), operationID: imported.operationID)
-        try await store.saveResourceImport(.init(locator: importLocator, mediaID: imported.targetMediaID, state: .processing, bindableUntil: nil), id: importID)
+        try await store.seedResourceImportStatus(.init(locator: importLocator, mediaID: imported.targetMediaID, state: .processing, bindableUntil: nil), id: importID)
 
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()),
             text: "mixed resources", attachmentJobIDs: [uploadID, importID])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         let otherIntent = try V2SendIntent(id: UUID(), roomID: otherRoom, clientMessageID: .init(uuid: UUID()),
             text: "other room", attachmentJobIDs: [])
-        try await store.freezeSendIntent(otherIntent)
+        try await store.freezeMetadataSendIntent(otherIntent)
 
         let preparing = try await store.pendingResourceSendSnapshot(in: room, page: 0)
         #expect(preparing.preparing.count == 1)
@@ -46,7 +46,7 @@ struct V2PendingResourceSendSnapshotTests {
         #expect(preparing.submitted.isEmpty)
         #expect(!preparing.hasNext)
 
-        try await store.saveResourceImport(.init(locator: importLocator, mediaID: imported.targetMediaID, state: .ready,
+        try await store.seedResourceImportStatus(.init(locator: importLocator, mediaID: imported.targetMediaID, state: .ready,
             bindableUntil: Date().addingTimeInterval(300)), id: importID)
         let ready = try await store.pendingResourceSendSnapshot(in: room, page: 0)
         #expect(ready.preparing[0].completed == 2 && ready.preparing[0].total == 2)

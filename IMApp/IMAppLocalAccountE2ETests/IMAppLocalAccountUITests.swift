@@ -487,7 +487,7 @@ private func assertDirectMessageIsRestricted(sender: LocalE2EAccountCredentials,
         // Rejections are returned on this request and intentionally not persisted.
         // Recovery must not invent a successful or durable rejected send.
         let recovered = try await client.recover(.init(identity: command.identity, fingerprint: command.fingerprint,
-            domainFingerprint: command.command.fingerprint, action: .query))
+            domainFingerprint: command.command.fingerprint))
         XCTAssertEqual(recovered, .unresolved)
         }
     } catch { XCTFail("Restricted message must return a bound authorization proof: \(error)") }

@@ -65,7 +65,7 @@ extension GRDBV2LocalSyncStore {
                         AND m.accepted_projection_observed=1
                         AND NOT EXISTS(SELECT 1 FROM v2_send_intent_dependencies d
                           JOIN v2_resource_transfer_jobs j ON j.job_id=d.job_id
-                          WHERE d.intent_id=p.intent_id AND (j.stage<>'ready' OR j.staging_released<>1
+                          WHERE d.intent_id=p.intent_id AND (j.stage<>'ready' OR j.source_released<>1
                             OR EXISTS(SELECT 1 FROM v2_background_transfer_tasks b
                               WHERE b.job_id=j.job_id AND b.state='active')))
                         AND NOT EXISTS(SELECT 1 FROM v2_send_intent_import_dependencies d

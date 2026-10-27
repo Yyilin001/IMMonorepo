@@ -13,7 +13,7 @@ struct V2ResourceAdmissionTests {
         var firstUpload: V2ResourcePreparedUpload?
         for _ in 0..<16 {
             let upload = try upload(room: room)
-            _ = try await store.prepareResourceTransfer(id: upload.id, request: upload.request, localFileToken: upload.localFileToken)
+            _ = try await store.prepareMetadataResourceTransfer(id: upload.id, request: upload.request, localAssetID: upload.localAssetID)
             try await store.pauseResourceTransfer(id: upload.id, code: "network", retryAt: Date())
             if firstUpload == nil { firstUpload = upload }
         }
@@ -27,7 +27,7 @@ struct V2ResourceAdmissionTests {
         try await store.close()
         let reopened = try fixture.open()
         let same = try #require(firstUpload)
-        _ = try await reopened.prepareResourceTransfer(id: same.id, request: same.request, localFileToken: same.localFileToken)
+        _ = try await reopened.prepareMetadataResourceTransfer(id: same.id, request: same.request, localAssetID: same.localAssetID)
         try await reopened.prepareResourceImport(id: firstImportID, request: firstImport)
         let newID = UUID(), newRequest = try importRequest(room: room)
         await #expect(throws: V2ResourceJournalError.capacityExceeded) {
@@ -36,11 +36,11 @@ struct V2ResourceAdmissionTests {
         #expect(try await reopened.resourceImport(id: newID) == nil)
         let cancelled = try V2ResourceImportStatus(locator: .init(home: .room(room), operationID: firstImport.operationID),
             mediaID: firstImport.targetMediaID, state: .cancelled, bindableUntil: nil)
-        try await reopened.saveResourceImport(cancelled, id: firstImportID)
+        try await reopened.seedResourceImportStatus(cancelled, id: firstImportID)
         try await reopened.prepareResourceImport(id: newID, request: newRequest)
         let overflow = try upload(room: room)
         await #expect(throws: V2ResourceJournalError.capacityExceeded) {
-            _ = try await reopened.prepareResourceTransfer(id: overflow.id, request: overflow.request, localFileToken: overflow.localFileToken)
+            _ = try await reopened.prepareMetadataResourceTransfer(id: overflow.id, request: overflow.request, localAssetID: overflow.localAssetID)
         }
         try await reopened.close()
     }
@@ -54,7 +54,7 @@ struct V2ResourceAdmissionTests {
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()),
             text: "two attachments", attachmentJobIDs: [importID, upload.id])
         await #expect(throws: V2ResourceJournalError.capacityExceeded) {
-            try await store.freezeSendIntent(intent, resources: [upload], imports: [importID: request])
+            try await store.freezeMetadataSendIntent(intent, resources: [upload], imports: [importID: request])
         }
         #expect(try await store.resourceImport(id: importID) == nil)
         #expect(try await store.resourceTransfer(id: upload.id) == nil)
@@ -85,10 +85,10 @@ struct V2ResourceAdmissionTests {
         try await store.prepareResourceImport(id: id, request: request)
         let ready = try V2ResourceImportStatus(locator: .init(home: .room(room), operationID: request.operationID),
             mediaID: request.targetMediaID, state: .ready, bindableUntil: Date().addingTimeInterval(60))
-        try await store.saveResourceImport(ready, id: id)
+        try await store.seedResourceImportStatus(ready, id: id)
         for _ in 0..<32 { try await store.prepareResourceImport(id: UUID(), request: importRequest(room: room)) }
         let late = try V2ResourceImportStatus(locator: ready.locator, mediaID: ready.mediaID, state: .processing, bindableUntil: nil)
-        await #expect(throws: V2ResourceJournalError.conflict) { try await store.saveResourceImport(late, id: id) }
+        await #expect(throws: V2ResourceJournalError.conflict) { try await store.seedResourceImportStatus(late, id: id) }
         #expect(try await store.resourceImport(id: id)?.status?.state == .ready)
         try await store.close()
     }
@@ -102,7 +102,7 @@ struct V2ResourceAdmissionTests {
         let id = UUID()
         return try .init(id: id, request: .init(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
             usage: .messageAttachment(room), contentType: "image/png", byteCount: 3,
-            checksum: .init(value: String(repeating: "a", count: 64))), localFileToken: id.uuidString)
+            checksum: .init(value: String(repeating: "a", count: 64))), localAssetID: .init(id))
     }
 
     private func importRequest(room: RoomID) throws -> V2ResourceImportRequest {

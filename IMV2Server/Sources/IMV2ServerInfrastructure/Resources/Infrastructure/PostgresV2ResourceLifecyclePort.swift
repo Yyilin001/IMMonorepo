@@ -25,7 +25,7 @@ extension PostgresV2ResourceLifecycleStore: V2ResourceLifecyclePort {
             operation: try request.operationID.resourceUUID, mediaID: try request.mediaID.resourceUUID,
             contentType: request.contentType, byteCount: request.byteCount,
             requestJSON: String(decoding: try encoder.encode(request), as: UTF8.self),
-            allocate: allocate, expiresAt: expiresAt, now: now)
+            allocate: allocate, expiresAt: expiresAt, now: now, displayName: request.displayName)
         return try row.snapshot()
     }
 

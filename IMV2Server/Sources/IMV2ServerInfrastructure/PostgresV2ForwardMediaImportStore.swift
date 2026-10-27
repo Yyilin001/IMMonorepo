@@ -178,8 +178,8 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
                   AND upload_session_id=\(bind:job.uploadID) AND state IN ('pending_upload','scanning') FOR UPDATE
                 """).first() != nil else { throw V2ResourceProviderError.preconditionFailed }
             try await sql.raw("""
-                INSERT INTO im_v2.resource_catalog(media_id,home_kind,home_id,usage_kind,generation,created_at)
-                VALUES(\(bind:job.targetID),'room',\(bind:lease.export.intent.targetRoomID),'message_attachment',1,\(bind:now))
+                INSERT INTO im_v2.resource_catalog(media_id,home_kind,home_id,usage_kind,generation,created_at,display_name)
+                VALUES(\(bind:job.targetID),'room',\(bind:lease.export.intent.targetRoomID),'message_attachment',1,\(bind:now),\(bind:lease.source.displayName.value))
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.resource_forward_outputs(export_id,ordinal,target_media_id,reference_json,byte_count,sha256,created_at)

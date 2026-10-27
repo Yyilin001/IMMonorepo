@@ -30,6 +30,8 @@ COPY IMV2Server ./IMV2Server
 # from needing several extra gigabytes merely to commit disposable products.
 # Compile one frontend at a time to keep the local release build within a
 # bounded-memory Docker VM.
+# Preserve SwiftPM runtime bundles beside the executables before removing
+# compiler outputs; copying executables alone omits dependency resources.
 RUN set -eu; \
     swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2AccountServerApp \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2ServerApp \
@@ -48,13 +50,21 @@ RUN set -eu; \
           "${bin_path}/IMV2PlacementControlApp" \
           "${bin_path}/IMV2RoomHostSupervisorApp" \
           /runtime/IMV2Server/.build/release/ \
+    && for bundle in "${bin_path}"/*.resources "${bin_path}"/*.bundle; do \
+           if [ -d "${bundle}" ]; then cp -RL "${bundle}" /runtime/IMV2Server/.build/release/; fi; \
+       done \
+    && for product in IMV2AccountServerApp IMV2ServerApp IMV2OperatorServerApp \
+           IMV2LocalGatewayProbe IMV2ResourceImageWorker IMV2PlacementControlApp \
+           IMV2RoomHostSupervisorApp; do \
+           chmod 0755 "/runtime/IMV2Server/.build/release/${product}"; \
+       done \
     && rm -rf /workspace/IMV2Server/.build /root/.cache/org.swift.swiftpm
 
 FROM swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6
 
 RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|https://ports.ubuntu.com/ubuntu-ports/|g' /etc/apt/sources.list \
     && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl imagemagick \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl imagemagick ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY IMV2Server/Resources/imagemagick-policy.xml /etc/ImageMagick-6/policy.xml
@@ -65,5 +75,14 @@ WORKDIR /workspace
 # the existing Compose command paths, but copy only the required executable
 # products instead of SwiftPM's multi-gigabyte object/module/compiler cache.
 COPY --from=build /runtime/IMV2Server/.build/release ./IMV2Server/.build/release
+
+# Modes are normalized in the build stage, including inputs extracted as 0600.
+# Check them here without copying up the executable bytes into another layer.
+RUN set -eu; \
+    for product in IMV2AccountServerApp IMV2ServerApp IMV2OperatorServerApp \
+        IMV2LocalGatewayProbe IMV2ResourceImageWorker IMV2PlacementControlApp \
+        IMV2RoomHostSupervisorApp; do \
+        test -x "/workspace/IMV2Server/.build/release/${product}"; \
+    done
 
 CMD ["/workspace/IMV2Server/.build/release/IMV2AccountServerApp"]

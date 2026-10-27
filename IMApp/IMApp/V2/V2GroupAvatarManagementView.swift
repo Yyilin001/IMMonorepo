@@ -2,15 +2,17 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct V2GroupAvatarManagementView: View {
-    private enum Modal: Equatable { case chooseImage, remove }
+    private enum Modal: Equatable { case chooseImage, chooseResource, remove }
     @State private var store: V2GroupAvatarManagementStore
     @State private var modal: Modal?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @Environment(\.v2AvatarPipeline) private var pipeline
+    @Environment(\.v2ResourceManagement) private var resources
 
     init(store: V2GroupAvatarManagementStore) { _store = State(initialValue: store) }
 
@@ -27,9 +29,20 @@ struct V2GroupAvatarManagementView: View {
                     Button("选择新头像", systemImage: "photo") { modal = .chooseImage }
                         .disabled(!store.canUpload)
                         .accessibilityIdentifier("v2.group.avatar.choose")
+                    if resources != nil {
+                        Button("从已有图片选择", systemImage: "photo.on.rectangle") { modal = .chooseResource }
+                            .disabled(!store.canChange).accessibilityIdentifier("v2.group.avatar.choose-resource")
+                    }
                     Button("移除群头像", role: .destructive) { modal = .remove }
                         .disabled(!store.canRemove)
                         .accessibilityIdentifier("v2.group.avatar.remove")
+                }
+                if !store.drafts.isEmpty {
+                    Section("本机头像草稿") {
+                        ForEach(store.drafts) { image in
+                            V2GroupAvatarDraftRow(store: store, image: image)
+                        }
+                    }
                 }
                 if !store.pending.isEmpty {
                     Section("待处理更改") {
@@ -60,6 +73,9 @@ struct V2GroupAvatarManagementView: View {
         .fileImporter(isPresented: modalBinding(.chooseImage), allowedContentTypes: [.jpeg, .png], allowsMultipleSelection: false) { result in
             modal = nil
             if case .success(let urls) = result, let url = urls.first { store.importImage(from: url) }
+        }
+        .sheet(isPresented: modalBinding(.chooseResource)) {
+            if let resources { V2AvatarResourcePicker(service: resources) { value in modal = nil; store.useResource(value) } }
         }
         .confirmationDialog("移除当前群头像？", isPresented: modalBinding(.remove), titleVisibility: .visible) {
             Button("移除", role: .destructive) { store.remove() }
@@ -137,5 +153,42 @@ struct V2GroupAvatarManagementView: View {
 
     private func modalBinding(_ value: Modal) -> Binding<Bool> {
         .init(get: { modal == value }, set: { if !$0, modal == value { modal = nil } })
+    }
+}
+
+private struct V2GroupAvatarDraftRow: View {
+    let store: V2GroupAvatarManagementStore
+    let image: V2StagedConversationAttachment
+    @Environment(\.v2MediaThumbnailCache) private var cache
+    @State private var preview: UIImage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                if let preview {
+                    Image(uiImage: preview).resizable().scaledToFill()
+                        .frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 12))
+                        .accessibilityLabel("头像草稿预览")
+                }
+                VStack(alignment: .leading) {
+                    Text(image.displayName)
+                    Text(image.availability == .local ? "仅存本机，尚未提交" : "原件不可用，请移除后重新选择")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            Button("继续提交") { store.submitDraft(image) }
+                .disabled(!store.canUpload || image.availability != .local)
+                .accessibilityIdentifier("v2.group.avatar.draft.submit")
+            Button("移除草稿", role: .destructive) { store.discardDraft(image) }
+                .disabled(store.isPerformingAction)
+                .accessibilityIdentifier("v2.group.avatar.draft.discard")
+        }
+        .buttonStyle(.bordered)
+        .task(id: image.localAssetID) {
+            guard let cache else { return }
+            let result = await store.preview(image, cache: cache)
+            guard !Task.isCancelled else { return }
+            preview = result
+        }
     }
 }

@@ -112,6 +112,18 @@ cleanup_local_build() {
   return "${exit_status}"
 }
 trap cleanup_local_build EXIT
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+  # Compile on Apple Silicon, then package the Linux x86_64 executables. Never
+  # fall back silently to compiling Swift inside an emulated x86 Docker guest.
+  python3 "${repo_root}/scripts/build_v2_linux_release.py"
+  release_context="$(python3 - "${repo_root}/build/native-linux-release/current.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["run"])
+PY
+  )"
+  docker build --platform linux/amd64 --tag imv2localaccount-v2server \
+    --file "${release_context}/Dockerfile" "${release_context}"
+else
 mkdir -p "${build_context}/IMV2" "${build_context}/IMV2Core" "${build_context}/IMV2Compression" "${build_context}/IMV2Server"
 rsync -a --exclude '.build*' --exclude '.swiftpm' --exclude '.DS_Store' \
   "${repo_root}/IMV2Core/" "${build_context}/IMV2Core/"
@@ -121,6 +133,8 @@ rsync -a --exclude '.build*' --exclude '.swiftpm' --exclude '.DS_Store' \
   "${repo_root}/IMV2Server/" "${build_context}/IMV2Server/"
 cp "${v2_dir}/Dockerfile.account" "${build_context}/IMV2/Dockerfile.account"
 docker build --tag imv2localaccount-v2server --file "${build_context}/IMV2/Dockerfile.account" "${build_context}"
+fi
+bash "${repo_root}/scripts/verify_v2_resource_image_permissions.sh" imv2localaccount-v2server
 prune_unreferenced_local_build_stages
 
 # Recreate the PostgreSQL container so its read-only canonical schema mount is
@@ -149,6 +163,19 @@ test "${schema_is_current}" = 't' || {
   printf 'Then rerun this script. No automatic schema or data migration was attempted.\n' >&2
   exit 1
 }
+# A current schema does not make retained message payloads compatible with the
+# required resource descriptor. Refuse activation before seeding/provisioning
+# or starting application services; never repair or discard existing messages.
+if ! resource_payload_is_current="$(
+  compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U im_v2 -d im_v2 -tA \
+    < "${script_dir}/current_v2_resource_payload_contract.sql" |
+    tr -d '[:space:]'
+)" || [[ "${resource_payload_is_current}" != 't' ]]; then
+  printf 'local PostgreSQL message payloads do not match the current resource contract.\n' >&2
+  printf 'Use an explicitly isolated fresh test environment or an independently verified data conversion.\n' >&2
+  printf 'No automatic data migration or deletion was attempted.\n' >&2
+  exit 1
+fi
 # Repeatable extension install also covers a retained canonical source database.
 "${script_dir}/install_v2_realtime_journal.sh" --print-sql |
   compose exec -T postgres psql -X --set=ON_ERROR_STOP=1 -U im_v2 -d im_v2 > /dev/null

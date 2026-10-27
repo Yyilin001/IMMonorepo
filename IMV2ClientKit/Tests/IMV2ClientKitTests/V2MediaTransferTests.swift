@@ -8,6 +8,31 @@ import Testing
 
 @Suite("V2 native media transfer")
 struct V2MediaTransferTests {
+    @Test(arguments: [true, false])
+    func imageRowsRequestOnlyBoundedPreviewAndRejectAnOriginalResponse(valid: Bool) async throws {
+        let media = MediaID(uuid: UUID()), room = RoomID(uuid: UUID())
+        let location = V2MediaMessageLocation(roomID: room, messageID: .init(uuid: UUID()))
+        let checksum = try V2ResourceChecksum(value: String(repeating: "a", count: 64))
+        let plan = try V2ResourceTransferPlan(mode: .httpGet, url: #require(URL(string: "https://objects.invalid/thumbnail")),
+            expiresAt: Date().addingTimeInterval(60), expectedByteCount: 3, checksum: checksum)
+        let preview = try V2ResourceVariantDescriptor(key: .init(resource: .init(home: .room(room), mediaID: media),
+            rendition: .derived(id: .init(uuid: UUID()), version: .init(1))), checksum: checksum, byteCount: 3)
+        let endpoint = try #require(URL(string: "https://edge.invalid/v2/media"))
+        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type":"application/json"]))
+        let transport = RecordingEdgeTransport(result: .success((try JSONEncoder().encode(V2MediaDownloadTargetEnvelope(plan: plan, preview: valid ? preview : nil)), response)))
+        let resolver = try V2HTTPMediaDownloadTargetResolver(endpoint: endpoint,
+            credentials: FixedMediaEdgeCredentials(accessToken: "access-token", deviceID: try .init("device")), transport: transport)
+        if valid {
+            let target = try await resolver.resolveImagePreviewTarget(mediaID: media, message: location, size: .thumbnail)
+            #expect(target.preview == preview && target.expectedByteCount == 3)
+        } else {
+            await #expect(throws: V2ClientMediaTransferError.invalidTarget) { try await resolver.resolveImagePreviewTarget(mediaID: media, message: location, size: .thumbnail) }
+        }
+        let request = try #require(await transport.lastRequest())
+        #expect(URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?.queryItems?.last == .init(name: "image_size", value: "320"))
+        #expect(V2ResourceAutomaticDownloadPolicy.standard.categories.isEmpty)
+    }
+
     @Test func downloadTargetRetainsExplicitOSDelegationAndDoesNotInventOne() throws {
         let now = Date(), expiry = now.addingTimeInterval(60)
         let checksum = try V2ResourceChecksum(value: String(repeating: "a", count: 64))

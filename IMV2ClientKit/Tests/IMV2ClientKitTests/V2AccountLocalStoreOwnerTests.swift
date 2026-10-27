@@ -81,7 +81,7 @@ private struct Fixture {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
     func owner() -> V2AccountLocalStoreOwner {
-        .init(root: root, bootstrapper: .init(bindingStore: binding))
+        .init(root: root, cacheRoot: directory.appending(path: "caches"), bootstrapper: .init(bindingStore: binding))
     }
     func removeFiles() { try? FileManager.default.removeItem(at: directory) }
 }

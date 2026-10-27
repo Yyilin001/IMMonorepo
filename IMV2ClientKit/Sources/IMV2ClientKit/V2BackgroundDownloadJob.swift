@@ -30,6 +30,7 @@ struct V2BackgroundDownloadJob: Equatable, Sendable {
     enum State: Equatable, Sendable {
         case preparing
         case paused
+        case pausing(V2BackgroundDownloadTask?)
         case transferring(V2BackgroundDownloadTask)
         case downloaded(V2BackgroundDownloadTask)
         case cancelled(V2BackgroundDownloadTask?)
@@ -40,9 +41,11 @@ struct V2BackgroundDownloadJob: Equatable, Sendable {
     let state: State
     let attemptCount: Int
     let retryAtMilliseconds: Int64
+    let priority: V2NetworkWorkPriority
     init(id: UUID, mediaID: MediaID, message: V2MediaMessageLocation?, state: State,
-         attemptCount: Int = 0, retryAtMilliseconds: Int64 = 0) {
+         attemptCount: Int = 0, retryAtMilliseconds: Int64 = 0, priority: V2NetworkWorkPriority = .interactive) {
         self.id = id; self.mediaID = mediaID; self.message = message; self.state = state
         self.attemptCount = attemptCount; self.retryAtMilliseconds = retryAtMilliseconds
+        self.priority = priority
     }
 }

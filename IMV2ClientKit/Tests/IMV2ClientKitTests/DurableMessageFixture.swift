@@ -10,7 +10,7 @@ func persistDurableMessage(in store: GRDBV2LocalSyncStore, roomID: RoomID,
                            clientMessageID: ClientMessageID, text: String) async throws -> V2SendIntent {
     let intent = try V2SendIntent(id: UUID(), roomID: roomID, clientMessageID: clientMessageID,
                                   text: text, attachmentJobIDs: [])
-    try await store.freezeSendIntent(intent)
+    try await store.freezeMetadataSendIntent(intent)
     _ = try await store.handOffSendIntent(intent.id)
     return try await store.databasePool.read { db in
         guard let saved = try GRDBV2LocalSyncStore.readSendIntent(intent.id, db: db) else {

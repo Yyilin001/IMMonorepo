@@ -1041,6 +1041,9 @@ final class V2RootNavigationStore {
     var fixtureRoomID: String?
     var selectedTab: Tab = .conversations
 
+    func showResources(roomID: RoomID? = nil) { path.append(V2ResourceRoute.library(roomID)) }
+    func showResourceDownloadSettings() { path.append(V2ResourceRoute.downloadSettings) }
+
     func showConversation(_ target: V2ConversationDestination) {
         switch target {
         case .room(let route): showConversation(roomID: route.roomID, messageID: route.messageID)

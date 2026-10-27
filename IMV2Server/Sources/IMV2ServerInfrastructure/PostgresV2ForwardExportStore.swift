@@ -210,7 +210,6 @@ public struct PostgresV2ForwardExportStore: Sendable {
                   references.allSatisfy({ $0.revokedAt == nil })
             else { throw V2ForwardExportError.mediaUnavailable }
             guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardExportError.corruptPersistenceState }
-            let currentTime = try V2PersistenceTimestamp(date: now)
             var mediaByID: [UUID: V2ForwardExportMedia] = [:]
             // 所有媒体使用方都按 UUID 顺序加锁。保留期清理使用 SKIP LOCKED；
             // 要么先将媒体标记为过期并导致此处拒绝，
@@ -218,16 +217,18 @@ public struct PostgresV2ForwardExportStore: Sendable {
             for reference in references {
                 guard let media = try await sql.raw("""
                     SELECT media_id, upload_session_id, content_type, byte_count, state, expires_at,
+                           (SELECT c.display_name FROM im_v2.resource_catalog c WHERE c.media_id=media_objects.media_id) AS display_name,
                            EXISTS(SELECT 1 FROM im_v2.resource_catalog c
                              WHERE c.media_id=media_objects.media_id AND c.home_kind='room'
                                AND c.home_id=\(bind:sourceRoom) AND c.usage_kind='message_attachment') AS bound_resource
                     FROM im_v2.media_objects WHERE media_id = \(bind: reference.mediaID) FOR UPDATE
                     """).first(decoding: ExportMediaRow.self),
-                      media.state == "available", media.boundResource || media.expiresAt.microseconds > currentTime.microseconds,
+                      media.state == "available", media.boundResource, let displayName = media.displayName,
                       media.byteCount > 0
                 else { throw V2ForwardExportError.mediaUnavailable }
                 mediaByID[media.mediaID] = .init(mediaID: media.mediaID, uploadSessionID: media.uploadSessionID,
-                                               contentType: media.contentType, byteCount: media.byteCount)
+                                               contentType: media.contentType, byteCount: media.byteCount,
+                                               displayName: try V2ResourceDisplayName(displayName))
             }
             let orderedReferences = references.sorted { $0.ordinal < $1.ordinal }
             guard Set(orderedReferences.map(\.ordinal)).count == orderedReferences.count,
@@ -340,9 +341,11 @@ private struct ExportMediaRow: Decodable {
     let mediaID: UUID; let uploadSessionID: UUID; let contentType: String
     let byteCount: Int64; let state: String; let expiresAt: V2PersistenceTimestamp
     let boundResource: Bool
+    let displayName: String?
     enum CodingKeys: String, CodingKey {
         case mediaID = "media_id"; case uploadSessionID = "upload_session_id"; case contentType = "content_type"
         case byteCount = "byte_count"; case state; case expiresAt = "expires_at"
         case boundResource = "bound_resource"
+        case displayName = "display_name"
     }
 }

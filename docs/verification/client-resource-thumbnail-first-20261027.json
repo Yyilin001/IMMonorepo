@@ -1,0 +1,75 @@
+{
+  "status": "implementation-live-server-and-testflight-release-verified",
+  "observedAt": "2026-10-27T07:53:26.868184+00:00",
+  "causes": [
+    "Initial timeline awaited cache authorization and image decoding; the structured soft deadline still drained slow image readers",
+    "Message download resolver selected original objects despite existing 320/1280 preview variants",
+    "Automatic original image download was enabled by default"
+  ],
+  "changes": [
+    "Initial timeline does not authorize or decode media",
+    "Visible image rows request image_size=320 with scoped room/message authorization, no fallback to original",
+    "Preview byte digest and derived variant identity are verified and stored independently from original demands",
+    "Preview grants retain message access generation and expiry checks; refreshed grants reauthorize the preview, not original",
+    "Image viewer opens immediately with thumbnail, downloads original only after open, and keeps failure local to viewer",
+    "Original automatic downloads default off; explicit stored preferences remain respected",
+    "Existing dimensions keep image layout stable; small seed cache bounded to 32 entries",
+    "Late cancelled row requests cannot overwrite the newest preview request result"
+  ],
+  "tests": {
+    "clientKit": {
+      "count": 62,
+      "passed": true,
+      "log": "/tmp/im-thumbnail-client-tests-r4-20261027.log"
+    },
+    "server": {
+      "count": 8,
+      "passed": true,
+      "log": "/tmp/im-thumbnail-server-tests-r2-20261027.log"
+    },
+    "appSimulator": {
+      "count": 16,
+      "passed": true,
+      "log": "/tmp/im-thumbnail-app-tests-r3-20261027.log",
+      "xcresult": "/tmp/im-thumbnail-app-tests-r3-20261027.xcresult"
+    },
+    "releaseBuildLog": "/tmp/im-thumbnail-release-build-r2-20261027.log",
+    "releaseBuildResult": "/tmp/im-thumbnail-release-build-r2-20261027.json",
+    "releaseBuildPassed": true,
+    "sourceDrift": []
+  },
+  "release": {
+    "serverDeployed": true,
+    "testFlightUploaded": true,
+    "currentTestFlightBuild": "1.0 (7)",
+    "requiresPairedClientAndServerRelease": true,
+    "serverImageID": "sha256:20f2dc7ba04699cbe9a3e9febf8058a7bcf02988f18e93d3d1056f16ba18470b",
+    "liveVerificationRecord": "docs/verification/client-resource-thumbnail-release-20261027.json",
+    "appleProcessingCompleted": true,
+    "availableForTesting": true,
+    "testFlightRecord": "docs/verification/client-resource-thumbnail-testflight-20261027.json"
+  },
+  "limits": [
+    "No claim of real-device latency measurement or zero-placeholder cold-cache rendering"
+  ],
+  "sourceSHA256": {
+    "IMV2Core/Sources/IMV2Core/MediaReference.swift": "6d8d3779a10936c06190745e932479b3e7375165eda6d867d4be7dde51ae903f",
+    "IMV2ClientKit/Sources/IMV2ClientKit/V2MediaTransfer.swift": "cc3ac2f40c9c06a3e8db916895d2e73202e13df9dc090184620625190c9e47af",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDownloadCache.swift": "452ceb041ca7351c0df0b8c425abbe8d82f22e75a3c8ae000ac3df8fad173145",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDownloadNetworkPreferences.swift": "fcac90e178f8b86761eb3b8434a5f846875deb4dd76af310305f50e9ea3f9cde",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2MediaTransferTests.swift": "5d57b2194ecc6aacd3c854064d1ae72ac1b75f0ca97b456afddb6d0ec2af3e6e",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2ResourceDownloadCacheTests.swift": "8409373f9cb3ce1e2bde840fe01ad46115fc53c2f22e6aac38cda213edae89d3",
+    "IMV2Server/Sources/IMV2ServerApplication/V2MediaEdgeDownloadService.swift": "f04365119e1d5e6576cc29965f59627bc9c46622a40b8c9c171b20a52961193a",
+    "IMV2Server/Sources/IMV2ServerHTTP/V2MediaEdgeHTTPHandler.swift": "7883df0d13986ab6d20812e7de8fbdb8cdaf00b04a632b8d92f77528bda3f6d9",
+    "IMV2Server/Sources/IMV2ServerHTTP/V2VaporMediaEdgeRoutes.swift": "0d35ec73ade8c39b1b09c82c919c1b40c4c2bc5c942d155d0fa37a8f9fbc7e92",
+    "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/V2BoundMediaProvider.swift": "0329ca83b52cbe5e917302c5599a24f767347177f7717f4080b197fd8eba3261",
+    "IMV2Server/Sources/IMV2ServerInfrastructure/RoomClients/V2RoomRefMediaDownloadClient.swift": "947eed4e8eecd4fed42737784770e6aa0071009cf8982bfd5602ac62fa196b4b",
+    "IMV2Server/Tests/IMV2ServerTests/V2MediaEdgeDownloadServiceTests.swift": "4a1a92b9b26ec905c4f10b2c21644d52ce6b8edab309268501c80698df0ec361",
+    "IMApp/IMApp/V2/V2ConversationDetailStore.swift": "9f77f572c70c75dc53efd3bb0ba4036c4ce058bce12e3be2e8a200baac95adbd",
+    "IMApp/IMApp/V2/V2ConversationMediaViews.swift": "d449d8ca3ef60bd9de96406faf61cc8bf062eb961b76d8b459298b765b9b3b60",
+    "IMApp/IMApp/V2/V2ConversationMediaDownloadService.swift": "51e0cbe1b1fa0dcd27e52b61027a8b9d279e1e347d55eb767d0349adb5515717",
+    "IMApp/IMApp/V2/Resources/V2ResourceStorageView.swift": "ea61b11279a150243cc32150a087b11c9de131c6fec1b931b5add93c0eb6103e",
+    "IMApp/IMAppTests/V2ConversationStoreTests.swift": "835c3f62d6e4e5d05e5286b4c67cb366436edec13488946b565172eae05bf2d1",
+    "IMApp/IMAppTests/V2PhotoLibraryImageTests.swift": "f523a96e6b920c3e207b9237c303184d481283eb76b0b43a39e858ce3a97ee57"
+  }
+}

@@ -68,12 +68,14 @@ public struct V2ForwardExportMedia: Codable, Equatable, Sendable {
     public let contentType: String
     /// 媒体字节数。
     public let byteCount: Int64
+    public let displayName: V2ResourceDisplayName
 
-    package init(mediaID: UUID, uploadSessionID: UUID, contentType: String, byteCount: Int64) {
+    package init(mediaID: UUID, uploadSessionID: UUID, contentType: String, byteCount: Int64, displayName: V2ResourceDisplayName = .attachment) {
         self.mediaID = mediaID
         self.uploadSessionID = uploadSessionID
         self.contentType = contentType
         self.byteCount = byteCount
+        self.displayName = displayName
     }
 }
 

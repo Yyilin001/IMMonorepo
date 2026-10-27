@@ -36,9 +36,9 @@ final class V2AvatarPipeline {
         var image: V2SendableImage?
         if let access = initial.avatar, let pixels {
             do {
-                let file = try await files.avatar(access)
+                let file = try await files.avatar(access, home: .account(key.userID))
                 image = await thumbnails.thumbnail(fileURL: file.fileURL, maximumPixelSize: pixels)
-                await files.releaseFile(file.fileURL)
+                await file.release()
             } catch is CancellationError { throw CancellationError() }
             catch { /* A failed byte capability does not revoke the independent name lease. */ }
         }
@@ -67,9 +67,9 @@ final class V2AvatarPipeline {
         var image: V2SendableImage?
         if let access = presentation.avatar {
             do {
-                let file = try await files.avatar(access)
+                let file = try await files.avatar(access, home: .room(activation.roomID))
                 image = await thumbnails.thumbnail(fileURL: file.fileURL, maximumPixelSize: pixels)
-                await files.releaseFile(file.fileURL)
+                await file.release()
                 guard image != nil else { throw V2ClientMediaTransferError.invalidResponse }
             } catch V2ClientMediaTransferError.targetExpired {
                 await groups.invalidate(roomID: activation.roomID)

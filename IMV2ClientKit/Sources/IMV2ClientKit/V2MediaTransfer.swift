@@ -14,9 +14,20 @@ public struct V2ClientMediaTransferTarget: Equatable, Sendable {
     public let expiresAt: Date
     public let expectedByteCount: Int64
     public let checksum: V2ResourceChecksum
+    public let preview: V2ResourceVariantDescriptor?
+    public private(set) var networkConstraints: V2ResourceDownloadNetworkConstraints = .unrestricted
     public let backgroundDownloadAuthorization: V2ResourceBackgroundDownloadAuthorization?
 
-    public init(downloadPlan:V2ResourceTransferPlan) throws {
+    public func restrictingNetwork(to constraints: V2ResourceDownloadNetworkConstraints) -> Self {
+        var copy = self
+        copy.networkConstraints = networkConstraints.intersecting(constraints)
+        return copy
+    }
+
+    public init(downloadPlan:V2ResourceTransferPlan, preview: V2ResourceVariantDescriptor? = nil) throws {
+        do { _ = try V2MediaDownloadTargetEnvelope(plan: downloadPlan, preview: preview) }
+        catch { throw V2ClientMediaTransferError.invalidTarget }
+        self.preview = preview
         guard downloadPlan.mode == .httpGet, let checksum = downloadPlan.checksum else {throw V2ClientMediaTransferError.invalidTarget}
         self.url=downloadPlan.url
         self.headers=Dictionary(uniqueKeysWithValues:downloadPlan.headers.map {($0.name,$0.value)})
@@ -33,6 +44,13 @@ public struct V2ClientMediaTransferTarget: Equatable, Sendable {
 /// 访问令牌必须留在该适配器内部，而不能被复制进提供方目标的请求头。
 public protocol V2ClientMediaDownloadTargetResolver: Sendable {
     func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2ClientMediaTransferTarget
+    func resolveImagePreviewTarget(mediaID: MediaID, message: V2MediaMessageLocation, size: V2MediaImagePreviewSize) async throws -> V2ClientMediaTransferTarget
+}
+
+extension V2ClientMediaDownloadTargetResolver {
+    public func resolveImagePreviewTarget(mediaID: MediaID, message: V2MediaMessageLocation, size: V2MediaImagePreviewSize) async throws -> V2ClientMediaTransferTarget {
+        throw V2ClientMediaTransferError.invalidTarget
+    }
 }
 
 /// 用于已认证媒体边缘的、自洽且绑定设备的凭据对。
@@ -93,6 +111,14 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
     }
 
     public func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation? = nil) async throws -> V2ClientMediaTransferTarget {
+        try await resolve(mediaID: mediaID, message: message, previewSize: nil)
+    }
+
+    public func resolveImagePreviewTarget(mediaID: MediaID, message: V2MediaMessageLocation, size: V2MediaImagePreviewSize) async throws -> V2ClientMediaTransferTarget {
+        try await resolve(mediaID: mediaID, message: message, previewSize: size)
+    }
+
+    private func resolve(mediaID: MediaID, message: V2MediaMessageLocation?, previewSize: V2MediaImagePreviewSize?) async throws -> V2ClientMediaTransferTarget {
         try Task.checkCancellation()
         let edgeCredentials: V2ClientMediaEdgeCredentials
         do {
@@ -102,6 +128,7 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
         } catch let failure as V2HTTPFailure { throw failure } catch let auth as V2AuthSessionError { throw auth } catch {
             throw V2ClientMediaTransferError.authorizationUnavailable
         }
+        try Task.checkCancellation()
         guard !edgeCredentials.accessToken.isEmpty,
               !edgeCredentials.accessToken.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
         else { throw V2ClientMediaTransferError.authorizationUnavailable }
@@ -114,6 +141,8 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
                 .init(name: "room_id", value: message.roomID.rawValue), .init(name: "message_id", value: message.messageID.rawValue)
             ]
         }
+        if let items = components.queryItems { components.queryItems = items.filter { $0.name != "image_size" } }
+        if let previewSize { components.queryItems = (components.queryItems ?? []) + [.init(name: "image_size", value: String(previewSize.rawValue))] }
         guard let requestURL = components.url else { throw V2ClientMediaTransferError.invalidMediaEdgeEndpoint }
         var request = URLRequest(
             url: requestURL,
@@ -140,6 +169,7 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
         catch {
             throw V2ClientMediaTransferError.networkFailure
         }
+        try Task.checkCancellation()
         switch response.statusCode {
         case 200 where V2HTTPContract.isJSON(response): break
         case 200: throw V2ClientMediaTransferError.invalidMediaEdgeResponse
@@ -156,7 +186,11 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
             guard !plan.url.absoluteString.contains(edgeCredentials.accessToken),
                   !plan.headers.contains(where: { $0.value.contains(edgeCredentials.accessToken) })
             else { throw V2ClientMediaTransferError.invalidTarget }
-            return try .init(downloadPlan: plan)
+            if previewSize != nil {
+                guard let preview = envelope.preview, preview.key.resource.mediaID == mediaID,
+                      preview.key.resource.home == message.map({ .room($0.roomID) }) else { throw V2ClientMediaTransferError.invalidTarget }
+            } else if envelope.preview != nil { throw V2ClientMediaTransferError.invalidTarget }
+            return try .init(downloadPlan: plan, preview: envelope.preview)
         } catch let error as V2ClientMediaTransferError {
             throw error
         } catch {
@@ -212,13 +246,25 @@ public actor V2URLSessionMediaByteTransfer: V2ClientMediaByteTransfer {
                 let priorETag = file.etag
                 let end = start == target.expectedByteCount ? start + chunkBytes - 1 : min(target.expectedByteCount - 1,start + chunkBytes - 1)
                 var request = URLRequest(url: target.url,cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,timeoutInterval: min(60,remainingLease))
+                target.networkConstraints.apply(to: &request)
                 request.httpMethod = "GET"
                 for (name,value) in target.headers { request.setValue(value,forHTTPHeaderField: name) }
                 request.setValue("bytes=\(start)-\(end)",forHTTPHeaderField:"Range")
                 request.setValue("identity",forHTTPHeaderField:"Accept-Encoding")
                 if let etag = file.etag { request.setValue(etag,forHTTPHeaderField:"If-Range") }
-                let transfer = try await transport.stream(request,maximumBytes: max(64 * 1024,target.expectedByteCount),
-                    receiveResponse: { try file.accept($0,requestedStart: start,requestedEnd: end) },consume: { try file.append($0) })
+                let progress = V2ResourceDownloadProgressRequest(context: V2ResourceDownloadProgressScope.context)
+                let transfer: V2RangeDownloadResponse
+                do {
+                    transfer = try await transport.stream(request,maximumBytes: max(64 * 1024,target.expectedByteCount),
+                        receiveResponse: {
+                            try file.accept($0,requestedStart: start,requestedEnd: end)
+                            try progress.begin(expectedBytes: file.acceptedResponseBytes)
+                        }, consume: {
+                            try file.append($0)
+                            try progress.consume(byteCount: $0.count)
+                        })
+                    progress.end()
+                } catch { progress.end(); throw error }
                 let response = transfer.response
                 // A strong unchanged validator associates this rebuilt full body
                 // with the already hash-verified local prefix. Publish's complete
@@ -271,6 +317,12 @@ public struct V2ClientMediaDownloadService: Sendable {
         guard target.expiresAt > now() else { throw V2ClientMediaTransferError.targetExpired }
         return target
     }
+    public func imagePreviewTarget(mediaID: MediaID, message: V2MediaMessageLocation, size: V2MediaImagePreviewSize) async throws -> V2ClientMediaTransferTarget {
+        let target = try await targetResolver.resolveImagePreviewTarget(mediaID: mediaID, message: message, size: size)
+        guard target.preview != nil, target.expiresAt > now() else { throw V2ClientMediaTransferError.invalidTarget }
+        return target
+    }
+
     public func download(target: V2ClientMediaTransferTarget, to destination: URL) async throws {
         try Task.checkCancellation()
         guard target.expiresAt > now() else { throw V2ClientMediaTransferError.targetExpired }

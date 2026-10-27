@@ -1,6 +1,15 @@
 import Foundation
 import IMV2Core
 
+public struct V2AccountStorageRoots: Equatable, Sendable {
+    public let persistent: URL
+    public let cache: URL
+    public init(persistent: URL, cache: URL) {
+        self.persistent = persistent.standardizedFileURL
+        self.cache = cache.standardizedFileURL
+    }
+}
+
 /// 同一主数据库生命周期内的 SQLite 工件集合。
 ///
 /// 包含主库、独立搜索库及两者的 WAL／SHM。删除前调用方必须停止所有访问者并关闭
@@ -46,14 +55,22 @@ public struct V2AccountStorageScope: Equatable, Sendable {
     public let incarnation: UUID
     /// 此目录绑定的领域账号；其存在不代替当前会话认证。
     public let accountID: UserID
-    /// 该实例所有数据库和受管媒体目录的共同根。
+    /// 数据库、唯一原件及保留字节的持久根。
     public let directory: URL
+    /// 可重建字节的独立系统 Caches 根；与持久根使用同一 incarnation。
+    public let cacheDirectory: URL
+    public init(incarnation: UUID, accountID: UserID, directory: URL, cacheDirectory: URL) {
+        self.incarnation = incarnation; self.accountID = accountID
+        self.directory = directory.standardizedFileURL; self.cacheDirectory = cacheDirectory.standardizedFileURL
+    }
     /// 当前实例的主库、搜索库及日志工件位置。
     public var database: V2LocalDatabaseArtifacts { .init(primary: directory.appending(path: "V2.sqlite")) }
-    /// 当前实例的待上传附件暂存目录，非持久命令队列。
-    public var mediaStagingDirectory: URL { directory.appending(path: "media-staging", directoryHint: .isDirectory) }
-    /// 当前实例的已下载媒体缓存目录。
-    public var mediaCacheDirectory: URL { directory.appending(path: "media-cache", directoryHint: .isDirectory) }
+    /// Unified, journal-owned resources for this exact account incarnation.
+    public var resourceFilesDirectory: URL { directory.appending(path: "resources", directoryHint: .isDirectory) }
+    public var resourceCacheDirectory: URL { cacheDirectory.appending(path: "resources", directoryHint: .isDirectory) }
+    /// Minimal AFU handoff is a sibling of the Complete-protected account
+    /// directory. Its opaque incarnation still belongs to the same retirement.
+    public var backgroundDirectory: URL { directory.appendingPathExtension("background") }
 }
 
 /// 账号目录记录无效、范围不匹配或清理顺序不满足约束时的错误。
@@ -73,6 +90,7 @@ public actor V2AccountStorageDirectory {
         let accountID: String
     }
     private let root: URL
+    private let cacheRoot: URL
     private let fileManager = FileManager.default
     private var prepared = false
     private var hasIssuedScope = false
@@ -81,14 +99,18 @@ public actor V2AccountStorageDirectory {
     /// 创建目录记录管理器，暂不访问磁盘。
     ///
     /// - Parameter root: 当前目录管理器独占的受管根；内部使用标准化 URL。
-    public init(root: URL) { self.root = root.standardizedFileURL }
+    public init(root: URL, cacheRoot: URL) {
+        self.root = root.standardizedFileURL.resolvingSymlinksInPath()
+        self.cacheRoot = cacheRoot.standardizedFileURL.resolvingSymlinksInPath()
+    }
     private var activeURL: URL { root.appending(path: "active.json") }
     private var retiredDirectory: URL { root.appending(path: "retired", directoryHint: .isDirectory) }
     private func markerURL(_ id: UUID) -> URL { retiredDirectory.appending(path: id.uuidString + ".json") }
     private func scope(_ entry: Entry) throws -> V2AccountStorageScope {
         guard entry.version == 1 else { throw V2AccountStorageError.invalidManifest }
         return .init(incarnation: entry.incarnation, accountID: try UserID(entry.accountID),
-                     directory: root.appending(path: entry.incarnation.uuidString, directoryHint: .isDirectory))
+                     directory: root.appending(path: entry.incarnation.uuidString, directoryHint: .isDirectory),
+                     cacheDirectory: cacheRoot.appending(path: entry.incarnation.uuidString, directoryHint: .isDirectory))
     }
     private func read(_ url: URL) throws -> Entry? {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
@@ -100,7 +122,10 @@ public actor V2AccountStorageDirectory {
     }
     private func prepare() throws {
         guard !prepared else { return }
+        guard root.isFileURL, cacheRoot.isFileURL, root != cacheRoot,
+              root.resolvingSymlinksInPath().path == root.path, cacheRoot.resolvingSymlinksInPath().path == cacheRoot.path else { throw V2AccountStorageError.scopeMismatch }
         try fileManager.createDirectory(at: retiredDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
         try V2LocalBackupExclusion.apply(to: root)
         prepared = true
     }
@@ -140,6 +165,7 @@ public actor V2AccountStorageDirectory {
         let entry = Entry(version: 1, incarnation: UUID(), accountID: accountID.rawValue)
         let result = try scope(entry)
         try fileManager.createDirectory(at: result.directory, withIntermediateDirectories: false)
+        try fileManager.createDirectory(at: result.cacheDirectory, withIntermediateDirectories: true)
         try V2LocalBackupExclusion.apply(to: result.directory)
         try JSONEncoder().encode(entry).write(to: activeURL, options: .atomic)
         return result
@@ -207,6 +233,8 @@ public actor V2AccountStorageDirectory {
         guard try scope(expected) == candidate else { throw V2AccountStorageError.scopeMismatch }
         guard let entry = try read(markerURL(candidate.incarnation)) else {
             guard !fileManager.fileExists(atPath: candidate.directory.path),
+                  !fileManager.fileExists(atPath: candidate.cacheDirectory.path),
+                  !fileManager.fileExists(atPath: candidate.backgroundDirectory.path),
                   try active()?.incarnation != candidate.incarnation else { throw V2AccountStorageError.scopeMismatch }
             return false
         }
@@ -216,7 +244,10 @@ public actor V2AccountStorageDirectory {
     /// 按捕获的实例目录删除内容及其记录；只有 active 仍指向该实例时才移除 active 文件。
     private func removeRetired(_ candidate: V2AccountStorageScope) throws {
         // Never consult the current account name for the deletion target.
+        guard root.resolvingSymlinksInPath().path == root.path, cacheRoot.resolvingSymlinksInPath().path == cacheRoot.path else { throw V2AccountStorageError.scopeMismatch }
         if fileManager.fileExists(atPath: candidate.directory.path) { try fileManager.removeItem(at: candidate.directory) }
+        if fileManager.fileExists(atPath: candidate.cacheDirectory.path) { try fileManager.removeItem(at: candidate.cacheDirectory) }
+        if fileManager.fileExists(atPath: candidate.backgroundDirectory.path) { try fileManager.removeItem(at: candidate.backgroundDirectory) }
         if try read(activeURL)?.incarnation == candidate.incarnation { try fileManager.removeItem(at: activeURL) }
         try fileManager.removeItem(at: markerURL(candidate.incarnation))
     }

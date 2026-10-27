@@ -33,7 +33,7 @@ private func checkPresentations(_ media: [V2MediaReference], _ presentations: [V
     }
     for presentation in presentations {
         _ = try V2MediaPresentation(mediaID: presentation.mediaID, kind: presentation.kind,
-                                    contentType: presentation.contentType, byteCount: presentation.byteCount)
+                                    contentType: presentation.contentType, byteCount: presentation.byteCount, resourceDescriptor: presentation.resourceDescriptor)
     }
 }
 

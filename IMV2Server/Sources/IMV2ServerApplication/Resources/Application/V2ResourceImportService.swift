@@ -14,9 +14,10 @@ public struct V2ResourceImportSnapshot: Sendable {
 public struct V2ResourceImportSourceGrant: Sendable {
     public let contentType: String
     public let facts: V2StoredObjectFacts
+    public let displayName: V2ResourceDisplayName
     public let recheck: @Sendable () async throws -> Void
-    public init(contentType: String, facts: V2StoredObjectFacts, recheck: @escaping @Sendable () async throws -> Void) {
-        self.contentType = contentType; self.facts = facts; self.recheck = recheck
+    public init(contentType: String, facts: V2StoredObjectFacts, displayName: V2ResourceDisplayName, recheck: @escaping @Sendable () async throws -> Void) {
+        self.contentType = contentType; self.facts = facts; self.displayName = displayName; self.recheck = recheck
     }
 }
 
@@ -90,7 +91,7 @@ public struct V2ResourceImportService: Sendable {
         let upload = try V2ResourceUploadRequest(operationID: .init(request.operationID.rawValue),
             mediaID: request.targetMediaID, usage: request.targetUsage, contentType: source.contentType,
             byteCount: source.facts.byteCount,
-            checksum: .init(value: source.facts.sha256.map { String(format: "%02x", $0) }.joined()), clientModes: [.httpPut])
+            checksum: .init(value: source.facts.sha256.map { String(format: "%02x", $0) }.joined()), clientModes: [.httpPut], displayName: source.displayName)
         let session = try await resources.create(upload, actor: actor, device: device)
         try await persistence.attach(session, locator: locator, actor: actor, device: device)
         let store = try await resolve(locator.home, request.targetUsage, actor, device)

@@ -1,0 +1,26 @@
+# Build context is one successful scripts/build_v2_linux_release.py run directory.
+# Compilation happens natively on the Mac; this image only packages executables.
+# Keep the existing runtime environment while changing the compiler workflow.
+FROM swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl imagemagick ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+COPY bin/ ./IMV2Server/.build/release/
+COPY manifest.json /opt/im-native-release-manifest.json
+COPY imagemagick-policy.xml /etc/ImageMagick-6/policy.xml
+
+RUN set -eu; \
+    for product in IMV2AccountServerApp IMV2ServerApp IMV2OperatorServerApp \
+        IMV2LocalGatewayProbe IMV2ResourceImageWorker IMV2PlacementControlApp \
+        IMV2RoomHostSupervisorApp; do \
+        test -x "/workspace/IMV2Server/.build/release/${product}"; \
+        ldd "/workspace/IMV2Server/.build/release/${product}" > /tmp/im-native-libraries; \
+        if grep -q 'not found' /tmp/im-native-libraries; then cat /tmp/im-native-libraries; exit 1; fi; \
+    done; \
+    rm /tmp/im-native-libraries; \
+    /workspace/IMV2Server/.build/release/IMV2ResourceImageWorker --check
+
+CMD ["/workspace/IMV2Server/.build/release/IMV2AccountServerApp"]

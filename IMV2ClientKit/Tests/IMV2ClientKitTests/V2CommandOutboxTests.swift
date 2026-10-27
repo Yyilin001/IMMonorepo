@@ -9,7 +9,7 @@ struct V2MessageIntentAdmissionTests {
     func immutableSnapshot() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let intent=try V2SendIntent(id:UUID(),roomID:f.room,clientMessageID:.init(uuid:UUID()),text:"content",replyTo:.init(messageID:.init(uuid:UUID())),attachmentJobIDs:[])
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         #expect(await f.remote.submissions==0)
         #expect(try await f.store.preparingSendIntents()==[intent])
         try await f.store.handOffSendIntent(intent.id)
@@ -23,10 +23,10 @@ struct V2MessageIntentAdmissionTests {
     func duplicateIntent() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let intent=try f.intent("original")
-        try await f.store.freezeSendIntent(intent)
-        try await f.store.freezeSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
+        try await f.store.freezeMetadataSendIntent(intent)
         let changed=try V2SendIntent(id:intent.id,roomID:intent.roomID,clientMessageID:intent.clientMessageID,text:"changed",attachmentJobIDs:[])
-        await #expect(throws:V2ResourceJournalError.conflict) { try await f.store.freezeSendIntent(changed) }
+        await #expect(throws:V2ResourceJournalError.conflict) { try await f.store.freezeMetadataSendIntent(changed) }
         #expect(try await f.store.preparingSendIntents()==[intent])
         try await f.store.close()
     }

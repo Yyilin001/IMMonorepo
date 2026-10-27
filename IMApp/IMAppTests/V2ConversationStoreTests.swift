@@ -8,6 +8,250 @@ import UIKit
 
 @MainActor
 struct V2ConversationStoreTests {
+    @Test func firstImageTimelineAndLaterSafeAreaLayoutKeepTheWholeLastRowVisible() async throws {
+        let messages = try (0..<9).map { index in
+            let media = V2MediaReference(mediaID: .init(uuid: UUID()))
+            return V2ConversationMessageItem(id: UUID().uuidString, roomSequence: UInt64(index + 1), revision: 1,
+                text: "Photo \(index)", media: [media],
+                mediaPresentations: [try .init(mediaID: media.mediaID, kind: .image, contentType: "image/png", byteCount: 4)],
+                createdAt: Date(timeIntervalSince1970: Double(index)), isOutgoing: true, isWithdrawn: false)
+        }
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: messages),
+            sender: nil, userID: UUID().uuidString, roomID: UUID().uuidString)
+        await store.refresh()
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let host = UIHostingController(rootView: NavigationStack { V2ConversationDetailView(store: store) })
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        func collection(in view: UIView) -> UICollectionView? {
+            if let result = view as? UICollectionView, result.numberOfSections > 0,
+               result.numberOfItems(inSection: 0) == messages.count { return result }
+            for child in view.subviews { if let result = collection(in: child) { return result } }
+            return nil
+        }
+        func settledTail() async throws {
+            var stableFrames = 0
+            let deadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < deadline {
+                window.layoutIfNeeded(); host.view.layoutIfNeeded()
+                if let list = collection(in: host.view), list.bounds.height > 0,
+                   let last = list.layoutAttributesForItem(at: .init(item: messages.count - 1, section: 0)) {
+                    let edge = list.contentSize.height - list.bounds.height + list.adjustedContentInset.bottom
+                    let gap = max(0, edge - list.contentOffset.y)
+                    let tailIsVisible = last.frame.maxY <= list.bounds.maxY - list.adjustedContentInset.bottom + 1
+                    stableFrames = gap <= 1 && tailIsVisible ? stableFrames + 1 : 0
+                    if stableFrames >= 5 { return }
+                }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            Issue.record("Last image row must settle completely above the composer and safe area")
+        }
+        try await settledTail()
+        host.additionalSafeAreaInsets.bottom = 80
+        try await settledTail()
+    }
+
+    @Test func initialMessageSnapshotDoesNotWaitForImageAuthorizationOrDecode() async throws {
+        let media = V2MediaReference(mediaID: .init(uuid: UUID()))
+        let message = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "",
+            media: [media], mediaPresentations: [try .init(mediaID: media.mediaID, kind: .image,
+                contentType: "image/png", byteCount: 4)], createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        let reader = V2ConversationMediaDownloaderFake(result: .failure)
+        let thumbnails = V2LocalMediaThumbnailCache(directories: []) { _, _ in
+            Issue.record("Initial timeline must not decode images"); return nil
+        }
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: [message]),
+            sender: nil, userID: "current-user", roomID: "room-a", mediaDownloader: reader, mediaThumbnails: thumbnails)
+        await store.refresh()
+        #expect(store.messages == [message])
+        #expect(store.state == .loaded)
+        #expect(await reader.cacheLookups == 0)
+        #expect(await reader.requests().isEmpty)
+        #expect(store.initialImagePreviews.isEmpty)
+        await thumbnails.close()
+    }
+
+    @Test func localTimelinePublishesWhileAncillaryMetadataIsStillPaused() async {
+        let message = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "cached message",
+            createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        let reader = V2ConversationDataSourceFake(summaries: [], messages: [message])
+        await reader.pauseHistoryRead()
+        let store = makeConversationDetailStore(dataSource: reader, sender: nil, userID: "user", roomID: "room")
+        let refresh = Task { await store.refresh() }
+        await reader.waitForHistoryRead()
+        #expect(store.messages == [message])
+        #expect(store.state == .loaded)
+        await reader.resumeHistoryRead()
+        await refresh.value
+    }
+
+    @Test func imageRowLoadsThumbnailAndDownloadsOriginalOnlyOnOpen() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "thumbnail-route-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let media = V2MediaReference(mediaID: .init(uuid: UUID()))
+        let target = try V2ClientMediaTransferTarget(downloadPlan: .init(mode: .httpGet,
+            url: #require(URL(string: "https://media.invalid/fixture")), expiresAt: .distantFuture, expectedByteCount: 4,
+            checksum: .init(value: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a")))
+        let files = try await makeResourceMediaTestDownloader(downloader: .init(
+            targetResolver: V2MediaDownloadTargetResolverFake(target: target), byteTransfer: V2MediaByteTransferFake(downloadedData: Data([1,2,3,4]))), directory: root)
+        let file = try await files.download(media)
+        let pixel = V2SendableImage(image: UIImage())
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [root]) { _, size in
+            #expect(size == 1280 || size == 2048); return pixel
+        }
+        let reader = V2ConversationMediaDownloaderFake(result: .success(file), cached: file)
+        let message = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "",
+            media: [media], mediaPresentations: [try .init(mediaID: media.mediaID, kind: .image,
+                contentType: "image/png", byteCount: 4)], createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: [message]),
+            sender: nil, userID: "current-user", roomID: "room-a", mediaDownloader: reader, mediaThumbnails: thumbnails)
+        await store.refresh()
+        await store.loadImagePreview(media, from: message)
+        #expect(await reader.previewRequests == 1)
+        #expect(await reader.requests().isEmpty)
+        #expect(store.initialImagePreviews[media.mediaID]?.image === pixel.image)
+        #expect(store.mediaDownloadState(for: media) == .notDownloaded)
+        #expect(await store.originalImage(media, from: message) === pixel.image)
+        #expect(await reader.requests() == [media])
+        await thumbnails.close(); try await files.close()
+    }
+
+    @Test func reopenedTimelinePublishesDecodedPreviewInItsFirstSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "first-preview-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let media = V2MediaReference(mediaID: .init(uuid: UUID()))
+        let target = try V2ClientMediaTransferTarget(downloadPlan: .init(mode: .httpGet,
+            url: #require(URL(string: "https://media.invalid/fixture")), expiresAt: .distantFuture, expectedByteCount: 4,
+            checksum: .init(value: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a")))
+        let files = try await makeResourceMediaTestDownloader(downloader: .init(
+            targetResolver: V2MediaDownloadTargetResolverFake(target: target), byteTransfer: V2MediaByteTransferFake(downloadedData: Data([1,2,3,4]))), directory: root)
+        let file = try await files.download(media)
+        let pixel = V2SendableImage(image: UIImage())
+        let decodeCount = FirstPreviewDecodeCount()
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [root]) { _, _ in
+            await decodeCount.record(); return pixel
+        }
+        let lease = try await file.borrowFile()
+        _ = await thumbnails.thumbnail(fileURL: lease.fileURL, maximumPixelSize: 1280)
+        await lease.release()
+        let reader = V2ConversationMediaDownloaderFake(result: .failure, cachedPreview: file)
+        let message = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "", media: [media],
+            mediaPresentations: [try .init(mediaID: media.mediaID, kind: .image, contentType: "image/png", byteCount: 4)],
+            createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
+        await source.pauseHistoryRead()
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, userID: UUID().uuidString,
+            roomID: UUID().uuidString, mediaDownloader: reader, mediaThumbnails: thumbnails)
+        let refresh = Task { await store.refresh() }
+        await source.waitForHistoryRead()
+        #expect(store.state == .loaded)
+        #expect(store.messages == [message])
+        #expect(store.imagePreviewStates[media.mediaID] == .downloaded(file))
+        #expect(store.initialImagePreviews[media.mediaID]?.image === pixel.image)
+        #expect(await decodeCount.value == 1)
+        #expect(await reader.previewRequests == 0)
+        #expect(await reader.requests().isEmpty)
+        await source.resumeHistoryRead(); await refresh.value
+        await thumbnails.close(); try await files.close()
+    }
+
+    @Test func cancelledOldImageRowCannotEraseANewerPreviewResult() async throws {
+        let media = V2MediaReference(mediaID: .init(uuid: UUID()))
+        let message = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "", media: [media],
+            mediaPresentations: [try .init(mediaID: media.mediaID, kind: .image, contentType: "image/png", byteCount: 4)],
+            createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        let reader = V2PreviewDemandGate(), thumbnails = V2LocalMediaThumbnailCache(directories: [])
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: [message]),
+            sender: nil, userID: "user", roomID: "room", mediaDownloader: reader, mediaThumbnails: thumbnails)
+        await store.refresh()
+        let old = Task { await store.loadImagePreview(media, from: message) }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while await reader.calls == 0 { try #require(ContinuousClock.now < deadline); await Task.yield() }
+        old.cancel()
+        await store.loadImagePreview(media, from: message)
+        #expect(store.imagePreviewStates[media.mediaID] == .failed)
+        await reader.releaseFirst()
+        await old.value
+        #expect(store.imagePreviewStates[media.mediaID] == .failed)
+        await thumbnails.close()
+    }
+
+    @Test(arguments: [false, true])
+    func restoresCachedMessageMediaWithoutStartingADownload(hit: Bool) async throws {
+        let reference = V2MediaReference(mediaID: .init(uuid: UUID()))
+        let message = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "cached photo",
+            media: [reference], mediaPresentations: [try testPresentation(for: reference)], createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        let file = V2DownloadedConversationMedia(mediaID: reference.mediaID, fileURL: URL(fileURLWithPath: "/tmp/opaque-cache-state-test"))
+        let reader = V2ConversationMediaDownloaderFake(result: .failure, cached: hit ? file : nil)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: [message]),
+            sender: nil, userID: "current-user", roomID: "room-a", mediaDownloader: reader)
+        await store.refresh()
+        await store.restoreCachedMedia(reference, from: message)
+        #expect(store.mediaDownloadState(for: reference) == (hit ? .downloaded(file) : .notDownloaded))
+        #expect(await reader.requests().isEmpty)
+        #expect(store.messageActionFeedback == nil)
+    }
+
+    @Test("a normalized photo enters the real chat draft without a provider or normalization file")
+    func stagesNormalizedPhotoDirectlyIntoChatDraft() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "chat-normalized-photo-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
+        let data = UIGraphicsImageRenderer(size: .init(width: 8, height: 8)).jpegData(withCompressionQuality: 0.9) { context in
+            UIColor.blue.setFill(); context.fill(.init(x: 0, y: 0, width: 8, height: 8))
+        }
+        let photo = V2NormalizedPhoto(data: data, format: .jpeg)
+        let room = RoomID(uuid: UUID())
+        let page = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, userID: fixture.scope.accountID.rawValue, roomID: room.rawValue, attachmentStager: fixture.stager)
+        await page.stageAttachment(photo: photo)
+        let draft = try #require(page.attachments.first)
+        #expect(page.attachments.count == 1 && draft.state == .staged)
+        #expect(draft.attachment.displayName == "照片.jpg" && draft.attachment.contentType == "image/jpeg")
+        #expect(try await fixture.stager.selectedAttachments(purpose: .messageDraft(room)).map(\.id) == [draft.id])
+        let lease = try await page.borrowAttachment(id: draft.id)
+        #expect(try Data(contentsOf: lease.fileURL) == data)
+        await lease.release()
+        #expect(try await fixture.resources.storageSnapshot().transferReservedBytes == 0)
+        await page.removeAttachment(id: draft.id)
+        #expect(page.attachments.isEmpty)
+        let cleanup = try await fixture.resources.planCleanup()
+        #expect(try await fixture.resources.commitCleanup(cleanup).deletedCount == 1)
+        try await fixture.close()
+    }
+
+    @Test("a reconstructed chat restores only its own durable original selections without duplicates")
+    func restoresOriginalDraftAfterColdAccountOpen() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "chat-original-restore-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "draft.txt"); try Data("saved attachment".utf8).write(to: source)
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
+        let room = RoomID(uuid: UUID()), otherRoom = RoomID(uuid: UUID())
+        let draft = try await fixture.stager.stageImportedFile(at: source, purpose: .messageDraft(room))
+        _ = try await fixture.stager.stageImportedFile(at: source, purpose: .messageDraft(otherRoom))
+        try await fixture.close()
+        let restored = try await V2OriginalResourceTestFixture(root: root, scope: fixture.scope)
+        let page = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, userID: fixture.scope.accountID.rawValue, roomID: room.rawValue, attachmentStager: restored.stager)
+        async let first: Void = page.refresh()
+        async let second: Void = page.refresh()
+        _ = await (first, second)
+        #expect(page.attachments.map(\.id) == [draft.id])
+        #expect(page.attachments.first?.state == .staged)
+        let lease = try await page.borrowAttachment(id: draft.id)
+        #expect(try Data(contentsOf: lease.fileURL) == Data("saved attachment".utf8))
+        await lease.release()
+        await page.removeAttachment(id: draft.id)
+        await page.refresh()
+        #expect(page.attachments.isEmpty)
+        #expect(try await restored.stager.selectedAttachments(purpose: .messageDraft(room)).isEmpty)
+        #expect(try await restored.stager.selectedAttachments(purpose: .messageDraft(otherRoom)).count == 1)
+        try await restored.close()
+    }
+
     @Test func identicalTimelineRefreshDoesNotAdvanceRevisionAndMetadataRefreshSkipsTimelineRead() async {
         let message = V2ConversationMessageItem(id: "stable-message", roomSequence: 1, revision: 1,
             text: "hello", createdAt: .now, isOutgoing: false, isWithdrawn: false)
@@ -737,7 +981,6 @@ struct V2ConversationStoreTests {
     @Test func attachmentOnlyMessageFreezesIntentAndTransfersFileOwnership() async throws {
         let staged = V2StagedConversationAttachment(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000601")!,
-            fileURL: URL(fileURLWithPath: "/tmp/v2-attachment"),
             displayName: "diagram.png",
             contentType: "image/png",
             byteCount: 42
@@ -763,14 +1006,13 @@ struct V2ConversationStoreTests {
         #expect(await uploader.frozenRooms() == [try RoomID("room-a")])
         #expect(await stager.discardedAttachments().isEmpty)
         #expect(store.attachments.isEmpty)
-        #expect(store.sendFeedback == "已保存发送意图，附件准备完成后自动发送。")
+        #expect(store.sendFeedback == nil)
     }
 
     @Test(arguments: [false, true])
     func failedResourceIntentRetainsTheDraftAndFiles(senderUnavailable: Bool) async {
         let staged = V2StagedConversationAttachment(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000611")!,
-            fileURL: URL(fileURLWithPath: "/tmp/v2-attachment"),
             displayName: "document.pdf",
             contentType: "application/pdf",
             byteCount: 42
@@ -804,7 +1046,6 @@ struct V2ConversationStoreTests {
     @Test func invalidMentionDoesNotUploadOrScanStagedAttachments() async throws {
         let staged = V2StagedConversationAttachment(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000612")!,
-            fileURL: URL(fileURLWithPath: "/tmp/v2-invalid-mention-attachment"),
             displayName: "document.pdf",
             contentType: "application/pdf",
             byteCount: 42
@@ -906,83 +1147,61 @@ struct V2ConversationStoreTests {
         #expect(store.sendFeedback == "提及对象不能重复。")
     }
 
-    @Test func attachmentStagerCopiesImporterFileIntoItsOwnDirectoryAndDiscardsOnlyTheCopy() async throws {
-        let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory
-            .appendingPathComponent("v2-attachment-stager-" + UUID().uuidString, isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
-        let source = root.appendingPathComponent("imported-note.txt", isDirectory: false)
-        let stagingDirectory = root.appendingPathComponent("staging", isDirectory: true)
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    @Test func attachmentStagerImportsABorrowableOriginalAndCleanupNeverDeletesTheCallerSource() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "original-copy-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "imported-note.txt")
         try Data("private attachment bytes".utf8).write(to: source)
-        let stager = try V2FileConversationAttachmentStager(
-            directory: stagingDirectory,
-            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000701")! }
-        )
-
-        let staged = try await stager.stageImportedFile(at: source)
-
-        #expect(staged.fileURL.deletingLastPathComponent() == stagingDirectory.standardizedFileURL)
-        #expect(staged.fileURL != source)
-        #expect(fileManager.contentsEqual(atPath: source.path, andPath: staged.fileURL.path))
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
+        let staged = try await fixture.stager.stageImportedFile(at: source, purpose: .personalAvatar)
+        let lease = try await fixture.stager.borrow(.selection(staged.localAssetID))
+        let file = lease.fileURL
+        #expect(file != source && file.deletingLastPathComponent().lastPathComponent == "files")
+        #expect(try Data(contentsOf: file) == Data(contentsOf: source))
         #expect(staged.displayName == "imported-note.txt")
         #expect(staged.byteCount == Int64("private attachment bytes".utf8.count))
-        #expect(try staged.fileURL.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
-        #expect(try stagingDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
-
-        await stager.discard(staged)
-
-        #expect(!fileManager.fileExists(atPath: staged.fileURL.path))
-        #expect(fileManager.fileExists(atPath: source.path))
+        #expect(try file.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        #expect(try fixture.scope.resourceFilesDirectory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        await fixture.stager.discard(staged)
+        #expect(try await fixture.resources.planCleanup().fileIDs.isEmpty)
+        await lease.release()
+        let plan = try await fixture.resources.planCleanup()
+        #expect(try await fixture.resources.commitCleanup(plan).deletedCount == 1)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        try await fixture.close()
     }
 
-    @Test func attachmentStagerPurgesOnlyDirectOrphanedCopiesOnNextActivation() async throws {
-        let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory
-            .appendingPathComponent("v2-attachment-orphans-" + UUID().uuidString, isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
-        let stagingDirectory = root.appendingPathComponent("staging", isDirectory: true)
-        let outsideFile = root.appendingPathComponent("keep.txt", isDirectory: false)
-        let orphan = stagingDirectory.appendingPathComponent("orphan", isDirectory: false)
-        try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
-        try Data("keep".utf8).write(to: outsideFile)
-        try Data("orphan".utf8).write(to: orphan)
-        let stager = try V2FileConversationAttachmentStager(directory: stagingDirectory)
-
-        await stager.discardOrphanedStagedFiles()
-
-        #expect(!fileManager.fileExists(atPath: orphan.path))
-        #expect(fileManager.fileExists(atPath: outsideFile.path))
+    @Test func resourceMaintenanceNeverDeletesUnownedImports() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "original-unowned-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let callerFile = root.appending(path: "keep.txt"), unrelated = root.appending(path: "not-a-managed-partial")
+        try Data("keep".utf8).write(to: callerFile); try Data("external".utf8).write(to: unrelated)
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
+        try await fixture.resources.maintainCache()
+        #expect(FileManager.default.fileExists(atPath: callerFile.path))
+        #expect(FileManager.default.fileExists(atPath: unrelated.path))
+        try await fixture.close()
     }
 
-    @Test func attachmentStagerEnforcesFileAndDirectoryBudgetsBeforePublishingACopy() async throws {
-        let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory
-            .appendingPathComponent("v2-attachment-budget-" + UUID().uuidString, isDirectory: true)
-        defer { try? fileManager.removeItem(at: root) }
-        let stagingDirectory = root.appendingPathComponent("staging", isDirectory: true)
-        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
-        let oversized = root.appendingPathComponent("oversized.bin")
+    @Test func originalAdmissionUsesTheSharedPhysicalBudgetAndNeverEvictsAnActiveDraft() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "original-budget-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let oversized = root.appending(path: "oversized.bin"), first = root.appending(path: "first.bin"), second = root.appending(path: "second.bin")
         try Data(repeating: 1, count: 9).write(to: oversized)
-        let first = root.appendingPathComponent("first.bin")
-        let second = root.appendingPathComponent("second.bin")
-        try Data(repeating: 2, count: 6).write(to: first)
-        try Data(repeating: 3, count: 6).write(to: second)
-        let stager = try V2FileConversationAttachmentStager(
-            directory: stagingDirectory,
-            policy: .init(maximumFileBytes: 8, maximumDirectoryBytes: 10, maximumFileCount: 2)
-        )
-
-        await #expect(throws: V2ConversationAttachmentStagingError.fileTooLarge) {
-            try await stager.stageImportedFile(at: oversized)
-        }
-        let staged = try await stager.stageImportedFile(at: first)
-        await #expect(throws: V2ConversationAttachmentStagingError.stagingQuotaExceeded) {
-            try await stager.stageImportedFile(at: second)
-        }
-
-        #expect(staged.byteCount == 6)
-        #expect(try fileManager.contentsOfDirectory(at: stagingDirectory, includingPropertiesForKeys: nil).count == 1)
+        try Data(repeating: 2, count: 6).write(to: first); try Data(repeating: 3, count: 6).write(to: second)
+        let facts = try first.resourceValues(forKeys: [.totalFileAllocatedSizeKey,.fileAllocatedSizeKey])
+        let allocation = Int64(try #require(facts.totalFileAllocatedSize ?? facts.fileAllocatedSize))
+        let fixture = try await V2OriginalResourceTestFixture(root: root, policy: .init(maximumFileBytes: 8, maximumFileCount: 2), byteBudget: max(allocation,6) + 5)
+        await #expect(throws: V2ConversationAttachmentStagingError.fileTooLarge) { try await fixture.stager.stageImportedFile(at: oversized, purpose: .personalAvatar) }
+        let staged = try await fixture.stager.stageImportedFile(at: first, purpose: .personalAvatar)
+        await #expect(throws: V2ConversationAttachmentStagingError.stagingQuotaExceeded) { try await fixture.stager.stageImportedFile(at: second, purpose: .personalAvatar) }
+        #expect(try await fixture.read(.selection(staged.localAssetID)) == Data(repeating: 2, count: 6))
+        #expect(try await fixture.resources.storageSnapshot().files.count == 1)
+        try await fixture.close()
     }
 
     @Test func foregroundMediaDownloaderUsesFreshAuthorizedTransferAndOpaqueCacheFilename() async throws {
@@ -999,33 +1218,33 @@ struct V2ConversationStoreTests {
         let resolver = V2MediaDownloadTargetResolverFake(target: target)
         let transfer = V2MediaByteTransferFake(downloadedData: Data([1, 2, 3, 4]))
         let client = V2ClientMediaDownloadService(targetResolver: resolver, byteTransfer: transfer)
-        let downloader = try V2ForegroundConversationMediaDownloader(
+        let downloader = try await makeResourceMediaTestDownloader(
             downloader: client,
-            directory: root,
-            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000711")! }
+            directory: root
         )
 
         let downloaded = try await downloader.download(reference)
 
         #expect(await resolver.requests() == [reference.mediaID])
         let stableTemporary = try #require(await transfer.downloadDestinations().first)
-        #expect(stableTemporary.pathExtension == "download")
-        #expect(stableTemporary.lastPathComponent.contains(target.checksum.value))
+        #expect(stableTemporary.deletingLastPathComponent().lastPathComponent == "transfers")
+        #expect(UUID(uuidString: stableTemporary.lastPathComponent) != nil)
         #expect(!stableTemporary.lastPathComponent.contains(reference.mediaID.rawValue))
         #expect(try Data(contentsOf: downloaded.fileURL) == Data([1, 2, 3, 4]))
         #expect(!downloaded.fileURL.lastPathComponent.contains(reference.mediaID.rawValue))
-        #expect(downloaded.fileURL.pathExtension == "media")
+        #expect(downloaded.fileURL.deletingLastPathComponent().lastPathComponent == "files")
 
         try Data([9, 9, 9, 9]).write(to: downloaded.fileURL)
         let replaced = try await downloader.download(reference)
         #expect(replaced.fileURL != downloaded.fileURL)
         #expect(!fileManager.fileExists(atPath: downloaded.fileURL.path))
         #expect(try Data(contentsOf: replaced.fileURL) == Data([1, 2, 3, 4]))
-        #expect(await transfer.downloadDestinations() == [stableTemporary,stableTemporary])
+        #expect(await transfer.downloadDestinations().count == 2)
         #expect(!fileManager.fileExists(atPath: stableTemporary.path))
+        try await downloader.close()
     }
 
-    @Test func foregroundMediaDownloaderPurgesOnlyIncompleteCacheTransfers() async throws {
+    @Test func resourceMaintenanceDoesNotDeleteUnownedFiles() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("v2-media-cache-cleanup-" + UUID().uuidString, isDirectory: true)
@@ -1033,7 +1252,7 @@ struct V2ConversationStoreTests {
         let target = try V2ClientMediaTransferTarget(downloadPlan: .init(mode: .httpGet,
             url: #require(URL(string: "https://media.invalid/object")), expiresAt: .distantFuture,
             expectedByteCount: 0, checksum: .init(value: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")))
-        let downloader = try V2ForegroundConversationMediaDownloader(
+        let downloader = try await makeResourceMediaTestDownloader(
             downloader: .init(
                 targetResolver: V2MediaDownloadTargetResolverFake(target: target),
                 byteTransfer: V2MediaByteTransferFake(downloadedData: Data())
@@ -1045,13 +1264,14 @@ struct V2ConversationStoreTests {
         try Data("partial".utf8).write(to: orphan)
         try Data("retained".utf8).write(to: retained)
 
-        await downloader.discardOrphanedTemporaryFiles()
+        try await downloader.performMaintenance()
 
-        #expect(!fileManager.fileExists(atPath: orphan.path))
+        #expect(fileManager.fileExists(atPath: orphan.path))
         #expect(fileManager.fileExists(atPath: retained.path))
+        try await downloader.close()
     }
 
-    @Test func foregroundMediaDownloaderEvictsLeastRecentCompleteEntriesAtItsCapacityBoundary() async throws {
+    @Test func resourceMediaSharesOnePhysicalFileAcrossEquivalentIdentifiers() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("v2-media-cache-capacity-" + UUID().uuidString, isDirectory: true)
@@ -1059,21 +1279,21 @@ struct V2ConversationStoreTests {
         let target = try V2ClientMediaTransferTarget(downloadPlan: .init(mode: .httpGet,
             url: #require(URL(string: "https://media.invalid/object")), expiresAt: .distantFuture,
             expectedByteCount: 4, checksum: .init(value: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a")))
-        let downloader = try V2ForegroundConversationMediaDownloader(
+        let downloader = try await makeResourceMediaTestDownloader(
             downloader: .init(
                 targetResolver: V2MediaDownloadTargetResolverFake(target: target),
                 byteTransfer: V2MediaByteTransferFake(downloadedData: Data([1, 2, 3, 4]))
             ),
             directory: root,
-            cachePolicy: .init(maximumByteCount: 8, maximumEntryCount: 1, maximumAge: 3_600)
+            cachePolicy: .init(maximumByteCount: 1_048_576, maximumEntryCount: 1, maximumAge: 3_600)
         )
         let first = try await downloader.download(.init(mediaID: .init("cache-first")))
         let second = try await downloader.download(.init(mediaID: .init("cache-second")))
 
-        #expect(!fileManager.fileExists(atPath: first.fileURL.path))
+        #expect(first.fileURL == second.fileURL)
         #expect(fileManager.fileExists(atPath: second.fileURL.path))
-        #expect(try fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "media" }.count == 1)
+        #expect(try fileManager.contentsOfDirectory(at: second.fileURL.deletingLastPathComponent(), includingPropertiesForKeys: nil).count == 1)
+        try await downloader.close()
     }
 
     @Test func messageWithdrawalUsesProjectionRevisionAndRefreshesAfterAcknowledgement() async {
@@ -3110,6 +3330,7 @@ private func makeConversationDetailStore(
     attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
     resourceSender: (any V2DurableConversationSending)? = nil,
     mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
+    mediaThumbnails: V2LocalMediaThumbnailCache? = nil,
     projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
     activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil,
     roomSubscriptions: V2RoomSubscriptionCoordinator? = nil,
@@ -3149,7 +3370,8 @@ private func makeConversationDetailStore(
         media: .init(
             attachmentStager: attachmentStager,
             resourceSender: resourceSender,
-            downloader: mediaDownloader
+            downloader: mediaDownloader,
+            thumbnails: mediaThumbnails
         ),
         runtime: .init(
             liveActivity: conversationLiveActivity,
@@ -3378,6 +3600,24 @@ private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchr
 }
 
 private actor V2ConversationDataSourceFake: V2ConversationDataSource {
+    private var pausesHistory = false
+    private var historyRead: CheckedContinuation<Void, Never>?
+    private var historyWaiter: CheckedContinuation<Void, Never>?
+    func pauseHistoryRead() { pausesHistory = true }
+    func waitForHistoryRead() async {
+        if historyRead != nil { return }
+        await withCheckedContinuation { historyWaiter = $0 }
+    }
+    func resumeHistoryRead() { historyRead?.resume(); historyRead = nil }
+    func roomLogHistoryIsIncomplete(roomID: String) async throws -> Bool {
+        if pausesHistory {
+            pausesHistory = false
+            await withCheckedContinuation {
+                historyRead = $0; historyWaiter?.resume(); historyWaiter = nil
+            }
+        }
+        return false
+    }
     private var summaries: [V2ConversationListItem]
     private let messages: [V2ConversationMessageItem]
     private var readCheckpoint: V2ConversationRoomReadCheckpoint = .unknown
@@ -3696,7 +3936,7 @@ private actor V2ConversationAttachmentStagerFake: V2ConversationAttachmentStagin
 
     init(result: Result<V2StagedConversationAttachment, Error>) { self.result = result }
 
-    func stageImportedFile(at _: URL) throws -> V2StagedConversationAttachment {
+    func stageImportedFile(at _: URL, purpose: V2LocalResourceAssetPurpose) throws -> V2StagedConversationAttachment {
         try result.get()
     }
 
@@ -3740,16 +3980,30 @@ private enum V2ConversationMediaDownloadFailure: Error, Sendable {
 }
 
 private actor V2ConversationMediaDownloaderFake: V2ConversationMediaDownloading {
+    private(set) var previewRequests = 0
+    func imagePreview(_ media: V2MediaReference, message: V2MediaMessageLocation) throws -> V2DownloadedConversationMedia {
+        previewRequests += 1
+        guard let cached else { throw V2ConversationMediaDownloadFailure.failed }
+        return cached
+    }
+    private(set) var cacheLookups = 0
+    func cachedFile(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia? { cacheLookups += 1; return cached }
+    func borrowCached(_ media: V2MediaReference, message: V2MediaMessageLocation?) throws -> V2ConversationMediaFileLease? { throw V2ConversationMediaDownloadFailure.failed }
     enum Result: Sendable {
         case success(V2DownloadedConversationMedia)
         case failure
     }
 
     private let result: Result
+    private let cached: V2DownloadedConversationMedia?
+    private let cachedPreview: V2DownloadedConversationMedia?
+    func cachedImagePreview(_ media: V2MediaReference, message: V2MediaMessageLocation) -> V2DownloadedConversationMedia? { cachedPreview }
     private var requestsValue: [V2MediaReference] = []
 
-    init(result: Result) {
+    init(result: Result, cached: V2DownloadedConversationMedia? = nil, cachedPreview: V2DownloadedConversationMedia? = nil) {
         self.result = result
+        self.cached = cached
+        self.cachedPreview = cachedPreview
     }
 
     private(set) var lastMessageLocation: V2MediaMessageLocation?
@@ -3767,6 +4021,8 @@ private actor V2ConversationMediaDownloaderFake: V2ConversationMediaDownloading 
 }
 
 private actor V2ConversationMediaCacheDiscardingFake: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
+    func cachedFile(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia? { nil }
+    func borrowCached(_ media: V2MediaReference, message: V2MediaMessageLocation?) throws -> V2ConversationMediaFileLease? { throw V2ConversationMediaDownloadFailure.failed }
     private var discarded: [V2MediaReference] = []
 
     func download(_: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia {
@@ -4881,4 +5137,23 @@ extension V2ConversationStoreTests {
         #expect(await remote.calls == 0)
         try await f.store.close()
     }
+}
+
+private actor V2PreviewDemandGate: V2ConversationMediaDownloading {
+    private(set) var calls = 0
+    private var first: CheckedContinuation<Void, Never>?
+    func releaseFirst() { first?.resume(); first = nil }
+    func imagePreview(_ media: V2MediaReference, message: V2MediaMessageLocation) async throws -> V2DownloadedConversationMedia {
+        calls += 1
+        if calls == 1 { await withCheckedContinuation { first = $0 }; try Task.checkCancellation() }
+        throw V2MediaFileAccessError.unavailable
+    }
+    func cachedFile(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia? { nil }
+    func borrowCached(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2ConversationMediaFileLease? { nil }
+    func download(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia { throw V2MediaFileAccessError.unavailable }
+}
+
+private actor FirstPreviewDecodeCount {
+    private(set) var value = 0
+    func record() { value += 1 }
 }

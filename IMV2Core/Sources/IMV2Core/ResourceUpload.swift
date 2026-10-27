@@ -1,5 +1,22 @@
 import Foundation
 
+/// Dimensions of the oriented upload bytes. Client declarations are layout
+/// hints until the server decoder verifies them; this value grants no access.
+public struct V2ResourcePixelDimensions: Equatable, Hashable, Codable, Sendable {
+    public let width: Int
+    public let height: Int
+    public init(width: Int, height: Int) throws {
+        guard width > 0, height > 0, width <= 16_384, height <= 16_384,
+              width <= 40_000_000 / height else { throw V2ResourceValidationError.invalidUploadRequest }
+        self.width = width; self.height = height
+    }
+    private enum CodingKeys: CodingKey { case width, height }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(width: values.decode(Int.self, forKey: .width), height: values.decode(Int.self, forKey: .height))
+    }
+}
+
 public enum V2ResourceUploadSessionState: String, Codable, Sendable {
     case created, uploading, finalizing, completed, cancelled, expired, failed
 }
@@ -19,13 +36,18 @@ public struct V2ResourceUploadRequest: Equatable, Codable, Sendable {
     public let byteCount: Int64
     public let checksum: V2ResourceChecksum
     public let clientModes: [V2ResourceTransferMode]
+    public let displayName: V2ResourceDisplayName
+    /// Persisted declaration, never a verified catalog descriptor.
+    public let clientImageDimensions: V2ResourcePixelDimensions?
 
     public init(operationID: MediaUploadOperationID, mediaID: MediaID, usage: V2ResourceUsage,
                 contentType: String, byteCount: Int64, checksum: V2ResourceChecksum,
-                clientModes: [V2ResourceTransferMode] = [.httpPut]) throws {
+                clientModes: [V2ResourceTransferMode] = [.httpPut], displayName: V2ResourceDisplayName = .attachment,
+                clientImageDimensions: V2ResourcePixelDimensions? = nil) throws {
         guard V2ResourceMetadataValidation.contentType(contentType), byteCount > 0,
               !clientModes.isEmpty, clientModes.count <= V2ResourceTransferMode.allCases.count,
-              Set(clientModes).count == clientModes.count, clientModes.allSatisfy(\.isUpload)
+              Set(clientModes).count == clientModes.count, clientModes.allSatisfy(\.isUpload),
+              clientImageDimensions == nil || contentType.hasPrefix("image/")
         else { throw V2ResourceValidationError.invalidUploadRequest }
         self.operationID = operationID
         self.mediaID = mediaID
@@ -34,15 +56,19 @@ public struct V2ResourceUploadRequest: Equatable, Codable, Sendable {
         self.byteCount = byteCount
         self.checksum = checksum
         self.clientModes = clientModes.sorted { $0.rawValue < $1.rawValue }
+        self.displayName = displayName
+        self.clientImageDimensions = clientImageDimensions
     }
 
-    private enum CodingKeys: String, CodingKey { case operationID, mediaID, usage, contentType, byteCount, checksum, clientModes }
+    private enum CodingKeys: String, CodingKey { case operationID, mediaID, usage, contentType, byteCount, checksum, clientModes, displayName, clientImageDimensions }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(operationID: values.decode(MediaUploadOperationID.self, forKey: .operationID),
                       mediaID: values.decode(MediaID.self, forKey: .mediaID), usage: values.decode(V2ResourceUsage.self, forKey: .usage),
                       contentType: values.decode(String.self, forKey: .contentType), byteCount: values.decode(Int64.self, forKey: .byteCount),
-                      checksum: values.decode(V2ResourceChecksum.self, forKey: .checksum), clientModes: values.decode([V2ResourceTransferMode].self, forKey: .clientModes))
+                      checksum: values.decode(V2ResourceChecksum.self, forKey: .checksum), clientModes: values.decode([V2ResourceTransferMode].self, forKey: .clientModes),
+                      displayName: values.decode(V2ResourceDisplayName.self, forKey: .displayName),
+                      clientImageDimensions: values.decodeIfPresent(V2ResourcePixelDimensions.self, forKey: .clientImageDimensions))
     }
 }
 

@@ -1,0 +1,35 @@
+{
+  "observedAt": "2026-10-27T03:54:53.618332+00:00",
+  "status": "verified-client-installed-launch-blocked-by-device-lock",
+  "sourceSHA256": {
+    "IMApp/IMApp/V2/V2MessageTimelinePresentation.swift": "7632957059454d6f35f2721a86bc23654c9d926bd4c67724c7f6520fffd4ec04",
+    "IMApp/IMApp/V2/V2ConversationMediaViews.swift": "f66f9c5b34b421b0c5b8339ede1aeafc9b9a742d492c3eab7d81a3f1a4eaea79",
+    "IMApp/IMApp/V2/V2ConversationUI.swift": "3a78bfb2ff9ffca57fa7ca8c92cfd59305e3e08b44aecc0c0bb4e0e06f129f0d",
+    "IMApp/IMAppTests/V2PhotoLibraryImageTests.swift": "52882b115ae7b93b5ae363cbcd8688cd1870b7495cfc7b768c1b29de85fed99f"
+  },
+  "changes": [
+    "Remove visible attachment-count header while retaining accessibility summary",
+    "Use 分享 for ready resource actions and retain same-height disabled image share action before availability",
+    "Use metadata-sized local preview or placeholder during preparation; no timeline progress bar",
+    "Use placeholder during download and decode; preserve failure/retry/cancel controls"
+  ],
+  "iosTests": {
+    "passed": 9,
+    "log": "/tmp/im-resource-placeholder-app-r2-20261027.log",
+    "xcresult": "/tmp/im-resource-placeholder-app-r2-20261027.xcresult",
+    "previousRun": "/tmp/im-resource-placeholder-app-20261027.log",
+    "note": "Repeated targeted suite after final pre-download share-control edit; both runs passed."
+  },
+  "signedClient": {
+    "record": "/tmp/im-resource-client-signed-release-20261027-r22/result.json",
+    "binarySHA256": "4947bf0d3691256e70a8b09216e6e46f39b578fb6721ac2916524cec9c5e45a2",
+    "sourceDrift": [],
+    "installed": true,
+    "installRecord": "/tmp/im-resource-placeholder-phone-install-20261027.json",
+    "launched": false,
+    "launchRecord": "/tmp/im-resource-placeholder-phone-launch-20261027.json",
+    "launchFailure": "device locked",
+    "manualAppearanceNotYetVerified": true
+  },
+  "serverChanged": false
+}

@@ -9,8 +9,116 @@ import Testing
 
 // These cases exercise the process-wide disk budget and its aggregate counters.
 // Running them concurrently lets another case change the very snapshot under test.
-@Suite("Background task adoption and opaque handoff", .serialized)
+@Suite("Background task adoption and opaque handoff", .serialized, .timeLimit(.minutes(1)))
 struct V2BackgroundTransferTests {
+    @Test(arguments: [(true,200,true,true),(true,409,true,true),(true,500,true,false),(true,200,false,false),(false,200,true,false),(false,409,true,false)])
+    func wholeReceiptAdvancesToVerificationWithoutRepeatingPut(whole: Bool, status: Int, correctOrigin: Bool, finalize: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "whole-receipt-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appending(path: "V2.sqlite"), installationBinding: .init(value: UUID()), userID: .init(uuid: UUID()))
+        let id = UUID(), owner = UUID(), sessionID = try await store.backgroundSessionID(), room = RoomID(uuid: UUID())
+        let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
+            usage: .messageAttachment(room), contentType: "text/plain", byteCount: 4,
+            checksum: .init(value: String(repeating: "a", count: 64)), clientModes: [whole ? .httpPut : .httpPartPut])
+        _ = try await store.prepareMetadataResourceTransfer(id: id, request: request, localAssetID: .init(id))
+        let session = try V2ResourceUploadSession(locator: .init(home: .room(room), sessionID: .init(uuid: UUID())),
+            mediaID: request.mediaID, generation: 1, state: .created, resourceState: .pending, expiresAt: Date().addingTimeInterval(600))
+        try await store.saveResourceSession(session, for: id)
+        _ = try #require(try await store.claimResourceStep(id: id, owner: owner, now: Date()))
+        let mapping = V2BackgroundTaskMapping(id: UUID(), sessionID: sessionID, jobID: id, activationID: UUID(),
+            sourceToken: UUID(), taskIdentifier: 1, partNumber: whole ? nil : 1, expectedBytes: 4,
+            expiresAt: Date().addingTimeInterval(300), originDigest: "expected-origin")
+        try await store.installBackgroundMapping(mapping, resourceOwner: owner)
+        let receipt = V2BackgroundTransferResult(mappingID: mapping.id, taskIdentifier: 1, statusCode: status,
+            errorCode: nil, sentBytes: status == 409 ? 0 : 4, originDigest: correctOrigin ? mapping.originDigest : "other-origin")
+        #expect(try await store.completeBackgroundMapping(mapping, result: receipt))
+        let job = try #require(try await store.resourceTransfer(id: id))
+        #expect(job.nextAction == (finalize ? .finalize : .status))
+        #expect(job.stage != .ready) // Provider response never commits the business operation.
+        #expect(try await store.completeBackgroundMapping(mapping, result: receipt) == false)
+        try await store.close()
+    }
+
+    @Test func lockedColdUploadActivityAccountsForUnmappedWorkAndWaitsForUnlock() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appendingPathComponent("V2.sqlite"),
+            installationBinding: .init(value: UUID()), userID: .init(uuid: UUID()))
+        let files = try await makeBackgroundTestFiles(store: store, root: root)
+        let driver = BackgroundDriver(tasks: [.init(identifier: 7, mappingID: nil)])
+        await driver.setProtection(false)
+        let scheduler = V2AccountWorkScheduler()
+        let coordinator = try V2BackgroundTransferCoordinator(sessionID: UUID(), activationID: UUID(), store: store,
+            scheduler: scheduler, driver: driver, files: files, root: root)
+        let worker = Task { try await coordinator.run() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await driver.protectionChecks == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        await driver.setProtection(false)
+        while await driver.protectionChecks < 2, !(await driver.entered), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await driver.protectionChecks >= 2)
+        #expect(await driver.entered == false)
+        #expect(await scheduler.snapshot().active == 1)
+        await driver.setProtection(true)
+        await driver.waitForDrain()
+        #expect(await scheduler.snapshot().active == 1)
+        await driver.finishDrain()
+        worker.cancel()
+        let result = await worker.result
+        if case .failure(let error) = result { #expect(error is CancellationError) }
+        else { Issue.record("The account activity should end only on explicit cancellation") }
+        #expect(await scheduler.snapshot().active == 0)
+        await coordinator.close(); await files.close(); try await store.close()
+    }
+
+    @Test(arguments: [false, true]) func coldAdoptionHonorsDurableUserPauseBeforeResumingOSWork(initiallyLocked: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "cold-upload-pause-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appending(path: "V2.sqlite"), installationBinding: .init(value: UUID()), userID: .init(uuid: UUID()))
+        let id = UUID(), owner = UUID(), sessionID = try await store.backgroundSessionID(), room = RoomID(uuid: UUID())
+        let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()), usage: .messageAttachment(room), contentType: "text/plain", byteCount: 4, checksum: .init(value: String(repeating: "a", count: 64)), clientModes: [.httpPartPut])
+        _ = try await store.prepareMetadataResourceTransfer(id: id, request: request, localAssetID: .init(id))
+        let session = try V2ResourceUploadSession(locator: .init(home: .room(room), sessionID: .init(uuid: UUID())), mediaID: request.mediaID, generation: 1, state: .created, resourceState: .pending, expiresAt: .distantFuture)
+        try await store.saveResourceSession(session, for: id)
+        _ = try await store.claimResourceStep(id: id, owner: owner, now: Date())
+        let mapping = V2BackgroundTaskMapping(id: UUID(), sessionID: sessionID, jobID: id, activationID: UUID(), sourceToken: UUID(), taskIdentifier: 7, partNumber: 1, expectedBytes: 4, expiresAt: .distantFuture, originDigest: "controlled")
+        try await store.installBackgroundMapping(mapping, resourceOwner: owner)
+        let files = try await makeBackgroundTestFiles(store: store, root: root)
+        let asset = try await files.importOriginal(data: Data([1,2,3,4]), id: .init(), displayName: .init("part.bin"), contentType: .init("application/octet-stream"), purpose: .personalAvatar, maximumBytes: 4, maximumSelections: 1)
+        let lease = try await files.borrowSelection(asset.id)
+        let copy = try await files.makeBackgroundUploadSource(from: lease, sessionID: sessionID, id: mapping.sourceToken, range: .init(lowerBound: 0, upperBound: 3))
+        await lease.release()
+        try await store.requestManagedUploadPause(id)
+        let driver = BackgroundDriver(tasks: [.init(identifier: 7, mappingID: mapping.id, suspended: true)])
+        let scheduler = V2AccountWorkScheduler()
+        let coordinator = try V2BackgroundTransferCoordinator(sessionID: sessionID, activationID: UUID(), store: store, scheduler: scheduler, driver: driver, files: files, root: root)
+        if initiallyLocked {
+            await driver.setProtection(false)
+            await #expect(throws: V2BackgroundTransferError.protectedDataUnavailable) { try await coordinator.initialize() }
+            #expect(await driver.tasks().first?.suspended == true)
+            #expect(await scheduler.snapshot().active == 1)
+            await #expect(throws: V2BackgroundTransferError.protectedDataUnavailable) { try await coordinator.initialize() }
+            #expect(await scheduler.snapshot().active == 1)
+            await driver.setProtection(true)
+        }
+        let adoption = Task { try await coordinator.initialize() }
+        await driver.waitForDrain()
+        #expect(await driver.tasks().first?.suspended == true)
+        #expect(await scheduler.snapshot().active == 1)
+        #expect(FileManager.default.fileExists(atPath: copy.path))
+        #expect(try await files.snapshot().backgroundReservedBytes > 0)
+        await #expect(throws: V2ResourceTransferManagementError.actionUnavailable) { try await store.resumeManagedResourceTransfer(.upload(id)) }
+        await driver.finishDrain(); try await adoption.value
+        #expect(await scheduler.snapshot().active == 0)
+        #expect(!FileManager.default.fileExists(atPath: copy.path))
+        #expect(try await files.snapshot().backgroundReservedBytes == 0)
+        let job = try #require(try await store.resourceTransfer(id: id))
+        #expect(job.control == .pause && !job.cancellationRequested && job.session?.locator == session.locator)
+        #expect(try await store.dueResourceTransfers(now: .distantFuture).isEmpty)
+        await coordinator.close(); await files.close(); try await store.close()
+    }
+
     @Test(arguments: [false, true]) func stagingBusinessFailureDoesNotCountAsQuotaRejection(sameFailureType: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -109,12 +217,13 @@ struct V2BackgroundTransferTests {
         let store=try GRDBV2LocalSyncStore(databaseURL:root.appendingPathComponent("db.sqlite"),installationBinding:.init(value:UUID()))
         let driver=BackgroundDriver(tasks:[.init(identifier:1,mappingID:UUID())])
         let scheduler=V2AccountWorkScheduler(configuration:.init(byteTransferLimit:1)),diagnostics=V2NetworkDiagnostics()
-        let coordinator=try V2BackgroundTransferCoordinator(sessionID:UUID(),activationID:UUID(),store:store,scheduler:scheduler,driver:driver,root:root,diagnostics:diagnostics)
+        let files=try await makeBackgroundTestFiles(store:store,root:root)
+        let coordinator=try V2BackgroundTransferCoordinator(sessionID:UUID(),activationID:UUID(),store:store,scheduler:scheduler,driver:driver,files:files,root:root,diagnostics:diagnostics)
         let initTask=Task { try await coordinator.initialize() }
         await driver.waitForDrain()
         #expect(await scheduler.snapshot().active==1)
         #expect(diagnostics.snapshot().backgrounds.isEmpty)
-        let pending=Task { try await scheduler.acquire(.init(service:"other",kind:.byteTransfer)) }
+        let pending=Task { try await scheduler.acquire(.init(service:"other",kind:.byteTransfer(.upload))) }
         while await scheduler.snapshot().waiting==0 { await Task.yield() }
         #expect(await scheduler.snapshot().active==1)
         await driver.finishDrain()
@@ -127,15 +236,16 @@ struct V2BackgroundTransferTests {
         #expect(await driver.wakeInstalled)
         await coordinator.close()
         #expect(await scheduler.snapshot().active==0)
+        await files.close();try await store.close()
     }
     @Test(arguments:[(false,false),(true,false),(true,true)]) func missingSystemTaskReconcilesSameIdentityWithoutReadyProof(hasReceipt:Bool,lockedCompletion:Bool) async throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at:root) }
-        let store=try GRDBV2LocalSyncStore(databaseURL:root.appendingPathComponent("db.sqlite"),installationBinding:.init(value:UUID()))
-        let id=UUID(),owner=UUID(),sessionID=try await store.backgroundSessionID()
-        let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(.init(uuid:UUID())),contentType:"text/plain",byteCount:4,checksum:.init(value:String(repeating:"a",count:64)))
-        _ = try await store.prepareResourceTransfer(id:id,request:request,localFileToken:id.uuidString)
-        let session=try V2ResourceUploadSession(locator:.init(home:.room(.init(uuid:UUID())),sessionID:.init(uuid:UUID())),mediaID:request.mediaID,generation:1,state:.created,resourceState:.pending,expiresAt:Date().addingTimeInterval(600))
+        let store=try GRDBV2LocalSyncStore(databaseURL:root.appendingPathComponent("db.sqlite"),installationBinding:.init(value:UUID()),userID:.init(uuid:UUID()))
+        let id=UUID(),owner=UUID(),sessionID=try await store.backgroundSessionID(),room=RoomID(uuid:UUID())
+        let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:4,checksum:.init(value:String(repeating:"a",count:64)),clientModes:[.httpPartPut])
+        _ = try await store.prepareMetadataResourceTransfer(id:id,request:request,localAssetID: .init(id))
+        let session=try V2ResourceUploadSession(locator:.init(home:.room(room),sessionID:.init(uuid:UUID())),mediaID:request.mediaID,generation:1,state:.created,resourceState:.pending,expiresAt:Date().addingTimeInterval(600))
         try await store.saveResourceSession(session,for:id)
         _ = try await store.claimResourceStep(id:id,owner:owner,now:Date())
         let mapping=V2BackgroundTaskMapping(id:UUID(),sessionID:sessionID,jobID:id,activationID:UUID(),sourceToken:UUID(),taskIdentifier:7,partNumber:1,expectedBytes:4,expiresAt:Date().addingTimeInterval(600),originDigest:"origin")
@@ -144,11 +254,15 @@ struct V2BackgroundTransferTests {
         let folder=inbox.directory.appendingPathComponent("sources")
         try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
         let copy=folder.appendingPathComponent(mapping.sourceToken.uuidString)
-        try Data([1,2,3,4]).write(to:copy)
+        let files=try await makeBackgroundTestFiles(store:store,root:root)
+        let original=try await files.importOriginal(data:Data([1,2,3,4]),id:.init(),displayName:.init("part.bin"),contentType:.init("application/octet-stream"),purpose:.personalAvatar,maximumBytes:4,maximumSelections:1)
+        let originalUse=try await files.borrowSelection(original.id)
+        _ = try await files.makeBackgroundUploadSource(from:originalUse,sessionID:sessionID,id:mapping.sourceToken,range:.init(lowerBound:0,upperBound:3))
+        await originalUse.release()
         if hasReceipt { try inbox.write(.init(mappingID:mapping.id,taskIdentifier:7,statusCode:200,errorCode:nil,sentBytes:4,originDigest:"origin",receivedBytes:2)) }
         let driver=BackgroundDriver(tasks:lockedCompletion ? [.init(identifier:7,mappingID:mapping.id)] : []),scheduler=V2AccountWorkScheduler()
         let diagnostics=V2NetworkDiagnostics()
-        let coordinator=try V2BackgroundTransferCoordinator(sessionID:sessionID,activationID:UUID(),store:store,scheduler:scheduler,driver:driver,root:root,diagnostics:diagnostics)
+        let coordinator=try V2BackgroundTransferCoordinator(sessionID:sessionID,activationID:UUID(),store:store,scheduler:scheduler,driver:driver,files:files,root:root,diagnostics:diagnostics)
         try await coordinator.initialize()
         var activity:Task<Void,any Error>?
         if lockedCompletion {
@@ -162,6 +276,10 @@ struct V2BackgroundTransferTests {
             await driver.setProtection(true)
             for try await job in store.resourceTransferUpdates(id:id) { if job?.nextAction == .status { break } }
         }
+        // The business status commit wakes readers before the file-owner hop
+        // finishes physical cleanup. Join reconciliation before asserting
+        // unlink/capacity effects; status is not a file-deletion receipt.
+        try await coordinator.cancel(jobID:UUID())
         let restored=try #require(await store.resourceTransfer(id:id))
         #expect(restored.request.operationID==request.operationID && restored.request.mediaID==request.mediaID)
         #expect(restored.nextAction == .status && restored.stage != .ready)
@@ -180,44 +298,60 @@ struct V2BackgroundTransferTests {
         try inbox.write(.init(mappingID:mapping.id,taskIdentifier:7,statusCode:200,errorCode:nil,
             sentBytes:4,originDigest:"origin",receivedBytes:2))
         let restarted=try V2BackgroundTransferCoordinator(sessionID:sessionID,activationID:UUID(),store:store,
-            scheduler:scheduler,driver:driver,root:root,diagnostics:diagnostics)
+            scheduler:scheduler,driver:driver,files:files,root:root,diagnostics:diagnostics)
         try await restarted.initialize()
         #expect(diagnostics.snapshot().backgroundRecorded == 1)
         #expect(try inbox.results().isEmpty)
         #expect(try await store.completeBackgroundMapping(mapping,result:nil) == false)
         await restarted.close()
+        await files.close();try await store.close()
     }
-    @Test(arguments: [false, true]) func taskResumesOnlyAfterDurableMapAndCancellationPreservesOriginalJob(expiresWithoutCallback: Bool) async throws {
+    @Test(arguments: [(false,false,false,false),(true,false,false,false),(false,true,false,false),(false,true,true,false),(false,false,false,true)]) func taskResumesOnlyAfterDurableMapAndCancellationPreservesOriginalJob(expiresWithoutCallback: Bool, pauseDrain: Bool, userPause: Bool, whole: Bool) async throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at:root) }
         try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
-        let store=try GRDBV2LocalSyncStore(databaseURL:root.appendingPathComponent("db.sqlite"),installationBinding:.init(value:UUID()))
+        let store=try GRDBV2LocalSyncStore(databaseURL:root.appendingPathComponent("db.sqlite"),installationBinding:.init(value:UUID()),userID:.init(uuid:UUID()))
         let source=root.appendingPathComponent("original");try Data([1,2,3,4]).write(to:source)
         let id=UUID(),owner=UUID(),sessionID=try await store.backgroundSessionID(),room=RoomID(uuid:UUID())
-        let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:4,checksum:.init(value:String(repeating:"a",count:64)))
-        _ = try await store.prepareResourceTransfer(id:id,request:request,localFileToken:id.uuidString)
+        let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:4,checksum:.init(value:V2ResourceFileDigest.sha256(fileURL:source,expectedByteCount:4)),clientModes:whole ? [.httpPut] : [.httpPartPut])
+        _ = try await store.prepareMetadataResourceTransfer(id:id,request:request,localAssetID: .init(id))
         let session=try V2ResourceUploadSession(locator:.init(home:.room(room),sessionID:.init(uuid:UUID())),mediaID:request.mediaID,generation:1,state:.created,resourceState:.pending,expiresAt:Date().addingTimeInterval(600))
         try await store.saveResourceSession(session,for:id)
         let job=try #require(await store.claimResourceStep(id:id,owner:owner,now:Date()))
         let expiry=Date().addingTimeInterval(expiresWithoutCallback ? 1 : 300)
-        let grant=try V2ResourceBackgroundAuthorization(id:UUID(),sessionID:session.locator.sessionID,generation:1,mediaID:request.mediaID,partNumber:1,issuedAt:Date(),expiresAt:expiry)
-        let plan=try V2ResourceTransferPlan(mode:.httpPartPut,url:URL(string:"https://provider.invalid/signed-object")!,headers:[.init(name:"Content-Type",value:"text/plain")],expiresAt:expiry,expectedByteCount:4,byteRange:.init(lowerBound:0,upperBound:3),partNumber:1,backgroundAuthorization:grant)
-        let driver=BackgroundEnqueueDriver(store:store,sessionID:sessionID),scheduler=V2AccountWorkScheduler(),writer=BackgroundProtectionRecorder()
-        let coordinator=try V2BackgroundTransferCoordinator(sessionID:sessionID,activationID:UUID(),store:store,scheduler:scheduler,driver:driver,root:root.appendingPathComponent("background"),protectionWriter:writer)
+        let grant=try V2ResourceBackgroundAuthorization(id:UUID(),sessionID:session.locator.sessionID,generation:1,
+            mediaID:request.mediaID,scope:whole ? .whole(byteCount:4,checksum:request.checksum) : .part(number:1),issuedAt:Date(),expiresAt:expiry)
+        let plan=try V2ResourceTransferPlan(mode:whole ? .httpPut : .httpPartPut,url:URL(string:"https://provider.invalid/signed-object")!,
+            headers:[.init(name:"Content-Type",value:"text/plain")],expiresAt:expiry,expectedByteCount:4,
+            byteRange:whole ? nil : .init(lowerBound:0,upperBound:3),partNumber:whole ? nil : 1,
+            checksum:whole ? request.checksum : nil,backgroundAuthorization:grant)
+        let driver=BackgroundEnqueueDriver(store:store,sessionID:sessionID,pauseDrain:pauseDrain),scheduler=V2AccountWorkScheduler(),writer=BackgroundProtectionRecorder()
+        let files=try await makeBackgroundTestFiles(store:store,root:root.appendingPathComponent("background"),protection:writer)
+        let original=try await files.importOriginal(source:source,id:.init(),displayName:.init("original.bin"),contentType:.init("application/octet-stream"),purpose:.personalAvatar,maximumBytes:4,maximumSelections:1)
+        let sourceUse=try await files.borrowSelection(original.id)
+        let coordinator=try V2BackgroundTransferCoordinator(sessionID:sessionID,activationID:UUID(),store:store,scheduler:scheduler,driver:driver,files:files,root:root.appendingPathComponent("background"),protectionWriter:writer)
         let recovery = expiresWithoutCallback ? Task { try await coordinator.run() } : nil
         try await coordinator.initialize()
         if expiresWithoutCallback {
             await driver.waitForInitialActivityScan()
             try await coordinator.cancel(jobID: UUID()) // Join the initial reconciliation before enqueue.
         }
-        try await coordinator.enqueue(job:job,resourceOwner:owner,plan:plan,source:source)
+        try await coordinator.enqueue(job:job,resourceOwner:owner,plan:plan,source:sourceUse)
         #expect(await driver.resumedAfterMapping)
         let copiedFile=try #require(await driver.copiedFile)
         #expect(writer.policy(at:copiedFile) == .untilFirstAuthentication)
         #expect(writer.policy(at:source) == nil)
+        #expect(writer.policy(at:sourceUse.fileURL) == .complete)
         #expect(try await store.resourceTransfer(id:id)?.nextAction == .awaitingBackground)
         #expect(try await store.dueResourceTransfers().isEmpty)
         #expect(await scheduler.snapshot().active==1)
+        if !expiresWithoutCallback {
+            await driver.setSentBytes(2)
+            let live = await coordinator.transferProgress()[.upload(id)]
+            #expect(live?.transferredBytes == 2 && live?.expectedBytes == 4)
+            #expect(live?.attemptID == (await driver.tasks()).first?.mappingID)
+            #expect(try await store.resourceTransfer(id: id)?.nextAction == .awaitingBackground)
+        }
         if expiresWithoutCallback {
             // The driver emits no callbacks. Only enqueue's wake can install
             // the grant timer and drain this actual task at expiry.
@@ -229,15 +363,41 @@ struct V2BackgroundTransferTests {
                 defer { group.cancelAll() }; _ = try await group.next()
             }
         }
-        _ = try await store.requestResourceCancellation(id:id)
-        try await coordinator.cancel(jobID:id)
+        if userPause { try await store.requestManagedUploadPause(id) }
+        else { _ = try await store.requestResourceCancellation(id:id) }
+        if pauseDrain {
+            let cancellation=Task { try await coordinator.cancel(jobID:id) }
+            await driver.waitForDrain()
+            #expect(FileManager.default.fileExists(atPath:copiedFile.path))
+            #expect(try await files.snapshot().backgroundReservedBytes>0)
+            #expect(await scheduler.snapshot().active==1)
+            if userPause {
+                let row = try #require(try await store.managedResourceTransfers(.init()).entries.first)
+                #expect(row.phase == .pausing && !row.actions.contains(.resume))
+                await #expect(throws: V2ResourceTransferManagementError.actionUnavailable) { try await store.resumeManagedResourceTransfer(.upload(id)) }
+            }
+            await driver.finishDrain()
+            try await cancellation.value
+        } else { try await coordinator.cancel(jobID:id) }
         let cancelled=try #require(await store.resourceTransfer(id:id))
-        #expect(cancelled.cancellationRequested && cancelled.nextAction == .cancel)
+        #expect(await coordinator.transferProgress().isEmpty)
+        if userPause {
+            #expect(!cancelled.cancellationRequested && cancelled.control == .pause && cancelled.nextAction == .status)
+            #expect(try await store.dueResourceTransfers(now: .distantFuture).isEmpty)
+            let row = try #require(try await store.managedResourceTransfers(.init(group: .attention)).entries.first)
+            #expect(row.phase == .paused && row.actions == [.resume, .cancelUnbound])
+            try await store.resumeManagedResourceTransfer(.upload(id))
+            #expect(try await store.resourceTransfer(id: id)?.control == .run)
+            #expect(try await store.resourceTransfer(id: id)?.session?.locator == session.locator)
+        } else { #expect(cancelled.cancellationRequested && cancelled.nextAction == .cancel) }
         #expect(cancelled.request.operationID==request.operationID)
         #expect(await scheduler.snapshot().active==0)
+        #expect(!FileManager.default.fileExists(atPath:copiedFile.path))
+        #expect(try await files.snapshot().backgroundReservedBytes==0)
         #expect(try Data(contentsOf:source)==Data([1,2,3,4]))
         await coordinator.close()
         recovery?.cancel(); _ = await recovery?.result
+        await sourceUse.release();await files.close();try await store.close()
     }
     @Test func failedProtectionWriteLeavesNoReceiptToMistakeForProtectedHandoff() throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -266,34 +426,47 @@ private actor BackgroundDriver:V2BackgroundSessionDriving,V2BackgroundProtectedD
     private var available=true
     private var wake:@Sendable () async -> Void = {}
     private var actual:[V2BackgroundSystemTask]
-    private var drain:CheckedContinuation<Void,Never>?
-    private var entered=false
+    private var drains: [CheckedContinuation<Void,Never>] = []
+    private var drainFinished = false
+    private(set) var entered=false
+    private(set) var protectionChecks = 0
     private(set) var wakeInstalled=false
     init(tasks:[V2BackgroundSystemTask]) { actual=tasks }
     func tasks() -> [V2BackgroundSystemTask] { actual }
     func create(request:URLRequest,file:URL,mappingID:UUID) throws -> Int { throw V2BackgroundTransferError.unsupported }
     func resume(_ identifier:Int) {}
     func installWake(_ wake:@escaping @Sendable () async -> Void) { wakeInstalled=true;self.wake=wake }
-    func protectedDataAvailable() -> Bool { available }
+    func protectedDataAvailable() -> Bool { protectionChecks += 1; return available }
     func setProtection(_ available:Bool) async { self.available=available;await wake() }
     func completeSystemTask(_ id:Int) async { actual.removeAll {$0.identifier==id};await wake() }
     func cancelAndDrain(_ identifiers:[Int]) async {
-        guard !identifiers.isEmpty else { return }
+        guard actual.contains(where: { identifiers.contains($0.identifier) }) else { return }
         entered=true
-        await withCheckedContinuation { drain=$0 }
+        if !drainFinished { await withCheckedContinuation { drains.append($0) } }
         actual.removeAll { identifiers.contains($0.identifier) }
     }
     func waitForDrain() async { while !entered { await Task.yield() } }
-    func finishDrain() { drain?.resume();drain=nil }
+    func finishDrain() {
+        drainFinished = true
+        let pending = drains; drains.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
 }
 
 private actor BackgroundEnqueueDriver:V2BackgroundSessionDriving {
+    func setSentBytes(_ bytes: Int64) {
+        actual = actual.map { .init(identifier: $0.identifier, mappingID: $0.mappingID, suspended: $0.suspended, sentBytes: bytes) }
+    }
     private let store:GRDBV2LocalSyncStore
     private let sessionID:UUID
+    private let pauseDrain:Bool
+    private var enteredDrain=false
+    private var drains: [CheckedContinuation<Void,Never>] = []
+    private var drainFinished = false
     private var actual:[V2BackgroundSystemTask]=[]
     private(set) var resumedAfterMapping=false
     private(set) var copiedFile:URL?
-    init(store:GRDBV2LocalSyncStore,sessionID:UUID) { self.store=store;self.sessionID=sessionID }
+    init(store:GRDBV2LocalSyncStore,sessionID:UUID,pauseDrain:Bool=false) { self.store=store;self.sessionID=sessionID;self.pauseDrain=pauseDrain }
     private var scans = 0
     func tasks() -> [V2BackgroundSystemTask] { scans += 1; return actual }
     func waitForInitialActivityScan() async { while scans < 2 { await Task.yield() } }
@@ -309,7 +482,22 @@ private actor BackgroundEnqueueDriver:V2BackgroundSessionDriving {
         guard resumedAfterMapping else { throw V2BackgroundTransferError.mappingConflict }
         actual=actual.map { .init(identifier:$0.identifier,mappingID:$0.mappingID,suspended:false) }
     }
-    func cancelAndDrain(_ identifiers:[Int]) { actual.removeAll { identifiers.contains($0.identifier) } }
+    func cancelAndDrain(_ identifiers:[Int]) async {
+        guard actual.contains(where: { identifiers.contains($0.identifier) }) else { return }
+        if pauseDrain && !drainFinished {
+            enteredDrain=true
+            // Native URLSession completes every concurrent cancel/drain caller.
+            // A single continuation can be overwritten by reconciliation/close.
+            await withCheckedContinuation { drains.append($0) }
+        }
+        actual.removeAll { identifiers.contains($0.identifier) }
+    }
+    func waitForDrain() async { while !enteredDrain { await Task.yield() } }
+    func finishDrain() {
+        drainFinished = true
+        let pending = drains; drains.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
     func installWake(_ wake:@escaping @Sendable () async -> Void) {}
 }
 
@@ -323,4 +511,10 @@ private struct RejectResultProtection:V2ResourceFileProtectionWriting {
     func apply(_ protection:V2ResourceFileProtection,to file:URL) throws {
         if file.pathExtension=="result" { throw V2BackgroundTransferError.protectedDataUnavailable }
     }
+}
+
+private func makeBackgroundTestFiles(store: GRDBV2LocalSyncStore, root: URL,
+    protection: any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) async throws -> V2ResourceFileStore {
+    try .init(root: root.appending(path: "protected-resources"), backgroundRoot: root,
+        journal: await store.resourceFileJournal(), protection: protection)
 }

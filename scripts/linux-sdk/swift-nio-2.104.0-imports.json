@@ -1,0 +1,27 @@
+{
+  "revision": "6db9d9abd92ad7399b8a564cafbb87d3507245fa",
+  "version": "2.104.0",
+  "reason": "Cross-compiling the glibc SDK on macOS exposes imported fts/stat fields through _FoundationCShims and CDispatch; explicitly import their defining modules. No function or concurrency behavior changes. Applied only in the dedicated build checkout.",
+  "files": {
+    "Sources/_NIOFileSystem/DirectoryEntries.swift": {
+      "module": "_FoundationCShims",
+      "originalSHA256": "35d31b5de0cc7c9759ca78e9e4ba6343aacb3cbae01c0a219b576f1641ee39d4",
+      "patchedSHA256": "86b1867e5dcc683b1deb19a9129c755746670e1d151e75c336105f9e70c80ccb"
+    },
+    "Sources/_NIOFileSystem/FileInfo.swift": {
+      "module": "CDispatch",
+      "originalSHA256": "04b1aabc9ce2f834446013a426c90cccafd6dd87fba3fae070c665ce60f8f575",
+      "patchedSHA256": "2383481d9851d5c3d5ae5c0684835c688447687cc2202d9de092d4741e0f7897"
+    },
+    "Sources/_NIOFileSystem/Internal/System Calls/FileDescriptor+Syscalls.swift": {
+      "module": "CDispatch",
+      "originalSHA256": "7fb0def2058d811f0e3fb3a8f28d892ea6984526c1d5a9c40793cf65cbe7abe8",
+      "patchedSHA256": "fb10ca30446797e36b1db6ce3cb184ab55bcf92587fa43e20798238cd5e48b3c"
+    },
+    "Sources/_NIOFileSystem/Internal/System Calls/Syscall.swift": {
+      "module": "CDispatch",
+      "originalSHA256": "744572b7fc1a7ca8e1723de9f7067fd220328f5bcc705ce5d34f99bad074f06f",
+      "patchedSHA256": "a4fb260a0ebeaf9d51eb37b851036def83b293dccc725f7fdfd38b58458480d7"
+    }
+  }
+}

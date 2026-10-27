@@ -28,7 +28,12 @@ struct GatewayForwardDeliveryAssembly {
         let callTimeout = roomServices.callTimeout
         let registry = storageAssembly?.registry
         let transformer: V2LocalResourceTransformer?
+        let mediaProbe: V2LocalResourceMediaProbe?
         if let resourceConfiguration {
+            mediaProbe = try .init(
+                executable: ProcessInfo.processInfo.environment["IMV2_RESOURCE_FFPROBE"].map { URL(fileURLWithPath: $0) } ?? V2LocalResourceMediaProbe.defaultExecutable,
+                temporaryDirectory: resourceConfiguration.rootDirectory.appendingPathComponent("forward-media-processing"), maximumBytes: resourceConfiguration.maximumBytes)
+            try await mediaProbe?.verifyReadiness()
             let path = ProcessInfo.processInfo.environment["IMV2_RESOURCE_IMAGE_WORKER"]
                 ?? URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
                     .appendingPathComponent("IMV2ResourceImageWorker").path
@@ -37,7 +42,7 @@ struct GatewayForwardDeliveryAssembly {
                     temporaryDirectory: resourceConfiguration.rootDirectory.appendingPathComponent("forward-processing"))
                 try await transformer?.verifyReadiness()
             } else { transformer = nil }
-        } else { transformer = nil }
+        } else { transformer = nil; mediaProbe = nil }
         var forwardTargetEndpoints: [String: any V2ForwardExportDelivering] = [:]
         var forwardBackgroundDatabases: [String: any Database] = [:]
         for storage in configuration.roomShardStorage {
@@ -63,7 +68,7 @@ struct GatewayForwardDeliveryAssembly {
                         registry: registry, maximumBytes: resourceConfiguration.maximumBytes, allocate: allocate),
                     scanner: V2PlacementMediaScanner(database: ownerDatabase, registry: registry,
                         scanner: V2LocalResourceScanner(),
-                        variants: variants))
+                        variants: variants, mediaProbe: mediaProbe))
             } else { mediaWorker = nil }
             forwardTargetEndpoints[storage.shardID] = V2ActorForwardImportEndpoint(
                 inbox: PostgresV2ForwardInboxStore(database: ownerDatabase), media: mediaWorker,

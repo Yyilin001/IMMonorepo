@@ -4,7 +4,27 @@
 WITH schema_visibility AS MATERIALIZED (
  SELECT pg_catalog.set_config('search_path', '', true) AS active_path
 )
-SELECT (to_regclass('im_v2.device_room_progress') IS NOT NULL
+SELECT (
+(EXISTS (
+    SELECT 1 FROM pg_index
+    WHERE indrelid=to_regclass('im_v2.message_media_references') AND indisvalid AND indisready
+      AND replace(pg_get_indexdef(indexrelid),'im_v2.','im_v2.') =
+        'CREATE INDEX message_media_references_room_directory_idx ON im_v2.message_media_references USING btree (room_id, room_sequence DESC, ordinal DESC, media_id DESC) WHERE (revoked_at IS NULL)'
+)
+AND EXISTS (
+    SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+    WHERE t.tgrelid=to_regclass('im_v2.message_media_references') AND t.tgname='message_media_references_room_position'
+      AND t.tgenabled='O' AND NOT t.tgisinternal AND t.tgtype=23 AND t.tgqual IS NULL
+      AND (SELECT array_agg(a.attname::text ORDER BY k.ordinal)
+           FROM unnest(t.tgattr::smallint[]) WITH ORDINALITY k(attnum,ordinal)
+           JOIN pg_attribute a ON a.attrelid=t.tgrelid AND a.attnum=k.attnum)
+          = ARRAY['message_id','room_id','room_sequence']
+      AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='bind_message_media_room_position'
+      AND p.pronargs=0 AND p.prorettype='trigger'::regtype AND p.provolatile='v' AND NOT p.prosecdef
+      AND p.proconfig=ARRAY['search_path=pg_catalog, im_v2']
+      AND encode(sha256(convert_to(replace(p.prosrc,'im_v2.','im_v2.'),'UTF8')),'hex')='87a78224a9113f060a302c49e979fc68e7914b49e9d170323663e05730daf3eb'
+))
+AND to_regclass('im_v2.device_room_progress') IS NOT NULL
  AND to_regclass('im_v2.room_activation_leases') IS NULL
  AND (SELECT count(*) = 4 FROM pg_attribute WHERE attrelid = to_regclass('im_v2.device_room_progress') AND attnum > 0 AND NOT attisdropped AND attnotnull
       AND ((attname IN ('user_id','device_id','room_id') AND atttypid = 'uuid'::regtype) OR (attname = 'applied_through' AND atttypid = 'bigint'::regtype)))
@@ -770,10 +790,16 @@ AND (NOT EXISTS (
       ('resource_group_avatar_operations','event_id','uuid','NO'),
       ('resource_group_avatar_operations','created_at','timestamptz','NO'),
       ('resource_catalog','media_id','uuid','NO'),
+      ('message_media_references','room_id','uuid','NO'),
+      ('message_media_references','room_sequence','int8','NO'),
       ('resource_catalog','home_kind','text','NO'),
       ('resource_catalog','home_id','uuid','NO'),
       ('resource_catalog','usage_kind','text','NO'),
       ('resource_catalog','generation','int8','NO'),
+      ('resource_catalog','display_name','text','NO'),
+      ('resource_catalog','pixel_width','int4','YES'),
+      ('resource_catalog','pixel_height','int4','YES'),
+                  ('resource_catalog','duration_ms','int8','YES'),
       ('resource_forward_outputs','export_id','uuid','NO'),
       ('resource_forward_outputs','ordinal','int4','NO'),
       ('resource_forward_outputs','target_media_id','uuid','NO'),
@@ -850,6 +876,8 @@ AND (NOT EXISTS (
       ('resource_group_avatar_operations','CHECK ((room_sequence > 0))'),
       ('resource_catalog','PRIMARY KEY (media_id)'),
       ('resource_catalog','CHECK ((generation > 0))'),
+                  ('resource_catalog','CHECK (((duration_ms >= 1) AND (duration_ms <= ''2678400000''::bigint)))'),
+                  ('resource_catalog','CHECK ((((pixel_width IS NULL) AND (pixel_height IS NULL)) OR ((pixel_width IS NOT NULL) AND (pixel_height IS NOT NULL) AND ((pixel_width >= 1) AND (pixel_width <= 16384)) AND ((pixel_height >= 1) AND (pixel_height <= 16384)) AND (((pixel_width)::bigint * pixel_height) <= 40000000))))'),
       ('resource_catalog','FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id)'),
       ('resource_catalog','CHECK ((((usage_kind = ''user_avatar''::text) AND (home_kind = ''account''::text)) OR ((usage_kind = ANY (ARRAY[''message_attachment''::text, ''group_avatar''::text])) AND (home_kind = ''room''::text))))'),
       ('resource_forward_outputs','PRIMARY KEY (export_id, ordinal)'),

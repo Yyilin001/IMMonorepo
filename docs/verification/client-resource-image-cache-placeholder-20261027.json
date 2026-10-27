@@ -1,0 +1,41 @@
+{
+  "observedAt": "2026-10-27T04:12:39.627742+00:00",
+  "status": "verified-client-installed-and-launched",
+  "sourceSHA256": {
+    "IMApp/IMApp/V2/V2ConversationMediaViews.swift": "338ef45d72ecfd6a4db3cc4381d77e4d9fa4408769747facaa0a658fa487c7a6",
+    "IMApp/IMAppTests/V2PhotoLibraryImageTests.swift": "9a52fb9f39705c01edfb72ecdd0c3f3fbfb518fe1aa749e9c53e85960e861a4e"
+  },
+  "rootCause": "Missing initial in-memory media state defaults to notDownloaded; image row displayed 下载图片 before async authorized local cache recovery and decoding. Media kind and geometry already come from the message.",
+  "changes": [
+    "Represent local cache lookup separately as checking/finished",
+    "Use a text-free metadata-sized placeholder while checking; show download icon only after cache miss",
+    "Use same image geometry for retry, downloading and decode; keep authorized cache and borrow flow unchanged"
+  ],
+  "tests": [
+    {
+      "suite": "V2PhotoLibraryImageTests",
+      "passed": 11,
+      "log": "/tmp/im-resource-image-cache-placeholder-app-20261027.log",
+      "xcresult": "/tmp/im-resource-image-cache-placeholder-app-20261027.xcresult"
+    },
+    {
+      "test": "V2ConversationStoreTests.restoresCachedMessageMediaWithoutStartingADownload(hit:)",
+      "passed": 1,
+      "parameterCases": 2,
+      "cacheHitAndMissDoNotStartDownload": true,
+      "log": "/tmp/im-resource-image-cache-restore-app-20261027.log",
+      "xcresult": "/tmp/im-resource-image-cache-restore-app-20261027.xcresult"
+    }
+  ],
+  "signedClient": {
+    "record": "/tmp/im-resource-client-signed-release-20261027-r24/result.json",
+    "binarySHA256": "140bb55b98e7649cde63ef3bb4d54ad23003e5f41a7834ceb8560697a17a958c",
+    "sourceDrift": [],
+    "installed": true,
+    "installRecord": "/tmp/im-resource-image-cache-placeholder-phone-install-20261027.json",
+    "launched": true,
+    "launchRecord": "/tmp/im-resource-image-cache-placeholder-phone-launch-20261027.json"
+  },
+  "physicalEntryTransitionNotRecorded": true,
+  "serverChanged": false
+}

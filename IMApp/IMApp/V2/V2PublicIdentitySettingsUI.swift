@@ -9,10 +9,16 @@ import UniformTypeIdentifiers
 @Observable
 final class V2PublicIdentitySettingsStore {
     private let service: any V2ProfileIntentManaging
+    var resourceIntentManager: any V2ProfileIntentManaging { service }
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private var observationTask: Task<Void, Never>?
     private var confirmedDisplayName: String?
     private var savedAvatarDraft: V2ProfileAvatarUpload?
+    private var savedAvatarImport: V2ProfileAvatarImport?
+    private(set) var existingAvatar: V2AvatarResourceSelection?
+    var hasPendingAvatarImport: Bool { savedAvatarImport != nil }
+    @ObservationIgnored private var didRestoreAvatarSelection = false
+    @ObservationIgnored private var avatarSelectionGeneration: UInt64 = 0
     private var pendingObservation: (id: UUID, savedName: String)?
     private(set) var profileUserID: UserID?
 
@@ -23,6 +29,7 @@ final class V2PublicIdentitySettingsStore {
     private(set) var feedback: String?
     private(set) var isLoading = false
     private(set) var isSaving = false
+    private(set) var isSelectingAvatar = false
     private(set) var needsAttention = false
     private(set) var canReplacePending = false
     private var revision: V2ProfileRevision?
@@ -57,6 +64,19 @@ final class V2PublicIdentitySettingsStore {
             }
         } catch is CancellationError { return }
         catch { feedback = "无法读取本机资料，请稍后重试。" }
+        if !didRestoreAvatarSelection, stagedAvatar == nil, let attachmentStager {
+            let generation = avatarSelectionGeneration
+            do {
+                let selections = try await attachmentStager.selectedAttachments(purpose: .personalAvatar)
+                try Task.checkCancellation()
+                if generation == avatarSelectionGeneration, !didRestoreAvatarSelection, stagedAvatar == nil {
+                    stagedAvatar = selections.last
+                    for obsolete in selections.dropLast() { await attachmentStager.discard(obsolete) }
+                    didRestoreAvatarSelection = true
+                }
+            } catch is CancellationError { return }
+            catch { feedback = "无法恢复本机头像草稿。" }
+        }
         do {
             let persisted = try await service.pendingIntent()
             try Task.checkCancellation()
@@ -65,6 +85,7 @@ final class V2PublicIdentitySettingsStore {
                     if case .set(let name) = persisted.patch.displayName { displayName = name }
                     if case .remove = persisted.patch.avatar { removesAvatar = true }
                     savedAvatarDraft = persisted.avatarUpload
+                    savedAvatarImport = persisted.avatarImport
                 }
                 if revision == nil { revision = persisted.expectedRevision }
                 let savedName: String
@@ -93,7 +114,18 @@ final class V2PublicIdentitySettingsStore {
     }
 
     private var hasEditingDraft: Bool {
-        (confirmedDisplayName.map { displayName != $0 } ?? !displayName.isEmpty) || stagedAvatar != nil || removesAvatar
+        (confirmedDisplayName.map { displayName != $0 } ?? !displayName.isEmpty) || stagedAvatar != nil || existingAvatar != nil || removesAvatar
+    }
+
+    func selectAvatarResource(_ selection: V2AvatarResourceSelection) async {
+        guard !isSaving else { return }
+        avatarSelectionGeneration &+= 1
+        didRestoreAvatarSelection = true; isSelectingAvatar = false
+        let previous = stagedAvatar
+        stagedAvatar = nil; savedAvatarDraft = nil; savedAvatarImport = nil
+        existingAvatar = selection; removesAvatar = false
+        feedback = "已选择已有图片，保存后生效。"
+        if let previous, let attachmentStager { await attachmentStager.discard(previous) }
     }
 
     func selectAvatar(at url: URL) async {
@@ -101,34 +133,53 @@ final class V2PublicIdentitySettingsStore {
             feedback = "头像上传当前不可用。"
             return
         }
+        avatarSelectionGeneration &+= 1
+        let generation = avatarSelectionGeneration
+        isSelectingAvatar = true
+        defer { if generation == avatarSelectionGeneration { isSelectingAvatar = false } }
         do {
-            let staged = try await attachmentStager.stageImportedFile(at: url)
+            let staged = try await attachmentStager.stageImportedFile(at: url, purpose: .personalAvatar)
+            guard !Task.isCancelled, generation == avatarSelectionGeneration, !isSaving else {
+                await attachmentStager.discard(staged)
+                return
+            }
             guard staged.contentType.hasPrefix("image/") else {
                 await attachmentStager.discard(staged)
                 feedback = "请选择图片文件。"
                 return
             }
-            if let previous = stagedAvatar { await attachmentStager.discard(previous) }
+            let previous = stagedAvatar
             stagedAvatar = staged
+            didRestoreAvatarSelection = true
             savedAvatarDraft = nil
+            savedAvatarImport = nil; existingAvatar = nil
             removesAvatar = false
             feedback = "已选择新头像，保存后生效。"
+            if let previous { await attachmentStager.discard(previous) }
         } catch is CancellationError {
         } catch {
+            guard generation == avatarSelectionGeneration, !Task.isCancelled else { return }
             feedback = "无法读取这张图片。"
         }
     }
 
     func removeAvatar() async {
         guard !isSaving else { return }
-        if let stagedAvatar, let attachmentStager { await attachmentStager.discard(stagedAvatar) }
+        avatarSelectionGeneration &+= 1
+        didRestoreAvatarSelection = true
+        isSelectingAvatar = false
+        let previous = stagedAvatar
         stagedAvatar = nil
         savedAvatarDraft = nil
+        savedAvatarImport = nil; existingAvatar = nil
         removesAvatar = true
         feedback = "头像将在保存后移除。"
+        if let previous, let attachmentStager { await attachmentStager.discard(previous) }
     }
 
     func save() async {
+        guard !isSelectingAvatar else { feedback = "正在准备头像，请稍候。"; return }
+        guard stagedAvatar.map({ $0.availability == .local }) ?? true else { feedback = "头像原件不可用，请重新选择。"; return }
         guard !isSaving, let revision else { return }
         isSaving = true
         defer { isSaving = false }
@@ -136,13 +187,20 @@ final class V2PublicIdentitySettingsStore {
         do {
             let avatar: V2ProfileAvatarPatch = removesAvatar ? .remove : .unchanged
             let name: V2ProfileDisplayNamePatch = savedName == confirmedDisplayName ? .unchanged : .set(savedName)
-            let source = try stagedAvatar.map { try V2ProfileAvatarUpload(id: $0.id, fileURL: $0.fileURL, displayName: $0.displayName, contentType: $0.contentType, byteCount: $0.byteCount) }
+            let source = try stagedAvatar.map { try V2ProfileAvatarUpload(id: $0.id, localAssetID: $0.localAssetID, displayName: $0.displayName, contentType: $0.contentType, byteCount: $0.byteCount) }
+            let imported = try existingAvatar.map { selection in
+                try V2ProfileAvatarImport(id: UUID(), request: .init(operationID: .init(uuid: UUID()), source: selection.importSource,
+                    targetUsage: .userAvatar, targetMediaID: .init(uuid: UUID())))
+            }
             // The upload dependency is persisted before any transfer begins.
-            let patch = try V2ProfilePatch(displayName: name, avatar: source.map { .set(.init(mediaID: .init(uuid: $0.id))) } ?? avatar)
-            let intent = try await service.enqueue(expectedRevision: revision, patch: patch, avatarUpload: source)
+            let patch = try V2ProfilePatch(displayName: name, avatar: imported.map { .set(.init(mediaID: $0.request.targetMediaID)) } ?? source.map { .set(.init(mediaID: .init(uuid: $0.id))) } ?? avatar)
+            let intent: V2ProfileIntent
+            if let imported { intent = try await service.enqueueImportedAvatar(expectedRevision: revision, patch: patch, source: imported) }
+            else { intent = try await service.enqueue(expectedRevision: revision, patch: patch, avatarUpload: source) }
             // The account intent now owns the staged source. Keep its preview
             // reference until commit/discard rather than reverting to old avatar.
             savedAvatarDraft = source
+            savedAvatarImport = imported; existingAvatar = nil
             stagedAvatar = nil
             removesAvatar = false
             feedback = "已保存，等待同步。"
@@ -170,7 +228,7 @@ final class V2PublicIdentitySettingsStore {
             try await service.discard(intentID: pendingObservation.id)
             stopObserving()
             self.pendingObservation = nil
-            savedAvatarDraft = nil
+            savedAvatarDraft = nil; savedAvatarImport = nil
             canReplacePending = false
             needsAttention = false
             feedback = "已丢弃保存操作，文字编辑仍保留。"
@@ -189,14 +247,20 @@ final class V2PublicIdentitySettingsStore {
                 for try await status in await service.observe(intentID: id) {
                     try Task.checkCancellation()
                     guard let self else { return }
+                    if !status.sourceRetained, status.phase != .committed {
+                        self.pendingObservation = nil; self.savedAvatarDraft = nil; self.savedAvatarImport = nil
+                        self.needsAttention = false; self.canReplacePending = false
+                        self.feedback = "此次保存操作已结束，当前编辑内容已保留。"
+                        return
+                    }
                     self.needsAttention = status.phase == .needsAttention || status.phase == .closed
                     self.canReplacePending = status.canReplace
                     switch status.phase {
                     case .waitingToSubmit: self.feedback = "已保存，等待同步。"
-                    case .uploading: self.feedback = "正在上传头像。"
+                    case .preparingAvatar: self.feedback = "正在准备头像。"
                     case .confirming: self.feedback = "正在确认保存结果。"
                     case .committed:
-                        self.savedAvatarDraft = nil
+                        self.savedAvatarDraft = nil; self.savedAvatarImport = nil
                         if let profile = status.currentSnapshot {
                             self.apply(profile, preserveDraft: self.displayName != savedName)
                         }
@@ -218,12 +282,19 @@ final class V2PublicIdentitySettingsStore {
     /// 视图既不会保留原始压缩文件，也不会保留全分辨率图像。
     func avatarPreviewImage(cache: V2LocalMediaThumbnailCache) async -> UIImage? {
         do {
-            guard let fileURL = stagedAvatar?.fileURL ?? savedAvatarDraft?.fileURL else { return nil }
-            try Task.checkCancellation()
+            guard let attachmentStager else { return nil }
+            let context: V2LocalResourceReadContext
+            if let stagedAvatar { context = .selection(stagedAvatar.localAssetID) }
+            else if savedAvatarDraft != nil, let pendingObservation { context = .profileIntent(pendingObservation.id) }
+            else { return nil }
+            let lease = try await attachmentStager.borrow(context)
+            let fileURL = lease.fileURL
+            if Task.isCancelled { await lease.release(); return nil }
             let preview = await cache.thumbnail(
                 fileURL: fileURL,
                 maximumPixelSize: 256
             )?.image
+            await lease.release()
             try Task.checkCancellation()
             return preview
         } catch is CancellationError {
@@ -234,19 +305,21 @@ final class V2PublicIdentitySettingsStore {
     }
 
     var canSave: Bool {
-        revision != nil && !isSaving && !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            (displayName != confirmedDisplayName || stagedAvatar != nil || removesAvatar)
+        revision != nil && !isSaving && !isSelectingAvatar && !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            (displayName != confirmedDisplayName || stagedAvatar != nil || existingAvatar != nil || removesAvatar)
     }
 
     var avatarPresentationKey: String {
         if removesAvatar { return "removed" }
+        if let existingAvatar { return "existing-" + existingAvatar.key.mediaID.rawValue }
+        if let savedAvatarImport { return "import-" + savedAvatarImport.id.uuidString }
         if let stagedAvatar { return "staged-\(stagedAvatar.id.uuidString)" }
         if let savedAvatarDraft { return "saved-\(savedAvatarDraft.id.uuidString)" }
         return currentAvatar?.mediaID.rawValue ?? "none"
     }
 
     var currentAvatarKey: V2ProfileViewLookupKey? {
-        guard !removesAvatar, savedAvatarDraft == nil, currentAvatar != nil, let profileUserID else { return nil }
+        guard !removesAvatar, savedAvatarDraft == nil, savedAvatarImport == nil, existingAvatar == nil, currentAvatar != nil, let profileUserID else { return nil }
         return .init(userID: profileUserID, context: .relationship)
     }
 
@@ -262,10 +335,13 @@ final class V2PublicIdentitySettingsStore {
 }
 
 struct V2PublicIdentitySettingsView: View {
+    @Environment(\.v2ResourceManagement) private var resources
     @Environment(\.v2MediaThumbnailCache) private var thumbnailCache
     @Environment(\.v2AvatarPipeline) private var avatarPipeline
     @Bindable var store: V2PublicIdentitySettingsStore
     @State private var isImportingAvatar = false
+    @State private var isChoosingResource = false
+    @State private var avatarSelectionTask: Task<Void, Never>?
     @State private var saveTask: Task<Void, Never>?
     @State private var avatarPreviewImage: UIImage?
 
@@ -284,7 +360,11 @@ struct V2PublicIdentitySettingsView: View {
                 Button("选择头像") { isImportingAvatar = true }
                     .disabled(store.isSaving)
                     .accessibilityIdentifier("v2.profile.avatar.choose")
-                if store.currentAvatar != nil || store.stagedAvatar != nil {
+                if resources != nil {
+                    Button("从已有图片选择", systemImage: "photo.on.rectangle") { isChoosingResource = true }
+                        .disabled(store.isSaving).accessibilityIdentifier("v2.profile.avatar.choose-resource")
+                }
+                if store.currentAvatar != nil || store.stagedAvatar != nil || store.existingAvatar != nil {
                     Button("移除头像", role: .destructive) {
                         Task { await store.removeAvatar() }
                     }
@@ -348,10 +428,20 @@ struct V2PublicIdentitySettingsView: View {
             guard case .success(let url) = result else { return }
             Task { await store.selectAvatar(at: url) }
         }
-        .onDisappear { store.stopObserving() }
+        .sheet(isPresented: $isChoosingResource) {
+            if let resources {
+                V2AvatarResourcePicker(service: resources) { value in
+                    avatarSelectionTask?.cancel()
+                    avatarSelectionTask = Task { await store.selectAvatarResource(value) }
+                }
+            }
+        }
+        .onDisappear { avatarSelectionTask?.cancel(); store.stopObserving() }
     }
 
     private var avatarDescription: String {
+        if let existing = store.existingAvatar { return "已选择 \(existing.displayName)" }
+        if store.hasPendingAvatarImport { return "已有图片正在准备" }
         if let staged = store.stagedAvatar { return "已选择 \(staged.displayName)" }
         return store.currentAvatarKey == nil ? "未设置" : "已设置"
     }
@@ -372,7 +462,7 @@ struct V2PublicIdentitySettingsView: View {
             Image(systemName: "person.crop.circle.fill")
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
-                .accessibilityLabel("未设置头像")
+                .accessibilityLabel(store.existingAvatar != nil || store.hasPendingAvatarImport ? "已选择的头像图片" : "未设置头像")
         }
     }
 }

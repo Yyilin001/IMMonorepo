@@ -30,8 +30,10 @@ public struct V2ProjectionScopes: OptionSet, Equatable, Sendable {
     public static let conversationTimeline = Self(rawValue: 1 << 7)
     /// 会话详情元数据变化（标题、能力、公告、权限）。
     public static let conversationMetadata = Self(rawValue: 1 << 8)
+    /// Resource directory, transfers and account-owned file lifecycle.
+    public static let resources = Self(rawValue: 1 << 9)
     /// 全部作用域。
-    public static let all: Self = [.conversations, .conversationDetails, .contacts, .privacy, .presentations, .groupNicknames, .contactAliases, .conversationTimeline, .conversationMetadata]
+    public static let all: Self = [.conversations, .conversationDetails, .contacts, .privacy, .presentations, .groupNicknames, .contactAliases, .conversationTimeline, .conversationMetadata, .resources]
 }
 
 /// 一次投影变更摘要。

@@ -116,12 +116,25 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             table.hasPrefix("v2_contact_profile_search") || table.hasPrefix("sqlite_") { return .none }
         let conversation: V2ProjectionScopes = [.conversations, .conversationDetails]
         switch table {
-        case "v2_operation_work", "v2_operation_dependencies", "v2_profile_intents", "v2_own_profile_snapshot",
+        case "v2_profile_intents":
+            return .init(scopes: .resources, requiresImmediateRefresh: false)
+        case "v2_operation_work", "v2_operation_dependencies", "v2_own_profile_snapshot",
              "v2_personal_preference_intents", "v2_personal_preference_confirmed", "v2_name_operations", "v2_name_confirmed":
             // These are observed by their owning intent/editor streams. Retry
             // metadata cannot revoke every visible profile's authorization.
             return .none
-        case "v2_room_recovery_work", "v2_room_recovery_scan", "v2_resource_transfer_jobs", "v2_send_intent_dependencies", "v2_resource_import_jobs", "v2_send_intent_import_dependencies":
+        case "v2_resource_files", "v2_resource_file_consumers", "v2_resource_file_pins", "v2_resource_local_assets", "v2_resource_entries", "v2_resource_cached_versions",
+             "v2_resource_variants", "v2_resource_retention_intents",
+             "v2_resource_storage_policy", "v2_resource_download_network_preferences", "v2_resource_projection_index_jobs",
+             "v2_resource_background_upload_sources",
+             "v2_resource_transfer_jobs", "v2_resource_import_jobs", "v2_resource_download_jobs",
+             "v2_background_transfer_tasks":
+            return .init(scopes: .resources, requiresImmediateRefresh: false)
+        case "v2_resource_references", "v2_resource_access_generation", "v2_resource_room_denials":
+            return .init(scopes: .resources, requiresImmediateRefresh: true)
+        case "v2_resource_file_operations", "v2_resource_query_checkpoints": return .none
+        case "v2_resource_transfer_staging": return .init(scopes: .resources, requiresImmediateRefresh: false)
+        case "v2_room_recovery_work", "v2_room_recovery_scan", "v2_send_intent_dependencies", "v2_send_intent_import_dependencies":
             return .none
         case "v2_room_sync_states", "v2_room_latest_visible":
             return .init(scopes: conversation, requiresImmediateRefresh: kind == .delete)
@@ -155,7 +168,7 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
         case "v2_group_avatar_intents":
             // Local retries/claims only change management status. They cannot
             // invalidate every visible avatar's authorization and cause refetches.
-            return .init(scopes: .conversationDetails, requiresImmediateRefresh: true)
+            return .init(scopes: [.conversationDetails, .resources], requiresImmediateRefresh: true)
         case "v2_room_event_authorizations", "v2_group_member_roles", "v2_room_control_projections", "v2_group_avatar_invalidations":
             return .init(scopes: [.conversations, .conversationDetails, .presentations], requiresImmediateRefresh: true)
         case "v2_message_favorites", "v2_group_pinned_messages", "v2_timeline_activity_projections", "v2_message_mutation_operations":

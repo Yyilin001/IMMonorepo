@@ -13,11 +13,12 @@ struct V2AttachmentUploadLifecycleTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appending(path: "source.txt")
         try Data([1]).write(to: source)
-        let stager = try V2FileConversationAttachmentStager(directory: root.appending(path: "staging"))
-        let attachment = try await stager.stageImportedFile(at: source)
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
+        let stager = fixture.stager
+        let attachment = try await stager.stageImportedFile(at: source, purpose: .personalAvatar)
         let entered = AsyncStream<Void>.makeStream()
         let cancelled = AsyncStream<Void>.makeStream()
-        let transport = LateAttachmentUpload(entered: entered.continuation, cancelled: cancelled.continuation)
+        let transport = LateAttachmentUpload(entered: entered.continuation, cancelled: cancelled.continuation, originals: stager)
         let uploader = V2ForegroundConversationAttachmentUploader(durable: transport)
         let request = Task { try await uploader.upload(attachment) }
         var starts = entered.stream.makeAsyncIterator()
@@ -25,17 +26,17 @@ struct V2AttachmentUploadLifecycleTests {
         if cancelCaller { request.cancel() }
         let close = Task {
             await uploader.close()
-            try await stager.close()
+            try await fixture.close()
         }
         var cancellations = cancelled.stream.makeAsyncIterator()
         _ = await cancellations.next()
-        #expect(FileManager.default.fileExists(atPath: attachment.fileURL.path))
+        #expect(try await fixture.resources.storageSnapshot().files.count == 1)
         await transport.release()
         try await close.value
         await #expect(throws: CancellationError.self) { try await request.value }
         await #expect(throws: CancellationError.self) { try await uploader.upload(attachment) }
         #expect(await transport.calls == ["user-avatar"])
-        #expect(!FileManager.default.fileExists(atPath: attachment.fileURL.path))
+        #expect(FileManager.default.fileExists(atPath: fixture.scope.resourceFilesDirectory.path))
         #expect(FileManager.default.fileExists(atPath: source.path))
         await uploader.close()
         entered.continuation.finish()
@@ -46,14 +47,16 @@ struct V2AttachmentUploadLifecycleTests {
 private actor LateAttachmentUpload: V2DurableConversationSending {
     let entered: AsyncStream<Void>.Continuation
     let cancelled: AsyncStream<Void>.Continuation
+    let originals: V2FileConversationAttachmentStager
     private var continuation: CheckedContinuation<Void, Never>?
     private(set) var calls: [String] = []
-    init(entered: AsyncStream<Void>.Continuation, cancelled: AsyncStream<Void>.Continuation) {
-        self.entered = entered
+    init(entered: AsyncStream<Void>.Continuation, cancelled: AsyncStream<Void>.Continuation, originals: V2FileConversationAttachmentStager) {
+        self.entered = entered; self.originals = originals
         self.cancelled = cancelled
     }
     func upload(_ attachment: V2StagedConversationAttachment, usage: V2ResourceUsage) async throws -> V2MediaReference {
         #expect(usage == .userAvatar)
+        let lease = try await originals.borrow(.selection(attachment.localAssetID))
         calls.append("user-avatar")
         await withTaskCancellationHandler {
             await withCheckedContinuation {
@@ -62,7 +65,8 @@ private actor LateAttachmentUpload: V2DurableConversationSending {
             }
         } onCancel: { cancelled.yield(()) }
         // Model a transfer that keeps reading the file after cancellation.
-        #expect(try Data(contentsOf: attachment.fileURL) == Data([1]))
+        #expect(try Data(contentsOf: lease.fileURL) == Data([1]))
+        await lease.release()
         return .init(mediaID: .init(uuid: UUID()))
     }
     func freezeSend(text: String, mentions: [V2MentionTarget], replyTo: V2MessageReplyReference?, roomID: RoomID,

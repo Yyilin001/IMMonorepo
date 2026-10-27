@@ -103,6 +103,21 @@ enum V2ResourceTime {
     }
 }
 
+/// Validated MIME metadata. Parameters and header syntax are not accepted here.
+public struct V2ResourceContentType: Hashable, Codable, Sendable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard V2ResourceMetadataValidation.contentType(value) else { throw V2ResourceValidationError.invalidUploadRequest }
+        self.value = value
+    }
+    public init(from decoder: any Decoder) throws {
+        try self.init(decoder.singleValueContainer().decode(String.self))
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer(); try container.encode(value)
+    }
+}
+
 enum V2ResourceMetadataValidation {
     static func contentType(_ value: String) -> Bool {
         let components = value.split(separator: "/", omittingEmptySubsequences: false)

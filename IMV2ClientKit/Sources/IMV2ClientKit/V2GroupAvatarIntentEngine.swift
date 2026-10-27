@@ -65,7 +65,7 @@ public actor V2GroupAvatarIntentEngine {
         }
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
-        try await transfers.releaseAcceptedStaging()
+        try await transfers.releaseFinishedSources()
     }
 
     public func retry(_ id: GroupAvatarOperationID) async throws -> V2GroupAvatarIntent {
@@ -79,6 +79,7 @@ public actor V2GroupAvatarIntentEngine {
         let value = try await requireIntent(id)
         try requireOpen()
         if !value.submissionStarted, let job = value.uploadJobID { try await store.retryResourceTransfer(id: job) }
+        if !value.submissionStarted, let job = value.importJobID { try await store.retryResourceImport(id: job) }
         try requireOpen()
         try await store.retryGroupAvatarIntent(id)
         return try await resume(id)
@@ -97,7 +98,7 @@ public actor V2GroupAvatarIntentEngine {
         try await store.cancelGroupAvatarIntent(id)
         if let flight = flights[id] { flight.cancel(); _ = await flight.result }
         if let job = value.uploadJobID { try await transfers.cancel(id: job) }
-        try await transfers.releaseAcceptedStaging()
+        try await transfers.releaseFinishedSources()
     }
 
     public func resolve(_ id: GroupAvatarOperationID, action: V2GroupAvatarRecoveryRequest.Action) async throws -> V2GroupAvatarIntent {
@@ -135,7 +136,7 @@ public actor V2GroupAvatarIntentEngine {
         try requireOpen()
         try await store.abandonClosedGroupAvatarIntent(id)
         if let job = value.uploadJobID { try? await transfers.cancel(id: job) }
-        try await transfers.releaseAcceptedStaging()
+        try await transfers.releaseFinishedSources()
     }
 
     /// The caller obtains a fresh revision before choosing to replace a closed
@@ -152,7 +153,7 @@ public actor V2GroupAvatarIntentEngine {
         try requireOpen()
         let replacement = try await store.replaceClosedGroupAvatarIntent(id, expectedRevision: expectedRevision, now: now())
         if let job = value.uploadJobID { try? await transfers.cancel(id: job) }
-        try await transfers.releaseAcceptedStaging()
+        try await transfers.releaseFinishedSources()
         return replacement
     }
 
@@ -190,6 +191,15 @@ public actor V2GroupAvatarIntentEngine {
         if [.committed, .cancelled, .closed, .needsAttention].contains(value.stage) { return value }
         if value.recoveryAction != nil && recovery == nil { throw V2GroupAvatarIntentError.recoveryUnavailable }
         guard value.retryAt <= now() else { throw V2GroupAvatarIntentError.busy }
+        if !value.submissionStarted, let jobID = value.importJobID {
+            guard let job = try await store.resourceImport(id: jobID) else { throw V2GroupAvatarIntentError.invalidRecord }
+            if job.status?.state != .ready || job.cancellationRequested {
+                if job.cancellationRequested || job.attempts >= 5 || job.status?.state == .failed || job.status?.state == .cancelled {
+                    try await store.pauseGroupAvatarPreparation(id)
+                }
+                return try await requireIntent(id)
+            }
+        }
         if !value.submissionStarted, let jobID = value.uploadJobID {
             do {
                 guard let job = try await store.resourceTransfer(id: jobID) else { throw V2GroupAvatarIntentError.invalidRecord }
@@ -245,7 +255,7 @@ public actor V2GroupAvatarIntentEngine {
             throw error
         }
         let completed = try await requireIntent(id)
-        if completed.stage == .committed { try? await transfers.releaseAcceptedStaging() }
+        if completed.stage == .committed { try? await transfers.releaseFinishedSources() }
         return completed
     }
 }

@@ -10,6 +10,40 @@ import Testing
 
 @Suite(.serialized)
 struct V2ResourceLifecycleReviewRegressionTests {
+    @Test("client dimensions remain declarations until measured facts match",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil), arguments: [true, false])
+    func declaredImageDimensions(match: Bool) async throws {
+        try await withFixture { f in
+            let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: f.media, usage: .userAvatar,
+                contentType: "image/png", byteCount: Int64(f.bytes.count),
+                checksum: .init(value: f.digest.map { String(format: "%02x", $0) }.joined()),
+                clientImageDimensions: .init(width: match ? 300 : 1, height: match ? 160 : 1))
+            let json = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
+            let placement = String(decoding: try JSONEncoder().encode(f.old), as: UTF8.self)
+            try await f.sql.raw("DELETE FROM im_v2.resource_variants WHERE media_id=\(bind: f.media.uuidValue!)").run()
+            try await f.sql.raw("""
+                INSERT INTO im_v2.resource_upload_sessions(session_id,media_id,home_kind,home_id,actor_user_id,device_id,operation_id,
+                    request_json,state,storage_binding_id,storage_configuration_revision,placement_json,expires_at,created_at,updated_at)
+                VALUES(\(bind: UUID()),\(bind: f.media.uuidValue!),'account',\(bind: f.user.uuidValue!),\(bind: f.user.uuidValue!),
+                    \(bind: f.device.uuidValue!),\(bind: request.operationID.uuidValue!),\(bind: json)::jsonb,'completed',
+                    \(bind: f.old.binding.id),\(bind: f.old.binding.configurationRevision),\(bind: placement)::jsonb,
+                    clock_timestamp()+interval '1 hour',clock_timestamp(),clock_timestamp())
+                """).run()
+            try await f.sql.raw("UPDATE im_v2.media_objects SET state='scanning' WHERE media_id=\(bind: f.media.uuidValue!)").run()
+            try await f.sql.raw("INSERT INTO im_v2.media_scan_outbox(media_id,state,created_at) VALUES(\(bind: f.media.uuidValue!),'pending',clock_timestamp())").run()
+            let variants = V2ResourceVariantProcessor(database: f.database, registry: f.registry,
+                transformer: MeasuredMetadataTransformer(), allocate: { _ in try f.localSource.allocate() })
+            let scanner = V2PlacementMediaScanner(database: f.database, registry: f.registry, scanner: AcceptingReviewScanner(), variants: variants)
+            let worker = try V2MediaScanWorker(store: PostgresV2MediaScanStore(database: f.database), provider: scanner)
+            _ = try await worker.runOnce(limit: 1)
+            let actual = try #require(try await f.sql.raw("""
+                SELECT m.state,c.pixel_width AS width,c.pixel_height AS height
+                FROM im_v2.media_objects m JOIN im_v2.resource_catalog c USING(media_id) WHERE m.media_id=\(bind: f.media.uuidValue!)
+                """).first(decoding: MeasuredMetadataState.self))
+            #expect(actual.state == (match ? "available" : "failed"))
+            #expect(actual.width == (match ? 300 : nil) && actual.height == (match ? 160 : nil))
+        }
+    }
     @Test("image admission matches processing policy and permanent decoding failures terminate scanning",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil),
           arguments: ["invalid-image", "too-large", "transient"])
@@ -93,6 +127,19 @@ struct V2ResourceLifecycleReviewRegressionTests {
 }
 
 private struct ReviewScanState: Decodable { let media: String; let job: String }
+private struct MeasuredMetadataState: Decodable { let state: String; let width: Int?; let height: Int? }
+/// SQL/publication test boundary; decoder behavior is tested with the real worker separately.
+private struct MeasuredMetadataTransformer: V2ResourceTransformer {
+    func transform(input: V2StoredObjectFacts, recipe: V2ResourceRecipe, outputs: [Int: V2StoredObjectReference], registry: V2ResourceStorageRegistry) async throws -> [V2ResourceTransformOutput] {
+        var result: [V2ResourceTransformOutput] = []
+        for (size, reference) in outputs {
+            let facts = try await registry.storage(for: reference.binding).write(reference, byteCount: input.byteCount,
+                sha256: input.sha256, bytes: registry.storage(for: input.reference.binding).read(input.reference))
+            result.append(try .init(size: size, facts: facts, sourceDimensions: .init(width: 300, height: 160)))
+        }
+        return result
+    }
+}
 private struct AcceptingReviewScanner: V2ResourceScanner {
     func scan(_ input: V2StoredObjectFacts, storage: any V2ObjectStorage) async throws -> V2ResourceScanReceipt {
         try .init(input: input, policyVersion: "review-policy", engineVersion: "review-engine", result: .passed)

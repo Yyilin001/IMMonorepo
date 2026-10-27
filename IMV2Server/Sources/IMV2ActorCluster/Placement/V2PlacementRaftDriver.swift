@@ -53,12 +53,12 @@ package actor V2PlacementRaftDriver {
                     if current.role == .leader {
                         if ContinuousClock.now >= heartbeatDue {
                             heartbeatDue = ContinuousClock.now + heartbeat
-                            try await replicate(deadline: ContinuousClock.now + heartbeat)
+                            try await replicate(deadline: ContinuousClock.now + rpcBudget)
                             try await voter.compactIfNeeded()
                         }
                     } else if ContinuousClock.now >= electionDue {
                         electionDue = ContinuousClock.now + randomizedElection()
-                        try await campaign(deadline: ContinuousClock.now + heartbeat)
+                        try await campaign()
                         heartbeatDue = ContinuousClock.now
                     }
                 } catch V2PlacementRaftError.notLeader {
@@ -70,8 +70,16 @@ package actor V2PlacementRaftDriver {
         }
     }
     private func randomizedElection() -> Duration { .milliseconds(Int64.random(in: election)) }
-    private func campaign(deadline: ContinuousClock.Instant) async throws {
+    // Heartbeat is the cadence, not an RPC completion limit. A peer must make
+    // its vote/append durable before replying, which can take longer than one
+    // heartbeat. Keep each round bounded inside the minimum election window.
+    private var rpcBudget: Duration { .milliseconds(election.lowerBound / 2) }
+    private func campaign() async throws {
         let request = try await voter.campaign()
+        // A vote can only leave after the local term/vote promise is durable.
+        // Give the network its own budget after that actual write settles;
+        // a slow fsync must not make every outbound request already expired.
+        let deadline = ContinuousClock.now + rpcBudget
         try await withThrowingTaskGroup(of: (V2ActorHostID, V2PlacementRaftVoteReply?).self) { group in
             for peer in peers {
                 group.addTask { [transport] in (peer, try? await transport.vote(request, to: peer, deadline: deadline)) }

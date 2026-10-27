@@ -10,7 +10,7 @@ struct V2NetworkDiagnosticsTests {
         #expect(diagnostics.snapshot().backgrounds.count == 128)
         #expect(diagnostics.snapshot().backgroundRecorded == 10_000)
         #expect(diagnostics.snapshot().backgrounds.allSatisfy {
-            !$0.completionObserved && $0.bodyBytesSent == nil && $0.bodyBytesReceived == nil && $0.cancelled == nil
+            !$0.completionObserved && $0.errorCode == nil && $0.bodyBytesSent == nil && $0.bodyBytesReceived == nil && $0.cancelled == nil
         })
         let result=V2BackgroundTransferResult(mappingID:UUID(),taskIdentifier:1,statusCode:nil,
             errorCode:URLError.cancelled.rawValue,sentBytes:3,receivedBytes:0)
@@ -18,6 +18,7 @@ struct V2NetworkDiagnosticsTests {
         #expect(diagnostics.snapshot().backgrounds.last?.bodyBytesSent == 3)
         #expect(diagnostics.snapshot().backgrounds.last?.bodyBytesReceived == 0)
         #expect(diagnostics.snapshot().backgrounds.last?.cancelled == true)
+        #expect(diagnostics.snapshot().backgrounds.last?.errorCode == URLError.cancelled.rawValue)
         diagnostics.close()
         diagnostics.record(V2BackgroundTransferMetric(result:result))
         #expect(diagnostics.snapshot().backgrounds.isEmpty)

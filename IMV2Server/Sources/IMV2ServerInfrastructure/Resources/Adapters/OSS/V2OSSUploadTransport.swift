@@ -2,7 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2ServerApplication
 
-public struct V2OSSUploadTransport: V2UploadTransport {
+public struct V2OSSUploadTransport: V2BackgroundUploadTransport {
     public var binding: V2StorageBinding { client.configuration.binding }
     public let capabilities = V2ResourceTransportCapabilities(modes: [.httpPut], maximumBytes: 256 * 1_024 * 1_024)
     private let client: V2OSSClient
@@ -26,6 +26,18 @@ public struct V2OSSUploadTransport: V2UploadTransport {
             headers: headers.sorted { $0.key < $1.key }.map { try .init(name: $0.key, value: $0.value) },
             expiresAt: expiresAt, expectedByteCount: byteCount, checksum: checksum)
     }
+    public func backgroundPlans(mode: V2ResourceTransferMode, mediaID: MediaID, contentType: String, byteCount: Int64,
+        checksum: V2ResourceChecksum, requestedParts: [Int], sessionID: MediaUploadSessionID,
+        generation: Int64, issuedAt: Date, expiresAt: Date) async throws -> [V2ResourceTransferPlan] {
+        guard mode == .httpPut, requestedParts.isEmpty else { throw V2ResourceProviderError.unsupportedCapability }
+        let grant = try V2ResourceBackgroundAuthorization(id: UUID(), sessionID: sessionID, generation: generation,
+            mediaID: mediaID, scope: .whole(byteCount: byteCount, checksum: checksum), issuedAt: issuedAt, expiresAt: expiresAt)
+        let signed = try await plan(mode: mode, mediaID: mediaID, contentType: contentType,
+            byteCount: byteCount, checksum: checksum, expiresAt: expiresAt)
+        return [try .init(mode: mode, url: signed.url, headers: signed.headers, expiresAt: expiresAt,
+            expectedByteCount: byteCount, checksum: checksum, backgroundAuthorization: grant)]
+    }
+
     public func completedBytes(mediaID: MediaID, byteCount: Int64) async throws -> V2ResourceByteStream {
         try await client.read(key: key(mediaID), expectedBytes: byteCount)
     }

@@ -13,10 +13,10 @@ public struct V2ResourceCapabilities:Codable,Equatable,Sendable {
     public let allowedUsages:[V2ResourceCapabilityUsage]
     public let maximumParts:Int
     public let backgroundTransfer:Bool
-    public init(version:Int=1,uploadModes:[V2ResourceTransferMode],maximumBytes:Int64,
+    public init(version:Int=2,uploadModes:[V2ResourceTransferMode],maximumBytes:Int64,
                 allowedUsages:[V2ResourceCapabilityUsage],maximumParts:Int,backgroundTransfer:Bool,
                 maximumImageBytes:Int64? = nil) throws {
-        guard version==1,!uploadModes.isEmpty,uploadModes.allSatisfy(\.isUpload),Set(uploadModes).count==uploadModes.count,
+        guard version==2,!uploadModes.isEmpty,uploadModes.allSatisfy(\.isUpload),Set(uploadModes).count==uploadModes.count,
               maximumBytes>0,maximumImageBytes.map({ $0 > 0 && $0 <= maximumBytes }) ?? true,
               !allowedUsages.isEmpty,Set(allowedUsages).count==allowedUsages.count,
               (0...10_000).contains(maximumParts),maximumParts==0 || uploadModes.contains(.httpPartPut)

@@ -10,6 +10,42 @@ import Testing
 
 @Suite("Room recovery schema retirement", .serialized)
 struct PostgresV2RoomRecoverySchemaTests {
+    @Test("resource directory readiness requires its exact binding trigger and bounded index",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"] != nil
+                   && ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"),
+          arguments: ["missing-trigger", "disabled-trigger", "wrong-events", "changed-function",
+                      "wrong-search-path", "missing-index", "wrong-index-order", "unfiltered-index"])
+    func resourceDirectoryReadinessRejectsDrift(_ fault: String) async throws {
+        try await withUserEventDatabase { database, sql, schema in
+            try await V2SchemaReadiness.verify(database: database, schema: schema)
+            switch fault {
+            case "missing-trigger":
+                try await sql.raw("DROP TRIGGER message_media_references_room_position ON \(unsafeRaw: schema).message_media_references").run()
+            case "disabled-trigger":
+                try await sql.raw("ALTER TABLE \(unsafeRaw: schema).message_media_references DISABLE TRIGGER message_media_references_room_position").run()
+            case "wrong-events":
+                try await sql.raw("DROP TRIGGER message_media_references_room_position ON \(unsafeRaw: schema).message_media_references").run()
+                try await sql.raw("CREATE TRIGGER message_media_references_room_position BEFORE INSERT ON \(unsafeRaw: schema).message_media_references FOR EACH ROW EXECUTE FUNCTION \(unsafeRaw: schema).bind_message_media_room_position()").run()
+            case "changed-function":
+                try await sql.raw("CREATE OR REPLACE FUNCTION \(unsafeRaw: schema).bind_message_media_room_position() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog, \(unsafeRaw: schema) AS 'BEGIN RETURN NEW; END;'").run()
+            case "wrong-search-path":
+                try await sql.raw("ALTER FUNCTION \(unsafeRaw: schema).bind_message_media_room_position() SET search_path=public").run()
+            case "missing-index":
+                try await sql.raw("DROP INDEX \(unsafeRaw: schema).message_media_references_room_directory_idx").run()
+            case "wrong-index-order":
+                try await sql.raw("DROP INDEX \(unsafeRaw: schema).message_media_references_room_directory_idx").run()
+                try await sql.raw("CREATE INDEX message_media_references_room_directory_idx ON \(unsafeRaw: schema).message_media_references(room_id,room_sequence,ordinal,media_id) WHERE revoked_at IS NULL").run()
+            case "unfiltered-index":
+                try await sql.raw("DROP INDEX \(unsafeRaw: schema).message_media_references_room_directory_idx").run()
+                try await sql.raw("CREATE INDEX message_media_references_room_directory_idx ON \(unsafeRaw: schema).message_media_references(room_id,room_sequence DESC,ordinal DESC,media_id DESC)").run()
+            default: Issue.record("Unknown directory DDL fault"); return
+            }
+            await #expect(throws: V2SchemaReadinessError.unavailableTable(schema + ".message_media_references[directory-contract]")) {
+                try await V2SchemaReadiness.verify(database: database, schema: schema)
+            }
+        }
+    }
+
     @Test("readiness renders catalog definitions independently of the connection search path")
     func readinessPreservesConnectionSearchPath() async throws {
         try await withUserEventDatabase { _, _, schema in

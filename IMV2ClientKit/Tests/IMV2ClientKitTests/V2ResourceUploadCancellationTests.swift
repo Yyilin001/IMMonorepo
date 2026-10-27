@@ -16,10 +16,12 @@ struct V2ResourceUploadCancellationTests {
         let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
             usage: .messageAttachment(room), contentType: "text/plain", byteCount: 3,
             checksum: .init(value: V2ResourceFileDigest.sha256(fileURL: file, expectedByteCount: 3)))
+        let resources = try await makeResourceTestCenter(store: store, root: directory)
+        try await importTestResourceSource(center: resources, source: file, id: .init(id), request: input)
         let control = try CancellingResourceUpload(stage: stage, input: input, room: room)
-        let engine = V2ResourceTransferEngine(store: store, control: control, executor: control, directory: directory)
+        let engine = V2ResourceTransferEngine(store: store, control: control, executor: control, resources: resources)
         do {
-            _ = try await engine.prepare(id: id, request: input)
+            _ = try await engine.prepare(id: id, request: input, localAssetID: .init(id))
             let work = Task {
                 if stage == -1 { withUnsafeCurrentTask { $0?.cancel() } }
                 for _ in 0..<5 {
@@ -35,9 +37,9 @@ struct V2ResourceUploadCancellationTests {
             #expect(!saved.cancellationRequested)
             #expect(try Data(contentsOf: file) == Data("abc".utf8))
             #expect(try await store.resourceSendPayloads().isEmpty)
-            await engine.close()
+            await engine.close(); await resources.close()
             try await store.close()
-        } catch { await engine.close(); try? await store.close(); throw error }
+        } catch { await engine.close(); await resources.close(); try? await store.close(); throw error }
     }
 }
 

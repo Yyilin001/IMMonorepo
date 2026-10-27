@@ -17,8 +17,9 @@ public struct V2ResourceVariantProcessor: Sendable {
     public func prepare(mediaID:UUID,input:V2StoredObjectFacts) async throws {
         guard let sql=database as? any SQLDatabase,
               let session=try await sql.raw("""
-                SELECT resource.generation,resource.usage_kind,media.content_type
+                SELECT resource.generation,resource.usage_kind,media.content_type,upload.request_json::text AS upload_request
                 FROM im_v2.resource_catalog resource JOIN im_v2.media_objects media USING(media_id)
+                LEFT JOIN im_v2.resource_upload_sessions upload ON upload.media_id=resource.media_id
                 WHERE resource.media_id=\(bind:mediaID) AND media.state='scanning'
                 """).first(decoding:VariantResourceRow.self)
         else { throw V2ResourceProviderError.preconditionFailed }
@@ -51,12 +52,20 @@ public struct V2ResourceVariantProcessor: Sendable {
         if rows.allSatisfy({$0.state=="ready"}) { return }
         let outputs=try Dictionary(uniqueKeysWithValues:rows.map { ($0.size,try JSONDecoder().decode(V2StoredObjectReference.self,from:Data($0.reference.utf8))) })
         let receipts=try await transformer.transform(input:input,recipe:recipe,outputs:outputs,registry:registry)
-        guard Set(receipts.map(\.size))==Set(sizes), receipts.count==sizes.count else { throw V2ResourceProviderError.integrityMismatch }
+        guard Set(receipts.map(\.size))==Set(sizes), receipts.count==sizes.count,
+              let dimensions = receipts.first?.sourceDimensions,
+              receipts.allSatisfy({ $0.sourceDimensions == dimensions }) else { throw V2ResourceProviderError.integrityMismatch }
+        let declaration = try session.uploadRequest.map { try JSONDecoder().decode(V2ResourceUploadRequest.self, from: Data($0.utf8)) }
+        try dimensions.validate(clientDimensions: declaration?.clientImageDimensions)
         try await database.transaction { transaction in
             guard let sql=transaction as? any SQLDatabase,
                   try await sql.raw("SELECT 1 FROM im_v2.media_objects WHERE media_id=\(bind: mediaID) AND state='scanning' FOR UPDATE").first() != nil
             else { throw V2ResourceProviderError.preconditionFailed }
             guard try await sql.raw("SELECT 1 FROM im_v2.resource_catalog WHERE media_id=\(bind: mediaID) AND generation=\(bind: session.generation)").first() != nil else { throw V2ResourceProviderError.preconditionFailed }
+            try await sql.raw("""
+                UPDATE im_v2.resource_catalog SET pixel_width=\(bind: dimensions.width),pixel_height=\(bind: dimensions.height)
+                WHERE media_id=\(bind: mediaID) AND generation=\(bind: session.generation)
+                """).run()
             for receipt in receipts {
                 guard receipt.facts.reference==outputs[receipt.size] else { throw V2ResourceProviderError.integrityMismatch }
                 try await sql.raw("UPDATE im_v2.resource_variants SET state='ready',byte_count=\(bind: receipt.facts.byteCount),sha256=\(bind: receipt.facts.sha256) WHERE media_id=\(bind: mediaID) AND generation=\(bind: session.generation) AND recipe=\(bind: recipe.rawValue) AND size=\(bind: receipt.size)").run()
@@ -65,7 +74,7 @@ public struct V2ResourceVariantProcessor: Sendable {
     }
 }
 private struct VariantResourceRow:Decodable {
-    let generation:Int64;let usageKind:String;let contentType:String
-    enum CodingKeys:String,CodingKey { case generation,usageKind="usage_kind",contentType="content_type" }
+    let generation:Int64;let usageKind:String;let contentType:String;let uploadRequest:String?
+    enum CodingKeys:String,CodingKey { case generation,usageKind="usage_kind",contentType="content_type",uploadRequest="upload_request" }
 }
 private struct VariantOutputRow:Decodable { let size:Int;let reference:String;let state:String }

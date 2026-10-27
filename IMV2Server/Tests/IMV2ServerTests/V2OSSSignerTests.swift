@@ -1,9 +1,48 @@
 import Foundation
 import Testing
+import IMV2Core
 import IMV2ServerApplication
 @testable import IMV2ServerInfrastructure
 
 struct V2OSSSignerTests {
+    @Test func wholeBackgroundUploadUsesOneSignedPutAndExactGrant() async throws {
+        let configuration = try V2OSSConfiguration(bucket: "test-bucket", region: "cn-shenzhen",
+            endpoint: #require(URL(string: "https://test-bucket.oss-cn-shenzhen.aliyuncs.com")),
+            prefix: "validation/", binding: .init(id: "test-oss", configurationRevision: 1))
+        let client = V2OSSClient(configuration: configuration,
+            credentials: .init(load: { .init(accessKeyID: "test-ak", accessKeySecret: "test-sk", securityToken: nil) }))
+        do {
+            let transport = V2OSSUploadTransport(client: client), media = MediaID(uuid: UUID())
+            let storage = V2OSSObjectStorage(client: client)
+            let registry = try V2ResourceStorageRegistry(storages: [storage], defaultBinding: configuration.binding)
+            let service = try V2ResourceService(resolve: { _,_,_,_ in throw V2ResourceProviderError.configurationInvalid },
+                registry: registry, transports: [transport], maximumBytes: transport.capabilities.maximumBytes,
+                allocate: { _ in try storage.allocate() })
+            let capabilities = try service.capabilities()
+            #expect(capabilities.version == 2 && capabilities.backgroundTransfer)
+            #expect(capabilities.uploadModes == [.httpPut] && capabilities.maximumParts == 0)
+            #expect(try JSONDecoder().decode(V2ResourceCapabilities.self, from: JSONEncoder().encode(capabilities)) == capabilities)
+            let session = MediaUploadSessionID(uuid: UUID()), bytes: Int64 = 9 * 1_024 * 1_024
+            let checksum = try V2ResourceChecksum(value: String(repeating: "a", count: 64)), now = Date()
+            let plans = try await transport.backgroundPlans(mode: .httpPut, mediaID: media,
+                contentType: "application/octet-stream", byteCount: bytes, checksum: checksum,
+                requestedParts: [], sessionID: session, generation: 2, issuedAt: now, expiresAt: now.addingTimeInterval(300))
+            #expect(plans.count == 1)
+            let plan = try #require(plans.first), grant = try #require(plan.backgroundAuthorization)
+            #expect(plan.mode == .httpPut && plan.byteRange == nil && plan.partNumber == nil)
+            #expect(plan.expectedByteCount == bytes && plan.checksum == checksum)
+            #expect(grant.scope == .whole(byteCount: bytes, checksum: checksum))
+            #expect(grant.sessionID == session && grant.generation == 2 && grant.mediaID == media)
+            #expect(plan.url.query?.contains("x-oss-signature=") == true)
+            await #expect(throws: V2ResourceProviderError.unsupportedCapability) {
+                try await transport.backgroundPlans(mode: .httpPartPut, mediaID: media,
+                    contentType: "application/octet-stream", byteCount: bytes, checksum: checksum,
+                    requestedParts: [1], sessionID: session, generation: 2, issuedAt: now, expiresAt: now.addingTimeInterval(300))
+            }
+            try await client.shutdown()
+        } catch { try? await client.shutdown(); throw error }
+    }
+
     private let query = ["param1": "value1", "+param1": "value3", "|param1": "value4",
                          "+param2": "", "|param2": "", "param2": ""]
     private func signer(token: String? = nil) -> V2OSSSigner {

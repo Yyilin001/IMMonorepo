@@ -229,10 +229,10 @@ struct V2OperationWorkTests {
         try await store.prepareResourceImport(id: job, request: request)
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()),
             text: "completed attachment", attachmentJobIDs: [job])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         let status = try V2ResourceImportStatus(locator: .init(home: .room(room), operationID: request.operationID),
             mediaID: request.targetMediaID, state: .ready, bindableUntil: Date().addingTimeInterval(60))
-        try await store.saveResourceImport(status, id: job)
+        try await store.seedResourceImportStatus(status, id: job)
         try await store.handOffSendIntent(intent.id)
         let work = try #require(try await store.dueOperationWork(now: Date(), kinds: [.sendMessage]).first)
         guard case .claimed = try await store.claimOperationWork(id: work.id, ownerID: UUID(), action: .submit, now: Date()) else {
@@ -264,10 +264,10 @@ struct V2OperationWorkTests {
         let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
             usage: .messageAttachment(room), contentType: "text/plain", byteCount: 3,
             checksum: .init(value: String(repeating: "b", count: 64)))
-        _ = try await store.prepareResourceTransfer(id: job, request: request, localFileToken: job.uuidString)
+        _ = try await store.prepareMetadataResourceTransfer(id: job, request: request, localAssetID: .init(job))
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()),
             text: "protected attachment", attachmentJobIDs: [job])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         let ready = try V2ResourceUploadSession(locator: .init(home: .room(room), sessionID: .init(uuid: UUID())),
             mediaID: request.mediaID, generation: 1, state: .completed, resourceState: .ready,
             expiresAt: Date().addingTimeInterval(60), bindableUntil: Date().addingTimeInterval(60))
@@ -282,11 +282,11 @@ struct V2OperationWorkTests {
         let later = now.addingTimeInterval(8 * 24 * 60 * 60)
         #expect(try await store.pruneCompletedOperationHistory(now: later) == 0)
         #expect(FileManager.default.fileExists(atPath: file.path))
-        #expect(try await store.claimReleasableResourceFileToken(id: job) == job.uuidString)
+        #expect(try await store.releasableResourceAssetID(id: job) == .init(job))
         // Claiming deletion alone cannot release the history ownership boundary.
         #expect(try await store.pruneCompletedOperationHistory(now: later) == 0)
-        try FileManager.default.removeItem(at: file)
-        try await store.confirmResourceStagingReleased(id: job)
+        try await store.releaseResourceSource(id: job)
+        #expect(FileManager.default.fileExists(atPath: file.path))
         #expect(try await store.pruneCompletedOperationHistory(now: later) == 0)
         try await store.observeResourceSendFixtureProjection(intent.clientMessageID, accepted: accepted,
             mediaPresentations: [try .init(mediaID: request.mediaID, kind: .file, contentType: request.contentType, byteCount: request.byteCount)])
@@ -484,8 +484,9 @@ struct V2OperationWorkTests {
         let (store, _, _, user) = try fixture()
         let stagedID = UUID()
         let source = try V2ProfileAvatarUpload(id: stagedID,
-            fileURL: FileManager.default.temporaryDirectory.appending(path: stagedID.uuidString),
+            localAssetID: .init(stagedID),
             displayName: "avatar.png", contentType: "image/png", byteCount: 32)
+        try await store.seedMetadataProfileSource(source)
         let intent = try await store.enqueueProfileIntent(accountID: user, expectedRevision: .init(rawValue: 1)!,
             patch: .init(displayName: .set("name")), avatarUpload: source, now: now)
         #expect(intent.workID == nil)

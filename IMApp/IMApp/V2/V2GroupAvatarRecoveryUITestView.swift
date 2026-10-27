@@ -66,20 +66,24 @@ private struct RecoveryUIFixture {
     let transfers: V2ResourceTransferEngine
     let notifier: V2ProjectionChangeNotifier
     let journal: GRDBV2LocalSyncStore
+    let resources: V2ResourceCenter
 
     static func make(scope: UUID, directory: URL) async throws -> Self {
         try await V2AccountActivationScope.withPrepared { activation in
             let actor = UserID(uuid: scope), device = DeviceID(uuid: scope)
+            let storage = try await V2AccountStorageDirectory(root: directory, cacheRoot: directory.appending(path: "cache-scopes")).openScope(accountID: actor)
             let journal = try await V2LocalStoreBootstrapper(bindingStore: RecoveryUIBinding(value: scope))
-                .open(databaseURL: directory.appendingPathComponent("journal.sqlite"), userID: actor)
+                .open(databaseURL: storage.database.primary, userID: actor)
             activation.onDiscard { try await journal.close() }
+            let resources = try await V2ResourceCenter.make(scope: storage, store: journal)
+            activation.onDiscard { await resources.close() }
             let boundary = RecoveryUIBoundary(actor: actor, device: device)
-            let transfers = V2ResourceTransferEngine(store: journal, control: boundary, executor: boundary, directory: directory)
+            let transfers = V2ResourceTransferEngine(store: journal, control: boundary, executor: boundary, resources: resources)
             activation.onDiscard { await transfers.close() }
             let intents = V2GroupAvatarIntentEngine(actorUserID: actor, store: journal, transfers: transfers, submissions: boundary, recovery: boundary)
             activation.onDiscard { await intents.close() }
             let manager = V2GroupAvatarManagementService(actorUserID: actor, deviceID: device, store: journal, intents: intents,
-                reader: boundary, capabilities: boundary, directory: directory)
+                reader: boundary, capabilities: boundary, resources: resources)
             activation.onDiscard { await manager.close() }
             let notifier = V2ProjectionChangeNotifier(localStore: journal)
             activation.onDiscard { await notifier.finish() }
@@ -93,13 +97,13 @@ private struct RecoveryUIFixture {
             }
             try Task.checkCancellation()
             try activation.adopt()
-            return .init(pending: pending, manager: manager, intents: intents, transfers: transfers, notifier: notifier, journal: journal)
+            return .init(pending: pending, manager: manager, intents: intents, transfers: transfers, notifier: notifier, journal: journal, resources: resources)
         }
     }
 
     func close() async {
         await pending.close(); await manager.close(); await intents.close(); await transfers.close(); await notifier.finish()
-        try? await journal.close()
+        await resources.close(); try? await journal.close()
     }
 }
 
@@ -128,7 +132,10 @@ private struct RecoveryUIBoundary: V2GroupAvatarPresentationReading, V2ResourceC
     func finalize(_ session: V2ResourceUploadSession) throws -> V2ResourceUploadSession { throw V2GroupAvatarManagementError.unavailable }
     func cancel(_ session: V2ResourceUploadSession) throws -> V2ResourceUploadSession { throw V2GroupAvatarManagementError.unavailable }
     func upload(fileURL: URL, plan: V2ResourceTransferPlan) throws { throw V2GroupAvatarManagementError.unavailable }
-    func stageImportedFile(at sourceURL: URL) throws -> V2StagedConversationAttachment { throw V2GroupAvatarManagementError.unavailable }
+    func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) throws -> V2StagedConversationAttachment { throw V2GroupAvatarManagementError.unavailable }
+    func stageNormalizedPhoto(_ photo: V2NormalizedPhoto, purpose: V2LocalResourceAssetPurpose) throws -> V2StagedConversationAttachment { throw V2GroupAvatarManagementError.unavailable }
+    func selectedAttachments(purpose: V2LocalResourceAssetPurpose) -> [V2StagedConversationAttachment] { [] }
+    func borrow(_ context: V2LocalResourceReadContext) throws -> V2ResourceFileLease { throw V2ResourceStorageError.unavailable }
     func discard(_ attachment: V2StagedConversationAttachment) { }
 }
 #endif

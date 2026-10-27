@@ -6,8 +6,6 @@ import UIKit
 
 struct V2RootView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.dynamicTypeSize) private var inheritedTypeSize
-    @Environment(\.layoutDirection) private var inheritedDirection
     private let appPushDelegate: V2AppPushDelegate
     private let initialPasswordMode: V2AppStore.PasswordMode
     private let initialLocalE2ETestAccountHandle: String?
@@ -22,6 +20,7 @@ struct V2RootView: View {
     private let revocationVisualAccessibility: Bool
     private let groupAvatarRecoveryTestScope: UUID?
     private let mediaFileTestScope: UUID?
+    private let resourceCenterTestScope: UUID?
     @State private var revocationVisualFixture: V2DeviceRevocationPresentation?
     #endif
 
@@ -34,6 +33,8 @@ struct V2RootView: View {
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-resource-scope").flatMap(UUID.init(uuidString:)) : nil
         mediaFileTestScope = startupMode == .uiTestingSignedOut
             ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-media-scope").flatMap(UUID.init(uuidString:)) : nil
+        resourceCenterTestScope = startupMode == .uiTestingSignedOut
+            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-resource-center-scope").flatMap(UUID.init(uuidString:)) : nil
         revocationVisualAccessibility = startupMode == .uiTestingSignedOut && arguments.contains("-v2-ui-testing-revocation-accessibility")
         _revocationVisualFixture = State(initialValue: startupMode == .uiTestingSignedOut && arguments.contains("-v2-ui-testing-revocation-paused") ? .paused : nil)
         initialPasswordMode = arguments.contains("-v2-ui-testing-password-register") ? .register : .signIn
@@ -70,6 +71,20 @@ struct V2RootView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        if revocationVisualAccessibility {
+            rootContent
+                .environment(\.dynamicTypeSize, .accessibility5)
+                .environment(\.layoutDirection, .rightToLeft)
+        } else {
+            rootContent
+        }
+        #else
+        rootContent
+        #endif
+    }
+
+    @ViewBuilder private var rootContent: some View {
         ZStack {
             Group {
                 switch store.route {
@@ -80,6 +95,14 @@ struct V2RootView: View {
                         .accessibilityIdentifier("v2.launch.local-bootstrap")
                 case .signedOut:
                     signedOutContent
+                        .safeAreaInset(edge: .bottom) {
+                            V2DeviceRevocationStatusView(state: revocationPresentation) {
+                                #if DEBUG
+                                if revocationVisualFixture != nil { revocationVisualFixture = .pending; return }
+                                #endif
+                                await store.retryDeviceRevocation()
+                            }
+                        }
                 case .authenticating:
                     ProgressView("正在验证身份…")
                 case .localReadOnly:
@@ -109,6 +132,7 @@ struct V2RootView: View {
                             passwordLifecycleClient: store.passwordLifecycleClient(),
                             signOut: { store.requestSignOut() }
                         )
+                        .environment(\.v2ResourceManagement, store.resourceManagement)
                         .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
                         .environment(\.v2AvatarPipeline, store.avatarPipeline)
                     } else {
@@ -147,20 +171,9 @@ struct V2RootView: View {
                     ContentUnavailableView("V2 暂不可用", systemImage: "exclamationmark.triangle", description: Text(message))
                 }
             }
-            .safeAreaInset(edge: .bottom) {
-                V2DeviceRevocationStatusView(state: revocationPresentation) {
-                    #if DEBUG
-                    if revocationVisualFixture != nil { revocationVisualFixture = .pending; return }
-                    #endif
-                    await store.retryDeviceRevocation()
-                }
-            }
-
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
-        .environment(\.dynamicTypeSize, revocationTypeSize)
-        .environment(\.layoutDirection, revocationDirection)
         .onDisappear { protectedDataRetryTask?.cancel() }
         .task { await store.restore() }
         .task(id: scenePhase) {
@@ -185,7 +198,10 @@ struct V2RootView: View {
 
     @ViewBuilder private var signedOutContent: some View {
         #if DEBUG
-        if let scope = mediaFileTestScope {
+        if let scope = resourceCenterTestScope {
+            V2ResourceCenterUITestView(scope: scope,
+                cleanup: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-center-cleanup"))
+        } else if let scope = mediaFileTestScope {
             V2MediaFileUsageUITestView(scope: scope,
                 cleanup: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-media-cleanup"))
         } else if let scope = groupAvatarRecoveryTestScope {
@@ -204,20 +220,6 @@ struct V2RootView: View {
                 initialPassword: initialLocalE2ETestPassword, initialPublicHandle: initialLocalE2ETestPublicHandle,
                 initialDisplayName: initialLocalE2ETestDisplayName)
         }
-    }
-
-    private var revocationTypeSize: DynamicTypeSize {
-        #if DEBUG
-        if revocationVisualAccessibility { return .accessibility5 }
-        #endif
-        return inheritedTypeSize
-    }
-
-    private var revocationDirection: LayoutDirection {
-        #if DEBUG
-        if revocationVisualAccessibility { return .rightToLeft }
-        #endif
-        return inheritedDirection
     }
 
     private var revocationPresentation: V2DeviceRevocationPresentation {
@@ -476,6 +478,7 @@ struct V2SignedInRootView: View {
                 openSecurity: { presentedSettingsSheet = .accountSecurity },
                 openPendingAvatars: { presentedSettingsSheet = .pendingGroupAvatars },
                 openFavorites: { presentedSettingsSheet = .favorites },
+                openResources: appStore.resourceManagement == nil ? nil : { rootNavigation.path.append(V2ResourceRoute.home) },
                 signOut: {
                     guard signOutTask == nil else { return }
                     signOutTask = Task {
@@ -563,6 +566,8 @@ struct V2SignedInRootView: View {
                     initiallyFocusedMessageID: route.messageID,
                     groupInvitationStore: groupInvitationStore)
             }
+            .v2ResourceDestinations(service: appStore.resourceManagement, navigation: rootNavigation,
+                profile: publicIdentitySettingsStore, groups: pendingGroupAvatarsStore)
             .navigationDestination(for: V2LocalDirectConversationRoute.self) { route in
                 if let service = conversationStore.localDirectConversationService {
                     V2LocalDirectConversationView(operationID: route.operationID,
@@ -594,6 +599,7 @@ struct V2SignedInRootView: View {
                 guard !Task.isCancelled, pendingGroupInvitationURL == url else { return }
                 pendingGroupInvitationURL = nil
             }
+            .environment(\.v2ResourceNavigation, rootNavigation)
             .onDisappear { signOutTask?.cancel() }
             .sheet(item: $presentedSettingsSheet, onDismiss: {
                 guard let route = conversationAfterSettingsDismissal else { return }
@@ -642,7 +648,11 @@ struct V2SignedInRootView: View {
                 case .deviceSessions:
                     if let deviceSessionsStore {
                         NavigationStack {
-                            V2DeviceSessionsView(store: deviceSessionsStore)
+                            V2DeviceSessionsView(
+                                store: deviceSessionsStore,
+                                exitConfirmation: appStore.deviceRevocationPresentation,
+                                retryExitConfirmation: { await appStore.retryDeviceRevocation() }
+                            )
                                 .toolbar {
                                     ToolbarItem(placement: .confirmationAction) {
                                         Button("完成") { presentedSettingsSheet = nil }
@@ -655,6 +665,8 @@ struct V2SignedInRootView: View {
             }
         }
         .authorPresentationPage(context: .list(signedInProfilePageID))
+        .environment(\.v2ResourceNavigation, rootNavigation)
+        .environment(\.v2ResourceManagement, appStore.resourceManagement)
         .environment(\.v2UserInteractionContext, .init(contacts: contactsStore, conversations: conversationStore, navigation: rootNavigation))
     }
 }

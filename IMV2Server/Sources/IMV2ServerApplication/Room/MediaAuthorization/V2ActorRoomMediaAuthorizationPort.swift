@@ -27,7 +27,7 @@ public struct V2ActorRoomMediaAuthorizationPort: Sendable {
             }
             return snapshot
         case .notVisible: return nil
-        case .resourceUploadAllowed, .profilesVisible, .groupAvatarVisible: throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        case .resourceUploadAllowed, .profilesVisible, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
     }
 
@@ -45,7 +45,7 @@ public struct V2ActorRoomMediaAuthorizationPort: Sendable {
             else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             return snapshot
         case .notVisible: return nil
-        case .visible, .profilesVisible, .groupAvatarVisible: throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        case .visible, .profilesVisible, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
     }
 
@@ -72,7 +72,7 @@ public struct V2ActorRoomMediaAuthorizationPort: Sendable {
             else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             return snapshot
         case .notVisible: return nil
-        case .visible, .resourceUploadAllowed, .groupAvatarVisible: throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        case .visible, .resourceUploadAllowed, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
     }
 
@@ -93,8 +93,30 @@ public struct V2ActorRoomMediaAuthorizationPort: Sendable {
             else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             return snapshot
         case .notVisible: return nil
-        case .visible, .resourceUploadAllowed, .profilesVisible:
+        case .visible, .resourceUploadAllowed, .profilesVisible, .resourceDirectory:
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+    }
+
+    public func resourceDirectory(_ request: V2ActorRoomResourceDirectoryWire,
+                                  deadline: ContinuousClock.Instant) async throws -> V2ActorRoomResourceDirectoryPageWire? {
+        switch try await query(.resourceDirectory(request), deadline) {
+        case .resourceDirectory(let page):
+            guard page.items.count <= request.query.limit,
+                  Set(page.items.map(\.position)).count == page.items.count,
+                  zip(page.items,page.items.dropFirst()).allSatisfy({ $0.position > $1.position }),
+                  request.snapshotUpperRoomSequence.map({ $0 == page.snapshotUpperRoomSequence }) ?? true,
+                  page.items.allSatisfy({ item in
+                      item.descriptor.key.home == .room(request.roomID)
+                      && request.query.category.includes(contentType: item.descriptor.contentType)
+                      && item.descriptor.state == .ready
+                      && (request.before.map({ item.position < $0 }) ?? true)
+                      && (request.query.before.map({ item.createdAt < $0 }) ?? true)
+                      && (request.query.after.map({ item.createdAt > $0 }) ?? true)
+                  }) else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+            return page
+        case .notVisible: return nil
+        default: throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
     }
 

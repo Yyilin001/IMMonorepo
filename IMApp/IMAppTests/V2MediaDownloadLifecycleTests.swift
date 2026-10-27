@@ -12,14 +12,15 @@ struct V2MediaDownloadLifecycleTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let resolver = ColdCacheResolver(), transfer = ColdCacheTransfer()
         let service = V2ClientMediaDownloadService(targetResolver: resolver, byteTransfer: transfer)
-        let first = try V2ForegroundConversationMediaDownloader(downloader: service, directory: root)
+        let first = try await makeResourceMediaTestDownloader(downloader: service, directory: root)
         let media = V2MediaReference(mediaID: .init(uuid: UUID()))
         let original = try await first.download(media)
         if mode == "corrupt" { try Data([2]).write(to: original.fileURL) }
         if mode == "revoked" { await resolver.revoke() }
+        try await first.close()
         // A new owner has no in-memory verification/publication state. Only the
         // account's protected disk cache survives this normal cold reconstruction.
-        let restored = try V2ForegroundConversationMediaDownloader(downloader: service, directory: root)
+        let restored = try await makeResourceMediaTestDownloader(downloader: service, directory: root)
         if mode == "revoked" {
             await #expect(throws: V2ClientMediaTransferError.serverStatus(403)) {
                 try await restored.download(media)
@@ -38,7 +39,7 @@ struct V2MediaDownloadLifecycleTests {
         try await first.close()
     }
 
-    @Test("account close drains a late download and removes only its cache", arguments: [false, true])
+    @Test("account close drains a late download without publishing and preserves other accounts", arguments: [false, true])
     func closeDownload(cancelCaller: Bool) async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "im-media-lifecycle-\(UUID())")
         let directory = root.appending(path: "account-a/media-cache")
@@ -51,7 +52,7 @@ struct V2MediaDownloadLifecycleTests {
         let cancelled = AsyncStream<Void>.makeStream()
         let transfer = LateMediaTransfer(entered: entered.continuation, cancelled: cancelled.continuation)
         let resolver = LifecycleMediaResolver()
-        let downloader = try V2ForegroundConversationMediaDownloader(
+        let downloader = try await makeResourceMediaTestDownloader(
             downloader: .init(targetResolver: resolver, byteTransfer: transfer), directory: directory
         )
         let reference = V2MediaReference(mediaID: try .init("lifecycle-media"))
@@ -68,7 +69,7 @@ struct V2MediaDownloadLifecycleTests {
         try await close.value
         await #expect(throws: CancellationError.self) { try await request.value }
         await #expect(throws: CancellationError.self) { try await downloader.download(reference) }
-        #expect(!FileManager.default.fileExists(atPath: directory.path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.appending(path: "cache-scope/resources/files").path).isEmpty)
         #expect(try Data(contentsOf: retained) == Data([7]))
         #expect(await resolver.count == 1)
         try await downloader.close()

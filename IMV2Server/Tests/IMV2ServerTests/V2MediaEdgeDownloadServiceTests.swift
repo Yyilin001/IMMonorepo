@@ -9,6 +9,25 @@ import Testing
 
 @Suite("V2 authenticated media edge")
 struct V2MediaEdgeDownloadServiceTests {
+    @Test func previewSelectionRequiresMessageScopeAndNeverFallsBackToOriginal() async throws {
+        let media = MediaID(uuid: UUID()), room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID())
+        let resolver = PreviewOnlyEdgeResolver()
+        let handler = V2MediaEdgeHTTPHandler(resolver: resolver)
+        let output = try await handler.downloadTarget(actorUserID: .init("actor"), deviceID: .init("device"),
+            rawMediaID: media.rawValue, rawRoomID: room.rawValue, rawMessageID: message.rawValue, rawImageSize: "320")
+        #expect(output.preview?.key.resource == .init(home: .room(room), mediaID: media))
+        #expect(output.plan.expectedByteCount == 3)
+        await #expect(throws: V2MediaEdgeHTTPHandlerError.invalidMessageLocation) {
+            try await handler.downloadTarget(actorUserID: .init("actor"), deviceID: .init("device"), rawMediaID: media.rawValue, rawImageSize: "320")
+        }
+        await #expect(throws: V2MediaEdgeHTTPHandlerError.invalidMessageLocation) {
+            try await handler.downloadTarget(actorUserID: .init("actor"), deviceID: .init("device"), rawMediaID: media.rawValue,
+                rawRoomID: room.rawValue, rawMessageID: message.rawValue, rawImageSize: "999999")
+        }
+        #expect(await resolver.originalCalls == 0)
+        #expect(await resolver.previewCalls == 1)
+    }
+
     @Test("edge keeps the opaque grant internal and returns only the bounded provider target")
     func issuesTargetForAuthenticatedDevice() async throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -79,4 +98,21 @@ private actor EdgeSessionStore: V2MediaDownloadSessionStore {
 private struct EdgeProvider: V2MediaObjectProvider {
     let target: V2ResourceTransferPlan
     func issueDownloadTarget(mediaID _: MediaID, expiresAt _: Date) -> V2ResourceTransferPlan { target }
+}
+
+private actor PreviewOnlyEdgeResolver: V2MediaDownloadTargetResolving {
+    var originalCalls = 0
+    var previewCalls = 0
+    func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) throws -> V2ResourceTransferPlan {
+        originalCalls += 1; throw V2MediaStoreError.downloadNotAuthorized
+    }
+    func imagePreviewTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation, size: V2MediaImagePreviewSize) throws -> V2MediaDownloadTargetEnvelope {
+        previewCalls += 1
+        let digest = try V2ResourceChecksum(value: String(repeating: "a", count: 64))
+        let variant = try V2ResourceVariantDescriptor(key: .init(resource: .init(home: .room(message.roomID), mediaID: mediaID),
+            rendition: .derived(id: .init(uuid: UUID()), version: .init(1))), checksum: digest, byteCount: 3)
+        let plan = try V2ResourceTransferPlan(mode: .httpGet, url: URL(string: "https://objects.invalid/preview")!,
+            expiresAt: .distantFuture, expectedByteCount: 3, checksum: digest)
+        return try .init(plan: plan, preview: variant)
+    }
 }

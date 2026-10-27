@@ -34,12 +34,15 @@ enum V2RoomWriteScalarPersistencePath {
         let replyToMessageID = message.replyTo?.messageID.rawValue ?? ""
         let forwardedFromMessageID = try command.forwardedFrom.map { try scalarRoomWriteUUID($0.messageID) }
         let forwardedFromUserID = try command.forwardedFrom.map { try scalarRoomWriteUUID($0.senderUserID) }
-        let mediaPresentationWire: [[String: Any]] = mediaPresentations.map { presentation in
-            [
+        let mediaPresentationWire: [[String: Any]] = try mediaPresentations.map { presentation in
+            guard let descriptor = presentation.resourceDescriptor,
+                  descriptor.key.home == .room(message.roomID) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            return [
                 "media_id": presentation.mediaID.rawValue,
                 "kind": presentation.kind.rawValue,
                 "content_type": presentation.contentType,
                 "byte_count": presentation.byteCount,
+                "resource_descriptor": try JSONSerialization.jsonObject(with: JSONEncoder().encode(descriptor)),
             ]
         }
         guard let mediaPresentationsJSON = String(data: try JSONSerialization.data(withJSONObject: mediaPresentationWire), encoding: .utf8) else {

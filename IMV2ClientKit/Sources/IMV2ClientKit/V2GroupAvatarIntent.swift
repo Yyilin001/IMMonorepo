@@ -1,19 +1,25 @@
 import Foundation
 import IMV2Core
 
+public enum V2GroupAvatarPreparation: Equatable, Sendable {
+    case upload(UUID), serverImport(UUID)
+}
+
 /// An account-owned, frozen management operation, independent of message outboxes.
 /// It never contains a provider URL, credential or presentation lease.
 public struct V2GroupAvatarIntent: Identifiable, Equatable, Sendable {
     public enum Stage: String, Sendable { case preparing, submitted, needsAttention, committed, cancelled, closed }
     public enum ClosedDisposition: String, Sendable { case awaitingDecision, abandoned, replaced }
     public enum Issue: String, Sendable {
-        case uploadUnavailable, outcomeUnknown, authorizationUnavailable, invalidResponse, throttled
+        case preparationUnavailable, outcomeUnknown, authorizationUnavailable, invalidResponse, throttled
         case revisionConflict, idempotencyConflict, resourceUnavailable, forbidden
     }
     public var id: GroupAvatarOperationID { command.operationID }
     public let actorUserID: UserID
     public let command: V2GroupAvatarCommand
-    public let uploadJobID: UUID?
+    public let preparation: V2GroupAvatarPreparation?
+    public var uploadJobID: UUID? { if case .upload(let id) = preparation { id } else { nil } }
+    public var importJobID: UUID? { if case .serverImport(let id) = preparation { id } else { nil } }
     public let stage: Stage
     public let submissionStarted: Bool
     public let recoveryAction: V2GroupAvatarRecoveryRequest.Action?

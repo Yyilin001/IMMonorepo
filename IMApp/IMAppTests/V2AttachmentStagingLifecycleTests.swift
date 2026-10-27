@@ -1,105 +1,145 @@
 import Foundation
-@testable import IMV2ClientKit
 import IMV2Core
 import Testing
+@testable import IMV2ClientKit
 @testable import IMApp
 
 @MainActor
 struct V2AttachmentStagingLifecycleTests {
-    @Test("account closure preserves unknown group-avatar sources and re-entry cleans only unreferenced drafts")
-    func preserveDurableSources() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "im-staging-durable-\(UUID())")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    @Test("normalized bytes obey the same selection limits and reject cancelled or closed callers")
+    func normalizedPhotoAdmissionAndClose() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "photo-original-admission-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
-        let directory = root.appending(path: "staging"), source = root.appending(path: "source.png")
-        try Data([1, 2, 3]).write(to: source)
-        let stager = try V2FileConversationAttachmentStager(directory: directory)
-        let kept = try await stager.stageImportedFile(at: source), orphan = try await stager.stageImportedFile(at: source)
-        let actor = UserID(uuid: UUID()), room = RoomID(uuid: UUID()), binding = V2LocalInstallationBinding(value: UUID())
-        let database = root.appending(path: "db.sqlite")
-        let store = try GRDBV2LocalSyncStore(databaseURL: database, installationBinding: binding, userID: actor)
-        let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()), usage: .groupAvatar(room),
-            contentType: "image/png", byteCount: kept.byteCount,
-            checksum: .init(value: V2ResourceFileDigest.sha256(fileURL: kept.fileURL, expectedByteCount: kept.byteCount)))
-        _ = try await store.prepareResourceTransfer(id: kept.id, request: request, localFileToken: kept.fileURL.lastPathComponent)
-        let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: room, expectedRevision: 0, mutation: .set(request.mediaID))
-        _ = try await store.freezeGroupAvatarIntent(actorUserID: actor, command: command, uploadJobID: kept.id)
-        try await store.requestGroupAvatarRecovery(command.operationID, action: .query)
-        try await stager.close(preservingDurableFiles: true)
-        try await store.close()
-        await #expect(throws: CancellationError.self) { _ = try await stager.stageImportedFile(at: source) }
-        #expect(try Data(contentsOf: kept.fileURL) == Data([1, 2, 3]))
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: database, installationBinding: binding, userID: actor)
-        let resumedStager = try V2FileConversationAttachmentStager(directory: directory)
-        let retained = try await reopened.retainedResourceFileTokens()
-        await resumedStager.discardOrphanedStagedFiles(retaining: retained, olderThan: .distantFuture)
-        #expect(FileManager.default.fileExists(atPath: kept.fileURL.path))
-        #expect(!FileManager.default.fileExists(atPath: orphan.fileURL.path))
-        #expect(try await reopened.groupAvatarIntent(command.operationID)?.recoveryAction == .query)
-        try await resumedStager.close(preservingDurableFiles: true); try await reopened.close()
-    }
-
-    @Test("cancellation after import admission removes the incomplete copy")
-    func cancelAtCopyBoundary() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "im-staging-copy-cancel-\(UUID())")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let source = root.appending(path: "source.bin")
-        try Data(repeating: 7, count: 128 * 1_024).write(to: source)
-        let directory = root.appending(path: "staging")
-        let stager = try V2FileConversationAttachmentStager(directory: directory, makeUUID: {
-            // The existing ID factory runs after admission and before the
-            // bounded copy, allowing a deterministic cancellation boundary.
+        let fixture = try await V2OriginalResourceTestFixture(root: root, policy: .init(maximumFileBytes: 8, maximumFileCount: 1))
+        await #expect(throws: V2ConversationAttachmentStagingError.invalidByteCount) {
+            try await fixture.stager.stageNormalizedPhoto(.init(data: Data(), format: .jpeg), purpose: .personalAvatar)
+        }
+        await #expect(throws: V2ConversationAttachmentStagingError.fileTooLarge) {
+            try await fixture.stager.stageNormalizedPhoto(.init(data: Data(repeating: 1, count: 9), format: .jpeg), purpose: .personalAvatar)
+        }
+        let photo = V2NormalizedPhoto(data: Data([1,2,3]), format: .png)
+        let draft = try await fixture.stager.stageNormalizedPhoto(photo, purpose: .personalAvatar)
+        await #expect(throws: V2ConversationAttachmentStagingError.stagingQuotaExceeded) {
+            try await fixture.stager.stageNormalizedPhoto(.init(data: Data([4,5,6]), format: .png), purpose: .personalAvatar)
+        }
+        let cancelled = Task {
             withUnsafeCurrentTask { $0?.cancel() }
-            return UUID()
-        })
-        let request = Task { try await stager.stageImportedFile(at: source) }
-        await #expect(throws: CancellationError.self) { try await request.value }
-        #expect(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).isEmpty)
-        #expect(try Data(contentsOf: source).count == 128 * 1_024)
-        try await stager.close()
+            return try await fixture.stager.stageNormalizedPhoto(photo, purpose: .personalAvatar)
+        }
+        await #expect(throws: CancellationError.self) { try await cancelled.value }
+        #expect(try await fixture.read(.selection(draft.localAssetID)) == photo.data)
+        #expect(try await fixture.resources.selectedLocalAssets(purpose: .personalAvatar).count == 1)
+        #expect(try await fixture.resources.storageSnapshot().files.count == 1)
+        try await fixture.close()
+        await #expect(throws: CancellationError.self) {
+            try await fixture.stager.stageNormalizedPhoto(photo, purpose: .personalAvatar)
+        }
+        let restored = try await V2OriginalResourceTestFixture(root: root, scope: fixture.scope)
+        #expect(try await restored.read(.selection(draft.localAssetID)) == photo.data)
+        try await restored.close()
     }
 
-    @Test("closed account staging deletes copies and rejects later imports")
-    func closeStaging() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "im-staging-close-\(UUID())")
+    @Test("cancellation inside the normalized-byte publisher leaves no protected draft or temporary copy")
+    func normalizedPhotoCancellationAtCopyBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "photo-original-copy-cancel-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await V2OriginalResourceTestFixture(root: root, protection: CancellingOriginalProtection())
+        let photo = V2NormalizedPhoto(data: Data(repeating: 9, count: 128 * 1024), format: .jpeg)
+        await #expect(throws: CancellationError.self) {
+            try await fixture.stager.stageNormalizedPhoto(photo, purpose: .personalAvatar)
+        }
+        #expect(try await fixture.resources.selectedLocalAssets(purpose: .personalAvatar).isEmpty)
+        let usage = try await fixture.resources.storageSnapshot()
+        #expect(usage.files.isEmpty && usage.transferReservedBytes == 0)
+        try await fixture.close()
+    }
+
+    @Test("cold reconstruction restores drafts and preserves the independent frozen upload")
+    func coldRecoveryPreservesFrozenSources() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "original-recovery-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let source = root.appending(path: "source.txt")
-        try Data("external source".utf8).write(to: source)
-        let firstDirectory = root.appending(path: "first/staging")
-        let first = try V2FileConversationAttachmentStager(directory: firstDirectory)
-        let second = try V2FileConversationAttachmentStager(directory: root.appending(path: "second/staging"))
-        let copy = try await first.stageImportedFile(at: source)
-        let other = try await second.stageImportedFile(at: source)
-        #expect(try Data(contentsOf: copy.fileURL) == Data(contentsOf: source))
+        let source = root.appending(path: "source.png"); try Data([1,2,3]).write(to: source)
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
+        let room = RoomID(uuid: UUID()), draftRoom = RoomID(uuid: UUID())
+        let kept = try await fixture.stager.stageImportedFile(at: source, purpose: .groupAvatar(room))
+        let draft = try await fixture.stager.stageImportedFile(at: source, purpose: .messageDraft(draftRoom))
+        let asset = try #require(try await fixture.resources.localAsset(kept.localAssetID))
+        let request = try V2ResourceUploadRequest(operationID: .init(uuid: kept.id), mediaID: .init(uuid: kept.id), usage: .groupAvatar(room),
+            contentType: asset.contentType.value, byteCount: asset.byteCount, checksum: asset.checksum, displayName: asset.displayName)
+        let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: room, expectedRevision: 0, mutation: .set(request.mediaID))
+        _ = try await fixture.store.freezeGroupAvatarUploadIntent(actorUserID: fixture.scope.accountID, command: command, uploadJobID: kept.id,
+            request: request, localAssetID: kept.localAssetID)
+        try await fixture.store.requestGroupAvatarRecovery(command.operationID, action: .query)
+        try await fixture.close()
+        await #expect(throws: CancellationError.self) { try await fixture.stager.stageImportedFile(at: source, purpose: .personalAvatar) }
+        let restored = try await V2OriginalResourceTestFixture(root: root, scope: fixture.scope)
+        #expect(try await restored.stager.selectedAttachments(purpose: .messageDraft(draftRoom)).map(\.id) == [draft.id])
+        #expect(try await restored.stager.selectedAttachments(purpose: .groupAvatar(room)).isEmpty)
+        #expect(try await restored.read(.upload(kept.id)) == Data([1,2,3]))
+        await restored.stager.discard(draft)
+        #expect(try await restored.resources.planCleanup().fileIDs.isEmpty)
+        #expect(try await restored.store.groupAvatarIntent(command.operationID)?.recoveryAction == .query)
+        #expect(try Data(contentsOf: source) == Data([1,2,3]))
+        try await restored.close()
+    }
+
+    @Test("cancellation reaches the actual protected publisher without losing the caller's source")
+    func cancelAtCopyBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "original-copy-cancel-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "source.bin"); try Data(repeating: 7, count: 128 * 1024).write(to: source)
+        let fixture = try await V2OriginalResourceTestFixture(root: root, protection: CancellingOriginalProtection())
+        await #expect(throws: CancellationError.self) { try await fixture.stager.stageImportedFile(at: source, purpose: .personalAvatar) }
+        #expect(try await fixture.resources.selectedLocalAssets(purpose: .personalAvatar).isEmpty)
+        #expect(try await fixture.resources.storageSnapshot().files.isEmpty)
+        #expect(try Data(contentsOf: source).count == 128 * 1024)
+        try await fixture.close()
+    }
+
+    @Test("normal account close preserves originals and rejects late imports without crossing accounts")
+    func closeStaging() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "original-close-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "source.txt"); try Data("external source".utf8).write(to: source)
+        let first = try await V2OriginalResourceTestFixture(root: root.appending(path: "first"))
+        let second = try await V2OriginalResourceTestFixture(root: root.appending(path: "second"))
+        let copy = try await first.stager.stageImportedFile(at: source, purpose: .personalAvatar)
+        let other = try await second.stager.stageImportedFile(at: source, purpose: .personalAvatar)
+        #expect(try await first.read(.selection(copy.localAssetID)) == Data(contentsOf: source))
         try await first.close()
-        #expect(!FileManager.default.fileExists(atPath: firstDirectory.path))
-        #expect(try Data(contentsOf: other.fileURL) == Data(contentsOf: source))
-        await #expect(throws: CancellationError.self) { try await first.stageImportedFile(at: source) }
-        try await first.close()
-        #expect(!FileManager.default.fileExists(atPath: firstDirectory.path))
-        try await second.close()
+        #expect(try await second.read(.selection(other.localAssetID)) == Data(contentsOf: source))
+        await #expect(throws: CancellationError.self) { try await first.stager.stageImportedFile(at: source, purpose: .personalAvatar) }
+        let restored = try await V2OriginalResourceTestFixture(root: first.scope.directory, scope: first.scope)
+        #expect(try await restored.read(.selection(copy.localAssetID)) == Data(contentsOf: source))
+        try await restored.close(); try await second.close()
         #expect(FileManager.default.fileExists(atPath: source.path))
     }
 
-    @Test("a cancelled importer never creates a staged copy and normal retry succeeds")
+    @Test("an already-cancelled importer creates no draft and retry publishes a borrowable original")
     func cancelledImport() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "im-staging-cancel-\(UUID())")
+        let root = FileManager.default.temporaryDirectory.appending(path: "original-cancel-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let source = root.appending(path: "source.txt")
-        try Data("payload".utf8).write(to: source)
-        let directory = root.appending(path: "staging")
-        let stager = try V2FileConversationAttachmentStager(directory: directory)
+        let source = root.appending(path: "source.txt"); try Data("payload".utf8).write(to: source)
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
         let cancelled = Task {
             withUnsafeCurrentTask { $0?.cancel() }
-            return try await stager.stageImportedFile(at: source)
+            return try await fixture.stager.stageImportedFile(at: source, purpose: .personalAvatar)
         }
         await #expect(throws: CancellationError.self) { try await cancelled.value }
-        #expect(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).isEmpty)
-        let retry = try await stager.stageImportedFile(at: source)
-        #expect(try Data(contentsOf: retry.fileURL) == Data(contentsOf: source))
-        try await stager.close()
+        #expect(try await fixture.resources.selectedLocalAssets(purpose: .personalAvatar).isEmpty)
+        let retry = try await fixture.stager.stageImportedFile(at: source, purpose: .personalAvatar)
+        #expect(try await fixture.read(.selection(retry.localAssetID)) == Data(contentsOf: source))
+        try await fixture.close()
+    }
+}
+
+private struct CancellingOriginalProtection: V2ResourceFileProtectionWriting {
+    func apply(_ protection: V2ResourceFileProtection, to file: URL) throws {
+        if file.deletingLastPathComponent().lastPathComponent == "partials" { withUnsafeCurrentTask { $0?.cancel() } }
+        try V2SystemResourceFileProtectionWriter().apply(protection, to: file)
     }
 }

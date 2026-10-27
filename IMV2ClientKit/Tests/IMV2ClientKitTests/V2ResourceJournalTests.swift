@@ -5,12 +5,102 @@ import Testing
 
 @Suite("Resource journal and frozen send intent")
 struct V2ResourceJournalTests {
+    @Test(arguments: [false, true])
+    func handoffUsesFrozenDependencyKindEvenIfAnotherKindLaterSharesItsID(imported: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appendingPathComponent("journal.sqlite"),
+            installationBinding: .init(value: UUID()), userID: .init(uuid: UUID()))
+        let room = RoomID(uuid: UUID()), id = UUID()
+        let upload = try V2ResourceUploadRequest(operationID: .init(uuid: id), mediaID: .init(uuid: id),
+            usage: .messageAttachment(room), contentType: "image/png", byteCount: 10,
+            checksum: .init(value: String(repeating: "a", count: 64)))
+        let request = try V2ResourceImportRequest(operationID: .init(uuid: UUID()),
+            source: .message(location: .init(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID())),
+                mediaID: .init(uuid: UUID()), variantID: nil), targetUsage: .messageAttachment(room), targetMediaID: .init(uuid: UUID()))
+        if imported { try await store.prepareResourceImport(id: id, request: request) }
+        else { _ = try await store.prepareMetadataResourceTransfer(id: id, request: upload, localAssetID: .init(id)) }
+        let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()), text: "draft", attachmentJobIDs: [id])
+        try await store.freezeSendIntent(intent)
+        if imported { _ = try await store.prepareMetadataResourceTransfer(id: id, request: upload, localAssetID: .init(id)) }
+        else { try await store.prepareResourceImport(id: id, request: request) }
+        try await store.saveResourceSession(.init(locator: .init(home: .room(room), sessionID: .init(uuid: UUID())),
+            mediaID: upload.mediaID, generation: 1, state: .completed, resourceState: .ready,
+            expiresAt: .distantFuture, bindableUntil: .distantFuture), for: id)
+        try await store.seedResourceImportStatus(.init(locator: .init(home: .room(room), operationID: request.operationID),
+            mediaID: request.targetMediaID, state: .ready, bindableUntil: .distantFuture), id: id)
+        _ = try await store.handOffSendIntent(intent.id)
+        #expect(try await store.resourceSendPayloads().first?.media == [.init(mediaID: imported ? request.targetMediaID : upload.mediaID)])
+        try await store.completeResourceSendFixture(intent.clientMessageID, result: .rejected(.permissionDenied))
+        let replacement = try await store.replaceProvenUnsentSendIntent(intent.id)
+        let next = try #require(try await store.preparingSendIntent(id: replacement)?.attachmentJobIDs.first)
+        if imported {
+            #expect(try await store.resourceImport(id: next)?.request.source == request.source)
+            #expect(try await store.resourceTransfer(id: next) == nil)
+        } else {
+            #expect(try await store.resourceTransfer(id: next)?.localAssetID == .init(id))
+            #expect(try await store.resourceImport(id: next) == nil)
+        }
+        try await store.close()
+    }
+
+    @Test func ambiguousTransferIdentityCannotBecomeMessageDependency() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appendingPathComponent("journal.sqlite"),
+            installationBinding: .init(value: UUID()), userID: .init(uuid: UUID()))
+        let room = RoomID(uuid: UUID()), id = UUID()
+        let upload = try V2ResourceUploadRequest(operationID: .init(uuid: id), mediaID: .init(uuid: id),
+            usage: .messageAttachment(room), contentType: "image/png", byteCount: 10,
+            checksum: .init(value: String(repeating: "a", count: 64)))
+        _ = try await store.prepareMetadataResourceTransfer(id: id, request: upload, localAssetID: .init(id))
+        let request = try V2ResourceImportRequest(operationID: .init(uuid: UUID()),
+            source: .message(location: .init(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID())),
+                mediaID: .init(uuid: UUID()), variantID: nil), targetUsage: .messageAttachment(room), targetMediaID: .init(uuid: UUID()))
+        try await store.prepareResourceImport(id: id, request: request)
+        let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()), text: "draft", attachmentJobIDs: [id])
+        await #expect(throws: V2ResourceJournalError.conflict) { try await store.freezeSendIntent(intent) }
+        #expect(try await store.preparingSendIntent(id: intent.id) == nil)
+        try await store.close()
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func existingAttachmentAdmissionRequiresTheTargetConversation(imported: Bool, matchingRoom: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appendingPathComponent("journal.sqlite"),
+            installationBinding: .init(value: UUID()), userID: .init(uuid: UUID()))
+        let room = RoomID(uuid: UUID()), target = matchingRoom ? room : RoomID(uuid: UUID()), id = UUID()
+        if imported {
+            let request = try V2ResourceImportRequest(operationID: .init(uuid: id),
+                source: .message(location: .init(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID())),
+                    mediaID: .init(uuid: UUID()), variantID: nil),
+                targetUsage: .messageAttachment(room), targetMediaID: .init(uuid: UUID()))
+            try await store.prepareResourceImport(id: id, request: request)
+        } else {
+            let request = try V2ResourceUploadRequest(operationID: .init(uuid: id), mediaID: .init(uuid: id),
+                usage: .messageAttachment(room), contentType: "image/png", byteCount: 10,
+                checksum: .init(value: String(repeating: "a", count: 64)))
+            _ = try await store.prepareMetadataResourceTransfer(id: id, request: request, localAssetID: .init(id))
+        }
+        let intent = try V2SendIntent(id: UUID(), roomID: target, clientMessageID: .init(uuid: UUID()),
+            text: "draft", attachmentJobIDs: [id])
+        if matchingRoom {
+            try await store.freezeSendIntent(intent)
+            #expect(try await store.preparingSendIntent(id: intent.id) != nil)
+        } else {
+            await #expect(throws: V2ResourceJournalError.conflict) { try await store.freezeSendIntent(intent) }
+            #expect(try await store.preparingSendIntent(id: intent.id) == nil)
+        }
+        try await store.close()
+    }
+
     @Test func frozenIntentSurvivesRestartAndHandsOffOnlyOnce() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("resource-journal-\(UUID()).sqlite")
         let binding = V2LocalInstallationBinding(value: UUID())
         let intent = try V2SendIntent(id: UUID(), roomID: .init(UUID().uuidString), clientMessageID: .init(UUID().uuidString), text: "immutable snapshot", attachmentJobIDs: [])
         let first = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: .init(uuid:UUID(uuidString:"12345678-1234-1234-1234-123456789012")!))
-        try await first.freezeSendIntent(intent)
+        try await first.freezeMetadataSendIntent(intent)
         let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: .init(uuid:UUID(uuidString:"12345678-1234-1234-1234-123456789012")!))
         #expect(try await restarted.preparingSendIntents() == [intent])
         #expect(try await restarted.handOffSendIntent(intent.id) == intent.clientMessageID)
@@ -29,10 +119,10 @@ struct V2ResourceJournalTests {
         let request = try V2ResourceImportRequest(operationID: .init(UUID().uuidString), source: source, targetUsage: .messageAttachment(room), targetMediaID: .init(UUID().uuidString))
         try await store.prepareResourceImport(id: id, request: request)
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(UUID().uuidString), text: "copy", attachmentJobIDs: [id])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         await #expect(throws: V2ResourceJournalError.dependencyNotReady) { try await store.handOffSendIntent(intent.id) }
         let status = try V2ResourceImportStatus(locator: .init(home: .room(room), operationID: request.operationID), mediaID: request.targetMediaID, state: .ready, bindableUntil: Date().addingTimeInterval(60))
-        try await store.saveResourceImport(status, id: id)
+        try await store.seedResourceImportStatus(status, id: id)
         let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: .init(uuid:UUID(uuidString:"12345678-1234-1234-1234-123456789012")!))
         _ = try await restarted.handOffSendIntent(intent.id)
         let commands = try await restarted.resourceSendPayloads()
@@ -45,9 +135,9 @@ struct V2ResourceJournalTests {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("resource-frozen-\(UUID()).sqlite")
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: .init(value: UUID()), userID: .init(uuid:UUID()))
         let intent = try V2SendIntent(id: UUID(), roomID: .init(UUID().uuidString), clientMessageID: .init(UUID().uuidString), text: "original", attachmentJobIDs: [])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         let changed = try V2SendIntent(id: intent.id, roomID: intent.roomID, clientMessageID: intent.clientMessageID, text: "edited", attachmentJobIDs: [])
-        await #expect(throws: V2ResourceJournalError.conflict) { try await store.freezeSendIntent(changed) }
+        await #expect(throws: V2ResourceJournalError.conflict) { try await store.freezeMetadataSendIntent(changed) }
         #expect(try await store.preparingSendIntents() == [intent])
         try await store.cancelSendIntent(intent.id)
         await #expect(throws: V2ResourceJournalError.conflict) { try await store.handOffSendIntent(intent.id) }
@@ -66,7 +156,7 @@ struct V2ResourceRecoveryTests {
         let file=directory.appendingPathComponent(jobID.uuidString)
         try Data([1,2,3]).write(to:file)
         let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:3,checksum:.init(value:String(repeating:"b",count:64)))
-        _ = try await store.prepareResourceTransfer(id:jobID,request:request,localFileToken:jobID.uuidString)
+        _ = try await store.prepareMetadataResourceTransfer(id:jobID,request:request,localAssetID: .init(jobID))
         let ready=try V2ResourceUploadSession(locator:.init(home:.room(room),sessionID:.init(uuid:UUID())),mediaID:request.mediaID,generation:1,state:.completed,resourceState:.ready,expiresAt:Date().addingTimeInterval(100),bindableUntil:Date().addingTimeInterval(100))
         try await store.saveResourceSession(ready,for:jobID)
         var attachmentIDs=[jobID]
@@ -79,14 +169,14 @@ struct V2ResourceRecoveryTests {
                     targetUsage:.messageAttachment(room),targetMediaID:.init(uuid:UUID()))
                 originalImports.append(imported)
                 try await store.prepareResourceImport(id:importID,request:imported)
-                try await store.saveResourceImport(.init(locator:.init(home:.room(room),operationID:imported.operationID),mediaID:imported.targetMediaID,state:.ready,bindableUntil:Date().addingTimeInterval(100)),id:importID)
+                try await store.seedResourceImportStatus(.init(locator:.init(home:.room(room),operationID:imported.operationID),mediaID:imported.targetMediaID,state:.ready,bindableUntil:Date().addingTimeInterval(100)),id:importID)
                 attachmentIDs.insert(importID,at:ordinal==0 ? 0 : 2)
             }
         }
         let intent=try V2SendIntent(id:UUID(),roomID:room,clientMessageID:.init(uuid:UUID()),text:"Frozen original text",
             mentions:[.user(.init(uuid:UUID()))],entities:[.init(offsetUTF16:0,lengthUTF16:6,kind:.bold)],
             replyTo:.init(messageID:.init(uuid:UUID())),attachmentJobIDs:attachmentIDs)
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         _ = try await store.handOffSendIntent(intent.id)
         try await store.claimResourceSendForRecovery(intent.clientMessageID,now:Date())
         await #expect(throws:V2ResourceJournalError.conflict) { _ = try await store.replaceProvenUnsentSendIntent(intent.id) }
@@ -109,7 +199,7 @@ struct V2ResourceRecoveryTests {
             // A failed multi-resource replacement preserves the original and
             // rolls back the new intent and every partially inserted job.
             for (id, filler) in fillers {
-                try await store.saveResourceImport(.init(locator: .init(home: .room(room), operationID: filler.operationID),
+                try await store.seedResourceImportStatus(.init(locator: .init(home: .room(room), operationID: filler.operationID),
                     mediaID: filler.targetMediaID, state: .cancelled, bindableUntil: nil), id: id)
             }
         }
@@ -125,9 +215,9 @@ struct V2ResourceRecoveryTests {
         let newJobID=replacement.attachmentJobIDs[mixedImports ? 1 : 0]
         let newJob=try #require(try await store.resourceTransfer(id:newJobID))
         #expect(newJob.request.mediaID != request.mediaID && newJob.request.operationID != request.operationID)
-        #expect(newJob.request.checksum==request.checksum && newJob.localFileToken==jobID.uuidString)
-        let engine=V2ResourceTransferEngine(store:store,control:ReadyResourceControl(ready:ready),executor:ForbiddenResourceExecutor(),directory:directory)
-        try await engine.releaseAcceptedStaging()
+        #expect(newJob.request.checksum==request.checksum && newJob.localAssetID == .init(jobID))
+        let engine=V2ResourceTransferEngine(store:store,control:ReadyResourceControl(ready:ready),executor:ForbiddenResourceExecutor(),resources:try await makeResourceTestCenter(store:store,root:directory))
+        try await engine.releaseFinishedSources()
         #expect(FileManager.default.fileExists(atPath:file.path))
         #expect(try await store.resourceSendPayloads().count==1)
         let newReady=try V2ResourceUploadSession(locator:.init(home:.room(room),sessionID:.init(uuid:UUID())),mediaID:newJob.request.mediaID,generation:1,state:.completed,resourceState:.ready,expiresAt:Date().addingTimeInterval(100),bindableUntil:Date().addingTimeInterval(100))
@@ -139,7 +229,7 @@ struct V2ResourceRecoveryTests {
                 let imported=try #require(try await store.resourceImport(id:replacementJobID)).request
                 #expect(imported.source==originalImports[index].source && imported.targetUsage==originalImports[index].targetUsage)
                 #expect(imported.operationID != originalImports[index].operationID && imported.targetMediaID != originalImports[index].targetMediaID)
-                try await store.saveResourceImport(.init(locator:.init(home:.room(room),operationID:imported.operationID),mediaID:imported.targetMediaID,state:.ready,bindableUntil:Date().addingTimeInterval(100)),id:replacementJobID)
+                try await store.seedResourceImportStatus(.init(locator:.init(home:.room(room),operationID:imported.operationID),mediaID:imported.targetMediaID,state:.ready,bindableUntil:Date().addingTimeInterval(100)),id:replacementJobID)
             }
         }
         _ = try await store.handOffSendIntent(replacementID)
@@ -151,11 +241,12 @@ struct V2ResourceRecoveryTests {
                 #expect(submitted.media[ordinal].mediaID == (try await store.resourceImport(id:replacement.attachmentJobIDs[ordinal]))?.request.targetMediaID)
             }
         }
-        try await engine.releaseAcceptedStaging()
+        try await engine.releaseFinishedSources()
         #expect(FileManager.default.fileExists(atPath:file.path))
         try await store.completeResourceSendFixture(replacement.clientMessageID,result:.accepted(.init(messageID:.init(uuid:UUID()),roomSequence:1)))
-        try await engine.releaseAcceptedStaging()
-        #expect(!FileManager.default.fileExists(atPath:file.path))
+        try await engine.releaseFinishedSources()
+        #expect(FileManager.default.fileExists(atPath:file.path))
+        #expect(try await store.testHeldAssetIDs().contains(.init(jobID)) == false)
         await engine.close()
         try await store.close()
     }
@@ -168,20 +259,20 @@ struct V2ResourceRecoveryTests {
         let file=directory.appendingPathComponent(jobID.uuidString)
         try Data([1,2,3]).write(to:file)
         let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:3,checksum:.init(value:String(repeating:"a",count:64)))
-        _ = try await store.prepareResourceTransfer(id:jobID,request:request,localFileToken:jobID.uuidString)
+        _ = try await store.prepareMetadataResourceTransfer(id:jobID,request:request,localAssetID: .init(jobID))
         let ready=try V2ResourceUploadSession(locator:.init(home:.room(room),sessionID:.init(uuid:UUID())),mediaID:request.mediaID,generation:1,state:.completed,resourceState:.ready,expiresAt:Date().addingTimeInterval(100),bindableUntil:Date().addingTimeInterval(100))
         try await store.saveResourceSession(ready,for:jobID)
         let intent=try V2SendIntent(id:UUID(),roomID:room,clientMessageID:.init(uuid:UUID()),text:"Retain the original",attachmentJobIDs:[jobID])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         _ = try await store.handOffSendIntent(intent.id)
-        let engine=V2ResourceTransferEngine(store:store,control:ReadyResourceControl(ready:ready),executor:ForbiddenResourceExecutor(),directory:directory)
-        try await engine.releaseAcceptedStaging()
+        let engine=V2ResourceTransferEngine(store:store,control:ReadyResourceControl(ready:ready),executor:ForbiddenResourceExecutor(),resources:try await makeResourceTestCenter(store:store,root:directory))
+        try await engine.releaseFinishedSources()
         #expect(FileManager.default.fileExists(atPath:file.path))
         #expect(try await store.submittedSendIntents(in:room).first?.status == .pending)
         try await store.claimResourceSendForRecovery(intent.clientMessageID,now:Date())
         #expect(try await store.submittedSendIntents(in:room).first?.status == .confirmingOutcome)
         _ = try await store.pruneCompletedOperationHistory(now:Date().addingTimeInterval(8*86_400))
-        try await engine.releaseAcceptedStaging()
+        try await engine.releaseFinishedSources()
         #expect(FileManager.default.fileExists(atPath:file.path))
         #expect(try await store.resourceSendPayloads().count==1)
         let accepted = try V2MessageOperationAcceptance(messageID: .init(uuid: UUID()), roomSequence: 1)
@@ -193,8 +284,9 @@ struct V2ResourceRecoveryTests {
         #expect(try await store.submittedSendIntents(in:room).isEmpty)
         _ = try await store.pruneCompletedOperationHistory(now:Date().addingTimeInterval(8*86_400))
         #expect(try await store.resourceSendPayloads().count==1)
-        try await engine.releaseAcceptedStaging()
-        #expect(!FileManager.default.fileExists(atPath:file.path))
+        try await engine.releaseFinishedSources()
+        #expect(FileManager.default.fileExists(atPath:file.path))
+        #expect(try await store.testHeldAssetIDs().contains(.init(jobID)) == false)
         #expect(try await store.releasableResourceJobs().isEmpty)
         _ = try await store.pruneCompletedOperationHistory(now:Date().addingTimeInterval(8*86_400))
         #expect(try await store.resourceSendPayloads().isEmpty)
@@ -209,14 +301,14 @@ struct V2ResourceRecoveryTests {
         let store=try GRDBV2LocalSyncStore(databaseURL:directory.appendingPathComponent("db.sqlite"),installationBinding:.init(value:UUID()),userID:.init(uuid:UUID()))
         let room=try RoomID(UUID().uuidString),existingID=UUID()
         let request=try V2ResourceUploadRequest(operationID:.init(UUID().uuidString),mediaID:.init(UUID().uuidString),usage:.messageAttachment(room),contentType:"text/plain",byteCount:3,checksum:.init(value:String(repeating:"a",count:64)))
-        _ = try await store.prepareResourceTransfer(id:existingID,request:request,localFileToken:existingID.uuidString)
+        _ = try await store.prepareMetadataResourceTransfer(id:existingID,request:request,localAssetID: .init(existingID))
         let ready=try V2ResourceUploadSession(locator:.init(home:.room(room),sessionID:.init(UUID().uuidString)),mediaID:request.mediaID,generation:1,state:.completed,resourceState:.ready,expiresAt:Date().addingTimeInterval(100),bindableUntil:Date().addingTimeInterval(100))
         let cache=V2ResourceCapabilitiesCache(reader:ReducedResourceCapabilities())
         try await cache.refreshIfNeeded()
-        let engine=V2ResourceTransferEngine(store:store,control:ReadyResourceControl(ready:ready),executor:ForbiddenResourceExecutor(),directory:directory,capabilities:cache)
-        #expect(try await engine.prepare(id:existingID,request:request).id==existingID)
+        let engine=V2ResourceTransferEngine(store:store,control:ReadyResourceControl(ready:ready),executor:ForbiddenResourceExecutor(),resources:try await makeResourceTestCenter(store:store,root:directory),capabilities:cache)
+        #expect(try await engine.prepare(id:existingID,request:request,localAssetID:.init(existingID)).id==existingID)
         let newID=UUID()
-        await #expect(throws:V2ResourceCapabilityError.fileTooLarge(maximumBytes:1)) { _ = try await engine.prepare(id:newID,request:request) }
+        await #expect(throws:V2ResourceCapabilityError.fileTooLarge(maximumBytes:1)) { _ = try await engine.prepare(id:newID,request:request,localAssetID:.init(newID)) }
         #expect(try await store.resourceTransfer(id:newID)==nil)
         await engine.close()
     }
@@ -228,7 +320,7 @@ struct V2ResourceRecoveryTests {
         let jobID = UUID()
         let room = try RoomID(UUID().uuidString)
         let request = try V2ResourceUploadRequest(operationID: .init(UUID().uuidString), mediaID: .init(UUID().uuidString), usage: .messageAttachment(room), contentType: "text/plain", byteCount: 3, checksum: .init(value: String(repeating: "a", count: 64)))
-        _ = try await store.prepareResourceTransfer(id: jobID, request: request, localFileToken: jobID.uuidString)
+        _ = try await store.prepareMetadataResourceTransfer(id: jobID, request: request, localAssetID: .init(jobID))
         let locator = V2ResourceUploadLocator(home: .room(room), sessionID: try .init(UUID().uuidString))
         let processing = try V2ResourceUploadSession(locator: locator, mediaID: request.mediaID, generation: 1, state: .finalizing, resourceState: .scanning, expiresAt: Date().addingTimeInterval(100))
         try await store.saveResourceSession(processing, for: jobID)
@@ -236,7 +328,7 @@ struct V2ResourceRecoveryTests {
         let control = ReadyResourceControl(ready: ready)
         let executor = ForbiddenResourceExecutor()
         let restarted = try GRDBV2LocalSyncStore(databaseURL: directory.appendingPathComponent("db.sqlite"), installationBinding: binding, userID: .init(uuid:UUID(uuidString:"12345678-1234-1234-1234-123456789012")!))
-        let engine = V2ResourceTransferEngine(store: restarted, control: control, executor: executor, directory: directory)
+        let engine = V2ResourceTransferEngine(store: restarted, control: control, executor: executor, resources: try await makeResourceTestCenter(store: restarted, root: directory))
         let result = try await engine.resume(id: jobID)
         #expect(result.request == request)
         #expect(result.session?.locator == locator)
@@ -250,11 +342,11 @@ struct V2ResourceRecoveryTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: .init(value: UUID()), userID: .init(uuid:UUID()))
         let jobID = UUID(), room = try RoomID(UUID().uuidString)
         let request = try V2ResourceUploadRequest(operationID: .init(UUID().uuidString), mediaID: .init(UUID().uuidString), usage: .messageAttachment(room), contentType: "text/plain", byteCount: 3, checksum: .init(value: String(repeating: "b", count: 64)))
-        _ = try await store.prepareResourceTransfer(id: jobID, request: request, localFileToken: jobID.uuidString)
+        _ = try await store.prepareMetadataResourceTransfer(id: jobID, request: request, localAssetID: .init(jobID))
         let ready = try V2ResourceUploadSession(locator: .init(home: .room(room), sessionID: .init(UUID().uuidString)), mediaID: request.mediaID, generation: 1, state: .completed, resourceState: .ready, expiresAt: Date(), bindableUntil: Date().addingTimeInterval(-1))
         try await store.saveResourceSession(ready, for: jobID)
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(UUID().uuidString), text: "", attachmentJobIDs: [jobID])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         await #expect(throws: V2ResourceJournalError.bindingExpired) { try await store.handOffSendIntent(intent.id) }
         #expect(try await store.resourceSendPayloads().isEmpty)
     }

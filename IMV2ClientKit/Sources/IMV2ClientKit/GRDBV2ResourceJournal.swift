@@ -7,7 +7,7 @@ extension GRDBV2LocalSyncStore {
         CREATE TABLE v2_resource_transfer_jobs (
             job_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
             media_id TEXT NOT NULL UNIQUE, request BLOB NOT NULL,
-            local_file_token TEXT NOT NULL, session BLOB,
+            local_asset_id TEXT NOT NULL REFERENCES v2_resource_local_assets(asset_id), session BLOB,
             stage TEXT NOT NULL CHECK(stage IN ('prepared','transferring','processing','ready','paused','cancelled','rejected','expired')),
             cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancellation_requested IN (0,1)),
             attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
@@ -18,24 +18,34 @@ extension GRDBV2LocalSyncStore {
             background_attempts INTEGER NOT NULL DEFAULT 0 CHECK(background_attempts>=0),
             round_deadline REAL, poll_attempts INTEGER NOT NULL DEFAULT 0 CHECK(poll_attempts >= 0),
             needs_attention INTEGER NOT NULL DEFAULT 0 CHECK(needs_attention IN (0,1)),
+            user_control TEXT NOT NULL DEFAULT 'run' CHECK(user_control IN ('run','pause')),
             execution_owner TEXT,
-            staging_released INTEGER NOT NULL DEFAULT 0 CHECK(staging_released IN (0,1)),
-            staging_release_started INTEGER NOT NULL DEFAULT 0 CHECK(staging_release_started IN (0,1)),
+            source_released INTEGER NOT NULL DEFAULT 0 CHECK(source_released IN (0,1)),
+            finished_at REAL CHECK(finished_at>=0), history_retired INTEGER NOT NULL DEFAULT 0 CHECK(history_retired IN (0,1)),
             bindable_until REAL, created_at REAL NOT NULL
         );
         CREATE INDEX v2_resource_transfer_active_admission ON v2_resource_transfer_jobs(job_id)
             WHERE stage NOT IN ('ready','cancelled','rejected','expired');
         CREATE INDEX v2_resource_transfer_due ON v2_resource_transfer_jobs(retry_at, created_at, job_id)
-            WHERE stage NOT IN ('ready','cancelled','rejected','expired') AND needs_attention=0 AND execution_owner IS NULL AND next_action<>'awaitingBackground';
-        CREATE INDEX v2_resource_staging_release_candidates ON v2_resource_transfer_jobs(job_id) WHERE stage='ready' AND staging_released=0;
-        CREATE INDEX v2_resource_jobs_local_file ON v2_resource_transfer_jobs(local_file_token);
+            WHERE stage NOT IN ('ready','cancelled','rejected','expired') AND needs_attention=0 AND user_control='run' AND execution_owner IS NULL AND next_action<>'awaitingBackground';
+        CREATE INDEX v2_resource_staging_release_candidates ON v2_resource_transfer_jobs(job_id) WHERE stage='ready' AND source_released=0;
+        CREATE INDEX v2_resource_jobs_local_file ON v2_resource_transfer_jobs(local_asset_id);
+        CREATE TRIGGER v2_resource_transfer_finished AFTER UPDATE OF stage ON v2_resource_transfer_jobs
+            WHEN NEW.stage IN ('ready','cancelled') AND NEW.finished_at IS NULL
+            BEGIN UPDATE v2_resource_transfer_jobs SET finished_at=unixepoch('subsec') WHERE job_id=NEW.job_id; END;
+        CREATE INDEX v2_resource_transfer_history ON v2_resource_transfer_jobs(finished_at DESC,job_id DESC)
+            WHERE finished_at IS NOT NULL AND history_retired=0;
+        CREATE INDEX v2_resource_transfer_retired ON v2_resource_transfer_jobs(finished_at,job_id)
+            WHERE history_retired=1 AND stage IN ('ready','cancelled') AND source_released=1 AND execution_owner IS NULL;
+        CREATE INDEX v2_resource_transfer_created ON v2_resource_transfer_jobs(created_at DESC,job_id DESC);
         CREATE TABLE v2_background_transfer_session(singleton INTEGER PRIMARY KEY CHECK(singleton=1),session_id TEXT NOT NULL UNIQUE);
         CREATE TABLE v2_background_transfer_tasks(
             mapping_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,job_id TEXT NOT NULL REFERENCES v2_resource_transfer_jobs(job_id),
             activation_id TEXT NOT NULL,task_identifier INTEGER NOT NULL,source_token TEXT NOT NULL,
-            part_number INTEGER NOT NULL CHECK(part_number BETWEEN 1 AND 32),expected_bytes INTEGER NOT NULL CHECK(expected_bytes>0 AND expected_bytes<=8388608),
+            part_number INTEGER CHECK(part_number BETWEEN 1 AND 32),expected_bytes INTEGER NOT NULL CHECK(expected_bytes>0 AND expected_bytes<=268435456 AND (part_number IS NULL OR expected_bytes<=8388608)),
             expires_at REAL NOT NULL,origin_digest TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','completed')),
             created_at REAL NOT NULL,UNIQUE(session_id,task_identifier));
+        CREATE INDEX v2_background_transfer_job ON v2_background_transfer_tasks(job_id);
         CREATE UNIQUE INDEX v2_background_transfer_active_job ON v2_background_transfer_tasks(job_id) WHERE state='active';
         CREATE TABLE v2_send_intents (
             intent_id TEXT PRIMARY KEY, client_message_id TEXT NOT NULL UNIQUE,
@@ -64,21 +74,32 @@ extension GRDBV2LocalSyncStore {
         CREATE TABLE v2_resource_import_jobs (
             job_id TEXT PRIMARY KEY, request BLOB NOT NULL, status BLOB,
             cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancellation_requested IN (0,1)),
+            user_control TEXT NOT NULL DEFAULT 'run' CHECK(user_control IN ('run','pause')),
             stage TEXT NOT NULL CHECK(stage IN ('pending','copying','processing','ready','cancelled','failed')),
             attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
             retry_at REAL NOT NULL DEFAULT 0, server_retry_not_before REAL NOT NULL DEFAULT 0, poll_attempts INTEGER NOT NULL DEFAULT 0 CHECK(poll_attempts>=0),
-            round_deadline REAL, created_at REAL NOT NULL
+            round_deadline REAL, execution_owner TEXT, created_at REAL NOT NULL,
+            finished_at REAL CHECK(finished_at>=0), history_retired INTEGER NOT NULL DEFAULT 0 CHECK(history_retired IN (0,1))
         );
         CREATE INDEX v2_resource_import_active_admission ON v2_resource_import_jobs(job_id)
             WHERE stage NOT IN ('ready','cancelled','failed');
+        CREATE TRIGGER v2_resource_import_finished AFTER UPDATE OF stage ON v2_resource_import_jobs
+            WHEN NEW.stage IN ('ready','cancelled') AND NEW.finished_at IS NULL
+            BEGIN UPDATE v2_resource_import_jobs SET finished_at=unixepoch('subsec') WHERE job_id=NEW.job_id; END;
+        CREATE INDEX v2_resource_import_history ON v2_resource_import_jobs(finished_at DESC,job_id DESC)
+            WHERE finished_at IS NOT NULL AND history_retired=0;
+        CREATE INDEX v2_resource_import_retired ON v2_resource_import_jobs(finished_at,job_id)
+            WHERE history_retired=1 AND stage IN ('ready','cancelled') AND execution_owner IS NULL;
+        CREATE INDEX v2_resource_import_created ON v2_resource_import_jobs(created_at DESC,job_id DESC);
         CREATE INDEX v2_resource_import_due ON v2_resource_import_jobs(retry_at,created_at,job_id)
-            WHERE stage NOT IN ('ready','cancelled','failed') AND attempts<5;
+            WHERE stage NOT IN ('ready','cancelled','failed') AND attempts<5 AND user_control='run';
         CREATE TABLE v2_send_intent_import_dependencies (
             intent_id TEXT NOT NULL REFERENCES v2_send_intents(intent_id),
             ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
             job_id TEXT NOT NULL REFERENCES v2_resource_import_jobs(job_id),
             PRIMARY KEY(intent_id,ordinal), UNIQUE(intent_id,job_id)
         );
+        CREATE INDEX v2_send_intent_import_job ON v2_send_intent_import_dependencies(job_id,intent_id);
         """
 
     static func restoreArchivedConversationToInbox(roomID: RoomID, now: Date, db: Database) throws {
@@ -103,7 +124,7 @@ extension GRDBV2LocalSyncStore {
                 try Self.prepareResourceImport(id: id, request: request, now: now, db: db)
             }
             for resource in resources {
-                _ = try Self.prepareResourceTransfer(id: resource.id, request: resource.request, localFileToken: resource.localFileToken, now: now, db: db)
+                _ = try Self.prepareResourceTransfer(id: resource.id, request: resource.request, localAssetID: resource.localAssetID, now: now, db: db)
             }
             if let existing = try Self.readSendIntent(intent.id, db: db) {
                 guard existing.roomID == intent.roomID, existing.clientMessageID == intent.clientMessageID,
@@ -126,9 +147,19 @@ extension GRDBV2LocalSyncStore {
                                   try Self.encodeMentions(intent.mentions), try Self.encodeEntities(intent.entities, text: intent.text),
                                   intent.replyTo?.messageID.rawValue, try Self.commandRetryTimestamp(originalCreatedAt ?? now),reservation,Int64(deadline)])
             for (ordinal, job) in intent.attachmentJobIDs.enumerated() {
-                let imported = try Self.readResourceImport(job, db: db) != nil
+                let importedJob = try Self.readResourceImport(job, db: db)
+                let uploadJob = try Self.readResourceTransfer(job, db: db)
+                // Bare dependency IDs are admitted only when their kind is
+                // unambiguous. The chosen dependency table then freezes it.
+                guard importedJob == nil || uploadJob == nil else { throw V2ResourceJournalError.conflict }
+                if let importedJob {
+                    guard !importedJob.cancellationRequested,
+                          importedJob.request.targetUsage == .messageAttachment(intent.roomID) else { throw V2ResourceJournalError.conflict }
+                }
+                let imported = importedJob != nil
                 if !imported {
-                    guard try Bool.fetchOne(db, sql: "SELECT staging_released=0 AND staging_release_started=0 AND cancellation_requested=0 FROM v2_resource_transfer_jobs WHERE job_id=?",
+                    guard let uploadJob, uploadJob.request.usage == .messageAttachment(intent.roomID),
+                          try Bool.fetchOne(db, sql: "SELECT source_released=0 AND cancellation_requested=0 FROM v2_resource_transfer_jobs WHERE job_id=?",
                         arguments: [job.uuidString]) == true else { throw V2ResourceJournalError.conflict }
                 }
                 let table = imported ? "v2_send_intent_import_dependencies" : "v2_send_intent_dependencies"
@@ -214,9 +245,11 @@ extension GRDBV2LocalSyncStore {
             if intent.stage == .handedOff { return intent.clientMessageID }
             guard intent.stage == .preparing else { throw V2ResourceJournalError.conflict }
             var media: [V2MediaReference] = []
+            let importDependencies = try Self.sendImportDependencyIDs(id, db: db)
             for job in intent.attachmentJobIDs {
-                if let imported = try Self.readResourceImport(job, db: db) {
-                    guard !imported.cancellationRequested, imported.request.targetUsage == .messageAttachment(intent.roomID),
+                if importDependencies.contains(job) {
+                    guard let imported = try Self.readResourceImport(job, db: db),
+                          !imported.cancellationRequested, imported.request.targetUsage == .messageAttachment(intent.roomID),
                           let status = imported.status, status.state == .ready else { throw V2ResourceJournalError.dependencyNotReady }
                     guard let until = status.bindableUntilUnixMilliseconds, Double(until) / 1_000 > now.timeIntervalSince1970 else { throw V2ResourceJournalError.bindingExpired }
                     media.append(.init(mediaID: status.mediaID))
@@ -253,41 +286,69 @@ extension GRDBV2LocalSyncStore {
                 guard let result=UUID(uuidString:existing) else {throw V2ResourceJournalError.invalidRecord};return result
             }
             let original=try Self.requireProvenUnsentSendIntent(id,db:db)
-            try Self.restoreArchivedConversationToInbox(roomID: original.roomID, now: now, db: db)
-            let replacementID=UUID(), clientID=UUID()
-            let deadline=try Self.messageSendDeadline(now:now)
-            try db.execute(sql:"""
-                INSERT INTO v2_send_intents(intent_id,client_message_id,room_id,text,mentions,entities,reply_to,stage,created_at,replacement_of,payload_bytes,admission_deadline)
-                VALUES(?,?,?,?,?,?,?,'preparing',?,?,0,?)
-                """,arguments:[replacementID.uuidString,clientID.uuidString,original.roomID.rawValue,original.text,
-                    try Self.encodeMentions(original.mentions),try Self.encodeEntities(original.entities,text:original.text),
-                    original.replyTo?.messageID.rawValue,try Self.commandRetryTimestamp(now),id.uuidString,Int64(deadline)])
-            for (ordinal,oldID) in original.attachmentJobIDs.enumerated() {
-                let newID=UUID()
-                if let old=try Self.readResourceTransfer(oldID,db:db) {
-                    let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),
-                        usage:old.request.usage,contentType:old.request.contentType,byteCount:old.request.byteCount,
-                        checksum:old.request.checksum,clientModes:old.request.clientModes)
-                    guard try Bool.fetchOne(db,sql:"SELECT staging_released=0 AND staging_release_started=0 FROM v2_resource_transfer_jobs WHERE job_id=?",arguments:[oldID.uuidString]) == true
-                    else {throw V2ResourceJournalError.invalidRecord}
-                    // Share the immutable local file; its release predicate includes every job using it.
-                    _ = try Self.prepareResourceTransfer(id: newID, request: request, localFileToken: old.localFileToken, now: now, db: db)
-                    try db.execute(sql:"INSERT INTO v2_send_intent_dependencies(intent_id,ordinal,job_id) VALUES(?,?,?)",arguments:[replacementID.uuidString,ordinal,newID.uuidString])
-                } else if let old=try Self.readResourceImport(oldID,db:db) {
-                    let request=try V2ResourceImportRequest(operationID:.init(uuid:UUID()),source:old.request.source,
-                        targetUsage:old.request.targetUsage,targetMediaID:.init(uuid:UUID()))
-                    try Self.prepareResourceImport(id: newID, request: request, now: now, db: db)
-                    try db.execute(sql:"INSERT INTO v2_send_intent_import_dependencies(intent_id,ordinal,job_id) VALUES(?,?,?)",arguments:[replacementID.uuidString,ordinal,newID.uuidString])
-                } else {throw V2ResourceJournalError.invalidRecord}
-            }
-            guard let replacement=try Self.readSendIntent(replacementID,db:db) else { throw V2ResourceJournalError.invalidRecord }
-            let reservation=try Self.messageSendReservation(replacement,deadline:deadline,db:db)
-            try Self.requireMessageRoomCapacity(room:original.roomID,excludingIntent:replacementID,db:db)
-            try Self.requireOperationCapacity(adding:reservation,excludingIntent:replacementID,db:db)
-            try db.execute(sql:"UPDATE v2_send_intents SET payload_bytes=? WHERE intent_id=?",arguments:[reservation,replacementID.uuidString])
-            try db.execute(sql:"UPDATE v2_send_intents SET stage='cancelled' WHERE intent_id=?",arguments:[id.uuidString])
-            return replacementID
+            return try Self.replaceUnsentSendIntent(original, now: now, createdAt: now, db: db)
         }
+    }
+
+    /// Only callers holding a durable local-unsubmitted fact or a permanent
+    /// negative outcome may enter. Consumer handoff and retirement are atomic.
+    static func replaceUnsentSendIntent(_ original: V2SendIntent, now: Date, createdAt: Date, db: Database) throws -> UUID {
+        let id = original.id
+        try Self.restoreArchivedConversationToInbox(roomID: original.roomID, now: now, db: db)
+        let replacementID=UUID(), clientID=UUID()
+        let deadline=try Self.messageSendDeadline(now:now)
+        try db.execute(sql:"""
+            INSERT INTO v2_send_intents(intent_id,client_message_id,room_id,text,mentions,entities,reply_to,stage,created_at,replacement_of,payload_bytes,admission_deadline)
+            VALUES(?,?,?,?,?,?,?,'preparing',?,?,0,?)
+            """,arguments:[replacementID.uuidString,clientID.uuidString,original.roomID.rawValue,original.text,
+                try Self.encodeMentions(original.mentions),try Self.encodeEntities(original.entities,text:original.text),
+                original.replyTo?.messageID.rawValue,try Self.commandRetryTimestamp(createdAt),id.uuidString,Int64(deadline)])
+        let importDependencies = try Self.sendImportDependencyIDs(id, db: db)
+        for (ordinal,oldID) in original.attachmentJobIDs.enumerated() {
+            let newID=UUID()
+            if !importDependencies.contains(oldID), let old=try Self.readResourceTransfer(oldID,db:db) {
+                let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),
+                    usage:old.request.usage,contentType:old.request.contentType,byteCount:old.request.byteCount,
+                    checksum:old.request.checksum,clientModes:old.request.clientModes,displayName:old.request.displayName,clientImageDimensions:old.request.clientImageDimensions)
+                guard try Bool.fetchOne(db,sql:"SELECT source_released=0 FROM v2_resource_transfer_jobs WHERE job_id=?",arguments:[oldID.uuidString]) == true
+                else {throw V2ResourceJournalError.invalidRecord}
+                // Share the immutable local file; its release predicate includes every job using it.
+                _ = try Self.prepareResourceTransfer(id: newID, request: request, localAssetID: old.localAssetID, adoptingFrom: .upload(old.id), now: now, db: db)
+                try db.execute(sql:"INSERT INTO v2_send_intent_dependencies(intent_id,ordinal,job_id) VALUES(?,?,?)",arguments:[replacementID.uuidString,ordinal,newID.uuidString])
+            } else if importDependencies.contains(oldID), let old=try Self.readResourceImport(oldID,db:db) {
+                let request=try V2ResourceImportRequest(operationID:.init(uuid:UUID()),source:old.request.source,
+                    targetUsage:old.request.targetUsage,targetMediaID:.init(uuid:UUID()))
+                try Self.prepareResourceImport(id: newID, request: request, now: now, db: db)
+                try db.execute(sql:"INSERT INTO v2_send_intent_import_dependencies(intent_id,ordinal,job_id) VALUES(?,?,?)",arguments:[replacementID.uuidString,ordinal,newID.uuidString])
+            } else {throw V2ResourceJournalError.invalidRecord}
+        }
+        guard let replacement=try Self.readSendIntent(replacementID,db:db) else { throw V2ResourceJournalError.invalidRecord }
+        let reservation=try Self.messageSendReservation(replacement,deadline:deadline,db:db)
+        // Transfer the old preparation's admission credit in this same
+        // transaction; a full queue must still permit its own replacement.
+        try db.execute(sql:"UPDATE v2_send_intents SET stage='cancelled' WHERE intent_id=?",arguments:[id.uuidString])
+        try Self.requireMessageRoomCapacity(room:original.roomID,excludingIntent:replacementID,db:db)
+        try Self.requireOperationCapacity(adding:reservation,excludingIntent:replacementID,db:db)
+        try db.execute(sql:"UPDATE v2_send_intents SET payload_bytes=? WHERE intent_id=?",arguments:[reservation,replacementID.uuidString])
+        return replacementID
+    }
+
+    static func preparedSendNeedsRenewal(_ intent: V2SendIntent, now: Date, db: Database) throws -> Bool {
+        let time = try commandRetryTimestamp(now)
+        guard let deadline = try Int64.fetchOne(db, sql: "SELECT admission_deadline FROM v2_send_intents WHERE intent_id=?",
+            arguments: [intent.id.uuidString]) else { throw V2ResourceJournalError.invalidRecord }
+        if Double(deadline) / 1000 <= time { return true }
+        let imports = try sendImportDependencyIDs(intent.id, db: db)
+        for id in intent.attachmentJobIDs {
+            if imports.contains(id) {
+                guard let job = try readResourceImport(id, db: db) else { throw V2ResourceJournalError.invalidRecord }
+                if let until = job.status?.bindableUntilUnixMilliseconds, Double(until) / 1000 <= time { return true }
+            } else {
+                guard let job = try readResourceTransfer(id, db: db) else { throw V2ResourceJournalError.invalidRecord }
+                if job.stage == .expired || job.session?.bindableUntil.map({ $0 <= now }) == true { return true }
+            }
+        }
+        return false
     }
 
     public func abandonProvenUnsentSendIntent(_ id: UUID) throws {
@@ -316,6 +377,14 @@ extension GRDBV2LocalSyncStore {
         default: throw V2ResourceJournalError.conflict
         }
         return original
+    }
+
+    private static func sendImportDependencyIDs(_ id: UUID, db: Database) throws -> Set<UUID> {
+        Set(try String.fetchAll(db, sql: "SELECT job_id FROM v2_send_intent_import_dependencies WHERE intent_id=?",
+            arguments: [id.uuidString]).map {
+                guard let value = UUID(uuidString: $0) else { throw V2ResourceJournalError.invalidRecord }
+                return value
+            })
     }
 
     static func readSendIntent(_ id: UUID, db: Database) throws -> V2SendIntent? {

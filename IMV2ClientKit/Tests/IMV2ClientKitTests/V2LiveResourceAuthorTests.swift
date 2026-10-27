@@ -46,7 +46,7 @@ struct V2LiveResourceAuthorTests {
             var cursor: UserID?, seen = Set<UserID>(), pageCount = 0
             repeat {
                 try Task.checkCancellation()
-                let page = try await client.read(roomID: room, afterUserID: cursor, limit: 32)
+                let page = try await readNicknames(client, room: room, after: cursor, limit: 32)
                 pageCount += 1
                 try #require(pageCount <= 10 && page.retryable.isEmpty)
                 for id in page.userIDs {
@@ -257,10 +257,32 @@ struct V2LiveResourceAuthorTests {
             // No history pull or profile HTTP read occurs between this send and
             // receive: this presentation must come from committed direct delivery.
             print("Live resource stage: awaiting direct author presentation delta.")
-            let directDelta = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: directView) }
+            var directDelta = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: directView) }
             print("Live resource stage: received direct author presentation delta.")
+            // A permitted transient supplement is not a terminal presentation.
+            // Honor its actual notBefore, then commit a distinct live message
+            // on the same view. No history or HTTP profile pull may manufacture
+            // the live-delivery proof, and the original send is never repeated.
+            for attempt in 0..<4 {
+                guard directDelta.entries.count == 1,
+                      case .retryable(_, let notBefore) = directDelta.entries[0] else { break }
+                guard notBefore <= ContinuousClock.now + .seconds(20) else { throw ResourceLiveFailure.processing }
+                print("Live resource stage: direct supplement explicitly retryable; awaiting its notBefore.")
+                try await ContinuousClock().sleep(until: notBefore)
+                _ = try await resourceSend(fixture, client: .init(transport: authorTransport, connection: authorConnection),
+                    account: author, roomID: directRoom.roomID, clientMessageID: .init(uuid: UUID()),
+                    text: "A distinct live supplement attempt \(attempt + 1)", media: [], mentions: [])
+                directDelta = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: directView) }
+            }
             try #require(directDelta.entries.count == 1)
             guard case .presentation(let directProfile, let directAvatar, let directDeadline, let directAvatarDeadline) = directDelta.entries[0] else {
+                let reason: String
+                switch directDelta.entries[0] {
+                case .retryable: reason = "retryable-exhausted"
+                case .unavailable: reason = "unavailable"
+                case .presentation: reason = "presentation"
+                }
+                Issue.record("Direct live author supplement did not produce a presentation: \(reason)")
                 throw ResourceLiveFailure.presentation
             }
             #expect(directDelta.view == directView)
@@ -311,7 +333,17 @@ struct V2LiveResourceAuthorTests {
             #expect(nicknamePayload["target_user_id"] as? String == author.userID.rawValue)
             #expect(nicknamePayload["nickname"] == nil)
             _ = try await local.applyGroupEventPage(page)
-            let received = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: view) }
+            var received = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: view) }
+            // A raw history reader, like the app scheduler, must honor an
+            // explicit retryable supplement instead of treating it as final.
+            for _ in 0..<4 {
+                guard received.entries.count == 1,
+                      case .retryable(_, let notBefore) = received.entries[0] else { break }
+                guard notBefore <= ContinuousClock.now + .seconds(20) else { throw ResourceLiveFailure.processing }
+                try await ContinuousClock().sleep(until: notBefore)
+                _ = try await viewerTransport.pullGroupEvents(roomID: room, afterRoomSequence: 0, pageSize: 20)
+                received = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: view) }
+            }
             try #require(received.entries.count == 1)
             guard case .presentation(let value, let optionalAvatar, let presentationDeadline, let avatarDeadline) = received.entries[0],
                   let avatar = optionalAvatar else {
@@ -394,11 +426,11 @@ struct V2LiveResourceAuthorTests {
             let nicknamePages = try V2HTTPGroupNicknamePresentationClient(
                 groupsEndpoint: fixture.url("v2/profile-presentations/groups"), actorUserID: viewer.userID,
                 credentials: ResourceLiveCredentials(value: viewer), transport: mediaHTTP)
-            let names = try await nicknamePages.read(roomID: room, limit: 1)
+            let names = try await readNicknames(nicknamePages, room: room)
             #expect(names.userIDs == [author.userID] && names.nextCursor == nil)
             #expect(names.snapshot(for: author.userID)?.presentation.groupMember?.groupNickname == "Room author")
             #expect(names.snapshot(for: author.userID)?.avatar == nil)
-            let endOfNames = try await nicknamePages.read(roomID: room, afterUserID: author.userID, limit: 1)
+            let endOfNames = try await readNicknames(nicknamePages, room: room, after: author.userID)
             #expect(endOfNames.userIDs.isEmpty && endOfNames.nextCursor == nil)
             // The public profile and membership revisions remain unchanged.
             // Compression must still deliver the independent nickname version.
@@ -441,7 +473,7 @@ struct V2LiveResourceAuthorTests {
             await #expect(throws: V2PublicIdentityDirectoryClientError.notFound) {
                 try await discovery.resolveForPresentation(handle: authorHandle.description)
             }
-            let hiddenNames = try await nicknamePages.read(roomID: room, limit: 1)
+            let hiddenNames = try await readNicknames(nicknamePages, room: room)
             #expect(hiddenNames.unavailable == [author.userID] && hiddenNames.snapshot(for: author.userID) == nil)
             var nameRequest = URLRequest(url: fixture.url("v2/profile-presentations/groups/\(room.rawValue)/nicknames"))
             nameRequest.setValue("Bearer " + viewer.accessToken, forHTTPHeaderField: "Authorization")
@@ -463,7 +495,19 @@ struct V2LiveResourceAuthorTests {
             // TTL. The block test asserts that no NEW access is issued.
             await viewerConnection.endAuthorPresentationView(view)
             try await viewerTransport.stopAuthorPresentation(view)
-            try await verifyMessageDownload(fixture, author: author, room: room, transport: authorTransport, connection: authorConnection, directory: directory)
+            let recipient = try await fixture.register().credentials
+            let resourceRoom = try await seedRoom(fixture, viewer: recipient.userID, author: author.userID)
+            let recipientConnection = try connection(authorSupplements: false)
+            do {
+                let recipientSession = try await authenticate(recipientConnection, recipient)
+                let recipientTransport = V2ProtobufSyncTransport(wire: recipientConnection, protocolVersion: recipientSession.protocolVersion)
+                for sample in [RoomResourceSample.text, .audio, .video] {
+                    try await verifyMessageDownload(fixture, author: author, recipient: recipient, room: resourceRoom,
+                        transport: authorTransport, connection: authorConnection, recipientTransport: recipientTransport,
+                        directory: directory, sample: sample)
+                }
+                await recipientConnection.disconnect()
+            } catch { await recipientConnection.disconnect(); throw error }
             print("Live resource: Actor HTTP fallback and later TLS supplement both reject the newly blocked viewer.")
             print("Live resource: nickname room events persisted through revision 4; same-view authorized updates restored only current content.")
             print("Live resource: nickname directory pages carry leases, do not pre-sign avatars, and withhold blocked nickname text.")
@@ -482,34 +526,164 @@ struct V2LiveResourceAuthorTests {
         }
     }
 
-    private func verifyMessageDownload(_ fixture: LiveAccountFixture, author: V2AuthCredentials,
-                                       room: RoomID, transport: V2ProtobufSyncTransport, connection: V2TLSFrameConnection, directory: URL) async throws {
+    /// This fixture deliberately makes repeated raw reads rather than using the
+    /// app's presentation scheduler. It must honor the same server Retry-After.
+    private func readNicknames(_ client: V2HTTPGroupNicknamePresentationClient, room: RoomID,
+                               after: UserID? = nil, limit: Int = 1) async throws -> V2GroupNicknamePresentationPage {
+        for attempt in 0..<5 {
+            do { return try await client.read(roomID: room, afterUserID: after, limit: limit) }
+            catch V2ProfilePresentationError.throttled(let delay) {
+                guard attempt < 4, delay.isFinite, delay >= 0, delay <= 20 else {
+                    throw V2ProfilePresentationError.throttled(retryAfter: delay)
+                }
+                try await Task.sleep(for: .seconds(max(0.05, delay)))
+            }
+        }
+        throw ResourceLiveFailure.processing
+    }
+
+    private func verifyPersistentSend(_ fixture: LiveAccountFixture, author: V2AuthCredentials, room: RoomID,
+                                        media: MediaID, source: URL, sample: RoomResourceSample,
+                                        checksum: V2ResourceChecksum, bytes: Int64, directory: URL,
+                                        transport: V2ProtobufSyncTransport, connection: V2TLSFrameConnection) async throws -> V2MessageOperationAcceptance {
+        let root = directory.appendingPathComponent("persistent-upload")
+        let binding = V2LocalInstallationBinding(value: UUID()), id = UUID()
+        let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()),
+            text: "Frozen cloud send \(sample.contentType)", attachmentJobIDs: [id])
+        let scope = V2AccountStorageScope(incarnation: UUID(), accountID: author.userID,
+            directory: root.appendingPathComponent("support"), cacheDirectory: root.appendingPathComponent("cache"))
+        let database = root.appendingPathComponent("account.sqlite")
         let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
-        let credentials = ResourceLiveCredentials(value: author)
-        let uploads = try V2HTTPResourceUploadClient(endpoint: fixture.url("v2/resource-uploads"), credentials: credentials, transport: http)
-        let bytes = Data("a verified room attachment".utf8), media = MediaID(uuid: UUID())
+        let control = try V2HTTPResourceUploadClient(endpoint: fixture.url("v2/resource-uploads"), credentials: ResourceLiveCredentials(value: author), transport: http)
+        let first = try GRDBV2LocalSyncStore(databaseURL: database, installationBinding: binding, userID: author.userID)
+        let center = try await V2ResourceCenter.make(scope: scope, store: first)
+        let engine = V2ResourceTransferEngine(store: first, control: control, executor: V2URLSessionResourcePlanExecutor(session: fixture.http), resources: center)
+        let request: V2ResourceUploadRequest
+        let locator: V2ResourceUploadLocator
+        do {
+            try await center.attachUploads(engine)
+            let asset = try await center.importLocal(at: source, displayName: .init(sample.filename), contentType: .init(sample.contentType), purpose: .messageDraft(room))
+            request = try .init(operationID: .init(uuid: UUID()), mediaID: media, usage: .messageAttachment(room),
+                contentType: sample.contentType, byteCount: bytes, checksum: checksum, displayName: asset.displayName)
+            print("Live frozen stage \(sample.contentType): freeze.")
+            try await engine.prepareSend(intent, resources: [.init(id: id, request: request, localAssetID: asset.id)])
+            #expect(try await first.preparingSendIntents(in: room) == [intent])
+            #expect(try await first.dueOperationWork(now: Date(), kinds: [.sendMessage]).isEmpty)
+            await #expect(throws: V2ResourceJournalError.dependencyNotReady) { try await first.handOffSendIntent(intent.id) }
+            print("Live frozen stage \(sample.contentType): create.")
+            let created = try await engine.resume(id: id)
+            locator = try #require(created.session?.locator)
+            #expect(created.id == id && created.request == request && created.stage == .transferring)
+            await engine.close(); await center.close(); try await first.close()
+        } catch { await engine.close(); await center.close(); try? await first.close(); throw error }
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: database, installationBinding: binding, userID: author.userID)
+        let restoredCenter = try await V2ResourceCenter.make(scope: scope, store: reopened)
+        let restored = V2ResourceTransferEngine(store: reopened, control: control, executor: V2URLSessionResourcePlanExecutor(session: fixture.http), resources: restoredCenter)
+        do {
+            try await restoredCenter.attachUploads(restored)
+            var job = try #require(try await reopened.resourceTransfer(id: id))
+            #expect(job.request == request && job.session?.locator == locator)
+            #expect(try await reopened.preparingSendIntents(in: room) == [intent])
+            let deadline = ContinuousClock.now + .seconds(90)
+            while job.stage != .ready {
+                try #require(ContinuousClock.now < deadline && !job.needsAttention && ![.cancelled, .expired, .rejected].contains(job.stage))
+                let delay = job.retryAt.timeIntervalSinceNow
+                if delay > 0 {
+                    try #require(delay <= 20)
+                    try await Task.sleep(for: .seconds(delay))
+                }
+            print("Live frozen stage \(sample.contentType): upload-resume.")
+                do { job = try await restored.resume(id: id) }
+                catch {
+                    let pending = try #require(try await reopened.resourceTransfer(id: id))
+                    guard !pending.needsAttention, pending.retryAt > Date() else { throw error }
+                    job = pending
+                }
+            }
+            #expect(job.request == request && job.id == id && job.session?.locator == locator && job.session?.resourceState == .ready)
+            print("Live frozen stage \(sample.contentType): handoff.")
+            #expect(try await reopened.handOffSendIntent(intent.id) == intent.clientMessageID)
+            #expect(try await reopened.handOffSendIntent(intent.id) == intent.clientMessageID)
+            let due = try await reopened.dueOperationWork(now: Date(), kinds: [.sendMessage])
+            try #require(due.count == 1)
+            let workID = try #require(due.first?.id)
+            let frozen = try await reopened.messageSendCommand(workID: workID)
+            #expect(frozen.command.clientMessageID == intent.clientMessageID && frozen.command.text == intent.text)
+            #expect(frozen.command.media.map(\.mediaID) == [media])
+            let remote = DroppedResourceSendReceipt(client: .init(transport: transport, connection: connection))
+            let sender = V2MessageSendOperationService(accountID: author.userID, store: reopened, client: remote)
+            let sendDeadline = ContinuousClock.now + .seconds(60)
+            while true {
+                let work = try #require(try await reopened.operationWork(id: workID))
+                if work.execution == .committed { break }
+                if ![.ready, .backingOff].contains(work.scheduling) {
+                    print("Live frozen unexpected scheduling: \(work.scheduling.rawValue), execution: \(work.execution.rawValue), action: \(work.nextAction.rawValue), code: \(work.lastErrorCode ?? "none")")
+                }
+                try #require(ContinuousClock.now < sendDeadline && [.ready, .backingOff].contains(work.scheduling))
+                let delay = work.nextActionAt.timeIntervalSinceNow
+                if delay > 0 { try #require(delay <= 20); try await Task.sleep(for: .seconds(delay)) }
+                guard case .claimed(let claim) = try await reopened.claimOperationWork(id: workID, ownerID: UUID(), action: work.nextAction, now: Date()) else {
+                    throw V2OperationWorkError.invalidTransition
+                }
+            print("Live frozen stage \(sample.contentType): message-execute.")
+                try await sender.execute(claim)
+                #expect(try await reopened.messageSendCommand(workID: workID) == frozen)
+            }
+            #expect(await remote.droppedReceipts == 1)
+            #expect(await remote.submissions == 1)
+            #expect(await remote.recoveries >= 1)
+            let acceptance = try #require(await remote.confirmedAcceptance)
+            #expect(try await reopened.submittedSendIntents(in: room).first?.status == .acceptedAwaitingProjection)
+            let page = try await transport.pullGroupEvents(roomID: room, afterRoomSequence: 0, pageSize: 100)
+            print("Live frozen stage \(sample.contentType): projection.")
+            _ = try await reopened.applyGroupEventPage(page)
+            let matching = try await reopened.messages(in: room).filter { $0.media.contains { $0.mediaID == media } }
+            #expect(matching.count == 1 && matching.first?.messageID == acceptance.messageID && matching.first?.text == intent.text)
+            #expect(matching.first?.mediaPresentations.first?.resourceDescriptor?.durationMilliseconds == sample.durationMilliseconds)
+            #expect(try await reopened.submittedSendIntents(in: room).isEmpty)
+            try await restored.releaseFinishedSources(id: id)
+            await restored.close(); await restoredCenter.close(); try await reopened.close()
+            print("Live frozen send \(sample.contentType): pending intent, dependency gate, reopen, lost receipt, original query and single projection passed.")
+            return acceptance
+        } catch { await restored.close(); await restoredCenter.close(); try? await reopened.close(); throw error }
+    }
+
+    private enum RoomResourceSample: Equatable {
+        case text, audio, video
+        var contentType: String { switch self { case .text: "text/plain"; case .audio: "audio/wav"; case .video: "video/mp4" } }
+        var filename: String { switch self { case .text: "验收文件.txt"; case .audio: "验收音频.wav"; case .video: "验收视频.mp4" } }
+        var category: V2ResourceCategory { switch self { case .text: .file; case .audio: .audio; case .video: .video } }
+        var durationMilliseconds: Int64? { switch self { case .text: nil; case .audio: 2000; case .video: 500 } }
+        func payload() throws -> Data {
+            switch self {
+            case .text: return Data("a verified room attachment".utf8)
+            case .audio:
+                var result = Data()
+                func text(_ value: String) { result.append(Data(value.utf8)) }
+                func number<T: FixedWidthInteger>(_ value: T) { var little = value.littleEndian; withUnsafeBytes(of: &little) { result.append(contentsOf: $0) } }
+                text("RIFF"); number(UInt32(32036)); text("WAVEfmt "); number(UInt32(16)); number(UInt16(1)); number(UInt16(1))
+                number(UInt32(8000)); number(UInt32(16000)); number(UInt16(2)); number(UInt16(16)); text("data"); number(UInt32(32000)); result.append(Data(repeating: 0, count: 32000))
+                return result
+            case .video:
+                // A real FFmpeg-generated 64x48, 10 fps, 0.5 s MPEG-4 sample.
+                return try #require(Data(base64Encoded: "AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAAX21kYXQAAAGzABAHAAABthDAowVDbA8Atjbb+Ntv422/jbb+Ntv422/jbb+Ntv422/jbb+Ntv38AAAG2UeBH/98AAAG2UsBH/98AAAG2U+BH/98AAAG2VMBH/98AAANnbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAAfQAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAApJ0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAfQAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAEAAAAAwAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAH0AAAAAAABAAAAAAIKbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAoAAAAFABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABtW1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAXVzdGJsAAAA6XN0c2QAAAAAAAAAAQAAANltcDR2AAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAEAAMABIAAAASAAAAAAAAAABEkxhdmM2My4xLjEwMiBtcGVnNAAAAAAAAAAAAAAAAAAAGP//AAAAX2VzZHMAAAAAA4CAgE4AAQAEgICAQCARAAAAAAMNQAAABXAFgICALgAAAbABAAABtYkTAAABAAAAASAAxI2IAFUCBAYUYwAAAbJMYXZjNjMuMS4xMDIGgICAAQIAAAAQcGFzcAAAAAEAAAABAAAAFGJ0cnQAAAAAAAMNQAAABXAAAAAYc3R0cwAAAAAAAAABAAAABQAABAAAAAAUc3RzcwAAAAAAAAABAAAAAQAAABxzdHNjAAAAAAAAAAEAAAABAAAABQAAAAEAAAAoc3RzegAAAAAAAAAAAAAABQAAADMAAAAJAAAACQAAAAkAAAAJAAAAFHN0Y28AAAAAAAAAAQAAACwAAABhdWR0YQAAAFltZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAACxpbHN0AAAAJKl0b28AAAAcZGF0YQAAAAEAAAAATGF2ZjYzLjEuMTAy"))
+            }
+        }
+    }
+
+    private func verifyMessageDownload(_ fixture: LiveAccountFixture, author: V2AuthCredentials, recipient: V2AuthCredentials,
+                                       room: RoomID, transport: V2ProtobufSyncTransport, connection: V2TLSFrameConnection,
+                                       recipientTransport: V2ProtobufSyncTransport, directory: URL, sample: RoomResourceSample) async throws {
+        let directory = directory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
+        let credentials = ResourceLiveCredentials(value: recipient)
+        let bytes = try sample.payload(), media = MediaID(uuid: UUID())
         let file = directory.appendingPathComponent("attachment.txt")
         try bytes.write(to: file)
         let checksum = try V2ResourceChecksum(value: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
-        var session = try await uploads.create(.init(operationID: .init(uuid: UUID()), mediaID: media,
-            usage: .messageAttachment(room), contentType: "text/plain", byteCount: Int64(bytes.count), checksum: checksum))
-        let uploadDeadline = ContinuousClock.now + .seconds(120)
-        while let plan = try await uploads.target(session) {
-            guard ContinuousClock.now < uploadDeadline else { throw ResourceLiveFailure.processing }
-            try await V2URLSessionResourcePlanExecutor(session: fixture.http).upload(fileURL: file, plan: plan)
-            if plan.mode == .httpPut { break }
-            session = try await uploads.status(session.locator)
-        }
-        session = try await uploads.finalize(session)
-        let deadline = ContinuousClock.now + .seconds(20)
-        while session.resourceState != .ready && ContinuousClock.now < deadline {
-            guard session.state != .failed, session.resourceState != .rejected else { throw ResourceLiveFailure.processing }
-            try await Task.sleep(for: .milliseconds(200))
-            session = try await uploads.status(session.locator)
-        }
-        try #require(session.resourceState == .ready)
-        let sent = try await resourceSend(fixture, client: .init(transport: transport, connection: connection), account:credentials.value,roomID: room, clientMessageID: .init(uuid: UUID()),
-            text: "Attachment download contract", media: [.init(mediaID: media)], mentions: [])
+        let sent = try await verifyPersistentSend(fixture, author: author, room: room, media: media, source: file,
+            sample: sample, checksum: checksum, bytes: Int64(bytes.count), directory: directory, transport: transport, connection: connection)
         let message = V2MediaMessageLocation(roomID: room, messageID: sent.messageID)
         let resolver = try V2HTTPMediaDownloadTargetResolver(endpoint: fixture.url("v2/media"), credentials: credentials, transport: http)
         let target = try await resolver.resolveDownloadTarget(mediaID: media, message: message)
@@ -519,11 +693,55 @@ struct V2LiveResourceAuthorTests {
         let downloaded = directory.appendingPathComponent("downloaded-attachment.txt")
         try await V2URLSessionMediaByteTransfer(session: fixture.http).download(target: target, destinationURL: downloaded)
         #expect(try Data(contentsOf: downloaded) == bytes)
-        // This newly accepted attachment has had no edits; its initial content revision is 1.
-        _ = try await resourceWithdraw(fixture,account:credentials.value,roomID:room,messageID:sent.messageID,expectedMessageRevision:1)
-        await #expect(throws: V2ClientMediaTransferError.serverStatus(404)) {
-            _ = try await resolver.resolveDownloadTarget(mediaID: media, message: message)
-        }
+        let localRoot = directory.appendingPathComponent("resource-center")
+        let local = try GRDBV2LocalSyncStore(databaseURL: localRoot.appendingPathComponent("account.sqlite"),
+            installationBinding: .init(value: UUID()), userID: recipient.userID)
+        let center = try await V2ResourceCenter.make(scope: .init(incarnation: UUID(), accountID: recipient.userID,
+            directory: localRoot.appendingPathComponent("support"), cacheDirectory: localRoot.appendingPathComponent("cache")), store: local)
+        do {
+            let query = try V2HTTPRoomResourceDirectoryClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            let page = try #require(try await center.synchronize(roomID: room, query: .init(category: sample.category), using: query))
+            let resource = try #require(page.items.first { $0.descriptor.key.mediaID == media })
+            let key = resource.descriptor.key
+            #expect(resource.descriptor.checksum == checksum && resource.descriptor.byteCount == bytes.count)
+            #expect(resource.descriptor.durationMilliseconds == sample.durationMilliseconds)
+            #expect(resource.descriptor.pixelWidth == (sample == .video ? 64 : nil))
+            #expect(resource.descriptor.pixelHeight == (sample == .video ? 48 : nil))
+            #expect(try await center.details(for: key)?.sources.first?.location == message)
+            guard case .queued = try await center.prepareMessageDownload(mediaID: media, message: message) else {
+                throw ResourceLiveFailure.processing
+            }
+            let cache = try await center.downloadCache(using: .init(targetResolver: resolver, byteTransfer: V2URLSessionMediaByteTransfer(session: fixture.http)))
+            let cached = try await cache.download(.init(mediaID: media), message: message)
+            let lease = try await cached.borrowFile()
+            #expect(try Data(contentsOf: lease.fileURL) == bytes)
+            try await center.setRetained(true, variant: .init(resource: key))
+            #expect(try await center.planCleanup().fileIDs.isEmpty)
+            #expect(try await center.storageSnapshot().bytes(for: .retained) > 0)
+            await lease.release()
+            try await center.setRetained(false, variant: .init(resource: key))
+            let cleanup = try await center.planCleanup()
+            #expect(cleanup.fileIDs.count == 1)
+            #expect(try await center.commitCleanup(cleanup).deletedCount == 1)
+            #expect(try await center.storageSnapshot().totalBytes == 0)
+            #expect(try await center.details(for: key)?.variants.first?.localState == .needsDownload)
+            let restored = try await cache.download(.init(mediaID: media), message: message)
+            let restoredLease = try await restored.borrowFile()
+            #expect(try Data(contentsOf: restoredLease.fileURL) == bytes)
+            await restoredLease.release()
+            // Observe the real withdrawal through the same TLS event path the
+            // app uses, rather than directly manufacturing a local tombstone.
+            _ = try await resourceWithdraw(fixture,account:author,roomID:room,messageID:sent.messageID,expectedMessageRevision:1)
+            let events = try await recipientTransport.pullGroupEvents(roomID: room, afterRoomSequence: 0, pageSize: 100)
+            _ = try await local.applyGroupEventPage(events)
+            #expect(try await center.details(for: key) == nil)
+            await #expect(throws: V2ResourceStorageError.unavailable) { try await restored.borrowFile() }
+            await #expect(throws: V2ClientMediaTransferError.serverStatus(404)) {
+                _ = try await resolver.resolveDownloadTarget(mediaID: media, message: message)
+            }
+            await center.close(); try await local.close()
+        } catch { await center.close(); try? await local.close(); throw error }
+        print("Live resource center \(sample.contentType): cold upload recovery, trusted metadata, directory, queued download, borrow, retention, cleanup, redownload and TLS withdrawal revocation passed.")
         print("Live resource: room attachment uses a checked download plan; withdrawal stops new capability issuance.")
     }
 
@@ -738,6 +956,32 @@ private func resourceBlock(_ fixture:LiveAccountFixture,account:V2AuthCredential
     let command=try V2SocialOperationCommand(identity:.init(accountID:account.userID,scope:.userPair(account.userID,target),operation:.userBlock(.init(uuid:UUID()))),action:.userBlock(.block),expectedRevision:baseline.blockRevision,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+120000)
     guard case .receipt(let proof)=try await client.submit(command),proof.validates(command:command),case .applied(.userBlock(isBlocked:true,revision:_))=proof.outcome else {throw ResourceLiveFailure.presentation}
 }
+/// Fault injection is after a real TLS submission and server acceptance. Only
+/// the caller's first receipt is lost; reconciliation still uses the real peer.
+private actor DroppedResourceSendReceipt: V2MessageSendOperationClient {
+    let client: V2ProtobufMessageSendOperationClient
+    private(set) var submissions = 0
+    private(set) var recoveries = 0
+    private(set) var droppedReceipts = 0
+    private(set) var confirmedAcceptance: V2MessageOperationAcceptance?
+    init(client: V2ProtobufMessageSendOperationClient) { self.client = client }
+    func submit(_ command: V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
+        submissions += 1
+        let result = try await client.submit(command)
+        if droppedReceipts == 0, case .receipt(let receipt) = result, case .accepted = receipt.outcome {
+            droppedReceipts += 1
+            throw V2MessageSendTransportError.outcomeUnknown
+        }
+        return result
+    }
+    func recover(_ request: V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
+        recoveries += 1
+        let result = try await client.recover(request)
+        if case .receipt(let receipt) = result, case .accepted(let acceptance) = receipt.outcome { confirmedAcceptance = acceptance }
+        return result
+    }
+}
+
 private func resourceSend(_ fixture:LiveAccountFixture,client: V2ProtobufMessageSendOperationClient,account:V2AuthCredentials,roomID:RoomID,clientMessageID:ClientMessageID,text:String,media:[V2MediaReference],mentions:[V2MentionTarget]) async throws -> V2MessageOperationAcceptance {
     let command=try V2MessageSendOperationCommand(command:.init(roomID:roomID,senderUserID:account.userID,clientMessageID:clientMessageID,text:text,media:media,mentions:mentions,limits:.init(maxUTF8Bytes:4096)),firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+86400000)
     guard case .receipt(let proof)=try await client.submit(command),try proof.validates(identity:command.identity,fingerprint:command.fingerprint),case .accepted(let value)=proof.outcome else {throw ResourceLiveFailure.presentation};return value
@@ -757,7 +1001,7 @@ private func resourceInvitation(_ client:V2HTTPInvitationOperationClient,account
 }
 extension V2LiveResourceAuthorTests {
     @Test("real group avatar upload, byte presentation, removal and original recovery",
-          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1" || ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_CENTER"] == "1"))
     func groupAvatarAcceptance() async throws {
         let fixture = try LiveAccountFixture()
         defer { fixture.close() }
@@ -1071,7 +1315,7 @@ extension V2LiveResourceAuthorTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: account.userID)
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()),
             text: "Retained canonical content", attachmentJobIDs: [])
-        try await store.freezeSendIntent(intent)
+        try await store.freezeMetadataSendIntent(intent)
         try await store.handOffSendIntent(intent.id)
         let work = try #require(try await store.dueOperationWork(now: Date(), kinds: [.sendMessage]).first)
         let command = try await store.messageSendCommand(workID: work.id)

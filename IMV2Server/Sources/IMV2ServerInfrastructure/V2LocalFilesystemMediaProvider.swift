@@ -173,7 +173,7 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
     /// The new delegated PUT is signed independently of a short room activation.
     public func issueBackgroundUploadTarget(mediaID: MediaID, contentType: String, byteCount: Int64,
                                             authorization: V2ResourceBackgroundAuthorization) async throws -> V2MediaProviderUploadTarget {
-        guard byteCount>0,byteCount<=8*1_024*1_024,!contentType.isEmpty else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
+        guard case .part = authorization.scope, byteCount>0,byteCount<=8*1_024*1_024,!contentType.isEmpty else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
         _ = try objectURL(for:mediaID)
         let url = try signedTarget(kind:.upload,mediaID:mediaID,contentType:contentType,byteCount:byteCount,
                                    expiresAt:authorization.expiresAt,backgroundAuthorization:authorization)
@@ -533,7 +533,7 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
             throw V2LocalFilesystemMediaProviderError.invalidTarget
         }
         if let grant = claims.backgroundAuthorization {
-            guard kind == .upload, claims.byteCount>0,claims.byteCount<=8*1_024*1_024,
+            guard case .part = grant.scope, kind == .upload, claims.byteCount>0,claims.byteCount<=8*1_024*1_024,
                   grant.expiresAtMilliseconds == claims.expiresAtMilliseconds
             else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
         }

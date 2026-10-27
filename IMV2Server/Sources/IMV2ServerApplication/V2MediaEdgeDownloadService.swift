@@ -17,6 +17,19 @@ public protocol V2MediaDownloadTargetResolving: Sendable {
     /// - Returns: 仅在本进程内使用的提供方对象目标。
     /// - Throws: 设备不匹配、无可见性、媒体不可用或提供方交换失败时抛出。
     func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2ResourceTransferPlan
+    func imagePreviewTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation, size: V2MediaImagePreviewSize) async throws -> V2MediaDownloadTargetEnvelope
+
+}
+
+public extension V2MediaDownloadTargetResolving {
+    func imagePreviewTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation, size: V2MediaImagePreviewSize) async throws -> V2MediaDownloadTargetEnvelope {
+        throw V2MediaStoreError.downloadNotAuthorized
+    }
+}
+
+/// Only called after the same message visibility checks used for originals.
+public protocol V2MediaImagePreviewProviding: Sendable {
+    func issueImagePreviewTarget(mediaID: MediaID, roomID: RoomID, size: V2MediaImagePreviewSize, expiresAt: Date) async throws -> V2MediaDownloadTargetEnvelope
 }
 
 /// 媒体边缘下载的标准实现，串联媒体授权与提供方会话交换。

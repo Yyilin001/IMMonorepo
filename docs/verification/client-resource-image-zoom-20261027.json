@@ -1,0 +1,40 @@
+{
+  "observedAt": "2026-10-27T04:06:16.447182+00:00",
+  "status": "verified-client-installed-and-launched",
+  "sourceSHA256": {
+    "IMApp/IMApp/V2/V2ConversationMediaViews.swift": "0b56120c46efc01b4f69cff4fcb5505327bfcaa6c86629e8adcb9bdd39faa13b",
+    "IMApp/IMApp/V2/V2MessageTimelinePresentation.swift": "bf1e3916d8c9330724761278132e250531e0f5227ed20eb331180fb93897602c",
+    "IMApp/IMAppTests/V2PhotoLibraryImageTests.swift": "ce7627cf3d08d711a4a90b7c66cb490f0485a2c9b31bd78cb78c2c039f2908d2"
+  },
+  "behavior": [
+    "No inline share action or reserved action-row gap in message images",
+    "Pending and accepted decoded images open a full-screen viewer using native SwiftUI zoom navigation transition",
+    "Pinch and double-tap zoom, close action, aspect-fit on viewport changes; normal updates retain zoom",
+    "Existing authorized lease and bounded cache; decoded maximum edge 2048, viewer holds pixels only"
+  ],
+  "tests": [
+    {
+      "suite": "V2PhotoLibraryImageTests",
+      "passed": 10,
+      "log": "/tmp/im-resource-image-zoom-app-20261027.log",
+      "xcresult": "/tmp/im-resource-image-zoom-app-20261027.xcresult"
+    },
+    {
+      "suite": "V2LocalMediaThumbnailCacheTests",
+      "passed": 7,
+      "log": "/tmp/im-resource-image-zoom-cache-20261027.log",
+      "xcresult": "/tmp/im-resource-image-zoom-cache-20261027.xcresult"
+    }
+  ],
+  "signedClient": {
+    "record": "/tmp/im-resource-client-signed-release-20261027-r23/result.json",
+    "binarySHA256": "9eb4836af8d84dcd2698b74b960c151ceee72d2798d32b44a3a817ca9e2bc1f1",
+    "sourceDrift": [],
+    "installed": true,
+    "installRecord": "/tmp/im-resource-image-zoom-phone-install-20261027.json",
+    "launched": true,
+    "launchRecord": "/tmp/im-resource-image-zoom-phone-launch-20261027.json"
+  },
+  "nativeTransitionVisualAndPhysicalGestureNotYetVerified": true,
+  "serverChanged": false
+}

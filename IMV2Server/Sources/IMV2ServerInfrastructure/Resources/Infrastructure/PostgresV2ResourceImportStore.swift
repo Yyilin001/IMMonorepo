@@ -62,7 +62,7 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
     public func acquireSource(_ request: V2ResourceImportRequest, actor: UserID, device: DeviceID) async throws -> V2ResourceImportSourceGrant {
         let source = try await sources.authorize(request.source, actor: actor, device: device)
         let facts = try await hold(request, actor: actor, database: source.database)
-        return .init(contentType: facts.contentType, facts: facts.facts, recheck: source.recheck)
+        return .init(contentType: facts.contentType, facts: facts.facts, displayName: facts.displayName, recheck: source.recheck)
     }
 
     public func attach(_ session: V2ResourceUploadSession, locator: V2ResourceImportLocator, actor: UserID, device: DeviceID) async throws {
@@ -247,15 +247,15 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
 
     private func heldSource(_ request: V2ResourceImportRequest, actor: UserID, sql: any SQLDatabase) async throws -> ImportSourceFacts? {
         guard let hold = try await sql.raw("""
-            SELECT request_json::text AS request_text,reference_json::text AS reference,
-                byte_count,sha256,content_type,released_at
-            FROM im_v2.resource_import_holds
-            WHERE actor_user_id=\(bind: actor.uuidValue!) AND operation_id=\(bind: request.operationID.uuidValue!)
+            SELECT hold.request_json::text AS request_text,hold.reference_json::text AS reference,
+                hold.byte_count,hold.sha256,hold.content_type,hold.released_at,catalog.display_name
+            FROM im_v2.resource_import_holds hold JOIN im_v2.resource_catalog catalog ON catalog.media_id=hold.media_id
+            WHERE hold.actor_user_id=\(bind: actor.uuidValue!) AND hold.operation_id=\(bind: request.operationID.uuidValue!)
             """).first(decoding: ImportHoldRow.self) else { return nil }
         guard hold.releasedAt == nil,
               try JSONDecoder().decode(V2ResourceImportRequest.self, from: Data(hold.requestText.utf8)) == request
         else { throw V2MediaStoreError.idempotencyConflict }
-        return try .init(contentType: hold.contentType, facts: .init(
+        return try .init(contentType: hold.contentType, displayName: .init(hold.displayName), facts: .init(
             reference: JSONDecoder().decode(V2StoredObjectReference.self, from: Data(hold.reference.utf8)),
             byteCount: hold.byteCount, sha256: hold.sha256))
     }
@@ -268,16 +268,16 @@ private struct ResourceImportRow: Decodable {
     enum CodingKeys: String, CodingKey { case requestText = "request_text", sessionText = "session_text", targetMediaID = "target_media_id", state }
 }
 private struct ImportContentType: Decodable { let contentType: String; enum CodingKeys: String, CodingKey { case contentType = "content_type" } }
-private struct ImportSourceFacts { let contentType: String; let facts: V2StoredObjectFacts }
+private struct ImportSourceFacts { let contentType: String; let displayName: V2ResourceDisplayName; let facts: V2StoredObjectFacts }
 private struct ImportSourceRow: Decodable {
     let reference: String; let byteCount: Int64; let sha256: Data
     enum CodingKeys: String, CodingKey { case reference, byteCount = "byte_count", sha256 }
 }
 private struct ImportHoldRow: Decodable {
     let requestText: String; let reference: String; let byteCount: Int64; let sha256: Data
-    let contentType: String; let releasedAt: Date?
+    let contentType: String; let displayName: String; let releasedAt: Date?
     enum CodingKeys: String, CodingKey {
-        case requestText = "request_text", reference, byteCount = "byte_count", sha256, contentType = "content_type", releasedAt = "released_at"
+        case requestText = "request_text", reference, byteCount = "byte_count", sha256, contentType = "content_type", releasedAt = "released_at", displayName = "display_name"
     }
 }
 private struct ImportRecoveryRow: Decodable {

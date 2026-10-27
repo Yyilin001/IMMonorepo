@@ -14,26 +14,38 @@ scenario, followed by a completed upload and drained gate.
 import argparse
 import base64
 import collections
+import hashlib
 import http.client
 import http.server
 import json
 import os
+import plistlib
 from pathlib import Path
 import re
 import shutil
 import signal
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import uuid
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'IMV2/scripts'))
 from v2_native_placement_processes import voter_arguments, start_controls
+
+
+def oss_validation_parent(value):
+    # A scoped ECS role may allow only e.g. ecs-test/*. Always put this run in
+    # a fresh validation/native-UUID child, never directly in a business prefix.
+    if len(value.encode()) > 128 or not re.fullmatch(r'(?:[A-Za-z0-9_-]+/)*validation/', value):
+        raise argparse.ArgumentTypeError('OSS test parent must be a relative safe prefix ending in validation/')
+    return value
 
 
 def free_port():
@@ -69,6 +81,27 @@ def stop(process):
             return True
         except ProcessLookupError:
             return False
+        except PermissionError:
+            # Darwin may report EPERM after a short-lived group has vanished.
+            # Establish absence independently; an extant inaccessible group
+            # remains a cleanup failure and must never be treated as drained.
+            rows = subprocess.check_output(['ps', '-axo', 'pgid=,stat='], text=True)
+            members = [row.split()[1] for row in rows.splitlines()
+                       if len(row.split()) == 2 and int(row.split()[0]) == group]
+            # A zombie has already exited and cannot retain I/O or descendants.
+            # Reaping the owned leader can race Darwin's final group teardown.
+            if not members or all(state.startswith('Z') for state in members):
+                return False
+            raise
+
+    def signal_group(value):
+        try:
+            os.killpg(group, value)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            if group_exists():
+                raise
 
     def drain(seconds):
         deadline = time.monotonic() + seconds
@@ -79,11 +112,9 @@ def stop(process):
         return True
 
     if group_exists():
-        try: os.killpg(group, signal.SIGTERM)
-        except ProcessLookupError: pass
+        signal_group(signal.SIGTERM)
         if not drain(90):
-            try: os.killpg(group, signal.SIGKILL)
-            except ProcessLookupError: pass
+            signal_group(signal.SIGKILL)
             if not drain(10):
                 raise RuntimeError('owned process group failed to drain')
     process.wait(timeout=10)
@@ -197,7 +228,28 @@ def main():
     parser.add_argument('--extended-acceptance', action='store_true', help='also run typed message and group operation acceptance against the owned stack')
     parser.add_argument('--nickname-directory-only', action='store_true', help='real multi-page nickname reads with two independently issued devices')
     parser.add_argument('--oss', action='store_true', help='use a private OSS bucket with runtime credentials for the owned resource stack')
+    parser.add_argument('--oss-test-parent', type=oss_validation_parent, default='validation/',
+                        help='authorized parent for a fresh validation/native-UUID namespace, e.g. ecs-test/validation/')
+    parser.add_argument('--resource-center', action='store_true', help='require resource-center and group-avatar scenarios only, with real OSS')
+    parser.add_argument('--app-xctestrun', type=Path, help='prebuilt iOS App integration test manifest; requires resource-center')
+    parser.add_argument('--app-simulator', help='explicit dedicated simulator UDID for App integration')
+    parser.add_argument('--app-ui-simulator', help='explicit dedicated simulator for the real two-account photo UI closure')
+    parser.add_argument('--app-ui-derived-data', type=Path, help='owned Xcode build directory for that UI closure')
     args = parser.parse_args()
+    if args.oss_test_parent != 'validation/' and not args.oss:
+        parser.error('--oss-test-parent requires --oss')
+    if bool(args.app_xctestrun) != bool(args.app_simulator) or (args.app_xctestrun and not args.resource_center):
+        parser.error('App integration requires --resource-center, --app-xctestrun and --app-simulator together')
+    if args.app_xctestrun:
+        args.app_xctestrun = args.app_xctestrun.resolve(strict=True)
+        if not re.fullmatch(r'[0-9A-Fa-f-]{36}', args.app_simulator):
+            parser.error('invalid explicit simulator UDID')
+    if bool(args.app_ui_simulator) != bool(args.app_ui_derived_data) or (args.app_ui_simulator and not args.resource_center):
+        parser.error('App UI closure requires resource-center and both App UI options')
+    if args.app_ui_simulator and not re.fullmatch(r'[0-9A-Fa-f-]{36}', args.app_ui_simulator):
+        parser.error('invalid explicit App UI simulator UDID')
+    if args.resource_center and (not args.oss or args.extended_acceptance or args.slow_resource or args.nickname_directory_only):
+        parser.error('--resource-center requires --oss and cannot combine with other scenario selectors')
     if args.oss and (args.slow_resource or args.nickname_directory_only):
         parser.error('--oss requires the resource lifecycle scenario')
     if args.oss:
@@ -228,6 +280,7 @@ def main():
                                          env=environment, text=True).strip())
     print('Current native Account, Gateway and image worker built.', flush=True)
     processes, logs = [], []
+    process_records = []
     counts = collections.Counter()
     counts_lock = threading.Lock()
     with tempfile.TemporaryDirectory(prefix='im-resource-live-') as directory:
@@ -237,6 +290,8 @@ def main():
         operator_port = free_port() if args.extended_acceptance else None
         database_args = ['-h', '127.0.0.1', '-p', str(database_port), '-U', 'postgres']
         started_postgres, proxy, proxy_thread = False, None, None
+        ui_input = None
+        ui_input_bytes = b'Resource center live document payload.\nSelected with the system file picker.\n'
         slow_gate = SlowUploadGate() if args.slow_resource else None
         with (output / 'setup.log').open('w') as setup:
             def run(command):
@@ -252,6 +307,8 @@ def main():
                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 process._owned_process_group = process.pid
                 processes.append(process)
+                process_records.append(dict(name=name, pid=process.pid))
+                (output / 'owned-processes.json').write_text(json.dumps(process_records, indent=2) + '\n')
                 return process
 
             try:
@@ -446,7 +503,7 @@ def main():
                     IMV2_RESOURCE_IMAGE_WORKER=str(binary / 'IMV2ResourceImageWorker'), IM_V2_LOG_LEVEL='warning')
                 if args.oss:
                     bucket, region = os.environ['IM_V2_OSS_BUCKET'], os.environ['IM_V2_OSS_REGION']
-                    prefix = 'validation/native-' + uuid.uuid4().hex + '/'
+                    prefix = args.oss_test_parent + 'native-' + uuid.uuid4().hex + '/'
                     for config_key in list(shared):
                         if config_key.startswith('IM_V2_LOCAL_MEDIA_'): shared.pop(config_key)
                     shared.update(IM_V2_RESOURCE_MODE='enabled',
@@ -494,9 +551,13 @@ def main():
                     test_env['IMV2_LIVE_EXTENDED_ACCEPTANCE'] = '1'
                 if args.nickname_directory_only:
                     test_env['IMV2_LIVE_NICKNAME_DIRECTORY'] = '1'
+                if args.resource_center:
+                    test_env['IMV2_LIVE_RESOURCE_CENTER'] = '1'
                 test_filter = 'V2LiveResourceAuthorTests/slowResourceUploadKeepsControlAndCursorProgress' if args.slow_resource else 'V2LiveResourceAuthorTests'
                 if args.nickname_directory_only:
                     test_filter = 'V2LiveResourceAuthorTests/largeNicknameDirectoryIndependentDeviceReads'
+                if args.resource_center:
+                    test_filter = 'V2LiveResourceAuthorTests/(resourceLifecycle|groupAvatarAcceptance)'
                 with (output / 'client.log').open('w') as log:
                     test = subprocess.Popen(['swift', 'test', '--disable-automatic-resolution', '--no-parallel',
                         '--jobs', '4', '--filter', test_filter], cwd=ROOT / 'IMV2ClientKit', env=test_env,
@@ -515,7 +576,116 @@ def main():
                     passed = bool(re.search(r'Test .*largeNicknameDirectoryIndependentDeviceReads.* passed', text))
                 else:
                     passed = len(re.findall(r'Test "real resource upload, author delivery, byte access and block revocation" passed', text)) == 1
+                group_avatar_passed = len(re.findall(r'Test "real group avatar upload, byte presentation, removal and original recovery" passed', text)) == 1
+                if args.resource_center:
+                    passed = passed and group_avatar_passed
+                app_result, app_passed = None, None
+                if args.app_xctestrun and result == 0 and passed:
+                    # Keep __TESTROOT__ relative to the original built products.
+                    # The one-run manifest contains only the owned fixture token
+                    # and CA; OSS credentials are never handed to the simulator.
+                    manifest = plistlib.loads(args.app_xctestrun.read_bytes())
+                    app = manifest['IMAppTests']
+                    manifest = {'IMAppTests': app, '__xctestrun_metadata__': manifest['__xctestrun_metadata__']}
+                    app['EnvironmentVariables'].update({
+                        'IMV2_LIVE_APP_RESOURCES': '1',
+                        'IMV2_LIVE_ACCOUNT_HTTPS_URL': base_url,
+                        'IMV2_LIVE_RESOURCE_GATEWAY_PORT': str(gateway_port),
+                        'IMV2_LIVE_RESOURCE_FIXTURE_TOKEN': fixture_token,
+                        'IMV2_LIVE_RESOURCE_CA_BASE64': base64.b64encode((private / 'ca.der').read_bytes()).decode('ascii'),
+                    })
+                    app['OnlyTestIdentifiers'] = ['V2LiveResourceAppSendTests']
+                    app['CommandLineArguments'] = ['-v2-ui-testing-signed-out']
+                    fd, manifest_name = tempfile.mkstemp(prefix='owned-resource-', suffix='.xctestrun', dir=args.app_xctestrun.parent)
+                    try:
+                        with os.fdopen(fd, 'wb') as target:
+                            plistlib.dump(manifest, target)
+                        with (output / 'app-client.log').open('w') as log:
+                            test = subprocess.Popen(['xcodebuild', 'test-without-building', '-xctestrun', manifest_name,
+                                '-destination', 'platform=iOS Simulator,id=' + args.app_simulator,
+                                '-parallel-testing-enabled', 'NO', '-only-testing:IMAppTests/V2LiveResourceAppSendTests',
+                                '-resultBundlePath', str(output / 'app.xcresult')],
+                                cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                            test._owned_process_group = test.pid
+                            try:
+                                app_result = test.wait(timeout=360)
+                            finally:
+                                stop(test)
+                                # Simulator test hosts are launched by launchd,
+                                # outside xcodebuild's owned process group. Drain
+                                # only this explicit test app on this simulator.
+                                subprocess.run(['xcrun', 'simctl', 'terminate', args.app_simulator,
+                                    app['TestHostBundleIdentifier']], env=environment,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    finally:
+                        Path(manifest_name).unlink(missing_ok=True)
+                    app_text = (output / 'app-client.log').read_text()
+                    app_passed = app_result == 0 and 'Live iOS resource send: frozen image+file' in app_text and bool(re.search(r'Test .*appAccountRecoversFrozenImageAndFileAndRecipientReadsBoth.* passed', app_text))
+                    passed = passed and app_passed
+                app_ui_result, app_ui_passed = None, None
+                if args.app_ui_simulator and result == 0 and passed:
+                    # Trust is changed only in this explicitly selected test
+                    # simulator, never the host or any real device. No cloud
+                    # credentials enter the UI process or its launch arguments.
+                    run(['xcrun', 'simctl', 'keychain', args.app_ui_simulator, 'add-root-cert', str(private / 'ca.der')])
+                    def png_chunk(kind, data):
+                        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+                    image = output / 'system-photo-fixture.png'
+                    image.write_bytes(b'\x89PNG\r\n\x1a\n' +
+                        png_chunk(b'IHDR', struct.pack('>IIBBBBB', 64, 64, 8, 2, 0, 0, 0)) +
+                        png_chunk(b'IDAT', zlib.compress((b'\0' + bytes([32, 120, 230]) * 64) * 64)) + png_chunk(b'IEND', b''))
+                    run(['xcrun', 'simctl', 'addmedia', args.app_ui_simulator, str(image)])
+                    groups = subprocess.check_output(['xcrun', 'simctl', 'get_app_container', args.app_ui_simulator,
+                        'com.apple.DocumentsApp', 'groups'], env=environment, text=True)
+                    roots = [Path(line.split('\t', 1)[1]) for line in groups.splitlines()
+                        if line.startswith('group.com.apple.FileProvider.LocalStorage\t')]
+                    if len(roots) != 1 or roots[0].is_symlink():
+                        raise RuntimeError('explicit simulator has no safe local file-provider root')
+                    folder = roots[0] / 'File Provider Storage'
+                    if folder.is_symlink():
+                        raise RuntimeError('refusing a symbolic-link file-provider folder')
+                    folder.mkdir(mode=0o700, exist_ok=True)
+                    candidate = folder / 'IM Resource UI input.txt'
+                    # Exclusive creation establishes ownership; never replace
+                    # a document already present in the simulator's Files app.
+                    with candidate.open('xb') as source:
+                        source.write(ui_input_bytes)
+                    ui_input = candidate
+                    (output / 'system-file-fixture.json').write_text(json.dumps({
+                        'fileName': candidate.name, 'byteCount': len(ui_input_bytes),
+                        'sha256': hashlib.sha256(ui_input_bytes).hexdigest(), 'removedOwnedInput': False}, indent=2))
+                    command = ['xcodebuild', '-project', str(ROOT / 'IMApp/IMApp.xcodeproj'),
+                        '-scheme', 'IMAppLocalAccountE2E', '-configuration', 'Debug',
+                        '-destination', 'platform=iOS Simulator,id=' + args.app_ui_simulator,
+                        '-derivedDataPath', str(args.app_ui_derived_data),
+                        '-parallel-testing-enabled', 'NO', '-collect-test-diagnostics', 'never',
+                        'CODE_SIGNING_ALLOWED=YES', 'CODE_SIGN_IDENTITY=-', 'IM_V2_ACCOUNT_BASE_URL=' + base_url,
+                        'IM_V2_GATEWAY_HOST=localhost', 'IM_V2_GATEWAY_PORT=' + str(gateway_port),
+                        '-only-testing:IMAppLocalAccountE2ETests/IMAppLiveResourceUITests/testSystemPhotoSendsToIndependentAccountAndSurvivesRelaunch',
+                        '-only-testing:IMAppLocalAccountE2ETests/IMAppLiveResourceUITests/testSystemFileSendsToIndependentAccountAndPreviewsAfterRelaunch',
+                        '-resultBundlePath', str(output / 'app-ui.xcresult'), 'test']
+                    with (output / 'app-ui-client.log').open('w') as log:
+                        test = subprocess.Popen(command, cwd=ROOT, env=environment, stdout=log,
+                            stderr=subprocess.STDOUT, start_new_session=True)
+                        test._owned_process_group = test.pid
+                        try:
+                            app_ui_result = test.wait(timeout=900)
+                        finally:
+                            stop(test)
+                            for bundle in ['com.stskcxfz.imapp', 'com.codex.imappLocalAccountE2ETests.xctrunner']:
+                                subprocess.run(['xcrun', 'simctl', 'terminate', args.app_ui_simulator, bundle],
+                                    env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    ui_text = (output / 'app-ui-client.log').read_text()
+                    photo_ui_passed = 'Live resource UI closure: system photo -> real author -> independent recipient -> relaunch' in ui_text and bool(re.search(
+                        r'Test Case .*testSystemPhotoSendsToIndependentAccountAndSurvivesRelaunch.* passed \(', ui_text))
+                    file_ui_passed = 'Live resource UI file closure: system file picker -> real author -> independent recipient preview -> relaunch' in ui_text and bool(re.search(
+                        r'Test Case .*testSystemFileSendsToIndependentAccountAndPreviewsAfterRelaunch.* passed \(', ui_text))
+                    app_ui_passed = app_ui_result == 0 and photo_ui_passed and file_ui_passed
+                    passed = passed and app_ui_passed
                 summary = {'clientExitCode': result, 'requiredTestPassed': passed,
+                    'resourceCenterGate': args.resource_center, 'groupAvatarPassed': group_avatar_passed,
+                    'appClientExitCode': app_result, 'appResourcePassed': app_passed,
+                    'appUIClientExitCode': app_ui_result, 'appUIResourcePassed': app_ui_passed,
                     'httpResponses': [{'method': m, 'path': p, 'status': s, 'count': n} for (m, p, s), n in sorted(counts.items())],
                     'slowResourceGate': slow_gate.snapshot() if slow_gate else None,
                     'resourceFacts': json.loads(sql("""SELECT json_build_object(
@@ -524,16 +694,54 @@ def main():
                         'blocks',(SELECT count(*) FROM im_v2.user_blocks));"""))}
                 (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
                 if result or not passed:
+                    # Preserve bounded state facts before disposing this owned
+                    # database. Never capture payloads, object handles or URLs.
+                    try:
+                        diagnostics = json.loads(sql("""SELECT json_build_object(
+                            'mediaStates',(SELECT coalesce(json_agg(s),'[]') FROM (
+                                SELECT c.usage_kind,m.state AS media_state,
+                                    coalesce(o.state,'none') AS scan_state,count(*) AS count,
+                                    max(o.retry_count) AS maximum_retry_count,
+                                    max(extract(epoch FROM o.lease_expires_at-clock_timestamp())) AS maximum_lease_seconds
+                                FROM im_v2.resource_catalog c JOIN im_v2.media_objects m USING(media_id)
+                                LEFT JOIN im_v2.media_scan_outbox o USING(media_id)
+                                GROUP BY c.usage_kind,m.state,o.state) s),
+                            'uploadStates',(SELECT coalesce(json_agg(s),'[]') FROM (
+                                SELECT state,count(*) AS count FROM im_v2.resource_upload_sessions GROUP BY state) s),
+                            'variantStates',(SELECT coalesce(json_agg(s),'[]') FROM (
+                                SELECT recipe,size,state,count(*) AS count FROM im_v2.resource_variants GROUP BY recipe,size,state) s),
+                            'databaseWaits',(SELECT coalesce(json_agg(s),'[]') FROM (
+                                SELECT state,wait_event_type,wait_event,count(*) AS count
+                                FROM pg_stat_activity WHERE datname=current_database()
+                                GROUP BY state,wait_event_type,wait_event) s));"""))
+                        (output / 'resource-failure-diagnostics.json').write_text(json.dumps(diagnostics, indent=2) + '\n')
+                    except Exception as error:
+                        (output / 'resource-failure-diagnostics-error.json').write_text(json.dumps(dict(type=type(error).__name__)) + '\n')
+                    if shutil.which('pg_dump'):
+                        dump = output / 'failure-database.dump'
+                        with dump.open('xb') as destination:
+                            os.fchmod(destination.fileno(), 0o600)
+                            subprocess.run(['pg_dump', *database_args, '-Fc', 'im_live_resources'],
+                                env=environment, stdout=destination, stderr=setup, timeout=30, check=False)
                     raise RuntimeError('required live resource test failed; inspect client.log')
             finally:
                 failures = []
+                if ui_input is not None:
+                    try:
+                        if ui_input.is_symlink() or not ui_input.is_file() or ui_input.read_bytes() != ui_input_bytes:
+                            raise RuntimeError('owned system-file input changed; refusing cleanup')
+                        ui_input.unlink()
+                        evidence = output / 'system-file-fixture.json'
+                        value = json.loads(evidence.read_text()); value['removedOwnedInput'] = not ui_input.exists()
+                        evidence.write_text(json.dumps(value, indent=2))
+                    except Exception as error: failures.append(str(error))
                 if slow_gate is not None:
                     try: slow_gate.close_and_drain()
                     except Exception as error: failures.append(str(error))
                     (output / 'slow-resource-gate.json').write_text(json.dumps(slow_gate.snapshot(), indent=2) + '\n')
                 for process in reversed(processes):
                     try: stop(process)
-                    except Exception as error: failures.append(str(error))
+                    except Exception as error: failures.append(f"owned PID {process.pid}: {error}")
                 if proxy is not None:
                     try:
                         if proxy_thread is not None and proxy_thread.is_alive():
@@ -543,6 +751,10 @@ def main():
                 for log in logs: log.close()
                 if started_postgres:
                     run(['pg_ctl', '-D', str(private / 'pg'), '-m', 'fast', '-w', 'stop'])
+                (output / 'owned-cleanup.json').write_text(json.dumps(dict(
+                    processLeadersExited=all(process.poll() is not None for process in processes),
+                    processGroupsDrained=not failures, postgresStopped=started_postgres,
+                    failureCount=len(failures)), indent=2) + '\n')
                 if failures: raise RuntimeError('; '.join(failures))
     print('Real resource acceptance and owned-service cleanup passed; evidence: ' + str(output), flush=True)
 

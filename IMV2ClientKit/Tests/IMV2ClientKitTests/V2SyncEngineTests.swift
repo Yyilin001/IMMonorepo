@@ -772,7 +772,7 @@ struct V2SyncEngineTests {
         var replacement = try #require(body["replacement"] as? [String: Any])
         var state = try #require(replacement["state"] as? [String: Any])
         state["media_ids"] = [media]
-        state["media_presentations"] = [["media_id":media, "kind":"image", "content_type":"image/jpeg", "byte_count":256]]
+        state["media_presentations"] = [try resourcePresentationWireFixture(room: #require(state["room_id"] as? String), media: media, contentType: "image/jpeg", bytes: 256)]
         state["mention_user_ids"] = [mentioned]
         state["reply_to_message_id"] = reply
         state["forwarded_from_message_id"] = forwardedMessage
@@ -1307,12 +1307,7 @@ struct V2SyncEngineTests {
                 "sender_user_id": "00000000-0000-0000-0000-00000000021c",
                 "text": "图片",
                 "media_ids": [mediaID],
-                "media_presentations": [[
-                    "media_id": mediaID,
-                    "kind": "image",
-                    "content_type": "image/jpeg",
-                    "byte_count": 2_048,
-                ]],
+                "media_presentations": [try resourcePresentationWireFixture(room: roomID, media: mediaID, contentType: "image/jpeg", bytes: 2048)],
                 "mention_user_ids": [],
                 "mentions_everyone": false,
                 "server_created_at_ms": 1_750_000_000_000,
@@ -1321,7 +1316,8 @@ struct V2SyncEngineTests {
         _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("media-token"), receipt: .init("media-receipt"), hasMore: false, capabilityProfile: "base"))
 
         let message = try #require(await store.messages(in: .init(roomID)).first)
-        #expect(message.mediaPresentations == [try .init(mediaID: .init(mediaID), kind: .image, contentType: "image/jpeg", byteCount: 2_048)])
+        #expect(message.mediaPresentations == [try .init(mediaID: .init(mediaID), kind: .image, contentType: "image/jpeg", byteCount: 2_048,
+            resourceDescriptor: resourceDescriptorFixture(room: roomID, media: mediaID, contentType: "image/jpeg", bytes: 2048))])
     }
 
     @Test("forward attribution survives live sync and local projection")

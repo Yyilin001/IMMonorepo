@@ -3,7 +3,8 @@ import SwiftUI
 import IMV2ClientKit
 import IMV2Core
 
-/// Explicit, memory-only visual fixtures. No credentials or production storage are opened.
+/// Explicit visual fixtures. UUID-scoped resource tests may open their own
+/// temporary files; no credentials or production storage are opened.
 @MainActor
 struct V2MockPreview: View {
     @State private var appStore = V2AppStore(startupMode: .uiTestingSignedOut)
@@ -12,6 +13,7 @@ struct V2MockPreview: View {
     @State private var privacy: V2PrivacySettingsStore
     @State private var navigation = V2RootNavigationStore()
     @State private var screen = "messages"
+    @State private var resourceStagingStatus: String?
     private let source: V2MockPreviewSource
     private let notifier: V2ProjectionChangeNotifier
 
@@ -26,6 +28,9 @@ struct V2MockPreview: View {
         _privacy = State(initialValue: .init(reader: source, updater: source))
         let navigation = V2RootNavigationStore()
         let args = ProcessInfo.processInfo.arguments
+        if args.contains("-v2-mock-resource-staging-scope") {
+            _resourceStagingStatus = State(initialValue: "正在准备附件测试")
+        }
         if let i = args.firstIndex(of: "-v2-mock-screen"), i + 1 < args.count {
             let value = args[i + 1]
             _screen = State(initialValue: value)
@@ -36,7 +41,9 @@ struct V2MockPreview: View {
 
     var body: some View {
         Group {
-            if ProcessInfo.processInfo.arguments.contains("-v2-mock-hide-controls") {
+            if let resourceStagingStatus {
+                Text(resourceStagingStatus).accessibilityIdentifier("mock.resource-staging.status")
+            } else if ProcessInfo.processInfo.arguments.contains("-v2-mock-hide-controls") {
                 VStack(spacing: 0) {
                     if ProcessInfo.processInfo.arguments.contains("-v2-mock-incoming-controls") {
                         Button("模拟收到消息") {
@@ -53,7 +60,45 @@ struct V2MockPreview: View {
             }
         }
         .environment(\.v2MockProfileNames, Dictionary(uniqueKeysWithValues: [201: "小林", 202: "陈晨", 203: "阿青", 211: "李晓", 221: "周宁"].map { (String(format: "00000000-0000-0000-0000-%012d", $0.key), $0.value) }))
-        .task { await conversations.refresh() }
+        .task {
+            let args = ProcessInfo.processInfo.arguments
+            guard let index = args.firstIndex(of: "-v2-mock-resource-staging-scope"), index + 1 < args.count,
+                  let scope = UUID(uuidString: args[index + 1]) else {
+                await conversations.refresh(); return
+            }
+            await runResourceStagingFixture(scope: scope, cleanup: args.contains("-v2-mock-resource-staging-cleanup"))
+        }
+    }
+
+    /// Opt-in filesystem integration only. Ordinary previews remain memory-only.
+    /// The UUID is supplied by the test; cleanup cannot select another root.
+    private func runResourceStagingFixture(scope: UUID, cleanup: Bool) async {
+        let root = FileManager.default.temporaryDirectory.appending(path: "v2-mock-resource-staging-" + scope.uuidString)
+        do {
+            if cleanup {
+                if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+                resourceStagingStatus = "附件测试数据已清理"; return
+            }
+            let local = try await V2LocalStoreBootstrapper(bindingStore: V2MockResourceBinding(value: scope))
+                .open(databaseURL: root.appending(path: "account.sqlite"), userID: source.user)
+            let center: V2ResourceCenter
+            do {
+                center = try await .make(scope: .init(incarnation: scope, accountID: source.user,
+                    directory: root.appending(path: "support"), cacheDirectory: root.appending(path: "cache")), store: local)
+            } catch { try? await local.close(); throw error }
+            let stager = V2FileConversationAttachmentStager(resources: center)
+            conversations = .init(environment: .init(userID: source.user.rawValue,
+                projections: .init(dataSource: source), messages: .init(sender: source),
+                discovery: .init(directConversationOpener: source), media: .init(attachmentStager: stager),
+                runtime: .init(projectionChangeNotifier: notifier)))
+            await conversations.refresh()
+            resourceStagingStatus = nil
+            let lifetime = AsyncStream<Void>.makeStream()
+            await withTaskCancellationHandler {
+                for await _ in lifetime.stream { }
+            } onCancel: { lifetime.continuation.finish() }
+            await stager.close(); await center.close(); try await local.close()
+        } catch { resourceStagingStatus = "附件测试准备失败" }
     }
 
     private var previewControls: some View {
@@ -120,6 +165,15 @@ extension EnvironmentValues {
         get { self[V2MockProfileNamesKey.self] }
         set { self[V2MockProfileNamesKey.self] = newValue }
     }
+}
+
+private struct V2MockResourceBinding: V2InstallationBindingStore {
+    let value: UUID
+    func load() -> V2LocalInstallationBinding? { .init(value: value) }
+    func save(_ binding: V2LocalInstallationBinding) throws {
+        guard binding == .init(value: value) else { throw V2ResourceStorageError.conflict }
+    }
+    func delete() throws { throw V2ResourceStorageError.unavailable }
 }
 
 private actor V2MockPreviewSource: V2ConversationDataSource, V2ContactsReading, V2PublicIdentityPresentationResolving,

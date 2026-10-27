@@ -16,7 +16,7 @@ struct V2LocalMultipartUploadTests {
         let transport=V2LocalResourceUploadTransport(binding:try .init(id:"background",configurationRevision:1),provider:provider)
         let media=MediaID(uuid:UUID()),session=MediaUploadSessionID(uuid:UUID()),issued=Date()
         let bytes=Data("part".utf8),checksum=try V2ResourceChecksum(value:SHA256.hash(data:bytes).map{String(format:"%02x",$0)}.joined())
-        let plans=try await transport.backgroundPartPlans(mediaID:media,contentType:"text/plain",byteCount:4,checksum:checksum,requestedParts:[],sessionID:session,generation:3,issuedAt:issued,expiresAt:issued.addingTimeInterval(600))
+        let plans=try await transport.backgroundPlans(mode: .httpPartPut, mediaID:media,contentType:"text/plain",byteCount:4,checksum:checksum,requestedParts:[],sessionID:session,generation:3,issuedAt:issued,expiresAt:issued.addingTimeInterval(600))
         let plan=try #require(plans.first),grant=try #require(plan.backgroundAuthorization)
         #expect(grant.sessionID==session && grant.generation==3 && grant.mediaID==media && grant.partNumber==1)
         #expect(plan.expiresAt.timeIntervalSince(issued)>120)
@@ -24,7 +24,7 @@ struct V2LocalMultipartUploadTests {
         try await provider.storeUploadedObject(mediaID:try .init(plan.url.lastPathComponent),targetURL:plan.url,contentType:"text/plain",bytes:bytes)
         #expect(try await transport.confirmedParts(mediaID:media,byteCount:4,checksum:checksum).count==1)
         await #expect(throws:(any Error).self) {
-            _ = try await transport.backgroundPartPlans(mediaID:MediaID(uuid:UUID()),contentType:"text/plain",byteCount:4,checksum:checksum,requestedParts:[],sessionID:session,generation:3,issuedAt:issued,expiresAt:issued.addingTimeInterval(901))
+            _ = try await transport.backgroundPlans(mode: .httpPartPut, mediaID:MediaID(uuid:UUID()),contentType:"text/plain",byteCount:4,checksum:checksum,requestedParts:[],sessionID:session,generation:3,issuedAt:issued,expiresAt:issued.addingTimeInterval(901))
         }
     }
     @Test func providerRestartKeepsConfirmedPartsAndOnlyIssuesMissingTarget() async throws {

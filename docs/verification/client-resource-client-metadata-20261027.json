@@ -1,0 +1,143 @@
+{
+  "observedAt": "2026-10-27T03:28:05.803434+00:00",
+  "status": "verified-deployed-and-client-installed",
+  "sourceSHA256": {
+    "IMV2Core/Sources/IMV2Core/ResourceUpload.swift": "1afcda055f648b2c6950319f0587e76d2b428e29be7dc0ee9f18fd5cb47f69a9",
+    "IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2LocalResourceAsset.swift": "088bf7c855f8bdc0739481409857d43b81239739faa874678da78708493bfaf6",
+    "IMV2ClientKit/Sources/IMV2ClientKit/V2ResourceTransferJob.swift": "079db9ebe60b400d90829eba3a9e72f242b96e6926b49c309754866008f7f25e",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ResourceJournal.swift": "0dbb31caa77c9ca6d0c8445c977752abadbb4914b81e204ee74157c55a743f1d",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2GroupAvatarClosures.swift": "f51f7127ce6f90f56357622ad336099b23999e01b2b80b92328a79ed08223ade",
+    "IMApp/IMApp/V2/V2DurableConversationSendService.swift": "6fe29e5ce6bfa2d33261087053e75f4243962ae2c38810c2b3242bfcb6c057fd",
+    "IMApp/IMApp/V2/V2GroupAvatarManagementService.swift": "0f967b2e9178e536326abfc61ad47034682f8c9860c9cdc6032fb008180bd06b",
+    "IMApp/IMApp/V2/V2PhotoLibraryPicker.swift": "0ff06ce9ced1b68586e114323253f196307a6d53761e0541059bfe9ccff8884b",
+    "IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2ResourceTransformer.swift": "73675a1ad399351d5b5569c8a9a9406cb4f8c5a557380da14ecde9b70b0333d8",
+    "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceVariantProcessor.swift": "43bf6d3820b5bcde8fe6cf22c9db5484aba7ff6e2949000d212fb2eb4123f5fd",
+    "IMV2Server/Sources/IMV2ResourceImageWorker/main.swift": "89cc9e0344bec5656b6e704243f1d18bb744dce74ece518ad1b533adbf0a2f64"
+  },
+  "contract": "clientImageDimensions is a bounded oriented-size declaration, stored in upload request JSON. Server compares existing decoder results before publishing actual catalog dimensions. No additional metadata fetch/decode; no weakening of authorization, checksums or scanning.",
+  "sqlSchemaChanged": false,
+  "coreTests": {
+    "passed": 13,
+    "log": "/tmp/im-client-dimensions-core-tests-20261027.log"
+  },
+  "clientTests": {
+    "passed": 75,
+    "log": "/tmp/im-client-metadata-native-tests-20261027.log"
+  },
+  "retryAndPersistenceTests": {
+    "passed": 4,
+    "log": "/tmp/im-client-metadata-retry-tests-r2-20261027.log"
+  },
+  "iosTests": {
+    "passed": 30,
+    "log": "/tmp/im-client-metadata-app-r2-20261027.log",
+    "xcresult": "/tmp/im-client-metadata-app-r2-20261027.xcresult"
+  },
+  "serverPostgresAndDecoderTests": {
+    "passed": 7,
+    "log": "/tmp/im-client-metadata-postgres-tests-20261027.log",
+    "database": "isolated local Docker PostgreSQL, current canonical schema; no deployed DB used",
+    "ownedDatabaseStoppedAndRemoved": true,
+    "publicationDecoderBoundary": "Matching/mismatched claims use a measured-facts transformer fixture in real SQL pipeline; EXIF/decoding tests use actual image worker."
+  },
+  "signedClient": {
+    "record": "/tmp/im-resource-client-signed-release-20261027-r21/result.json",
+    "binarySHA256": "e90fe9d113571f5d4bef9a7548dfcd539dfee21580eb9e0a9ef6cc6ca6707ca8",
+    "installed": true,
+    "launched": true,
+    "installRecord": "/tmp/im-client-metadata-phone-install-20261027.json",
+    "launchRecord": "/tmp/im-client-metadata-phone-launch-20261027.json",
+    "manualPhotoSendNotYetVerified": true
+  },
+  "linuxRelease": {
+    "record": "/tmp/im-client-metadata-linux-20261027/build-result.json",
+    "sourceManifest": "/tmp/im-client-metadata-linux-20261027/source-manifest.json",
+    "status": "built",
+    "runtimeProof": "/tmp/im-client-metadata-linux-20261027/runtime-result.json",
+    "photoWorkerRegression": "/tmp/im-client-metadata-linux-20261027/photo-worker-result.json",
+    "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+    "onlyAccountGatewayAndWorkerRebuilt": true,
+    "otherFourProgramsAndPolicyUnchanged": true,
+    "loadSegmentsVerifiedBeforePackaging": true
+  },
+  "deployed": true,
+  "priorFailuresRetained": [
+    "/tmp/im-client-metadata-app-20261027.log",
+    "/tmp/im-client-metadata-retry-tests-20261027.log",
+    "/tmp/im-resource-client-signed-release-20261027-r20/result.json"
+  ],
+  "notes": [
+    "The first replacement test used a one-hour jump while the production preparation window is longer; corrected test to exercise expiry without changing production policy.",
+    "R20 production release compiled successfully but a test-only input changed; R21 rebuilt against frozen current inputs and verified without drift.",
+    "Owned Linux build container stopped; cache volume and all build/source artifacts preserved; default Docker context retained. Public probe uploads only generated fixtures and does not send a chat message or modify a profile."
+  ],
+  "deployment": {
+    "status": "deployed-six-healthy-services-public-https-verified",
+    "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+    "previousImageID": "sha256:8223e8abc566f59ac5b7a5fd791350a9d0389e46d38aaad28f5ecdd0fcf566a8",
+    "databaseUnchanged": true,
+    "schemaChanged": false,
+    "services": [
+      {
+        "service": "placement-a",
+        "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+        "health": "healthy"
+      },
+      {
+        "service": "placement-b",
+        "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+        "health": "healthy"
+      },
+      {
+        "service": "placement-c",
+        "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+        "health": "healthy"
+      },
+      {
+        "service": "account",
+        "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+        "health": "healthy"
+      },
+      {
+        "service": "gateway",
+        "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+        "health": "healthy"
+      },
+      {
+        "service": "operator",
+        "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+        "health": "healthy"
+      }
+    ],
+    "publicHTTPSSystemTrust": true,
+    "caddyNamespaceVerified": true
+  },
+  "publicOSSVerification": {
+    "status": "passed-public-oss-declared-metadata-and-oriented-verification",
+    "imageID": "sha256:f59c8e3d52fb2085d23779e1ce0bc89bc47e5556159dc177982ecb53a00af207",
+    "cases": [
+      {
+        "matching": true,
+        "resourceState": "ready",
+        "catalogDimensions": {
+          "width": 80,
+          "height": 120
+        },
+        "declarationPreserved": true,
+        "seconds": 1.001
+      },
+      {
+        "matching": false,
+        "resourceState": "rejected",
+        "catalogDimensions": {
+          "width": null,
+          "height": null
+        },
+        "declarationPreserved": true,
+        "seconds": 0.928
+      }
+    ],
+    "messageOrProfileMutation": false,
+    "fixture": "generated JPEG, encoded 120x80 with EXIF6, oriented 80x120"
+  }
+}

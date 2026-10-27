@@ -7,6 +7,36 @@ import IMV2Core
 import Testing
 
 struct V2ResourceCapabilitiesTests {
+    @Test("freezing a real attachment and its original dependency never waits for a capability or transport request")
+    func freezesOfflineOriginalWithoutNetwork() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "offline-original-freeze-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let account = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appending(path: "V2.sqlite"),
+            installationBinding: .init(value: UUID()), userID: account)
+        let resources = try await makeResourceTestCenter(store: store, root: root)
+        let source = root.appending(path: "offline.txt"); try Data("offline original".utf8).write(to: source)
+        let asset = try await resources.importLocal(at: source, displayName: .init("offline.txt"), contentType: .init("text/plain"), purpose: .messageDraft(room))
+        let reader = OfflineCapabilityReader()
+        let engine = V2ResourceTransferEngine(store: store, control: NoFreezeTransport(), executor: NoFreezeTransport(),
+            resources: resources, capabilities: .init(reader: reader))
+        let jobID = UUID()
+        let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
+            usage: .messageAttachment(room), contentType: asset.contentType.value, byteCount: asset.byteCount,
+            checksum: asset.checksum, displayName: asset.displayName)
+        let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()), text: "offline draft", attachmentJobIDs: [jobID])
+        try await engine.prepareSend(intent, resources: [.init(id: jobID, request: request, localAssetID: asset.id)])
+        #expect(await reader.reads == 0)
+        #expect(try await store.preparingSendIntent(id: intent.id)?.clientMessageID == intent.clientMessageID)
+        #expect(try await store.resourceTransfer(id: jobID)?.stage == .prepared)
+        #expect(try await resources.selectedLocalAssets(purpose: .messageDraft(room)).isEmpty)
+        let lease = try await resources.borrowLocalOriginal(for: .upload(jobID))
+        #expect(try Data(contentsOf: lease.fileURL) == Data("offline original".utf8))
+        await lease.release()
+        await engine.close(); await resources.close(); try await store.close()
+    }
+
     @Test func readsAuthenticatedBoundedCapabilityEndpoint() async throws {
         let endpoint=try #require(URL(string:"https://account.invalid/v2/resource-uploads"))
         let expected=try V2ResourceCapabilities(uploadModes:[.httpPut],maximumBytes:4096,allowedUsages:[.messageAttachment],maximumParts:0,backgroundTransfer:false)
@@ -50,6 +80,15 @@ struct V2ResourceCapabilitiesTests {
         }
         try await cache.validateNewUpload(request("application/octet-stream"))
     }
+}
+
+private struct NoFreezeTransport: V2ResourceUploadControlling, V2ResourcePlanExecuting {
+    func create(_ request: V2ResourceUploadRequest) throws -> V2ResourceUploadSession { Issue.record("freeze issued create"); throw CancellationError() }
+    func status(_ locator: V2ResourceUploadLocator) throws -> V2ResourceUploadSession { Issue.record("freeze issued status"); throw CancellationError() }
+    func target(_ session: V2ResourceUploadSession) throws -> V2ResourceTransferPlan? { Issue.record("freeze issued target"); throw CancellationError() }
+    func finalize(_ session: V2ResourceUploadSession) throws -> V2ResourceUploadSession { Issue.record("freeze issued finalize"); throw CancellationError() }
+    func cancel(_ session: V2ResourceUploadSession) throws -> V2ResourceUploadSession { Issue.record("freeze issued cancel"); throw CancellationError() }
+    func upload(fileURL: URL, plan: V2ResourceTransferPlan) throws { Issue.record("freeze issued byte upload"); throw CancellationError() }
 }
 
 private struct FixedCapabilityReader: V2ResourceCapabilityReading {

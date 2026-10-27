@@ -7,6 +7,8 @@ public struct V2BackgroundTransferMetric: Sendable {
     public let bodyBytesSent: Int64?
     public let bodyBytesReceived: Int64?
     public let statusCode: Int?
+    /// Numeric transport error only; never an endpoint or credential-bearing description.
+    public let errorCode: Int?
     public let completionObserved: Bool
     public let transportFailed: Bool?
     public let cancelled: Bool?
@@ -18,6 +20,7 @@ public struct V2BackgroundTransferMetric: Sendable {
         bodyBytesSent = result.flatMap { $0.sentBytes >= 0 ? $0.sentBytes : nil }
         bodyBytesReceived = result?.receivedBytes.flatMap { $0 >= 0 ? $0 : nil }
         statusCode = result?.statusCode
+        errorCode = result?.errorCode
         completionObserved = result != nil
         transportFailed = result.map { $0.errorCode != nil }
         cancelled = result.map { $0.errorCode == URLError.cancelled.rawValue }

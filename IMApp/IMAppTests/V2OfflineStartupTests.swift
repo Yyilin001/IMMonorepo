@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import IMV2Core
 @testable import IMV2ClientKit
 @testable import IMApp
@@ -6,6 +7,28 @@ import Testing
 
 @MainActor @Suite("Local-first startup and background authentication", .serialized)
 struct V2OfflineStartupTests {
+    @Test("unsupported resource schema blocks startup without refreshing or discarding local data")
+    func unsupportedResourceSchemaPreservesLocalAccount() async throws {
+        let f = try await OfflineAppFixture.make()
+        defer { f.removeFiles() }
+        let pending = f.root.appending(path: "pending-resource-original")
+        let bytes = Data("keep unsent original".utf8)
+        try bytes.write(to: pending)
+        let mutation = try DatabaseQueue(path: f.database.path)
+        let count = try await mutation.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_message_projections") }
+        try await mutation.write { try $0.execute(sql: "ALTER TABLE v2_resource_retention_intents DROP COLUMN intent_id") }
+        try mutation.close()
+        await f.app.restore()
+        #expect(f.app.route == .unavailable(message: "此版本无法打开本机数据，现有数据已保留。"))
+        #expect(f.app.accountAccessMode == .blocked && f.app.conversationStore == nil)
+        #expect(await f.refresh.calls == 0)
+        #expect(try await f.auth.restoreState() == .authenticated(accessTokenExpiresAt: .distantPast))
+        let retained = try DatabaseQueue(path: f.database.path)
+        #expect(try await retained.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_message_projections") } == count)
+        #expect(try Data(contentsOf: pending) == bytes)
+        try retained.close()
+    }
+
     @Test("expired credentials show the normal local inbox before refresh completes")
     func unavailableNetworkRetainsLocalContent() async throws {
         let f = try await OfflineAppFixture.make()
@@ -99,8 +122,11 @@ struct V2OfflineStartupTests {
         try await f.auth.establish(replacement)
         await f.refresh.succeed(f.successor)
         await restoring.value
-        try await waitUntil { f.app.accountAccessMode == .blocked }
+        // Withdrawing access precedes I/O drain. The terminal route is only
+        // published after the captured runtime and both database pools close.
+        try await waitUntil { f.app.accountAccessMode == .blocked && f.app.route == .signedOut }
         #expect(f.app.conversationStore == nil)
+        #expect(try await f.store.load()?.credentials.userID == replacement.userID)
     }
 
     @Test("a locally denied room is not restored by cached messages")
@@ -150,7 +176,7 @@ struct V2OfflineStartupTests {
         let binding = OfflineAppBindingStore()
         let refresh = OfflineAppRefresh()
         let first = V2AuthSession(credentialStore: store, transport: refresh)
-        let initialBootstrap = V2ClientSessionBootstrapper(authSession: first, localStoreBootstrapper: .init(bindingStore: binding), databaseURL: url, accountStorageRoot: root.appending(path: "accounts"))
+        let initialBootstrap = V2ClientSessionBootstrapper(authSession: first, localStoreBootstrapper: .init(bindingStore: binding), databaseURL: url, accountStorageRoots: .init(persistent: root.appending(path: "accounts"), cache: root.appending(path: "caches")))
         let local = try await initialBootstrap.openEstablishedSession()
         let scope = try #require(try await initialBootstrap.storageScope(for: local))
         let peer = try V2PublicIdentity(userID: .init(UUID().uuidString), handle: .init("offline_peer"), displayName: "Cached name requires lease", accountKind: .regular)
@@ -167,7 +193,7 @@ struct V2OfflineStartupTests {
         let marker = OfflineAppExitMarker()
         let closer = OfflineAppCloseBarrier(fail: failClose)
         let bootstrap = V2ClientSessionBootstrapper(authSession: auth, localStoreBootstrapper: .init(bindingStore: binding), databaseURL: url,
-            accountStorageRoot: root.appending(path: "accounts"), beforeClosingLocalStore: { _ in try await closer.check() })
+            accountStorageRoots: .init(persistent: root.appending(path: "accounts"), cache: root.appending(path: "caches")), beforeClosingLocalStore: { _ in try await closer.check() })
         let app = V2AppStore(localRestorationDependencies: .init(configuration: try .init(), authSession: auth, bootstrapper: bootstrap,
             exitMarker: marker, databaseURL: url, serviceIdentifier: "offline-fixture-" + UUID().uuidString))
         return .init(root: root, database: scope.database.primary, room: room, credentials: expired, successor: valid,

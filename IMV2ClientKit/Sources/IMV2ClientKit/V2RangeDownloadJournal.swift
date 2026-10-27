@@ -30,6 +30,7 @@ final class V2RangeDownloadFile: @unchecked Sendable {
     private var discardsResponseBody = false
     private var discardedBytes = 0
     var offset: Int64 { lock.withLock { journal.offset } }
+    var acceptedResponseBytes: Int64 { lock.withLock { responseExpectedBytes } }
     var etag: String? { lock.withLock { journal.etag } }
     init(destination: URL,target: V2ClientMediaTransferTarget) throws {
         self.target = target

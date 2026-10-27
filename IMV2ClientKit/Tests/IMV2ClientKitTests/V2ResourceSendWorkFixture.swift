@@ -29,6 +29,18 @@ extension GRDBV2LocalSyncStore {
         guard mediaPresentations.map(\.mediaID) == command.media.map(\.mediaID) else {
             throw V2OperationWorkError.invalidRecord
         }
+        let presentationWire = try mediaPresentations.map { presentation -> [String: Any] in
+            let descriptor: V2ResourceDescriptor? = try databasePool.read { db in
+                guard let row = try Row.fetchOne(db, sql: "SELECT job_id FROM v2_resource_transfer_jobs WHERE media_id=?", arguments: [presentation.mediaID.rawValue]),
+                      let id = UUID(uuidString: row["job_id"]), let job = try Self.readResourceTransfer(id, db: db),
+                      let session = job.session else { return nil }
+                return try .init(key: .init(home: session.locator.home, mediaID: presentation.mediaID), revision: session.generation,
+                    displayName: job.request.displayName, contentType: job.request.contentType, byteCount: job.request.byteCount,
+                    checksum: job.request.checksum, state: .ready)
+            }
+            return try resourcePresentationWireFixture(room: command.roomID.rawValue, media: presentation.mediaID.rawValue,
+                contentType: presentation.contentType, bytes: presentation.byteCount, descriptor: descriptor)
+        }
         let cursor = try cursor()
         let sequence = (cursor?.appliedSequence ?? 0) + 1
         let record = try V2ClientSyncRecord(sequence: sequence, sourceEventID: .init(uuid: UUID()), projectionKind: "message",
@@ -37,8 +49,7 @@ extension GRDBV2LocalSyncStore {
                 "room_sequence": accepted.roomSequence, "message_revision": 1,
                 "sender_user_id": command.senderUserID.rawValue, "text": command.text,
                 "media_ids": command.media.map { $0.mediaID.rawValue },
-                "media_presentations": mediaPresentations.map { ["media_id": $0.mediaID.rawValue,
-                    "kind": $0.kind.rawValue, "content_type": $0.contentType, "byte_count": $0.byteCount] as [String: Any] },
+                "media_presentations": presentationWire,
                 "server_created_at_ms": 1750000000000]))
         _ = try apply(.init(generation: cursor?.generation ?? 1, records: [record],
             nextSyncToken: .init("fixture-projection-\(sequence)"), receipt: .init("fixture-projection-\(sequence)"),

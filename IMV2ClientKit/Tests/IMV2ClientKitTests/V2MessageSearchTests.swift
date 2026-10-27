@@ -509,7 +509,7 @@ struct V2MessageSearchTests {
                 "sender_user_id": senderID.rawValue,
                 "text": "",
                 "media_ids": [mediaID],
-                "media_presentations": [["media_id": mediaID, "kind": kind, "content_type": "application/octet-stream", "byte_count": 1]],
+                "media_presentations": [try resourcePresentationWireFixture(room: roomID.rawValue, media: mediaID, contentType: kind == "image" ? "image/jpeg" : "application/octet-stream", bytes: 1).merging(["kind": kind], uniquingKeysWith: { _, new in new })],
                 "server_created_at_ms": Int64(1_750_000_000_000 + Int64(sequence))
             ])
         )

@@ -1,11 +1,70 @@
 import Foundation
-import IMV2ClientKit
+@testable import IMV2ClientKit
 import IMV2Core
 import Testing
 @testable import IMApp
 
 @MainActor
 struct V2PublicIdentitySettingsStoreTests {
+    @Test func existingImageSelectionSavesAnImportWithoutStagingOrUploading() async throws {
+        let service = try ProfileIntentServiceFixture(), store = V2PublicIdentitySettingsStore(service: service, attachmentStager: nil)
+        await store.load()
+        let location = V2MediaMessageLocation(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID()))
+        let selection = V2AvatarResourceSelection(key: .init(home: .room(location.roomID), mediaID: .init(uuid: UUID())),
+            source: .init(location: location, ordinal: 0, createdAt: nil), displayName: "已有头像.png")
+        await store.selectAvatarResource(selection)
+        #expect(store.canSave && store.stagedAvatar == nil && store.currentAvatarKey == nil)
+        await store.save()
+        let imported = try #require(await service.savedImport)
+        #expect(imported.request.source == selection.importSource && imported.request.targetUsage == .userAvatar)
+        #expect(imported.request.targetMediaID != selection.key.mediaID)
+        #expect(await service.savedPatch?.avatar == .set(.init(mediaID: imported.request.targetMediaID)))
+        #expect(store.existingAvatar == nil && !store.canSave)
+        store.stopObserving()
+    }
+    @Test("avatar selection is recovered from the real original journal after a cold account open")
+    func restoresLocalAvatarSelection() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "profile-original-restore-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "avatar.png"); try Data([1,2,3]).write(to: source)
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
+        let draft = try await fixture.stager.stageImportedFile(at: source, purpose: .personalAvatar)
+        _ = try await fixture.stager.stageImportedFile(at: source, purpose: .messageDraft(.init(uuid: UUID())))
+        try await fixture.close()
+        let restored = try await V2OriginalResourceTestFixture(root: root, scope: fixture.scope)
+        let page = V2PublicIdentitySettingsStore(service: try ProfileIntentServiceFixture(), attachmentStager: restored.stager)
+        await page.load()
+        #expect(page.stagedAvatar?.localAssetID == draft.localAssetID)
+        #expect(try await restored.read(.selection(draft.localAssetID)) == Data([1,2,3]))
+        await page.removeAvatar()
+        await page.load()
+        #expect(page.stagedAvatar == nil)
+        #expect(try await restored.stager.selectedAttachments(purpose: .personalAvatar).isEmpty)
+        page.stopObserving(); try await restored.close()
+    }
+
+    @Test("a late import cannot resurrect a removed or cancelled avatar selection", arguments: [false, true])
+    func lateImportIsDiscarded(remove: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "profile-original-late-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "avatar.png"); try Data([1,2,3]).write(to: source)
+        let fixture = try await V2OriginalResourceTestFixture(root: root)
+        let stager = PausedProfileStager(base: fixture.stager)
+        let page = V2PublicIdentitySettingsStore(service: try ProfileIntentServiceFixture(), attachmentStager: stager)
+        await page.load()
+        let selection = Task { await page.selectAvatar(at: source) }
+        await stager.entered()
+        #expect(page.isSelectingAvatar && !page.canSave)
+        if remove { await page.removeAvatar() } else { selection.cancel() }
+        await stager.release(); await selection.value
+        #expect(page.stagedAvatar == nil && !page.isSelectingAvatar)
+        #expect(try await fixture.stager.selectedAttachments(purpose: .personalAvatar).isEmpty)
+        #expect(try Data(contentsOf: source) == Data([1,2,3]))
+        page.stopObserving(); try await fixture.close()
+    }
+
     @Test func avatarUsesPresentationContext() async throws {
         let avatar = V2AvatarReference(mediaID: .init(uuid: UUID()))
         let service = try ProfileIntentServiceFixture(avatar: avatar)
@@ -68,7 +127,35 @@ struct V2PublicIdentitySettingsStoreTests {
     }
 
 }
+
+private actor PausedProfileStager: V2ConversationAttachmentStaging {
+    let base: V2FileConversationAttachmentStager
+    private let starts = AsyncStream<Void>.makeStream()
+    private var continuation: CheckedContinuation<Void, Never>?
+    init(base: V2FileConversationAttachmentStager) { self.base = base }
+    func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) async throws -> V2StagedConversationAttachment {
+        let asset = try await base.stageImportedFile(at: sourceURL, purpose: purpose)
+        await withCheckedContinuation { continuation = $0; starts.continuation.yield(()) }
+        return asset
+    }
+    func entered() async { var iterator = starts.stream.makeAsyncIterator(); _ = await iterator.next() }
+    func release() { continuation?.resume(); continuation = nil }
+    func selectedAttachments(purpose: V2LocalResourceAssetPurpose) async throws -> [V2StagedConversationAttachment] {
+        try await base.selectedAttachments(purpose: purpose)
+    }
+    func borrow(_ context: V2LocalResourceReadContext) async throws -> V2ResourceFileLease { try await base.borrow(context) }
+    func discard(_ attachment: V2StagedConversationAttachment) async { await base.discard(attachment) }
+}
+
 private actor ProfileIntentServiceFixture: V2ProfileIntentManaging {
+    private(set) var savedImport: V2ProfileAvatarImport?
+    func enqueueImportedAvatar(expectedRevision: V2ProfileRevision, patch: V2ProfilePatch, source: V2ProfileAvatarImport) async throws -> V2ProfileIntent {
+        savedPatch = patch; savedImport = source
+        let value = V2ProfileIntent(id: UUID(), accountID: profile.userID, operationID: .init(uuid: UUID()), expectedRevision: expectedRevision,
+            patch: patch, avatarPreparation: .serverImport(source), deadline: Date().addingTimeInterval(86400), workID: nil)
+        pending = value
+        return value
+    }
     nonisolated let profile: V2ProfileView
     private var pending: V2ProfileIntent?
     private var shouldBlockRefresh = false

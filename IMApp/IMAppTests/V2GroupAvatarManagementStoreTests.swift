@@ -60,7 +60,7 @@ struct V2GroupAvatarManagementStoreTests {
     @Test(arguments: [false, true]) func anUnknownOperationCanBeQueriedWithoutCurrentManagementPermission(readFailure: Bool) async throws {
         let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
         let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: room, expectedRevision: 0, mutation: .remove)
-        let intent = V2GroupAvatarIntent(actorUserID: user, command: command, uploadJobID: nil, stage: .submitted,
+        let intent = V2GroupAvatarIntent(actorUserID: user, command: command, preparation: nil, stage: .submitted,
             submissionStarted: true, recoveryAction: nil, closedDisposition: .awaitingDecision,
             attempts: 1, retryAt: Date(), issue: .outcomeUnknown, receipt: nil, closureProof: nil)
         let manager = PageAvatarManager(snapshot: .init(access: .forbidden, pending: [intent]))
@@ -80,7 +80,7 @@ struct V2GroupAvatarManagementStoreTests {
         let room = RoomID(uuid: UUID()), actor = UserID(uuid: UUID())
         let intents = try (0..<17).map { _ -> V2GroupAvatarIntent in
             let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: room, expectedRevision: 0, mutation: .remove)
-            return .init(actorUserID: actor, command: command, uploadJobID: nil, stage: .submitted,
+            return .init(actorUserID: actor, command: command, preparation: nil, stage: .submitted,
                 submissionStarted: true, recoveryAction: nil, closedDisposition: .awaitingDecision,
                 attempts: 1, retryAt: Date(), issue: .outcomeUnknown, receipt: nil, closureProof: nil)
         }
@@ -142,6 +142,10 @@ private actor AvatarPageGate {
 }
 
 private actor PageAvatarManager: V2GroupAvatarManaging {
+    private(set) var resourceSelections: [V2AvatarResourceSelection] = []
+    func changeUsingResource(roomID: RoomID, expectedRevision: UInt64, selection: V2AvatarResourceSelection) async throws {
+        resourceSelections.append(selection)
+    }
     struct Change: Sendable { let revision: UInt64; let image: V2StagedConversationAttachment? }
     struct Action: Sendable { let id: GroupAvatarOperationID; let action: V2GroupAvatarManagementAction }
     var snapshot: V2GroupAvatarManagementSnapshot
@@ -174,9 +178,9 @@ private actor PageAvatarStager: V2ConversationAttachmentStaging {
     let gate: AvatarPageGate?
     private(set) var staged = 0, discarded = 0
     init(gate: AvatarPageGate? = nil) { self.gate = gate }
-    func stageImportedFile(at sourceURL: URL) async -> V2StagedConversationAttachment {
+    func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) async -> V2StagedConversationAttachment {
         staged += 1; await gate?.wait()
-        return .init(id: UUID(), fileURL: sourceURL, displayName: "image.png", contentType: "image/png", byteCount: 3)
+        return .init(id: UUID(), displayName: "image.png", contentType: "image/png", byteCount: 3)
     }
     func discard(_ attachment: V2StagedConversationAttachment) { discarded += 1 }
 }

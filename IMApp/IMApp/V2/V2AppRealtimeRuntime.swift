@@ -999,13 +999,12 @@ struct V2AppRealtimeRuntime {
         authSession: V2AuthSession,
         authEpoch: V2AuthSessionEpoch,
         localStore: GRDBV2LocalSyncStore,
-        mediaCacheDirectory: URL,
-        mediaStagingDirectory: URL,
+        resourceCenter: V2ResourceCenter,
         testRoomNotificationInterceptor: (@Sendable (String, UInt64, Int) -> Bool)? = nil,
         testRoomProgressObserver: (@Sendable (RoomID, UInt64) async throws -> Void)? = nil,
         testRoomRecoveryObserver: (@Sendable (V2RoomRecoveryObservation) -> Void)? = nil,
         testConnectionObserver: (@Sendable (V2TLSFrameConnection) -> Void)? = nil
-    ) throws {
+    ) async throws {
         let coverage = V2AppRealtimeCoverage()
         realtimeCoverage = coverage
         let frameLimits = try V2FrameLimits(
@@ -1247,9 +1246,10 @@ struct V2AppRealtimeRuntime {
         groupReadReceiptReader = V2RealtimeGroupReadReceiptReader(transport: transport)
         conversationLiveActivity = V2RealtimeConversationLiveActivity(transport: transport, events: connection,localStore:localStore)
         let resourceControl = try V2HTTPResourceUploadClient(endpoint: configuration.endpoint("v2/resource-uploads"), credentials: accountHTTP, transport: accountHTTP)
-        let resourceEngine = V2ResourceTransferEngine(store: localStore, control: resourceControl, executor: V2URLSessionResourcePlanExecutor(scheduler: accountRuntime.scheduler, diagnostics: accountRuntime.networkDiagnostics), directory: mediaStagingDirectory,
+        let resourceEngine = V2ResourceTransferEngine(store: localStore, control: resourceControl, executor: V2URLSessionResourcePlanExecutor(scheduler: accountRuntime.scheduler, diagnostics: accountRuntime.networkDiagnostics), resources: resourceCenter,
             capabilities: V2ResourceCapabilitiesCache(reader: resourceControl))
         self.resourceTransfers = resourceEngine
+        try await resourceCenter.attachUploads(resourceEngine)
         let resourceImports = try V2HTTPResourceImportClient(endpoint: configuration.endpoint("v2/resource-imports"), credentials: accountHTTP, transport: accountHTTP)
         let groupAvatarCommands = try V2HTTPGroupAvatarCommandClient(roomsEndpoint: configuration.endpoint("v2/rooms"),
             actorUserID: actorUserID, credentials: accountHTTP, transport: accountHTTP)
@@ -1260,14 +1260,13 @@ struct V2AppRealtimeRuntime {
             actorUserID: actorUserID, credentials: accountHTTP, transport: accountHTTP)
         let groupAvatarManager = V2GroupAvatarManagementService(actorUserID: actorUserID, deviceID: deviceID,
             store: localStore, intents: groupAvatarIntents, reader: groupReader,
-            capabilities: resourceControl, directory: mediaStagingDirectory)
+            capabilities: resourceControl, resources: resourceCenter)
         self.groupAvatarManager = groupAvatarManager
-        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, messageOperations:messageSendOperations,
+        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, resources: resourceCenter, messageOperations:messageSendOperations,
             imports: resourceImports, groupAvatars: groupAvatarIntents, groupAvatarManager: groupAvatarManager)
         attachmentUploader = V2ForegroundConversationAttachmentUploader(durable: durableSender)
-        let foregroundMediaDownloader = try V2ForegroundConversationMediaDownloader(
-            downloader: mediaDownloader,
-            directory: mediaCacheDirectory
+        let foregroundMediaDownloader = V2ForegroundConversationMediaDownloader(
+            cache: try await resourceCenter.downloadCache(using: mediaDownloader), center: resourceCenter
         )
         self.mediaDownloader = foregroundMediaDownloader
         self.mediaCacheMaintenance = foregroundMediaDownloader

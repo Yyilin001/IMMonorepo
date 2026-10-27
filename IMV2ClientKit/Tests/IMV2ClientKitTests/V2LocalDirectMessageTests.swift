@@ -41,7 +41,7 @@ struct V2LocalDirectMessageTests {
         let message = try #require(try await service.localMessages(workID: workID).first)
         try await complete(workID, room: f.room, store: f.store)
         let intent = try V2SendIntent(id: message.id, roomID: f.room, clientMessageID: .init(message.id.uuidString), text: message.text, attachmentJobIDs: [])
-        try await f.store.freezeSendIntent(intent, now: message.createdAt)
+        try await f.store.freezeMetadataSendIntent(intent, now: message.createdAt)
         try await service.prepareLocalMessages()
         #expect(try await f.store.preparingSendIntents().map(\.id) == [message.id])
         #expect(try await service.localMessages(workID: workID).isEmpty)

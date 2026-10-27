@@ -232,6 +232,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var accountWorkPaused = false
     private(set) var isResumingAccountWork = false
     private(set) var conversationStore: V2ConversationListStore?
+    private(set) var resourceManagement: V2ResourceManagementService?
     private(set) var contactsStore: V2ContactsStore?
     private(set) var privacySettingsStore: V2PrivacySettingsStore?
     private(set) var userBlockSettingsStore: V2UserBlockSettingsStore?
@@ -324,6 +325,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             let databaseURL = try Self.databaseURL(
                 fileName: liveLocalAccountE2ETestScope?.databaseFileName
             )
+            let accountCacheRoot = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                .appending(path: databaseURL.lastPathComponent + ".accounts", directoryHint: .isDirectory)
             let revocationClient = try V2HTTPDeviceRevocationClient(endpoint: configuration.endpoint("v2/device-credentials/revoke"))
             self.configuration = configuration
             self.authSession = authSession
@@ -342,7 +345,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 authSession: authSession,
                 localStoreBootstrapper: .init(bindingStore: V2KeychainInstallationBindingStore(service: keychainService)),
                 databaseURL: databaseURL,
-                accountStorageRoot: databaseURL.appendingPathExtension("accounts")
+                accountStorageRoots: .init(persistent: databaseURL.appendingPathExtension("accounts"),
+                    cache: accountCacheRoot)
             )
             deviceRegistrationStore = registrationStore
             route = .launching
@@ -462,6 +466,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } catch V2OfflineReadBootstrapError.installationBindingUnavailable {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .protectedDataUnavailable
+        } catch V2ClientLocalStorageError.unsupportedResourceSchema {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .unavailable(message: "此版本无法打开本机数据，现有数据已保留。")
         } catch V2OfflineReadBootstrapError.installationBindingMismatch {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .unavailable(message: "无法确认本地数据的安装与账户归属。")
@@ -540,6 +547,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             } catch V2AuthSessionError.credentialsUnavailable, V2OfflineReadBootstrapError.installationBindingUnavailable {
                 guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
                 await self.discardAuthenticatedPresentation(route: .protectedDataUnavailable)
+            } catch V2ClientLocalStorageError.unsupportedResourceSchema {
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
+                await self.discardAuthenticatedPresentation(route: .unavailable(message: "此版本无法打开本机数据，现有数据已保留。"))
             } catch V2ClientSessionBootstrapError.localStoreCloseFailed {
                 guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
                 self.accountAccessMode = .blocked
@@ -708,6 +718,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             // Keychain boundary as credentials. It can recover after unlock.
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .protectedDataUnavailable
+        } catch V2ClientLocalStorageError.unsupportedResourceSchema {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .unavailable(message: "此版本无法打开本机数据，现有数据已保留。")
         } catch V2ClientLocalStorageError.backupExclusionVerificationFailed {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
@@ -855,6 +868,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         pendingGroupAvatarsStore?.suspend()
         pendingGroupAvatarsStore = nil
         mediaCacheDownloader = nil
+        resourceManagement = nil
         accountAttachmentUploader = nil
         accountAttachmentStager = nil
         indexer?.cancel()
@@ -886,13 +900,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         await indexer?.value
         do {
             // The account database and unknown operation journal survive sign-out.
-            // Keep source files too; next activation removes only aged orphans
-            // after consulting that journal. Closing is not a cancellation proof.
+            // Keep canonical originals and recovery facts. Importers must drain
+            // cancelled-value cleanup before the shared byte owner closes.
+            // Closing is not a cancellation proof for a business operation.
             try await V2AccountResourceCleanup.run([
                 { await closingUploader?.close() },
                 { await closingAccountRuntime?.close() },
+                { await closingStager?.close() },
                 { try await closingDownloader?.close() },
-                { try await closingStager?.close(preservingDurableFiles: true) },
                 { if let closingOfflineStore { try await closingBootstrapper?.closeLocalStore(closingOfflineStore) } },
                 { if let localStore { try await closingBootstrapper?.closeLocalStore(localStore) } }
             ])
@@ -952,29 +967,31 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let previousProfiles = accountProfileRepository
         accountProfileRepository = nil
         mediaCacheDownloader = nil
+        resourceManagement = nil
         accountAttachmentUploader = nil
         accountAttachmentStager = nil
         try await V2AccountResourceCleanup.run([
             { await previousProfiles?.close() },
             { await previousUploader?.close() },
-            { try await previousDownloader?.close() },
-            { try await previousStager?.close(preservingDurableFiles: true) }
+            { await previousStager?.close() },
+            { try await previousDownloader?.close() }
         ])
         try Task.checkCancellation()
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         try await authSession.requireAuthenticatedEpoch(authEpoch)
         try await V2AccountActivationScope.withPrepared { activation in
-            let attachmentStager = try V2FileConversationAttachmentStager(directory: scope.mediaStagingDirectory)
-            activation.onDiscard { try await attachmentStager.close(preservingDurableFiles: true) }
-            let realtime = try V2AppRealtimeRuntime(
+            let resourceCenter = try await V2ResourceCenter.make(scope: scope, store: localStore)
+            activation.onDiscard { await resourceCenter.close() }
+            let attachmentStager = V2FileConversationAttachmentStager(resources: resourceCenter)
+            activation.onDiscard { await attachmentStager.close() }
+            let realtime = try await V2AppRealtimeRuntime(
                 configuration: configuration,
                 actorUserID: userID,
                 deviceID: deviceID,
                 authSession: authSession,
                 authEpoch: authEpoch,
                 localStore: localStore,
-                mediaCacheDirectory: scope.mediaCacheDirectory,
-                mediaStagingDirectory: scope.mediaStagingDirectory
+                resourceCenter: resourceCenter
             )
             activation.onDiscard {
                 await realtime.backgroundSync.stop()
@@ -986,25 +1003,19 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 try await realtime.mediaCacheMaintenance.close()
             }
             let backgroundTransfers=try await V2BackgroundTransferCoordinator.native(store:localStore,
-                scheduler:realtime.accountRuntime.scheduler,activationID:realtime.accountRuntime.ownerID,
+                scheduler:realtime.accountRuntime.scheduler,resources:resourceCenter,activationID:realtime.accountRuntime.ownerID,
                 diagnostics:realtime.accountRuntime.networkDiagnostics)
             activation.onDiscard { await backgroundTransfers.close() }
             // Adopt existing system I/O before any foreground activity can request the same slots.
             try await realtime.resourceTransfers.attachBackground(backgroundTransfers)
             let backgroundDownloads = try await V2BackgroundDownloadCoordinator.native(accountID: userID,
-                store: localStore, scheduler: realtime.accountRuntime.scheduler, resolver: realtime.mediaDownloadResolver)
+                store: localStore, scheduler: realtime.accountRuntime.scheduler, resources: resourceCenter, resolver: realtime.mediaDownloadResolver)
             activation.onDiscard { await backgroundDownloads.close() }
             try await backgroundDownloads.initialize()
-            await realtime.mediaCacheMaintenance.attachBackgroundDownloads(backgroundDownloads)
+            try await realtime.mediaCacheMaintenance.attachBackgroundDownloads(backgroundDownloads)
             try Task.checkCancellation()
             try await authSession.requireAuthenticatedEpoch(authEpoch)
-            // No source reader is running yet. Multipart slices and interrupted
-            // import copies cannot be referenced by any durable resource intent.
-            try await attachmentStager.discardInterruptedCopies()
-            let retainedTokens = try await localStore.retainedResourceFileTokens()
-            await attachmentStager.discardOrphanedStagedFiles(retaining: retainedTokens, olderThan: Date().addingTimeInterval(-86_400))
-            try Task.checkCancellation()
-            await realtime.mediaCacheMaintenance.performMaintenance()
+            try await realtime.mediaCacheMaintenance.performMaintenance()
             try Task.checkCancellation()
             let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch,
                 transport: try V2RegisteredAccountHTTPTransport(executor: realtime.accountRuntime.httpExecutor,
@@ -1015,6 +1026,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 actorUserID: userID,
                 credentials: accountHTTP, transport: accountHTTP
             )
+            let resourceManagement = V2ResourceManagementService(center: resourceCenter, localStore: localStore,
+                downloader: realtime.mediaDownloader,
+                directory: try V2HTTPRoomResourceDirectoryClient(baseURL: configuration.accountBaseURL, credentials: accountHTTP, transport: accountHTTP))
             let roomRecovery = realtime.roomRecovery
             let conversationDataSource = V2GRDBConversationDataSource(
                 localStore: localStore, requiresLocalReadAuthorization: localIdentity != nil,
@@ -1025,6 +1039,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 profiles: realtime.profileRepository,
                 currentUserID: userID
             )
+            let thumbnails = V2LocalMediaThumbnailCache(directories: [scope.directory, scope.cacheDirectory])
+            activation.onDiscard { await thumbnails.close() }
             let conversationEnvironment = V2ConversationFeatureEnvironment(
                 userID: userID.rawValue,
                 projections: .init(
@@ -1063,7 +1079,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 media: .init(
                     attachmentStager: attachmentStager,
                     resourceSender: realtime.attachmentUploader.durable,
-                    downloader: realtime.mediaDownloader
+                    downloader: realtime.mediaDownloader,
+                    thumbnails: thumbnails
                 ),
                 runtime: .init(
                     liveActivity: realtime.conversationLiveActivity,
@@ -1203,8 +1220,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 pushWakeSettings = .init(reconciler: reconciler, preferences: preferences, remoteNotificationRegistrar: remoteNotificationRegistrar, environment: configuration.pushEndpointEnvironment)
             } else { pushWakeSettings = nil }
             activation.onDiscard { await pushWakeSettings?.stop() }
-            let thumbnails = V2LocalMediaThumbnailCache(directory: scope.directory)
-            activation.onDiscard { await thumbnails.close() }
             let presentations = realtime.profilePresentations
             let groupReader = try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: configuration.endpoint("v2/rooms"),
                 actorUserID: userID, credentials: accountHTTP, transport: accountHTTP)
@@ -1245,6 +1260,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             accountAttachmentStager = attachmentStager
             accountProfileRepository = realtime.profileRepository
             mediaCacheDownloader = realtime.mediaCacheMaintenance
+            self.resourceManagement = resourceManagement
             mediaThumbnailCache = thumbnails
             avatarPipeline = pipeline
             avatarInvalidationTask?.cancel()
@@ -1328,6 +1344,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             }
             await realtime.accountRuntime.startActivity(id: "backgroundDownloads") {
                 try await backgroundDownloads.run()
+            }
+            await realtime.accountRuntime.startActivity(id: "resourceDownloadRecovery") {
+                try await realtime.mediaCacheMaintenance.runRecovery()
             }
             await realtime.accountRuntime.startActivity(id: "resourcePreparation", operation: {
                 try await realtime.attachmentUploader.durable.runRecovery()

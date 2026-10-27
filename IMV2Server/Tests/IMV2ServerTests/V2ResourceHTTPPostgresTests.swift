@@ -72,13 +72,16 @@ struct V2ResourceHTTPPostgresTests {
             let byteDelivery=try V2LocalResourceDelivery(registry:registry,baseURL:URL(string:"https://resource.test")!,keyID:"test",keys:["test":Data(repeating:4,count:32)])
             V2VaporResourceByteRoutes(delivery:byteDelivery).register(on:app)
             let bytes=Data("verified resource HTTP pipeline".utf8)
-            let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:Int64(bytes.count),checksum:.init(value:SHA256.hash(data:bytes).map {String(format:"%02x",$0)}.joined()),clientModes:[mode])
+            let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:Int64(bytes.count),checksum:.init(value:SHA256.hash(data:bytes).map {String(format:"%02x",$0)}.joined()),clientModes:[mode],displayName:.init("验证附件.txt"))
             let headers:HTTPFields=[.authorization:"Bearer test",HTTPField.Name("X-IM-Device-ID")!:device.rawValue]
             let session=try await app.testing { client in
                 let response=try await client.send(.post,headers:headers,to:"v2/resource-uploads",beforeSend:{ try $0.content.encode(request,using:JSONEncoder()) })
                 #expect(response.status == .ok);#expect(response.headers[.cacheControl]=="no-store")
                 return try await response.content.decode(V2ResourceUploadSession.self)
             }
+            let metadataSQL = try #require(database as? any SQLDatabase)
+            let storedName = try await metadataSQL.raw("SELECT display_name FROM im_v2.resource_catalog WHERE media_id=\(bind: request.mediaID.uuidValue!)").first(decoding: ResourceHTTPDisplayName.self)
+            #expect(storedName?.displayName == request.displayName.value)
             let again=try await service.create(request,actor:user,device:device)
             #expect(again.locator==session.locator)
             // Changing the default and its limits must not invalidate a lost create response.
@@ -214,3 +217,7 @@ private struct ResourceHTTPRoomRouter:V2RoomShardRouting {
 private struct ResourceHTTPCount:Decodable {let count:Int64}
 
 private struct ResourceHTTPReference: Decodable { let reference: String }
+private struct ResourceHTTPDisplayName: Decodable {
+    let displayName: String
+    enum CodingKeys: String, CodingKey { case displayName = "display_name" }
+}

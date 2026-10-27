@@ -301,10 +301,7 @@ final class V2AppPushDelegate: NSObject, UIApplicationDelegate, V2RemoteNotifica
 
     func application(_: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
-        do {
-            V2BackgroundTransferEvents.handle(identifier: identifier,
-                root: try V2BackgroundTransferCoordinator.defaultRoot(), completion: completionHandler)
-        } catch { completionHandler() }
+        V2BackgroundTransferEvents.handle(identifier: identifier, completion: completionHandler)
     }
 
     func registerForRemoteNotifications() {

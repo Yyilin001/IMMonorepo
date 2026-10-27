@@ -44,7 +44,8 @@ public struct V2MediaEdgeHTTPHandler: Sendable {
         deviceID: DeviceID,
         rawMediaID: String,
         rawRoomID: String? = nil,
-        rawMessageID: String? = nil
+        rawMessageID: String? = nil,
+        rawImageSize: String? = nil
     ) async throws -> V2MediaDownloadTargetEnvelope {
         guard rawMediaID.utf8.count <= 128 else { throw V2MediaEdgeHTTPHandlerError.invalidMediaID }
         let mediaID: MediaID
@@ -62,6 +63,11 @@ public struct V2MediaEdgeHTTPHandler: Sendable {
             else { throw V2MediaEdgeHTTPHandlerError.invalidMessageLocation }
             message = .init(roomID: .init(uuid: roomUUID), messageID: .init(uuid: messageUUID))
         default: throw V2MediaEdgeHTTPHandlerError.invalidMessageLocation
+        }
+        if let rawImageSize {
+            guard let raw = Int(rawImageSize), let size = V2MediaImagePreviewSize(rawValue: raw), let message
+            else { throw V2MediaEdgeHTTPHandlerError.invalidMessageLocation }
+            return try await edge.imagePreviewTarget(actorUserID: actorUserID, deviceID: deviceID, mediaID: mediaID, message: message, size: size)
         }
         let target = try await edge.downloadTarget(actorUserID: actorUserID, deviceID: deviceID, mediaID: mediaID, message: message)
         do {
