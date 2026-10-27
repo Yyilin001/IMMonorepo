@@ -1,0 +1,91 @@
+{
+  "date": "2026-10-28T01:20:07.055651+08:00",
+  "status": "verified_and_direct_installed",
+  "scope": [
+    "IMApp/IMApp/V2/V2ConversationUI.swift",
+    "IMApp/IMApp/V2/V2ConversationSettingsView.swift",
+    "IMApp/IMApp/V2/V2ConversationDetailStore.swift",
+    "IMApp/IMApp/V2/V2MockPreview.swift",
+    "IMApp/IMAppUITests/IMAppGlassPresentationUITests.swift"
+  ],
+  "request": "Chat top-right action navigates directly to a grouped conversation settings page.",
+  "behavior": [
+    "Replace the ellipsis menu with a NavigationLink in the existing stack.",
+    "Settings renders peer/group identity, chat content, message actions, organization and notification sections.",
+    "Files use an in-stack resource route; search and group actions are owned by settings sheets.",
+    "Forward selection returns to the current chat; selecting a search result dismisses search, then returns to chat with the target message ID.",
+    "Group information, own nickname and administration are separated and preserve capability checks."
+  ],
+  "verification": {
+    "ui_tests": {
+      "result": "passed",
+      "count": 3,
+      "runs": [
+        {
+          "log": "/tmp/im-chat-settings-navigation.log",
+          "xcresult": "/tmp/im-chat-settings-navigation.xcresult",
+          "count": 2
+        },
+        {
+          "log": "/tmp/im-chat-settings-search.log",
+          "xcresult": "/tmp/im-chat-settings-search.xcresult",
+          "count": 1
+        }
+      ],
+      "scenarios": [
+        "Ellipsis directly pushes settings with no sheet, grouping renders, normal Back returns to chat",
+        "Forward action returns to selection mode in the same chat; Cancel restores the toolbar",
+        "Search cancellation keeps settings visible; selecting a synthetic result returns to chat"
+      ]
+    },
+    "visual_review": {
+      "result": "reviewed",
+      "screenshot": "/tmp/im-chat-settings-screenshots/03D6A962-E6DB-4A08-95A9-CC3C7A3025B1.png",
+      "fixture": "Synthetic group conversation, no server or production account access"
+    },
+    "release": {
+      "build": "1.0 (12)",
+      "signature": "verified",
+      "aps": "development",
+      "source_drift": []
+    },
+    "device": {
+      "installation": "success",
+      "launch": "success",
+      "version_readback": "1.0 (12)",
+      "uninstalled": false,
+      "evidence_directory": "/tmp/im-chat-settings-20261028"
+    }
+  },
+  "limits": [
+    "UI tests use synthetic group conversations; private-chat identity rendering reuses the existing shared authorized profile components.",
+    "The mock fixture has no resource-management service, so the files entry is not exercised by these UI tests.",
+    "Physical-device gestures and long-history search scroll accuracy have not been manually verified."
+  ],
+  "completed_at": "2026-10-28T01:25:02.104293+08:00",
+  "source_hashes": {
+    "IMApp/IMApp/V2/Resources/V2ResourceBusinessOwnersView.swift": "2297c1ebec16ffb4902e1805a7e7d3fbccfd2b647b0ad8e88b42feec7220e219",
+    "IMApp/IMApp/V2/Resources/V2ResourceCenterUITestView.swift": "0bb48115289fbafd87dfbe6da474bfb24c6f6a9a8ea1d3cb7a98785c51cfd40e",
+    "IMApp/IMApp/V2/Resources/V2ResourceViews.swift": "b2d5cb47468a8c707187cdd5d17da1a4c08abff09e86febe40691f322ca22d8e",
+    "IMApp/IMApp/V2/V2AppStore.swift": "3f6655f7d407d4669ccce76a4bedec87b358a174fbdc4457e1a8b8cf825b332b",
+    "IMApp/IMApp/V2/V2ConversationDetailStore.swift": "a2e7b41ac0772ea3349a09dea25ee64648ab500db2ed907e1822801e062893bf",
+    "IMApp/IMApp/V2/V2ConversationSettingsView.swift": "83d8a066bf8b4e5dd970cb6211223baed449e1fb28dceec61682d0b00cfacc62",
+    "IMApp/IMApp/V2/V2ConversationUI.swift": "6f5caadd3317414392ce32e8332c056eac45d55df077631674915d465fc3c327",
+    "IMApp/IMApp/V2/V2GroupAvatarManagementService.swift": "8d9e36a4e6e8630c491dfcbca112068f054299ba465801c3466e09fdf8157a48",
+    "IMApp/IMApp/V2/V2GroupAvatarManagementStore.swift": "3c5d20544dbddabf09e3cc171e6ef2f2ca8834eb97a2a66f56105293210cb4f5",
+    "IMApp/IMApp/V2/V2GroupAvatarManagementView.swift": "7006128c1610547cc6f9775c56ba94b216e3eeca775607c21c73488a105c365e",
+    "IMApp/IMApp/V2/V2GroupAvatarRecoveryUITestView.swift": "7aa6174c34376ca81cbf6f1c191ea62a823f4445f526511558934d3e35d5161d",
+    "IMApp/IMApp/V2/V2MockPreview.swift": "2342f9ce5e27e4f9ab5c37c81368d3883c04fa3d5ca30f0de27a743ea48e114a",
+    "IMApp/IMApp/V2/V2NativePresentation.swift": "8438c15f23c335499cc699319c20a0aab1c50a04b26e2be4d961e31d6312194d",
+    "IMApp/IMApp/V2/V2RootView.swift": "f9d286cd42cb5cf25d28a31ff95fbcd8ec98ef78f4d2d939407b4b3fd7831132",
+    "IMApp/IMApp/V2/V2VisualStyle.swift": "94f3a76898cfaada57ede9a658f66b880f850c995e20a1eb7ede5ac7fd5421d7",
+    "IMApp/IMAppTests/V2GroupAvatarManagementStoreTests.swift": "c85ccba45cffc342361a440037a92a994025b467ab7588a03ad892a7123a3489",
+    "IMApp/IMAppTests/V2GroupAvatarManagementTests.swift": "762b2d2519859c0b1058f1a7b701fb9dcfdf7a78de7151169cf417fdb806b3f9",
+    "IMApp/IMAppUITests/IMAppGlassPresentationUITests.swift": "b83cddd2185c705cadba28d87d8c9a3a6c3f896de00340595ec22f37e6c37029",
+    "IMApp/IMAppUITests/IMAppResourceRecoveryUITests.swift": "b263b16fcc69e80b749980102c3f97f4f52a5c3f961b3a7dba1f63d9a053a0f2",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ResourcePreparationSchedule.swift": "d23da2a2f262992f222fc2de51437e9e9fc1778295a0c78133ab2a7a82345ab4",
+    "IMV2ClientKit/Sources/IMV2ClientKit/V2GroupAvatarIntentEngine.swift": "06810f40146afade50ea2f2a3f5e3a0e1ac1e999baf4636a349eb174d76459f8",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2GroupAvatarAutomaticRecovery.swift": "c631b5b50876ca2506a1a0e161eebd79ff73935ffa2e966937802c12f69fdc4e",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2GroupAvatarAutomaticRecoveryTests.swift": "0305e0ded0ea2381c58e1363e7c0a48da6fc1f23ee1f27bf8a8ec7cee8753bc6"
+  }
+}

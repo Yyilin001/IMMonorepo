@@ -22,7 +22,7 @@ struct V2MockPreview: View {
         let notifier = V2ProjectionChangeNotifier()
         self.source = source
         self.notifier = notifier
-        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source), messages: .init(sender: source), discovery: .init(directConversationOpener: source), runtime: .init(projectionChangeNotifier: notifier))))
+        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source, messageSearcher: ProcessInfo.processInfo.arguments.contains("-v2-mock-search") ? source : nil), messages: .init(sender: source), discovery: .init(directConversationOpener: source), runtime: .init(projectionChangeNotifier: notifier))))
         _contacts = State(initialValue: .init(dataSource: source, identityResolver: source, relationshipChanger: source,
             userBlockChanger: source, directConversationOpener: source, currentUserID: source.user))
         _privacy = State(initialValue: .init(reader: source, updater: source))
@@ -176,7 +176,7 @@ private struct V2MockResourceBinding: V2InstallationBindingStore {
     func delete() throws { throw V2ResourceStorageError.unavailable }
 }
 
-private actor V2MockPreviewSource: V2ConversationDataSource, V2ContactsReading, V2PublicIdentityPresentationResolving,
+private actor V2MockPreviewSource: V2ConversationDataSource, V2ConversationMessageSearching, V2ContactsReading, V2PublicIdentityPresentationResolving,
     V2RelationshipChanging, V2UserBlockChanging, V2DirectConversationOpening, V2StrangerMessagePreferenceReading, V2StrangerMessagePreferenceUpdating, V2GroupRolePolicyAccessing, V2ConversationSending {
     let user = try! UserID("00000000-0000-0000-0000-000000000001")
     private var sentMessages: [String: [V2ConversationMessageItem]] = [:]
@@ -192,6 +192,19 @@ private actor V2MockPreviewSource: V2ConversationDataSource, V2ContactsReading, 
         return .init(items: cursor == nil ? texts.indices.map { i in .message(.init(id: "mock-message-\(i)", roomSequence: UInt64(i + 1), revision: 1, text: texts[i], createdAt: Date().addingTimeInterval(Double(i - 5) * 120), isOutgoing: i == 2 || i == 4, isWithdrawn: false, reactions: i == 1 ? [.init(reaction: "👍", count: 3, includesCurrentUser: true)] : [], senderUserID: try! UserID("00000000-0000-0000-0000-000000000201")), timelineSequence: UInt64(i + 1)) } + (sentMessages[roomID] ?? []).enumerated().map { .message($0.element, timelineSequence: UInt64($0.offset + 6)) } : [], olderCursor: nil)
     }
     func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation { .found(page: try await timelinePage(in: roomID, for: userID, before: nil, limit: 50), newerBoundary: nil) }
+    func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
+        guard request.cursor == nil, request.contentFilter == .all else { return .init(hits: [], nextCursor: nil) }
+        let room: RoomID = if case .room(let room) = request.scope { room } else { try .init(Self.room) }
+        let page = try await timelinePage(in: room.rawValue, for: user.rawValue, before: nil, limit: 50)
+        let hits = try page.items.compactMap { item -> V2MessageSearchHit? in
+            guard case .message(let message, _) = item, message.text.contains(request.query),
+                  request.senderUserID == nil || request.senderUserID == message.senderUserID else { return nil }
+            return .init(messageID: try .init(message.id), roomID: room, roomSequence: message.roomSequence,
+                senderUserID: message.senderUserID ?? user, text: message.text, createdAt: message.createdAt)
+        }
+        return .init(hits: Array(hits.prefix(request.limit)), nextCursor: nil)
+    }
+
     func contactProjectionPage(scope: V2ContactProjectionPageScope, matching query: String?, before cursor: V2ClientRelationshipCursor?, limit: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionPage {
         let names = scope == .friends ? ["小林", "陈晨", "阿青"] : scope == .incomingRequests ? ["李晓"] : ["周宁"]
         let items = try names.enumerated().map { i, name in

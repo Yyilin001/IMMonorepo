@@ -1657,7 +1657,7 @@ struct V2ConversationAccountMenu: View {
     }
 }
 
-private struct V2MessageSearchView: View {
+struct V2MessageSearchView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var store: V2ConversationSearchStore
     let onSelect: (V2MessageSearchHit) -> Void
@@ -1865,27 +1865,14 @@ struct V2FavoriteMessagesSheet: View {
 
 struct V2ConversationDetailView: View {
     private enum PresentedDetailSheet: Identifiable {
-        case settings
-        case groupMembers
-        case groupAvatar
-        case ownGroupNickname
         case groupReadReceipts(V2ConversationMessageItem)
         case edit(V2ConversationMessageItem)
         case forward
         case copyAttachments(V2ConversationMessageItem)
         case groupAnnouncement
-        case groupPermissions
-        case groupInvitations
 
         var id: String {
             switch self {
-            case .settings: "settings"
-            case .groupMembers:
-                "groupMembers"
-            case .groupAvatar:
-                "groupAvatar"
-            case .ownGroupNickname:
-                "ownGroupNickname"
             case .groupReadReceipts(let message):
                 "groupReadReceipts-\(message.id)"
             case .edit(let message):
@@ -1896,28 +1883,19 @@ struct V2ConversationDetailView: View {
                 "copyAttachments-\(message.id)"
             case .groupAnnouncement:
                 "groupAnnouncement"
-            case .groupPermissions:
-                "groupPermissions"
-            case .groupInvitations:
-                "groupInvitations"
             }
         }
     }
 
-    @Environment(\.v2ResourceManagement) private var resourceManagement
-    @Environment(\.v2ResourceNavigation) private var resourceNavigation
     @Environment(\.v2UserInteractionContext) private var userContext
     @State private var userProfile: V2UserProfileTarget?
     @State private var peerActions: V2UserProfileActionStore?
     @State private var store: V2ConversationDetailStore
-    @State private var openResourcesAfterSheet = false
     @State private var presentedDetailSheet: PresentedDetailSheet?
     @State private var isPresentingAttachmentImporter = false
     @State private var isPresentingPhotoPicker = false
     @State private var isImportingPhotos = false
     @State private var photoSelectionLimit = 1
-    @State private var messageSearchStore: V2ConversationSearchStore?
-    @State private var isPresentingMessageSearch = false
     @State private var focusedMessageID: String?
     @State private var showsMentionInput = false
     @State private var followsOwnSend = false
@@ -2433,24 +2411,8 @@ struct V2ConversationDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .toolbar { conversationToolbar }
-        .sheet(item: $presentedDetailSheet, onDismiss: {
-            if openResourcesAfterSheet, let room = try? RoomID(store.roomID) {
-                openResourcesAfterSheet = false
-                resourceNavigation?.showResources(roomID: room)
-            }
-        }) { sheet in
+        .sheet(item: $presentedDetailSheet) { sheet in
             switch sheet {
-            case .settings:
-                V2ConversationSettingsView(roomID: store.roomID, peerKey: store.presentationKey,
-                    openResources: resourceManagement == nil ? nil : {
-                        openResourcesAfterSheet = true; presentedDetailSheet = nil
-                    })
-            case .groupMembers:
-                V2GroupMembersSheet(store: store)
-            case .groupAvatar:
-                if let manager = store.groupAvatarManagementStore() { V2GroupAvatarManagementView(store: manager) }
-            case .ownGroupNickname:
-                if let editor = store.ownGroupNicknameEditor() { V2NameEditorView(store: editor) }
             case .groupReadReceipts(let message):
                 V2GroupReadReceiptsSheet(store: store, message: message)
             case .edit(let message):
@@ -2461,10 +2423,6 @@ struct V2ConversationDetailView: View {
                 V2CopyAttachmentsSheet(store: store, message: message)
             case .groupAnnouncement:
                 V2GroupAnnouncementSheet(store: store)
-            case .groupPermissions:
-                V2GroupPermissionsSheet(store: store)
-            case .groupInvitations:
-                if let groupInvitationStore { V2GroupInvitationManagementSheet(store: groupInvitationStore, roomID: store.roomID) }
             }
         }
         .v2UserProfileSheet(item: $userProfile)
@@ -2472,18 +2430,6 @@ struct V2ConversationDetailView: View {
             guard let key = store.presentationKey else { return }
             peerActions = userContext?.contacts.profileActions(for: key.userID)
             await peerActions?.run()
-        }
-        .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
-            messageSearchStore = nil
-        }) {
-            if let messageSearchStore {
-                NavigationStack {
-                    V2MessageSearchView(store: messageSearchStore) { hit in
-                        focusedMessageID = hit.messageID.rawValue
-                        isPresentingMessageSearch = false
-                    }
-                }
-            }
         }
         .fileImporter(
             isPresented: $isPresentingAttachmentImporter,
@@ -2618,49 +2564,13 @@ struct V2ConversationDetailView: View {
             }
         } else {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button("聊天详情", systemImage: "info.circle") { presentedDetailSheet = .settings }
-                        .accessibilityIdentifier("v2.chat.details")
-                    if resourceManagement != nil, let room = try? RoomID(store.roomID) {
-                        Button("聊天文件", systemImage: "folder") { resourceNavigation?.showResources(roomID: room) }
-                            .accessibilityIdentifier("v2.resources.chat.open")
-                    }
-                    Button("多选转发", systemImage: "arrowshape.turn.up.right") { store.beginForwardSelection() }
-                        .disabled(store.messages.allSatisfy(\.isWithdrawn))
-                        .accessibilityIdentifier("v2.message.forward.begin")
-                    if store.messageSearchStore() != nil {
-                        Button("搜索本会话", systemImage: "magnifyingglass") {
-                            messageSearchStore = store.messageSearchStore()
-                            isPresentingMessageSearch = messageSearchStore != nil
-                        }
-                        .accessibilityIdentifier("v2.message.search.current-room")
-                    }
-                    if store.isGroupConversation {
-                        Section("群聊") {
-                            Button("成员", systemImage: "person.2") { presentedDetailSheet = .groupMembers }
-                                .accessibilityIdentifier("v2.group.members")
-                            Button("群公告", systemImage: "megaphone") { presentedDetailSheet = .groupAnnouncement }
-                                .accessibilityIdentifier("v2.group.announcement")
-                            Button("权限", systemImage: "lock.shield") { presentedDetailSheet = .groupPermissions }
-                                .accessibilityIdentifier("v2.group.permissions")
-                            if store.canEditOwnGroupNickname {
-                                Button("我的群昵称", systemImage: "pencil") { presentedDetailSheet = .ownGroupNickname }
-                                    .accessibilityIdentifier("v2.group.nickname.edit")
-                            }
-                            if store.hasGroupAvatarManagement {
-                                Button("群头像", systemImage: "person.crop.circle") { presentedDetailSheet = .groupAvatar }
-                                    .accessibilityIdentifier("v2.group.avatar.manage")
-                            }
-                            if groupInvitationStore != nil {
-                                Button("邀请", systemImage: "person.badge.plus") { presentedDetailSheet = .groupInvitations }
-                                    .accessibilityIdentifier("v2.group.invitations")
-                            }
-                        }
-                    }
+                NavigationLink {
+                    V2ConversationSettingsView(store: store, groupInvitationStore: groupInvitationStore,
+                        focusMessage: { focusedMessageID = $0 })
                 } label: {
                     Image(systemName: "ellipsis")
                 }
-                .accessibilityLabel("会话详情与操作")
+                .accessibilityLabel("会话设置")
                 .accessibilityIdentifier("v2.conversation.detail.tools")
             }
         }

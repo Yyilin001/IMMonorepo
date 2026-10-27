@@ -13,6 +13,74 @@ final class IMAppGlassPresentationUITests: XCTestCase {
     }
 
     @MainActor
+    func testChatToolsNavigateDirectlyToGroupedSettingsAndBack() {
+        let app = launch()
+        let room = "00000000-0000-0000-0000-000000000101"
+        let conversation = app.buttons["v2.conversation.group.\(room)"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10))
+        conversation.tap()
+        let tools = app.buttons["v2.conversation.detail.tools"]
+        XCTAssertTrue(tools.waitForExistence(timeout: 10))
+        tools.tap()
+        let settings = app.navigationBars["群聊设置"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.sheets.count, 0)
+        XCTAssertTrue(app.buttons["v2.message.forward.begin"].exists)
+        XCTAssertTrue(app.switches["v2.chat-settings.pin"].exists)
+        XCTAssertTrue(app.switches["v2.chat-settings.archive"].exists)
+        let image = XCTAttachment(screenshot: app.screenshot()); image.lifetime = .keepAlways; add(image)
+        app.swipeUp()
+        XCTAssertTrue(app.buttons["v2.group.members"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["v2.group.announcement"].exists)
+        settings.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(tools.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["v2.message.draft"].exists)
+    }
+
+    @MainActor
+    func testSettingsForwardActionReturnsToTheSameChatSelection() {
+        let app = launch()
+        let room = "00000000-0000-0000-0000-000000000101"
+        let conversation = app.buttons["v2.conversation.group.\(room)"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10)); conversation.tap()
+        let tools = app.buttons["v2.conversation.detail.tools"]
+        XCTAssertTrue(tools.waitForExistence(timeout: 10)); tools.tap()
+        let forward = app.buttons["v2.message.forward.begin"]
+        XCTAssertTrue(forward.waitForExistence(timeout: 5)); forward.tap()
+        let cancel = app.buttons["v2.message.forward.cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.navigationBars["群聊设置"].exists)
+        cancel.tap()
+        XCTAssertTrue(tools.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testSettingsSearchCanCancelAndThenLocateAChatMessage() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-v2-mock-preview", "-v2-mock-hide-controls", "-v2-mock-screen", "messages", "-v2-mock-search"]
+        app.launch()
+        let room = "00000000-0000-0000-0000-000000000101"
+        let conversation = app.buttons["v2.conversation.group.\(room)"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10)); conversation.tap()
+        let tools = app.buttons["v2.conversation.detail.tools"]
+        XCTAssertTrue(tools.waitForExistence(timeout: 10)); tools.tap()
+        let search = app.buttons["v2.message.search.current-room"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap()
+        let query = app.textFields["v2.message.search.query"]
+        XCTAssertTrue(query.waitForExistence(timeout: 5))
+        app.navigationBars["搜索消息"].buttons["关闭"].tap()
+        XCTAssertTrue(app.navigationBars["群聊设置"].waitForExistence(timeout: 5))
+        search.tap()
+        XCTAssertTrue(query.waitForExistence(timeout: 5)); query.tap(); query.typeText("布局")
+        let result = app.buttons["v2.message.search.result.mock-message-2"]
+        XCTAssertTrue(result.waitForExistence(timeout: 5)); result.tap()
+        XCTAssertTrue(tools.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.navigationBars["群聊设置"].exists)
+        XCTAssertFalse(query.exists)
+        XCTAssertTrue(app.textFields["v2.message.draft"].exists)
+    }
+
+    @MainActor
     func testRoundUnreadBadgeAndCompactComposerCanSend() {
         let app = launch()
         let room = "00000000-0000-0000-0000-000000000101"

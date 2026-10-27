@@ -357,6 +357,8 @@ final class V2ConversationDetailStore {
         mentionHandlesText = context.initialMentionHandles ?? ""
     }
 
+    var canSearchMessages: Bool { messageSearcher != nil && (try? RoomID(roomID)) != nil }
+
     func messageSearchStore() -> V2ConversationSearchStore? {
         guard let messageSearcher, let roomID = try? RoomID(roomID) else { return nil }
         return .init(searcher: messageSearcher, scope: .room(roomID), actorUserID: try? .init(userID))
