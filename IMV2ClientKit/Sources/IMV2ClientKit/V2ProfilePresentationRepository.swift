@@ -119,6 +119,12 @@ public actor V2ProfilePresentationRepository {
         let observed: ContinuousClock.Instant
         let cost: Int
     }
+    private var localDisplayJournal: V2LocalProfileDisplayJournal?
+    private var localDisplays: [V2ProfileViewLookupKey: V2LocalProfileDisplay] = [:]
+    private var localBasics: [UserID: V2LocalProfileDisplayBasics] = [:]
+    private var locallyDeniedKeys: Set<V2ProfileViewLookupKey> = []
+    private var locallyDeniedUsers: Set<UserID> = []
+    private var displayObservers: [UUID: AsyncStream<V2LocalProfileDisplaySnapshot>.Continuation] = [:]
     private let actorUserID: UserID
     private let deviceID: DeviceID
     private let reader: any V2ProfilePresentationReading
@@ -149,10 +155,12 @@ public actor V2ProfilePresentationRepository {
 
     public init(actorUserID: UserID, deviceID: DeviceID, reader: any V2ProfilePresentationReading,
                 nicknameRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil,
-                aliasRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil) {
+                aliasRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil,
+                localDisplayJournal: V2LocalProfileDisplayJournal? = nil) {
         self.actorUserID = actorUserID; self.deviceID = deviceID; self.reader = reader
         self.nicknameRevisions = nicknameRevisions
         self.aliasRevisions = aliasRevisions
+        self.localDisplayJournal = localDisplayJournal
         retryJitter = { Double.random(in: 0.1...0.5) }
     }
     init(actorUserID: UserID, deviceID: DeviceID, reader: any V2ProfilePresentationReading,
@@ -160,6 +168,61 @@ public actor V2ProfilePresentationRepository {
         self.actorUserID = actorUserID; self.deviceID = deviceID; self.reader = reader; self.retryJitter = retryJitter
         nicknameRevisions = nil; aliasRevisions = nil
     }
+    /// Restored before publishing the signed-in UI. Expiring server grants and
+    /// account-local display facts deliberately have different lifetimes.
+    public func restoreLocalDisplay() throws -> V2LocalProfileDisplaySnapshot {
+        guard !closed else { throw V2ProfilePresentationError.inactive }
+        if let localDisplayJournal {
+            let value = try localDisplayJournal.load()
+            localDisplays = value.records; localBasics = value.basics; locallyDeniedKeys = value.deniedKeys; locallyDeniedUsers = value.deniedUsers
+        }
+        let snapshot = localDisplaySnapshot()
+        for observer in displayObservers.values { observer.yield(snapshot) }
+        return snapshot
+    }
+    public func localDisplayUpdates() throws -> AsyncStream<V2LocalProfileDisplaySnapshot> {
+        guard !closed else { throw V2ProfilePresentationError.inactive }
+        guard displayObservers.count < 8 else { throw V2ProfilePresentationError.overloaded }
+        let id = UUID(), stream = AsyncStream<V2LocalProfileDisplaySnapshot>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        stream.continuation.onTermination = { [weak self] _ in Task { await self?.removeDisplayObserver(id) } }
+        displayObservers[id] = stream.continuation; stream.continuation.yield(localDisplaySnapshot())
+        return stream.stream
+    }
+    private func removeDisplayObserver(_ id: UUID) { displayObservers[id] = nil }
+    private func localDisplaySnapshot() -> V2LocalProfileDisplaySnapshot {
+        .init(records: localDisplays, deniedKeys: locallyDeniedKeys, deniedUsers: locallyDeniedUsers, basics: localBasics)
+    }
+    private func publishLocalDisplay() {
+        let value = localDisplaySnapshot()
+        for observer in displayObservers.values { observer.yield(value) }
+    }
+    private func saveLocalDisplay(_ presentation: V2AuthorizedProfilePresentation) throws {
+        let key = presentation.lease.key
+        guard let value = V2LocalProfileDisplay(presentation) else {
+            try denyLocalDisplay(key, globally: true); return
+        }
+        if let previous = localDisplays[key], !value.supersedes(previous) { return }
+        let basic = try localDisplayJournal?.save(value) ?? V2LocalProfileDisplayBasics(value, previous: localBasics[key.userID])
+        localBasics[key.userID] = basic
+        if localBasics.count > 2000, let oldest = localBasics.keys.first { localBasics[oldest] = nil }
+        localDisplays[key] = value; locallyDeniedKeys.remove(key); locallyDeniedUsers.remove(key.userID)
+        if localDisplays.count > 2000, let oldest = localDisplays.min(by: { $0.value.observedAt < $1.value.observedAt })?.key {
+            localDisplays[oldest] = nil
+        }
+        publishLocalDisplay()
+    }
+    private func denyLocalDisplay(_ key: V2ProfileViewLookupKey, globally: Bool = false) throws {
+        // Persist denial before publishing removal. Resource/lease invalidation
+        // is separate; renewal and ordinary content invalidation keep old facts.
+        try localDisplayJournal?.deny(key, globally: globally)
+        if globally {
+            localDisplays = localDisplays.filter { $0.key.userID != key.userID }
+            localBasics[key.userID] = nil
+            locallyDeniedUsers.insert(key.userID)
+        } else { localDisplays[key] = nil; locallyDeniedKeys.insert(key) }
+        publishLocalDisplay()
+    }
+
     public func activate() -> V2ProfilePageActivation {
         activate(tracksVisibleRows: false)
     }
@@ -304,6 +367,8 @@ public actor V2ProfilePresentationRepository {
     }
     public func close() async {
         closed = true; endAllActivations()
+        localDisplays.removeAll(); localBasics.removeAll(); locallyDeniedKeys.removeAll(); locallyDeniedUsers.removeAll()
+        for observer in displayObservers.values { observer.finish() }; displayObservers.removeAll()
         let running = Array(tasks.values)
         for flight in running { await flight.task.value }
     }
@@ -396,7 +461,7 @@ public actor V2ProfilePresentationRepository {
         try registerInterest(key, activation: activation)
         try await refreshPresentationFloors([key])
         try Task.checkCancellation(); try requireActive(activation)
-        promoteCandidate(key, activation: activation)
+        try promoteCandidate(key, activation: activation)
         if let cached = currentSnapshot(for: key, activation: activation)?.presentation { return cached }
         if let until = negative[key], until > clock.now { return nil }
         if let until = states[key]?.retryUntil, until > clock.now { throw V2ProfilePresentationError.throttled(retryAfter: seconds(until)) }
@@ -480,9 +545,9 @@ public actor V2ProfilePresentationRepository {
                (!meetsNicknameFloor(value, minimum: floors.nicknames[key] ?? 0) || !meetsAliasFloor(value, minimum: floors.aliases[key] ?? 0)) { continue }
             if interests.contains(key) {
                 removeCandidate(key)
-                applyAuthorEntry(entry, access: prepared[key], binding: expected)
+                try applyAuthorEntry(entry, access: prepared[key], binding: expected)
             } else if activations[expected.activation.id]?.tracksVisibleRows == true {
-                stageCandidate(entry, access: prepared[key], binding: expected)
+                try stageCandidate(entry, access: prepared[key], binding: expected)
             }
         }
         cancelUnusedFlights()
@@ -492,7 +557,7 @@ public actor V2ProfilePresentationRepository {
         (authorNotBefore.map { expected.view.started > $0 } ?? true)
             && (states[key]?.deniedAt.map { expected.view.started > $0 } ?? true)
     }
-    private func applyAuthorEntry(_ entry: V2ReceivedAuthorPresentationEntry, access value: Access?, binding expected: V2ProfileAuthorBinding) {
+    private func applyAuthorEntry(_ entry: V2ReceivedAuthorPresentationEntry, access value: Access?, binding expected: V2ProfileAuthorBinding) throws {
         let key = entry.key
         guard let state = states[key] else { return }
         switch entry {
@@ -501,7 +566,7 @@ public actor V2ProfilePresentationRepository {
                   isNotOlder(presentation, than: state.floor), meetsNicknameFloor(presentation, minimum: state.nicknameRevisionFloor), meetsAliasFloor(presentation, minimum: state.aliasRevisionFloor) else { return }
             let newlyGranted = activations[expected.activation.id]?.grants[key] == nil
             let hasWaiter = demand[key]?.waiters.values.contains { $0.activation == expected.activation } == true
-            install(value, key: key)
+            try install(value, key: key)
             let floor = RevisionFloor(presentation, previous: states[key]?.floor)
             states[key]?.valueID = UUID(); states[key]?.floor = floor; states[key]?.retryUntil = nil
             negative.removeValue(forKey: key)
@@ -509,7 +574,7 @@ public actor V2ProfilePresentationRepository {
             complete(key, activation: expected.activation, result: .success(presentation))
             if newlyGranted && !hasWaiter { notify(key, activationID: expected.activation.id) }
         case .unavailable(_, let until):
-            if until > clock.now { deny(key, until: min(until, clock.now + .seconds(30))) }
+            if until > clock.now { try deny(key, until: min(until, clock.now + .seconds(30))) }
         case .retryable(_, let notBefore):
             guard notBefore > clock.now else { return }
             let until = min(notBefore, clock.now + .seconds(60))
@@ -517,7 +582,7 @@ public actor V2ProfilePresentationRepository {
             complete(key, activation: expected.activation, result: .failure(V2ProfilePresentationError.throttled(retryAfter: seconds(until))))
         }
     }
-    private func stageCandidate(_ entry: V2ReceivedAuthorPresentationEntry, access value: Access?, binding expected: V2ProfileAuthorBinding) {
+    private func stageCandidate(_ entry: V2ReceivedAuthorPresentationEntry, access value: Access?, binding expected: V2ProfileAuthorBinding) throws {
         let key = entry.key
         var deadline = min(clock.now + .seconds(5), expected.view.renewBy)
         switch entry {
@@ -532,7 +597,7 @@ public actor V2ProfilePresentationRepository {
         case .unavailable(_, let until):
             guard until > clock.now else { return }
             deadline = min(deadline, until)
-            if states[key] != nil { deny(key, until: min(until, clock.now + .seconds(30))) }
+            if states[key] != nil { try deny(key, until: min(until, clock.now + .seconds(30))) }
         case .retryable(_, let notBefore): deadline = min(deadline, notBefore)
         }
         guard deadline > clock.now else { return }
@@ -547,12 +612,12 @@ public actor V2ProfilePresentationRepository {
             expires: deadline, observed: clock.now, cost: cost)
         candidateBytes += cost
     }
-    private func promoteCandidate(_ key: V2ProfileViewLookupKey, activation: V2ProfilePageActivation) {
+    private func promoteCandidate(_ key: V2ProfileViewLookupKey, activation: V2ProfilePageActivation) throws {
         pruneCandidates()
         guard let candidate = candidates[key], let binding, binding.activation == activation,
               binding.id == candidate.bindingID, binding.view.renewBy > clock.now else { return }
         removeCandidate(key)
-        applyAuthorEntry(candidate.entry, access: candidate.access, binding: binding)
+        try applyAuthorEntry(candidate.entry, access: candidate.access, binding: binding)
     }
     private func removeCandidate(_ key: V2ProfileViewLookupKey) {
         guard let value = candidates.removeValue(forKey: key) else { return }
@@ -667,7 +732,7 @@ public actor V2ProfilePresentationRepository {
                     // Denial never restores access. Only still-live original
                     // activations make this old HTTP observation relevant.
                     if read.activations.contains(where: { $0.epoch == epoch && activations[$0.id]?.interests.contains(key) == true }) {
-                        deny(key, until: started + .seconds(30))
+                        try deny(key, until: started + .seconds(30))
                     }
                     continue
                 }
@@ -677,7 +742,7 @@ public actor V2ProfilePresentationRepository {
                    meetsNicknameFloor(entry.presentation, minimum: states[key]?.nicknameRevisionFloor ?? 0),
                    meetsAliasFloor(entry.presentation, minimum: states[key]?.aliasRevisionFloor ?? 0) {
                     let floor = RevisionFloor(entry.presentation, previous: states[key]?.floor)
-                    install(entry, key: key); states[key]?.floor = floor; negative.removeValue(forKey: key)
+                    try install(entry, key: key); states[key]?.floor = floor; negative.removeValue(forKey: key)
                     for activation in read.activations where activation.epoch == epoch && activations[activation.id] != nil {
                         activations[activation.id]?.grants[key] = .init(authorBindingID: nil)
                         complete(key, activation: activation, result: .success(entry.presentation))
@@ -719,7 +784,8 @@ public actor V2ProfilePresentationRepository {
         guard cost <= maximumBytes else { throw V2ProfilePresentationError.overloaded }
         return .init(presentation: value, deadline: deadline, bytes: cost, avatar: avatar, avatarDeadline: avatarDeadline)
     }
-    private func install(_ entry: Access, key: V2ProfileViewLookupKey) {
+    private func install(_ entry: Access, key: V2ProfileViewLookupKey) throws {
+        try saveLocalDisplay(entry.presentation)
         let previous = access[key]
         removeAccess(key)
         while access.count >= maximumEntries || bytes > maximumBytes - entry.bytes {
@@ -758,7 +824,8 @@ public actor V2ProfilePresentationRepository {
         activations[activationID]?.invalidationRevisions[key] = UUID()
         activations[activationID]?.observer?.yield(())
     }
-    private func deny(_ key: V2ProfileViewLookupKey, until: ContinuousClock.Instant) {
+    private func deny(_ key: V2ProfileViewLookupKey, until: ContinuousClock.Instant) throws {
+        try denyLocalDisplay(key)
         removeAccess(key); revokeGrants(key)
         if negative.count >= maximumEntries { negative.removeValue(forKey: negative.keys.first!) }
         negative[key] = until

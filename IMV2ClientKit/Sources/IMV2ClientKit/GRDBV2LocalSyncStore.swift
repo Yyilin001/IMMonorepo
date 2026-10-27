@@ -5136,6 +5136,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         migrator.registerMigration("resourceLocalImageDimensions") { db in
             try db.execute(sql: localResourceImageDimensionsSchemaSQL)
         }
+        migrator.registerMigration("localProfileDisplayFacts") { db in
+            try db.execute(sql: localProfileDisplaySchemaSQL)
+        }
+        migrator.registerMigration("localProfileDisplayLegacyImportFence") { db in
+            try db.execute(sql: "CREATE TABLE v2_local_profile_display_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1), legacy_imported INTEGER NOT NULL CHECK(legacy_imported IN(0,1))); INSERT INTO v2_local_profile_display_meta VALUES(1,0)")
+        }
         return migrator
     }()
 

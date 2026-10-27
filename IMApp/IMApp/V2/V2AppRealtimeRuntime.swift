@@ -1082,7 +1082,8 @@ struct V2AppRealtimeRuntime {
             reader: try V2HTTPProfilePresentationClient(endpoint: configuration.endpoint("v2/profile-presentations/batch"),
                 credentials: accountHTTP, transport: accountHTTP),
             nicknameRevisions: { try await localStore.groupNicknameRevisions(keys: $0) },
-            aliasRevisions: { try await localStore.contactAliasRevisions(keys: $0) })
+            aliasRevisions: { try await localStore.contactAliasRevisions(keys: $0) },
+            localDisplayJournal: try await localStore.localProfileDisplayJournal(accountID: actorUserID))
         self.profilePresentations = profilePresentations
         self.nameOperations = V2NameOperationService(accountID: actorUserID, store: localStore,
             client: try V2HTTPNameOperationClient(endpoint: configuration.endpoint("v2/profile-presentations"),

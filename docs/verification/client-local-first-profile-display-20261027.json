@@ -1,0 +1,80 @@
+{
+  "status": "verified_and_direct_installed",
+  "baseline": "0f91ccb70a200a53f90fd1b55c9286c7a3597afd",
+  "branch": "codex/local-first-profile-presentation",
+  "user_policy": "Previously authorized local names and own remarks remain visible offline and beyond presentation leases. Explicit context denial, global hidden/deleted profile or sign-out removes the relevant facts.",
+  "cause": [
+    "Rows only rendered names while a per-page presentation lease was live.",
+    "Page visibility, reactivation and avatar work controlled the lifetime of textual identity.",
+    "Persisted profile projections existed but were not used by centralized first-paint rendering."
+  ],
+  "implementation": [
+    "Account-scoped SQLite display facts restored before publishing signed-in UI.",
+    "Shared immutable display snapshot used by names, handles, identity callbacks and avatar initials.",
+    "Public names and own contact remarks shared across contact/direct screens; group nicknames confined to their exact room.",
+    "Durable explicit denial and monotonic basic identity/remark versions prevent stale fallback across screens.",
+    "Protected-data unavailability and runtime reconstruction preserve disk facts; sign-out clears them and fences legacy reimport.",
+    "Avatar/resource capabilities and protected-byte access retain the existing authorization lifecycle."
+  ],
+  "verification": {
+    "native": {
+      "tests": 78,
+      "suites": 11,
+      "result": "passed",
+      "log": "/tmp/im-local-profile-client-r6.log"
+    },
+    "simulator": {
+      "tests": 28,
+      "suites": 3,
+      "result": "passed",
+      "log": "/tmp/im-local-profile-app-r4.log",
+      "xcresult": "/tmp/im-local-profile-r4.xcresult"
+    },
+    "scenarios": [
+      "Expired lease, offline repository restart and cross-page reuse",
+      "No nickname/remark leakage across room contexts",
+      "Persistent context denial, global invalidation and late stale HTTP rejection",
+      "One-time legacy import and logout import fence",
+      "First appearance and reentry do not clear cached identity",
+      "Avatar decode blocked while local name is already visible",
+      "Rename replaces visible name without an intermediate nil identity",
+      "Offline startup and authentication state observation"
+    ],
+    "release": {
+      "build": "1.0 (10)",
+      "result": "passed",
+      "signature": "verified",
+      "source_drift": [],
+      "evidence": "/tmp/im-local-first-profile-20261027/release-validation.json"
+    },
+    "device": {
+      "build": "1.0 (10)",
+      "installation": "success",
+      "launch": "success",
+      "version_readback": "10",
+      "uninstalled": false,
+      "evidence_directory": "/tmp/im-local-first-profile-20261027"
+    }
+  },
+  "limits": [
+    "An identity never previously cached still requires its first authorized lookup.",
+    "Avatar pixels retain separate permission and cache behavior.",
+    "Physical-device first-frame timing and visual regression have not been measured.",
+    "This record covers profile display only, not full resource-center semantic acceptance."
+  ],
+  "completed_at": "2026-10-28T00:02:19.697429+08:00",
+  "source_hashes": {
+    "IMApp/IMApp/V2/V2AppRealtimeRuntime.swift": "b33fb02934368e540872727616a9ef6c4e7b7dd3ea2296d8c81548bcb70ea336",
+    "IMApp/IMApp/V2/V2AppStore.swift": "7406ca45f2172250b7eb8beb8fdb30fea82243506054ae7a26f87a3daba2990f",
+    "IMApp/IMApp/V2/V2AvatarPipeline.swift": "91a429209d349c6947d5555023289351afae8266c50b43e1b82948e2090344a0",
+    "IMApp/IMApp/V2/V2OfflineProjectionPresentation.swift": "b50806ac18b9464760959a60d633d2692a036f3785c8f116c498f439be04fc9e",
+    "IMApp/IMAppTests/V2ProfileAvatarPipelineTests.swift": "fa783ecf2ff154ae26575a6eef3e5f377c4112a3a1c6eac4dec14b12640714e9",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalSyncStore.swift": "f879c3627b5359ee2a11594f5e9e178f4489dc2238b08375d3cf6e5c1335f2d4",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ProjectionChanges.swift": "0d8a94d0f58118c15a26e74a43471ee45306c5e3a973b423f3c3589d18180a7b",
+    "IMV2ClientKit/Sources/IMV2ClientKit/V2ProfilePresentationRepository.swift": "e0f772d1306f091c40b4abb775b75e8c19aa9657f8e6e6d7a2fda9d950d08bce",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2LocalSchemaContractTests.swift": "a7125327104de13f0d1f57a93d39249cbc48f7ff5508598ac446b078572c7d1b",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalProfileDisplay.swift": "d15f5e03cdc3d34d158bbb564d528616ccf0bfc7866fd797144236c543d3a107",
+    "IMV2ClientKit/Sources/IMV2ClientKit/V2LocalProfileDisplay.swift": "dc52482bd8567a724ad9785c18670d7ed3c0bd6cb7f49b739860529e2b2ede9d",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2LocalProfileDisplayTests.swift": "55fe5c0eed6a62085599fcf9748720090656cba634b6fc6588735f0dbb803eb8"
+  }
+}

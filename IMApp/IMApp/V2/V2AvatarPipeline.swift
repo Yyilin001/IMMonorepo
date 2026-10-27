@@ -27,6 +27,27 @@ final class V2AvatarPipeline {
         self.profiles = profiles; self.groups = groups; self.files = files; self.thumbnails = thumbnails
         self.authors = authors
     }
+    private(set) var localDisplay: V2LocalProfileDisplaySnapshot?
+    @ObservationIgnored private var localDisplayTask: Task<Void, Never>?
+    func prepareLocalDisplay() async throws {
+        localDisplay = try await profiles.restoreLocalDisplay()
+        let updates = try await profiles.localDisplayUpdates()
+        localDisplayTask?.cancel()
+        // The account pipeline owns this observer, independently of page/row
+        // task cancellation. close() cancels and drains it before store close.
+        localDisplayTask = Task { [weak self] in
+            for await value in updates {
+                guard !Task.isCancelled, let self, !self.isClosed else { return }
+                self.localDisplay = value
+            }
+        }
+    }
+    func reloadLocalDisplay() async throws {
+        let value = try await profiles.restoreLocalDisplay()
+        guard !isClosed else { return }
+        localDisplay = value
+    }
+
     func snapshot(key: V2ProfileViewLookupKey, activation: V2ProfilePageActivation, pixels: Int?) async throws -> Snapshot? {
         guard !isClosed, !isSuspending else { throw V2ProfilePresentationError.inactive }
         let startedGeneration = generation
@@ -100,6 +121,8 @@ final class V2AvatarPipeline {
         isClosed = true
         isSuspending = true
         generation &+= 1
+        localDisplayTask?.cancel()
+        await localDisplayTask?.value; localDisplayTask = nil; localDisplay = nil
         await authors?.close()
         await profiles.close()
         await groups.close()
@@ -198,7 +221,7 @@ private struct V2AuthorizedProfileView: View {
                 .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.32)).accessibilityHidden(true)
                 if showsName { Text(displayName).font(.caption2).lineLimit(1) }
             case .handle:
-                Text(canDisplay ? displaySnapshot?.identity?.handle.description ?? placeholder : placeholder)
+                Text(displayHandle)
                     .accessibilityIdentifier("v2.user.public-handle")
             case .name:
                 Text(displayName).fixedSize(horizontal: false, vertical: true)
@@ -206,7 +229,7 @@ private struct V2AuthorizedProfileView: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(appearance == .handle ? (canDisplay ? displaySnapshot?.identity?.handle.description ?? placeholder : placeholder) : displayName)
+        .accessibilityLabel(appearance == .handle ? displayHandle : displayName)
         .task(id: TaskKey(key: key, phase: phase, generation: pipeline?.generation ?? 0, visible: isVisible, refresh: refresh,
                           activation: sharedPage?.activation, pageRevision: sharedPage?.revision(for: key), appearance: appearance)) {
             // A restarted task may still own a valid presentation. Do not blank
@@ -232,7 +255,7 @@ private struct V2AuthorizedProfileView: View {
                 if snapshot?.deadline == deadline { snapshot = nil }
             } catch { }
         }
-        .onChange(of: canDisplay ? displaySnapshot?.identity : nil, initial: true) { _, identity in onIdentity?(identity) }
+        .onChange(of: localIdentity ?? (pipeline?.localDisplay == nil && canDisplay ? displaySnapshot?.identity : nil), initial: true) { _, identity in onIdentity?(identity) }
         .onAppear { isVisible = true }
         .onScrollVisibilityChange(threshold: 0.1) { isVisible = $0; if !$0 { snapshot = nil } }
         .onDisappear { isVisible = false; snapshot = nil }
@@ -241,12 +264,19 @@ private struct V2AuthorizedProfileView: View {
         #if DEBUG
         if let name = mockProfileNames[key.userID.rawValue] { return name }
         #endif
+        if let local = pipeline?.localDisplay { return local.value(for: key)?.name }
         return canDisplay ? displaySnapshot?.name : nil
     }
+    private var displayHandle: String {
+        if let local = pipeline?.localDisplay { return local.value(for: key)?.identity.handle.description ?? placeholder }
+        return canDisplay ? displaySnapshot?.identity?.handle.description ?? placeholder : placeholder
+    }
+    private var localIdentity: V2PublicIdentity? { pipeline?.localDisplay?.value(for: key)?.identity }
     private var displayName: String {
         #if DEBUG
         if let name = mockProfileNames[key.userID.rawValue] { return name }
         #endif
+        if let local = pipeline?.localDisplay { return local.value(for: key)?.name ?? placeholder }
         return canDisplay ? displaySnapshot?.name ?? placeholder : placeholder
     }
     private func load(_ pipeline: V2AvatarPipeline) async {

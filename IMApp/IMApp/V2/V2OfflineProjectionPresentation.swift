@@ -11,6 +11,7 @@ final class V2OfflineProjectionPresentation {
     private(set) var conversations: [V2ClientConversationListEntry] = []
     private(set) var messages: [V2ClientMessageProjection] = []
     private(set) var ownProfile: V2ProfileView?
+    private(set) var localProfiles: V2LocalProfileDisplaySnapshot?
     private(set) var feedback: String?
     private(set) var isLoading = false
     private var conversationCursor: V2ClientConversationListCursor?
@@ -44,10 +45,12 @@ final class V2OfflineProjectionPresentation {
         var allowed: [V2ClientConversationListEntry] = []
         for row in page.entries where try await store.roomAllowsLocalRead(roomID: row.roomID) { allowed.append(row) }
         let profile = try await store.ownProfileSnapshot(accountID: userID)
+        let localProfiles = try await store.cachedLocalProfileDisplay(accountID: userID)
         try await requireTrust()
         try Task.checkCancellation()
         guard !closed, generation == started else { throw CancellationError() }
-        // No foreign cached identity/title/avatar is used by the offline view.
+        // Reuse local display facts without introducing network/media ports.
+        self.localProfiles = localProfiles
         conversations = allowed; conversationCursor = page.nextCursor; ownProfile = profile
     }
     func loadMessages(roomID: RoomID, older: Bool = false) async {
@@ -72,7 +75,7 @@ final class V2OfflineProjectionPresentation {
     }
     func invalidate() {
         closed = true; generation &+= 1
-        conversations = []; messages = []; ownProfile = nil; feedback = nil; isLoading = false
+        conversations = []; messages = []; ownProfile = nil; localProfiles = nil; feedback = nil; isLoading = false
     }
 }
 
@@ -98,7 +101,9 @@ struct V2OfflineRootView: View {
                             V2OfflineMessagesView(presentation: presentation, roomID: row.roomID)
                         } label: {
                             VStack(alignment: .leading) {
-                                Text("会话 " + row.roomID.rawValue)
+                                Text(row.roomProfile?.title ?? row.directIdentity.flatMap {
+                                    presentation.localProfiles?.value(for: .init(userID: $0.publicIdentity.userID, context: .directConversation))?.name
+                                } ?? "会话")
                                 if let message = row.lastMessage {
                                     Text(message.isWithdrawn ? "消息已撤回" : message.text.isEmpty ? "附件（联网后查看）" : message.text)
                                         .lineLimit(1).foregroundStyle(.secondary)
@@ -129,7 +134,7 @@ private struct V2OfflineMessagesView: View {
             }
             ForEach(presentation.messages, id: \.messageID) { message in
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(message.senderUserID == presentation.userID ? "你" : "消息")
+                    Text(message.senderUserID == presentation.userID ? "你" : presentation.localProfiles?.value(for: .init(userID: message.senderUserID, context: .room(roomID)))?.name ?? "消息")
                         .font(.caption).foregroundStyle(.secondary)
                     Text(message.isWithdrawn ? "消息已撤回" : message.text.isEmpty ? "附件（联网后查看）" : message.text)
                     Text(message.createdAt, style: .time).font(.caption).foregroundStyle(.secondary)

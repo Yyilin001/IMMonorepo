@@ -129,8 +129,7 @@ final class V2UserProfileActionStore {
 
 struct V2UserProfileSheet: View {
     let key: V2ProfileViewLookupKey
-    var usesNavigationStack = true
-    var openConversation: ((V2ConversationDestination) -> Void)? = nil
+    let usesNavigationStack: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.v2UserInteractionContext) private var context
     @State private var identity: V2PublicIdentity?
@@ -140,10 +139,38 @@ struct V2UserProfileSheet: View {
     @State private var pageID = UUID()
     @State private var messageTask: Task<Void, Never>?
     @State private var messageFeedback: String?
+    @State private var profileNavigation: V2RootNavigationStore
+    @Environment(\.v2ResourceManagement) private var resourceManagement
+    init(key: V2ProfileViewLookupKey, usesNavigationStack: Bool = true,
+         navigation: V2RootNavigationStore = .init()) {
+        self.key = key
+        self.usesNavigationStack = usesNavigationStack
+        _profileNavigation = State(initialValue: navigation)
+    }
+
     var body: some View {
         Group {
             if usesNavigationStack {
-                NavigationStack { profileContent }
+                @Bindable var profileNavigation = profileNavigation
+                NavigationStack(path: $profileNavigation.path) {
+                    profileContent
+                        .navigationDestination(for: V2ConversationRoute.self) { route in
+                            if let context {
+                                V2ConversationDetailView(store: context.conversations.detailStore(for: route.roomID),
+                                    initiallyFocusedMessageID: route.messageID)
+                            }
+                        }
+                        .navigationDestination(for: V2LocalDirectConversationRoute.self) { route in
+                            if let context, let service = context.conversations.localDirectConversationService {
+                                V2LocalDirectConversationView(operationID: route.operationID,
+                                    service: service, conversations: context.conversations, groupInvitations: nil)
+                            }
+                        }
+                        .v2ResourceDestinations(service: resourceManagement, navigation: profileNavigation)
+                }
+                .environment(\.v2UserInteractionContext, context.map {
+                    .init(contacts: $0.contacts, conversations: $0.conversations, navigation: profileNavigation)
+                })
             } else {
                 profileContent
             }
@@ -281,15 +308,11 @@ struct V2UserProfileSheet: View {
                     messageFeedback = context.conversations.directConversationFeedback ?? "正在打开其他会话，请稍后重试。"
                     return
                 }
-                if case .room(let route) = destination, case .room(let currentRoom) = key.context,
-                   currentRoom.rawValue == route.roomID, usesNavigationStack {
-                    dismiss()
-                } else if let openConversation {
-                    openConversation(destination)
+                if usesNavigationStack {
+                    // Keep the sheet and its profile state beneath the chat.
+                    profileNavigation.pushConversation(destination)
                 } else {
-                    // This profile is itself on the shared stack: replace the
-                    // destination without also issuing a competing pop.
-                    context.navigation.showConversation(destination)
+                    context.navigation.pushConversation(destination)
                 }
             }
         } label: {
@@ -308,23 +331,14 @@ struct V2UserProfileSheet: View {
 
 struct V2UserProfileTarget: Identifiable { let key: V2ProfileViewLookupKey; var id: V2ProfileViewLookupKey { key } }
 
-/// Profile sheets across contacts, chat messages and group members finish their
-/// dismissal before handing a destination to the authenticated navigation stack.
+/// A profile sheet owns its navigation flow. Opening a chat must not dismiss
+/// the profile or replace the authenticated app's unrelated navigation path.
 private struct V2UserProfilePresentation: ViewModifier {
     @Binding var target: V2UserProfileTarget?
-    @Environment(\.v2UserInteractionContext) private var context
-    @State private var pendingDestination: V2ConversationDestination?
 
     func body(content: Content) -> some View {
-        content.sheet(item: $target, onDismiss: {
-            guard let destination = pendingDestination else { return }
-            pendingDestination = nil
-            context?.navigation.showConversation(destination)
-        }) { target in
-            V2UserProfileSheet(key: target.key, openConversation: { destination in
-                pendingDestination = destination
-                self.target = nil
-            })
+        content.sheet(item: $target) { target in
+            V2UserProfileSheet(key: target.key)
         }
     }
 }

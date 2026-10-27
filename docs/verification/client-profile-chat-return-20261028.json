@@ -1,0 +1,70 @@
+{
+  "date": "2026-10-28T01:00:29.984314+08:00",
+  "status": "verified_and_direct_installed",
+  "scope": [
+    "IMApp/IMApp/V2/V2ContactsUI.swift",
+    "IMApp/IMApp/V2/V2UserProfileView.swift",
+    "IMApp/IMAppTests/V2ContactsStoreTests.swift"
+  ],
+  "cause": "Profile message actions called the cross-tab navigation operation, replacing NavigationPath and removing the originating profile. Profile sheets additionally dismissed themselves before that replacement.",
+  "behavior": [
+    "A profile already on the authenticated stack pushes the chat while retaining the selected tab and preceding routes.",
+    "A modal profile retains its own existing NavigationStack and profile state beneath the chat. It no longer dismisses itself to navigate.",
+    "Existing server-room and pending local-direct destinations are both supported.",
+    "Profile-owned chat and resource destinations share the same navigation owner; nested retry actions receive that owner through the interaction environment.",
+    "Global conversation shortcuts retain their existing cross-tab replacement behavior."
+  ],
+  "verification": {
+    "simulator": {
+      "result": "passed",
+      "test_count": 19,
+      "suite": "V2ContactsStoreTests",
+      "log": "/tmp/im-profile-return-navigation-r2.log",
+      "xcresult": "/tmp/im-profile-return-navigation-r2.xcresult",
+      "added_scenarios": [
+        "Preserve a contact/request back stack for server-room and local-direct targets",
+        "Empty room identifiers leave the stack unchanged",
+        "Hosted modal profile navigates profile → chat → chat files → chat → profile without changing the outer path or selected tab"
+      ]
+    },
+    "release": {
+      "build": "1.0 (11)",
+      "signature": "verified",
+      "aps": "development",
+      "source_drift": []
+    },
+    "device": {
+      "installation": "success",
+      "launch": "success",
+      "version_readback": "1.0 (11)",
+      "uninstalled": false,
+      "evidence_directory": "/tmp/im-profile-return-20261028"
+    }
+  },
+  "limits": [
+    "The hosted file-route test uses an unavailable service fixture to verify routing ownership, not resource downloading.",
+    "New local-direct stack preservation is verified by navigation state; the hosted view exercise uses an existing server-room route.",
+    "Physical-device back gestures have not been manually verified.",
+    "The hosted profile test exercises the modal content NavigationStack directly, not system sheet-dismissal gestures."
+  ],
+  "completed_at": "2026-10-28T01:04:34.490430+08:00",
+  "source_hashes": {
+    "IMApp/IMApp/V2/V2AppRealtimeRuntime.swift": "b33fb02934368e540872727616a9ef6c4e7b7dd3ea2296d8c81548bcb70ea336",
+    "IMApp/IMApp/V2/V2AppStore.swift": "7406ca45f2172250b7eb8beb8fdb30fea82243506054ae7a26f87a3daba2990f",
+    "IMApp/IMApp/V2/V2AvatarPipeline.swift": "91a429209d349c6947d5555023289351afae8266c50b43e1b82948e2090344a0",
+    "IMApp/IMApp/V2/V2ContactsUI.swift": "7c570774549ae20648ee072295554b10ab16cd42a874e56c860571c67b95f478",
+    "IMApp/IMApp/V2/V2NativePresentation.swift": "7354dd0af48e081320787388f0c09933ddc4072e5e6a257cb6c8c8dacb9e9200",
+    "IMApp/IMApp/V2/V2OfflineProjectionPresentation.swift": "b50806ac18b9464760959a60d633d2692a036f3785c8f116c498f439be04fc9e",
+    "IMApp/IMApp/V2/V2UserProfileView.swift": "f4678fb19d46ccee287691613b353bc50b896a3e94af3f2719dae3b55eab32e8",
+    "IMApp/IMApp/V2/V2VisualStyle.swift": "639f2c3d6962043f0cc0f6dd704a07c48443dab87fd31d4480df7d0db583143e",
+    "IMApp/IMAppTests/V2ContactsStoreTests.swift": "c6170660673ecb9aa939ce4b0b659d10d6461a580c07b9af314145428db35329",
+    "IMApp/IMAppTests/V2ProfileAvatarPipelineTests.swift": "fa783ecf2ff154ae26575a6eef3e5f377c4112a3a1c6eac4dec14b12640714e9",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalSyncStore.swift": "f879c3627b5359ee2a11594f5e9e178f4489dc2238b08375d3cf6e5c1335f2d4",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ProjectionChanges.swift": "0d8a94d0f58118c15a26e74a43471ee45306c5e3a973b423f3c3589d18180a7b",
+    "IMV2ClientKit/Sources/IMV2ClientKit/V2ProfilePresentationRepository.swift": "e0f772d1306f091c40b4abb775b75e8c19aa9657f8e6e6d7a2fda9d950d08bce",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2LocalSchemaContractTests.swift": "a7125327104de13f0d1f57a93d39249cbc48f7ff5508598ac446b078572c7d1b",
+    "IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalProfileDisplay.swift": "d15f5e03cdc3d34d158bbb564d528616ccf0bfc7866fd797144236c543d3a107",
+    "IMV2ClientKit/Sources/IMV2ClientKit/V2LocalProfileDisplay.swift": "dc52482bd8567a724ad9785c18670d7ed3c0bd6cb7f49b739860529e2b2ede9d",
+    "IMV2ClientKit/Tests/IMV2ClientKitTests/V2LocalProfileDisplayTests.swift": "55fe5c0eed6a62085599fcf9748720090656cba634b6fc6588735f0dbb803eb8"
+  }
+}

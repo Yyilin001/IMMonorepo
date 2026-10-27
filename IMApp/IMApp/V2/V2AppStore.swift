@@ -829,6 +829,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     ///
     /// - Parameter nextRoute: 全部本地收尾成功后要进入的 route。
     private func discardAuthenticatedPresentation(route nextRoute: Route) async {
+        let clearsLocalDisplay: Bool = switch nextRoute {
+        case .signedOut, .signOutPendingCredentialDeletion: true
+        default: false
+        }
         let closingGeneration = authenticationAttemptGate.generation
         let closingBootstrapper = bootstrapper
         let closingBackgroundSync = backgroundSync
@@ -908,6 +912,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 { await closingAccountRuntime?.close() },
                 { await closingStager?.close() },
                 { try await closingDownloader?.close() },
+                { if clearsLocalDisplay { try await localStore?.clearLocalProfileDisplays() } },
+                { if clearsLocalDisplay { try await closingOfflineStore?.clearLocalProfileDisplays() } },
                 { if let closingOfflineStore { try await closingBootstrapper?.closeLocalStore(closingOfflineStore) } },
                 { if let localStore { try await closingBootstrapper?.closeLocalStore(localStore) } }
             ])
@@ -1229,6 +1235,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 files: realtime.mediaCacheMaintenance, thumbnails: thumbnails,
                 authors: realtime.makeAuthorPresentationCoordinator(presentations))
             activation.onDiscard { await pipeline.close() }
+            try await pipeline.prepareLocalDisplay()
             guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
             let previousThumbnails = mediaThumbnailCache
             let previousPipeline = avatarPipeline
@@ -1270,6 +1277,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                     group.addTask {
                         for await _ in await notifier.updates(scopes: .presentations) {
                             guard !Task.isCancelled else { return }
+                            // Read the durable visibility result before waiting for
+                            // author-stream teardown. A name edit keeps local facts;
+                            // an explicit hidden/deleted projection removes them.
+                            try? await pipeline.reloadLocalDisplay()
                             await pipeline.suspend()
                         }
                     }

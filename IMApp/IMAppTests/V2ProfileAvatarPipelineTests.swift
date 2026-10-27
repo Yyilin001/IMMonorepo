@@ -11,6 +11,88 @@ import Observation
 @MainActor
 @Suite("Profile avatar pixels and display authority", .timeLimit(.minutes(1)))
 struct V2ProfileAvatarPipelineTests {
+    @Test("local display reaches the first UI identity callback during offline page reentry")
+    func localFirstPaintAndReentry() async throws {
+        let f = try await ProfilePipelineFixture(direct: true)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        try await pipeline.prepareLocalDisplay()
+        let page = await pipeline.profiles.activate()
+        _ = try await pipeline.snapshot(key: f.key, activation: page, pixels: nil)
+        try await waitForProfilePage { pipeline.localDisplay?.value(for: f.key)?.name == "Original" }
+        await pipeline.profiles.deactivate(page)
+        await pipeline.profiles.invalidate([f.key])
+        await f.reader.setOffline()
+        let probe = LocalProfileFirstPaintProbe()
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: LocalProfileFirstPaintHost(probe: probe, key: f.key)
+            .environment(\.v2AvatarPipeline, pipeline))
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitForProfilePage { !probe.identities.isEmpty }
+        #expect((probe.identities.first ?? nil) == "Original")
+        probe.visible = false
+        try await Task.sleep(for: .milliseconds(50))
+        probe.visible = true
+        try await waitForProfilePage { probe.identities.count >= 2 }
+        #expect(probe.identities.allSatisfy { $0 == "Original" })
+        await pipeline.suspend()
+        #expect(pipeline.localDisplay?.value(for: f.key)?.name == "Original")
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("renaming updates live identity without an intermediate nil callback")
+    func localRenameReplacesContentWithoutBlanking() async throws {
+        let f = try await ProfilePipelineFixture(direct: true)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        try await pipeline.prepareLocalDisplay()
+        let page = await pipeline.profiles.activate()
+        _ = try await pipeline.snapshot(key: f.key, activation: page, pixels: nil)
+        try await waitForProfilePage { pipeline.localDisplay?.value(for: f.key)?.name == "Original" }
+        let probe = LocalProfileFirstPaintProbe()
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: LocalProfileFirstPaintHost(probe: probe, key: f.key)
+            .environment(\.v2AvatarPipeline, pipeline))
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitForProfilePage { !probe.identities.isEmpty }
+        try await f.reader.replaceName()
+        await pipeline.profiles.invalidate([f.key])
+        let next = await pipeline.profiles.activate()
+        _ = try await pipeline.profiles.presentation(for: f.key, activation: next)
+        try await waitForProfilePage { (probe.identities.last ?? nil) == "Updated" }
+        #expect((probe.identities.first ?? nil) == "Original")
+        #expect(probe.identities.allSatisfy { $0 != nil })
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("names publish before a suspended avatar decode, then explicit denial removes them")
+    func localNamesDoNotWaitForAvatarPixels() async throws {
+        let f = try await ProfilePipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let entered = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in
+            await gate.wait(entered.continuation); return V2SendableImage(image: UIImage())
+        }
+        let pipeline = f.pipeline(thumbnails)
+        try await pipeline.prepareLocalDisplay()
+        let page = await pipeline.profiles.activate()
+        let image = Task { try await pipeline.snapshot(key: f.key, activation: page, pixels: 16) }
+        var iterator = entered.stream.makeAsyncIterator(); _ = await iterator.next()
+        #expect(pipeline.localDisplay?.value(for: f.key)?.name == "Original")
+        await gate.release(); _ = try await image.value
+        await pipeline.profiles.invalidate([f.key])
+        #expect(pipeline.localDisplay?.value(for: f.key)?.name == "Original")
+        await f.reader.deny()
+        let next = await pipeline.profiles.activate()
+        _ = try await pipeline.profiles.presentation(for: f.key, activation: next)
+        try await waitForProfilePage { pipeline.localDisplay?.value(for: f.key) == nil }
+        await pipeline.close(); await thumbnails.close(); try await f.files.close(); entered.continuation.finish()
+    }
+
     @Test("nested list pages reuse signed-in authority and render cached names on reentry")
     func nestedListReentry() async throws {
         let f = try await ProfilePipelineFixture(direct: true)
@@ -435,6 +517,8 @@ private actor ProfilePipelineReader: V2ProfilePresentationReading {
     var value: V2AuthorizedProfilePresentation
     let avatar: V2ResourceAvatarAccess
     var denied = false
+    var offline = false
+    func setOffline() { offline = true }
     var calls = 0
     init(value: V2AuthorizedProfilePresentation, avatar: V2ResourceAvatarAccess) { self.value = value; self.avatar = avatar }
     func deny() { denied = true }
@@ -461,6 +545,7 @@ private actor ProfilePipelineReader: V2ProfilePresentationReading {
     }
     func readPresentations(_ keys: [V2ProfileViewLookupKey]) throws -> V2ProfilePresentationBatch {
         calls += 1
+        if offline { throw URLError(.notConnectedToInternet) }
         let key = value.lease.key
         return .init(presentations: denied ? [:] : [key: value], unavailable: denied ? Set(keys) : [],
                      serverNow: Date(), avatars: denied ? [:] : [key: avatar])
@@ -478,4 +563,18 @@ private struct NoProfileByteIO: V2ClientMediaDownloadTargetResolver, V2ClientMed
     func upload(fileURL: URL, target: V2ClientMediaTransferTarget) throws { throw CancellationError() }
     func download(target: V2ClientMediaTransferTarget, destinationURL: URL) throws { throw CancellationError() }
     func readGroupAvatar(roomID: RoomID) throws -> V2GroupAvatarPresentation { throw V2GroupAvatarReadError.forbidden }
+}
+
+@MainActor @Observable private final class LocalProfileFirstPaintProbe {
+    var visible = true
+    var identities: [String?] = []
+}
+private struct LocalProfileFirstPaintHost: View {
+    @Bindable var probe: LocalProfileFirstPaintProbe
+    let key: V2ProfileViewLookupKey
+    var body: some View {
+        if probe.visible {
+            V2AuthorizedPublicHandleView(key: key) { identity in probe.identities.append(identity?.displayName) }
+        } else { Text("Other page") }
+    }
 }

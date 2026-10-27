@@ -88,6 +88,78 @@ struct V2ContactsStoreTests {
         #expect(store.feedback == "请求已提交，正在同步。")
     }
 
+    @Test(arguments: [false, true])
+    func chatOpenedFromProfilePreservesTheContactBackStack(local: Bool) {
+        let navigation = V2RootNavigationStore()
+        navigation.selectedTab = .contacts
+        navigation.path.append(V2ContactsRoute.requests)
+        navigation.path.append(V2ContactsRoute.contact(UUID().uuidString))
+        let original = navigation.path
+        let target: V2ConversationDestination = local
+            ? .localDirect(.init(operationID: UUID()))
+            : .room(.init(roomID: UUID().uuidString))
+        navigation.pushConversation(target)
+        #expect(navigation.selectedTab == .contacts)
+        #expect(navigation.path.count == original.count + 1)
+        navigation.path.removeLast()
+        #expect(navigation.path == original)
+        #expect(navigation.selectedTab == .contacts)
+    }
+
+    @Test func invalidChatDoesNotChangeTheProfileBackStack() {
+        let navigation = V2RootNavigationStore()
+        navigation.selectedTab = .contacts
+        navigation.path.append(V2ContactsRoute.contact(UUID().uuidString))
+        let original = navigation.path
+        navigation.pushConversation(.room(.init(roomID: "")))
+        #expect(navigation.path == original)
+        #expect(navigation.selectedTab == .contacts)
+    }
+
+    @Test func modalProfileKeepsItsOwnBackStackAndChatFilesInTheSameFlow() async throws {
+        await V2UITestWindowOwnership.acquire()
+        defer { V2UITestWindowOwnership.release() }
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let actor = UserID(uuid: UUID()), peer = UserID(uuid: UUID())
+        let contacts = makeStore(dataSource: ContactsDataSourceFake(projections: [], hydratedProfiles: [:]), currentUserID: actor)
+        let conversations = V2ConversationListStore(environment: .init(userID: actor.rawValue, projections: .init(dataSource: ProfileNavigationMessages())))
+        let root = V2RootNavigationStore(), local = V2RootNavigationStore()
+        root.selectedTab = .contacts
+        root.path.append(V2ContactsRoute.requests)
+        let original = root.path
+        let host = UIHostingController(rootView: V2UserProfileSheet(key: .init(userID: peer, context: .relationship), navigation: local)
+            .environment(\.v2UserInteractionContext, .init(contacts: contacts, conversations: conversations, navigation: root))
+            .environment(\.v2MockProfileNames, [peer.rawValue: "Navigation fixture"]))
+        let window = UIWindow(windowScene: scene); window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        func navigator(_ vc: UIViewController) -> UINavigationController? {
+            if let nav = vc as? UINavigationController { return nav }
+            return vc.children.lazy.compactMap { navigator($0) }.first
+        }
+        func waitForTitle(_ title: String?, depth: Int) async throws {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < deadline {
+                if let nav = navigator(host), nav.viewControllers.count == depth,
+                   (title == nil || nav.navigationBar.topItem?.title == title) { return }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            Issue.record("Profile flow did not display \(title) at depth \(depth)")
+        }
+        try await waitForTitle("用户资料", depth: 1)
+        local.pushConversation(.room(.init(roomID: UUID().uuidString)))
+        try await waitForTitle("会话", depth: 2)
+        #expect(root.path == original)
+        local.showResources(roomID: .init(uuid: UUID()))
+        try await waitForTitle(nil, depth: 3)
+        local.path.removeLast()
+        try await waitForTitle("会话", depth: 2)
+        local.path.removeLast()
+        try await waitForTitle("用户资料", depth: 1)
+        #expect(root.path == original)
+        #expect(root.selectedTab == .contacts)
+    }
+
     @Test func openingAFriendConversationSelectsTheMessagesTabWithTheReturnedRoom() async throws {
         let currentUserID = try UserID("00000000-0000-0000-0000-000000000821")
         let friend = try makeIdentity(userID: "00000000-0000-0000-0000-000000000822", handle: "friend", displayName: "好友")
@@ -888,4 +960,10 @@ private actor CancellableContactProfileReader: V2ProfileViewReading {
         guard !wasCancelled else { return }
         await withCheckedContinuation { cancellationWaiters.append($0) }
     }
+}
+
+private struct ProfileNavigationMessages: V2ConversationDataSource {
+    func conversationSummaryPage(for userID: String, isArchived: Bool, before cursor: V2ClientConversationListCursor?, limit: Int) async throws -> V2ConversationListPage { .init(items: [], nextCursor: nil) }
+    func timelinePage(in roomID: String, for userID: String, before cursor: V2ConversationTimelineCursor?, limit: Int) async throws -> V2ConversationTimelinePage { .init(items: [], olderCursor: nil) }
+    func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation { .unavailable }
 }

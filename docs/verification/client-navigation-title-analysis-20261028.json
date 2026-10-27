@@ -1,0 +1,125 @@
+{
+  "date": "2026-10-28T00:13:28.766578+08:00",
+  "status": "analysis_only_root_cause_not_proven",
+  "production_code_changed": false,
+  "evidence_directory": "/tmp/im-navigation-title-analysis-20261028",
+  "experiments": [
+    {
+      "variant": "group",
+      "iteration": 0,
+      "preloaded": true,
+      "first_destination_title_host_ms": 422,
+      "first_list_host_ms": 422,
+      "largest_main_actor_sampling_gap_ms": 422
+    },
+    {
+      "variant": "group",
+      "iteration": 1,
+      "preloaded": false,
+      "first_destination_title_host_ms": 51,
+      "first_list_host_ms": 79,
+      "largest_main_actor_sampling_gap_ms": 51
+    },
+    {
+      "variant": "direct",
+      "iteration": 0,
+      "preloaded": true,
+      "first_destination_title_host_ms": 203,
+      "first_list_host_ms": 203,
+      "largest_main_actor_sampling_gap_ms": 203
+    },
+    {
+      "variant": "direct",
+      "iteration": 1,
+      "preloaded": true,
+      "first_destination_title_host_ms": 50,
+      "first_list_host_ms": 50,
+      "largest_main_actor_sampling_gap_ms": 50
+    },
+    {
+      "variant": "direct",
+      "iteration": 2,
+      "preloaded": false,
+      "first_destination_title_host_ms": 62,
+      "first_list_host_ms": 62,
+      "largest_main_actor_sampling_gap_ms": 44
+    },
+    {
+      "variant": "direct",
+      "iteration": 3,
+      "preloaded": false,
+      "first_destination_title_host_ms": 50,
+      "first_list_host_ms": 83,
+      "largest_main_actor_sampling_gap_ms": 50
+    },
+    {
+      "variant": "direct_animation_probe",
+      "iteration": 0,
+      "preloaded": true,
+      "first_destination_title_host_ms": 203,
+      "first_list_host_ms": 203,
+      "largest_main_actor_sampling_gap_ms": 203
+    },
+    {
+      "variant": "direct_animation_probe",
+      "iteration": 1,
+      "preloaded": true,
+      "first_destination_title_host_ms": 56,
+      "first_list_host_ms": 56,
+      "largest_main_actor_sampling_gap_ms": 56
+    },
+    {
+      "variant": "direct_animation_probe",
+      "iteration": 2,
+      "preloaded": false,
+      "first_destination_title_host_ms": 44,
+      "first_list_host_ms": 78,
+      "largest_main_actor_sampling_gap_ms": 44
+    },
+    {
+      "variant": "direct_animation_probe",
+      "iteration": 3,
+      "preloaded": false,
+      "first_destination_title_host_ms": 46,
+      "first_list_host_ms": 75,
+      "largest_main_actor_sampling_gap_ms": 46
+    }
+  ],
+  "measurement_limits": [
+    "Debug simulator, synthetic fixed text and no production images; direct title uses synchronous test names, not the production account cache.",
+    "Sampling observes UIKit title/list hosts and presentation opacity, not actual text pixels or GPU compositing.",
+    "Navigation-bar layer animation probe observed no keyed animations; it cannot establish the production transition timing.",
+    "Initial construction delayed MainActor sampling in the first run; no stack trace attributes that delay to a particular function.",
+    "The reported physical-device blank header has not been reproduced by these probes."
+  ],
+  "confirmed_code_facts": [
+    "Peer presentation lookup key is immutable and set in detail-store initialization.",
+    "Cached name is synchronously read in the header view body.",
+    "Custom principal toolbar and trailing menu are declared outside the loading/loaded switch.",
+    "The detail view replaces its Group content during loading/loaded changes.",
+    "Zoom transition is used by the image viewer, not the ordinary conversation destination."
+  ],
+  "findings": [
+    "Title host was never sampled later than the collection host in these synthetic runs.",
+    "A loading-to-loaded content change alone does not establish the reported cause.",
+    "The prior suggestion of late toolbar attachment remains a hypothesis, not a demonstrated diagnosis."
+  ],
+  "next_isolation": [
+    "Release physical-device trace of a real conversation entry: data-ready, title-content appearance, transition boundaries, main-thread stacks and rendered frames.",
+    "Compare native text navigation title and fixed-content principal title on the same device before changing navigation architecture."
+  ],
+  "sources": [
+    {
+      "url": "https://developer.apple.com/forums/thread/822488",
+      "relation": "First-person report of native navigation-bar first-render flicker; no confirmed resolution."
+    },
+    {
+      "url": "https://developer.apple.com/forums/thread/811877",
+      "relation": "Custom large-title transition overlap; Apple requests a focused reproduction. Different toolbar placement from this app."
+    },
+    {
+      "url": "https://developer.apple.com/forums/topics/ui-frameworks-topic/ui-frameworks-topic-swiftui?page=2&sortBy=lastUpdated&sortOrder=DESC",
+      "relation": "Search-indexed first-person iOS 26 beta report of title loss after loading/List state transitions; no direct thread URL recovered."
+    }
+  ]
+}
