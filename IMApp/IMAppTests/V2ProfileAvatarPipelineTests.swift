@@ -11,6 +11,36 @@ import Observation
 @MainActor
 @Suite("Profile avatar pixels and display authority", .timeLimit(.minutes(1)))
 struct V2ProfileAvatarPipelineTests {
+    @Test("opening own profile does not revoke the account page's unchanged avatar grant")
+    func openingProfileRetainsAccountAvatarGrant() async throws {
+        let f = try await ProfilePipelineFixture(relationship: true)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let activation = await pipeline.profiles.activate()
+        _ = try await pipeline.snapshot(key: f.key, activation: activation, pixels: 64)
+        let before = try #require(await pipeline.profiles.cachedSnapshot(for: f.key, activation: activation))
+        let profile = await f.reader.value.view
+        let service = try ProfileIntentServiceFixture(confirmedProfile: profile)
+        let store = V2PublicIdentitySettingsStore(service: service, attachmentStager: nil)
+        await store.load()
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let appeared = AsyncStream<Void>.makeStream()
+        window.rootViewController = UIHostingController(rootView: NavigationStack {
+            V2PublicIdentitySettingsView(store: store).onAppear { appeared.continuation.yield(()) }
+        }.environment(\.v2AvatarPipeline, pipeline))
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil; store.stopObserving() }
+        var iterator = appeared.stream.makeAsyncIterator(); _ = await iterator.next()
+        try await Task.sleep(for: .milliseconds(200))
+        let after = try #require(await pipeline.profiles.cachedSnapshot(for: f.key, activation: activation))
+        #expect(after.deadline == before.deadline)
+        #expect(after.presentation.view == before.presentation.view)
+        #expect(after.avatar?.mediaID == before.avatar?.mediaID)
+        appeared.continuation.finish()
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
     @Test("local display reaches the first UI identity callback during offline page reentry")
     func localFirstPaintAndReentry() async throws {
         let f = try await ProfilePipelineFixture(direct: true)
@@ -482,7 +512,7 @@ private struct ProfilePipelineFixture {
     let pageContext: V2AuthorPresentationPageScope.Context
     let actor = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
     let reader: ProfilePipelineReader, files: V2ResourceMediaTestOwner
-    init(direct: Bool = false) async throws {
+    init(direct: Bool = false, relationship: Bool = false) async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("profile-pipeline-\(UUID())")
         let png = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).pngData { context in
             UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
@@ -490,7 +520,7 @@ private struct ProfilePipelineFixture {
         let media = MediaID(uuid: UUID()), variant = ResourceVariantID(uuid: UUID())
         let checksum = try V2ResourceChecksum(value: SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined())
         let room = RoomID(uuid: UUID())
-        key = .init(userID: .init(uuid: UUID()), context: .room(room))
+        key = .init(userID: .init(uuid: UUID()), context: relationship ? .relationship : .room(room))
         pageContext = direct ? .direct(roomID: room, actorUserID: actor, peerUserID: key.userID) : .group(room)
         let now = Date(), rev = try #require(V2ProfileRevision(rawValue: 1))
         let view = try V2ProfileView(userID: key.userID,

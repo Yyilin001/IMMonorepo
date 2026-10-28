@@ -6,6 +6,26 @@ import Testing
 
 @MainActor
 struct V2PublicIdentitySettingsStoreTests {
+    @Test func reopeningDoesNotRestoreSupersededFailureOrBlockNewEdits() async throws {
+        let service = try ProfileIntentServiceFixture()
+        let store = V2PublicIdentitySettingsStore(service: service, attachmentStager: nil)
+        await store.load()
+        _ = await store.saveNickname("旧请求")
+        store.stopObserving()
+        await service.failPreparation()
+        await store.load()
+        for _ in 0..<10000 { if store.needsAttention { break }; await Task.yield() }
+        #expect(store.needsAttention)
+        store.stopObserving()
+        await service.clearPending()
+        await store.load()
+        #expect(store.savePhase == nil)
+        #expect(!store.needsAttention && !store.isUpdating)
+        #expect(store.canEdit)
+        #expect(await store.saveNickname("新昵称"))
+        store.stopObserving()
+    }
+
     @Test func nicknameIsValidatedBeforeItCanEnterTheSaveQueue() async throws {
         let service = try ProfileIntentServiceFixture()
         let store = V2PublicIdentitySettingsStore(service: service, attachmentStager: nil)
@@ -217,10 +237,11 @@ private actor PausedProfileStager: V2ConversationAttachmentStaging {
     func discard(_ attachment: V2StagedConversationAttachment) async { await base.discard(attachment) }
 }
 
-private actor ProfileIntentServiceFixture: V2ProfileIntentManaging {
+actor ProfileIntentServiceFixture: V2ProfileIntentManaging {
     private var statusPhase: V2ProfileIntentStatus.Phase?
     private(set) var resumeCount = 0
     func failPreparation() { statusPhase = .needsAttention }
+    func clearPending() { pending = nil }
     private(set) var savedImport: V2ProfileAvatarImport?
     func enqueueImportedAvatar(expectedRevision: V2ProfileRevision, patch: V2ProfilePatch, source: V2ProfileAvatarImport) async throws -> V2ProfileIntent {
         statusPhase = nil
@@ -235,7 +256,8 @@ private actor ProfileIntentServiceFixture: V2ProfileIntentManaging {
     private var shouldBlockRefresh = false
     private var refreshContinuation: CheckedContinuation<V2ProfileView, any Error>?
     private(set) var savedPatch: V2ProfilePatch?
-    init(avatar: V2AvatarReference? = nil) throws {
+    init(avatar: V2AvatarReference? = nil, confirmedProfile: V2ProfileView? = nil) throws {
+        if let confirmedProfile { profile = confirmedProfile; return }
         let user = UserID(uuid: UUID())
         profile = try .init(userID: user, publicIdentity: .init(userID: user, handle: .init("profile_test"), displayName: "当前显示名", accountKind: .regular), avatar: avatar, state: .active, revision: .init(rawValue: 1)!, visibilityRevision: .init(rawValue: 1)!)
     }

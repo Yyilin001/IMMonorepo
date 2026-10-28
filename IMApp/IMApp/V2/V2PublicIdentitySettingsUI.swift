@@ -112,8 +112,14 @@ final class V2PublicIdentitySettingsStore {
                 pendingObservation = (persisted.id, savedName)
                 feedback = "正在恢复保存进度。"
                 observe(persisted.id, savedName: savedName)
-            } else if let pendingObservation {
-                observe(pendingObservation.id, savedName: pendingObservation.savedName)
+            } else {
+                // The durable service may have completed, discarded or superseded
+                // the previously observed intent while this page was closed.
+                stopObserving()
+                pendingObservation = nil
+                savedAvatarDraft = nil; savedAvatarImport = nil
+                canReplacePending = false
+                savePhase = nil
             }
         } catch is CancellationError { return }
         catch { feedback = "无法恢复本机保存进度，编辑内容已保留。" }
@@ -452,6 +458,7 @@ struct V2PublicIdentitySettingsView: View {
     @State private var modal: Modal?
     @State private var actionTask: Task<Void, Never>?
     @State private var copied = false
+    @State private var avatarRefreshGeneration = 0
     private enum Modal: String, Identifiable {
         case avatar, nickname, cancelChange
         var id: String { rawValue }
@@ -543,7 +550,9 @@ struct V2PublicIdentitySettingsView: View {
         .navigationTitle("个人资料").navigationBarTitleDisplayMode(.inline)
         .task { await store.load() }
         .refreshable { await store.load() }
-        .task(id: store.currentAvatar?.mediaID) {
+        .onChange(of: store.currentAvatar?.mediaID) { _, _ in avatarRefreshGeneration += 1 }
+        .task(id: avatarRefreshGeneration) {
+            guard avatarRefreshGeneration > 0 else { return }
             if let user = store.profileUserID, let avatarPipeline {
                 await avatarPipeline.profiles.invalidate([.init(userID: user, context: .relationship)])
             }
@@ -575,7 +584,7 @@ struct V2PublicIdentitySettingsView: View {
         case .preparingAvatar: "正在更新头像…"
         case .confirming: "正在确认更新…"
         case .committed: "已保存"
-        case .needsAttention, .closed: "更新未完成，请重试或重新编辑。"
+        case .needsAttention, .closed: store.feedback ?? "更新未完成，请重试或重新编辑。"
         }
     }
     private func run(_ operation: @escaping @MainActor () async -> Void) {

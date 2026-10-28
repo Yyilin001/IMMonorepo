@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-28",
+  "status": "client_fixes_verified_server_import_failure_unresolved",
+  "changes": [
+    "Profile entry no longer invalidates the shared avatar grant on initial mount; invalidation follows actual media ID changes.",
+    "An authoritative pendingIntent=nil clears obsolete observation and save phase while retaining independently staged edits.",
+    "Failure UI displays the specific store feedback rather than replacing every failure with a generic incomplete message."
+  ],
+  "verification": {
+    "result_bundle": "/tmp/im-profile-cache-status-fix-r2.xcresult",
+    "log": "/tmp/im-profile-cache-status-fix-r2.log",
+    "passed_tests": 13,
+    "hosted_avatar_regression": "openingProfileRetainsAccountAvatarGrant verifies unchanged presentation, deadline and avatar after mounting real profile UI",
+    "obsolete_task_regression": "reopeningDoesNotRestoreSupersededFailureOrBlockNewEdits",
+    "device_diagnostic": "Read-only copy of SQLite and WAL passed quick_check. Latest task: preparationFailed, server import state failed; preceding profile update committed. No real database writes or task cancellation performed."
+  },
+  "remaining": [
+    "Server import failed without a detailed reason in the client status protocol; server logs still required. Default root/ubuntu SSH identities were rejected. Requested existing ECS key path from user."
+  ],
+  "device_delivery": {
+    "version": "1.0",
+    "build": "17",
+    "device": "徐徐年年的 iPhone",
+    "release_build": "passed",
+    "signature": "verified",
+    "installation": "success",
+    "launch": "success",
+    "version_readback": "1.0 (17)",
+    "evidence_directory": "/tmp/im-profile-fix-device-20261028"
+  }
+}
