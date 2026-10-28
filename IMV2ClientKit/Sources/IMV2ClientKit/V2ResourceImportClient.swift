@@ -85,6 +85,17 @@ extension GRDBV2LocalSyncStore {
         }
     }
     public func resourceImport(id: UUID) throws -> V2ResourceImportJob? { try databasePool.read { try Self.readResourceImport(id, db: $0) } }
+    /// Derive recovery identity from this installation, never from a source's
+    /// owner or an unverified response. Reading status grants no new access.
+    public func resourceImportLocator(id: UUID) throws -> V2ResourceImportLocator {
+        try databasePool.read { db in
+            guard let job = try Self.readResourceImport(id, db: db),
+                  let user = try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") else {
+                throw V2ResourceJournalError.invalidRecord
+            }
+            return .init(home: job.request.targetUsage.home(actorUserID: try UserID(user)), operationID: job.request.operationID)
+        }
+    }
     public func saveResourceImport(_ status: V2ResourceImportStatus, id: UUID, owner: UUID) throws {
         try databasePool.write { db in
             guard try String.fetchOne(db, sql: "SELECT execution_owner FROM v2_resource_import_jobs WHERE job_id=?", arguments: [id.uuidString]) == owner.uuidString else { throw V2ResourceJournalError.conflict }

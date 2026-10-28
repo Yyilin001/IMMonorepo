@@ -132,6 +132,14 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         status = try await V2NetworkWorkScope.$context.withValue(.init(service: "resources", priority: .recovery, isRetry: job.attempts>1)) {
             try await V2HTTPRequestDeadline.$current.withValue(deadline) {
                 if let saved = job.status { return try await self.imports.status(saved.locator) }
+                if job.request.targetUsage == .userAvatar {
+                    let locator = try await self.store.resourceImportLocator(id: job.id)
+                    do { return try await self.imports.status(locator) }
+                    catch let failure as V2HTTPFailure where failure.statusCode == 404 {
+                        // No result is available yet. Creation remains idempotent
+                        // under the original operation and target media IDs.
+                    }
+                }
                 return try await self.imports.create(job.request)
             }
         }

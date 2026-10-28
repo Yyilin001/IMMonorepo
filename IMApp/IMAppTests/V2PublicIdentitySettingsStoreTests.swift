@@ -6,6 +6,76 @@ import Testing
 
 @MainActor
 struct V2PublicIdentitySettingsStoreTests {
+    @Test func nicknameIsValidatedBeforeItCanEnterTheSaveQueue() async throws {
+        let service = try ProfileIntentServiceFixture()
+        let store = V2PublicIdentitySettingsStore(service: service, attachmentStager: nil)
+        await store.load()
+        #expect(!(await store.saveNickname(" \n ")))
+        #expect(!(await store.saveNickname(String(repeating: "😀", count: 30))))
+        #expect(!(await store.saveNickname("name\u{0001}")))
+        #expect(await service.savedPatch == nil)
+        #expect(store.displayName == "当前显示名")
+        #expect(await store.saveNickname("  新昵称 😀  "))
+        #expect(await service.savedPatch?.displayName == .set("新昵称 😀"))
+        #expect(await service.savedPatch?.avatar == .unchanged)
+    }
+
+    @Test func nicknameSaveDoesNotUploadAnUnrelatedRecoveredAvatarDraft() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "profile-name-only-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "avatar.png"); try Data([1, 2, 3]).write(to: file)
+        let resources = try await V2OriginalResourceTestFixture(root: root)
+        let draft = try await resources.stager.stageImportedFile(at: file, purpose: .personalAvatar)
+        let service = try ProfileIntentServiceFixture()
+        let store = V2PublicIdentitySettingsStore(service: service, attachmentStager: resources.stager)
+        await store.load()
+        #expect(await store.saveNickname("独立昵称"))
+        #expect(await service.savedPatch?.avatar == .unchanged)
+        #expect(store.stagedAvatar?.localAssetID == draft.localAssetID)
+        #expect(try await resources.stager.selectedAttachments(purpose: .personalAvatar).count == 1)
+        store.stopObserving(); try await resources.close()
+    }
+
+    @Test func newAvatarDoesNotResubmitAnOldFailedNickname() async throws {
+        let service = try ProfileIntentServiceFixture()
+        let store = V2PublicIdentitySettingsStore(service: service, attachmentStager: nil)
+        await store.load()
+        store.displayName = "旧的失败昵称"
+        await store.save(); store.stopObserving()
+        await service.failPreparation(); await store.load()
+        for _ in 0..<10000 { if store.needsAttention { break }; await Task.yield() }
+        let room = RoomID(uuid: UUID())
+        let selection = V2AvatarResourceSelection(key: .init(home: .room(room), mediaID: .init(uuid: UUID())),
+            source: .init(location: .init(roomID: room, messageID: .init(uuid: UUID())), ordinal: 0, createdAt: nil), displayName: "头像.png")
+        #expect(await store.saveAvatarResource(selection))
+        #expect(await service.savedPatch?.displayName == .unchanged)
+        #expect(await service.savedImport != nil)
+        #expect(store.displayName == "当前显示名")
+        store.stopObserving()
+    }
+
+    @Test func failedAvatarPreparationOffersRetryAndKeepsTheOriginalImport() async throws {
+        let service = try ProfileIntentServiceFixture()
+        let store = V2PublicIdentitySettingsStore(service: service, attachmentStager: nil)
+        await store.load()
+        let location = V2MediaMessageLocation(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID()))
+        await store.selectAvatarResource(.init(key: .init(home: .room(location.roomID), mediaID: .init(uuid: UUID())),
+            source: .init(location: location, ordinal: 0, createdAt: nil), displayName: "头像.png"))
+        await store.save(); store.stopObserving()
+        let original = try #require(await service.savedImport)
+        await service.failPreparation()
+        await store.load()
+        for _ in 0..<10000 { if store.needsAttention { break }; await Task.yield() }
+        #expect(store.hasPendingAvatarImport && store.needsAttention && store.canReplacePending)
+        #expect(store.feedback == "头像准备未完成，可重试保存或重新选择图片。")
+        await store.resumePendingSave()
+        #expect(await service.resumeCount == 1)
+        #expect(await service.savedImport == original)
+        #expect(store.hasPendingAvatarImport && !store.needsAttention && !store.canReplacePending)
+        store.stopObserving()
+    }
+
     @Test func existingImageSelectionSavesAnImportWithoutStagingOrUploading() async throws {
         let service = try ProfileIntentServiceFixture(), store = V2PublicIdentitySettingsStore(service: service, attachmentStager: nil)
         await store.load()
@@ -148,8 +218,12 @@ private actor PausedProfileStager: V2ConversationAttachmentStaging {
 }
 
 private actor ProfileIntentServiceFixture: V2ProfileIntentManaging {
+    private var statusPhase: V2ProfileIntentStatus.Phase?
+    private(set) var resumeCount = 0
+    func failPreparation() { statusPhase = .needsAttention }
     private(set) var savedImport: V2ProfileAvatarImport?
     func enqueueImportedAvatar(expectedRevision: V2ProfileRevision, patch: V2ProfilePatch, source: V2ProfileAvatarImport) async throws -> V2ProfileIntent {
+        statusPhase = nil
         savedPatch = patch; savedImport = source
         let value = V2ProfileIntent(id: UUID(), accountID: profile.userID, operationID: .init(uuid: UUID()), expectedRevision: expectedRevision,
             patch: patch, avatarPreparation: .serverImport(source), deadline: Date().addingTimeInterval(86400), workID: nil)
@@ -176,12 +250,26 @@ private actor ProfileIntentServiceFixture: V2ProfileIntentManaging {
     func refreshIsWaiting() -> Bool { refreshContinuation != nil }
     func failRefresh() { refreshContinuation?.resume(throwing: V2OwnProfileClientError.networkFailure); refreshContinuation = nil }
     func enqueue(expectedRevision: V2ProfileRevision, patch: V2ProfilePatch, avatarUpload: V2ProfileAvatarUpload?) async throws -> V2ProfileIntent {
+        statusPhase = nil
         savedPatch = patch
         let intent = V2ProfileIntent(id: UUID(), accountID: profile.userID, operationID: .init(uuid: UUID()), expectedRevision: expectedRevision, patch: patch, avatarUpload: avatarUpload, deadline: Date().addingTimeInterval(86400), workID: nil)
         pending = intent
         return intent
     }
-    func resumeOrReapply(intentID: UUID) async throws -> V2ProfileIntent { throw V2OperationWorkError.invalidTransition }
+    func resumeOrReapply(intentID: UUID) async throws -> V2ProfileIntent {
+        guard let pending, pending.id == intentID else { throw V2OperationWorkError.invalidTransition }
+        resumeCount += 1; statusPhase = .preparingAvatar
+        return pending
+    }
     func discard(intentID: UUID) async throws {}
-    func observe(intentID: UUID) async -> AsyncThrowingStream<V2ProfileIntentStatus, Error> { .init { $0.finish() } }
+    func observe(intentID: UUID) async -> AsyncThrowingStream<V2ProfileIntentStatus, Error> {
+        let status = pending.flatMap { intent in
+            statusPhase.map { V2ProfileIntentStatus(intent: intent, phase: $0, currentSnapshot: profile,
+                sourceRetained: true, canReplace: $0 == .needsAttention) }
+        }
+        return .init { continuation in
+            if let status { continuation.yield(status) }
+            continuation.finish()
+        }
+    }
 }

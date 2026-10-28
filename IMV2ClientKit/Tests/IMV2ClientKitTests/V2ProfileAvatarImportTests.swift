@@ -5,6 +5,47 @@ import Testing
 
 @Suite("Personal avatar import belongs to its profile change")
 struct V2ProfileAvatarImportTests {
+    @Test(arguments: [false, true])
+    func retryRecoversTheOriginalCopyAfterItsResponseWasLost(reopen: Bool) async throws {
+        let f = try Fixture(), source = try f.source(), intent = try await f.enqueue(source)
+        try await f.store.pauseResourceImport(id: source.id, needsAttention: true)
+        let first = V2ProfileIntentService(store: f.store, accountID: f.user, manager: try f.manager())
+        #expect(try await first.prepareNextIntent())
+        #expect(try await f.store.firstUnfinishedProfileIntent(accountID: f.user) == nil)
+        let store: GRDBV2LocalSyncStore
+        if reopen { try await f.store.close(); store = try f.reopen() }
+        else { store = f.store }
+        let service = V2ProfileIntentService(store: store, accountID: f.user, manager: try f.manager())
+        #expect(try await store.resourceImportLocator(id: source.id) == .init(home: .account(f.user), operationID: source.request.operationID))
+        let resumed = try await service.resumeOrReapply(intentID: intent.id)
+        #expect(resumed.id == intent.id && resumed.operationID == intent.operationID)
+        #expect(resumed.avatarImport == source)
+        #expect(try await store.resourceImport(id: source.id)?.attempts == 0)
+        #expect(try await store.firstUnfinishedProfileIntent(accountID: f.user)?.id == intent.id)
+        // The server already copied the image. Recovering its result must bind
+        // that exact target, with no second copy or replacement profile command.
+        try await ready(source, store: store, user: f.user, until: Date().addingTimeInterval(100))
+        #expect(try await service.prepareNextIntent())
+        let frozen = try #require(try await store.profileIntent(id: intent.id))
+        #expect(frozen.avatarImport == source && frozen.workID != nil)
+        #expect(frozen.patch.avatar == .set(.init(mediaID: source.request.targetMediaID)))
+        try await store.close(); try f.remove()
+    }
+
+    @Test func rejectedCopyStillRequiresAFreshImport() async throws {
+        let f = try Fixture(), source = try f.source(), intent = try await f.enqueue(source)
+        let status = try V2ResourceImportStatus(locator: .init(home: .account(f.user), operationID: source.request.operationID),
+            mediaID: source.request.targetMediaID, state: .failed, bindableUntil: nil)
+        try await f.store.databasePool.write { try GRDBV2LocalSyncStore.saveResourceImport(status, id: source.id, db: $0) }
+        let service = V2ProfileIntentService(store: f.store, accountID: f.user, manager: try f.manager())
+        #expect(try await service.prepareNextIntent())
+        let replacement = try await service.resumeOrReapply(intentID: intent.id)
+        #expect(replacement.id != intent.id)
+        #expect(replacement.avatarImport?.request.operationID != source.request.operationID)
+        #expect(replacement.avatarImport?.request.source == source.request.source)
+        try await f.close()
+    }
+
     @Test func submittedImportProfileConfirmsOriginalOperationAfterResourceExpiry() async throws {
         let f = try Fixture(), source = try f.source(), intent = try await f.enqueue(source)
         let executor = ImportProfileExecutor()

@@ -260,8 +260,25 @@ extension GRDBV2LocalSyncStore {
     }
     func resumeProfilePreparation(id: UUID) throws -> Bool {
         try databasePool.write { db in
-            guard try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_profile_intents WHERE intent_id=? AND work_id IS NULL AND local_terminal IS NULL)", arguments: [id.uuidString]) == true else { return false }
-            try db.execute(sql: "UPDATE v2_profile_intents SET preparation_attempts=0,preparation_error=NULL,preparation_next_at=? WHERE intent_id=?", arguments: [Date().timeIntervalSince1970,id.uuidString])
+            guard let row = try Row.fetchOne(db, sql: "SELECT payload,local_terminal,source_released FROM v2_profile_intents WHERE intent_id=? AND work_id IS NULL", arguments: [id.uuidString]),
+                  !(row["source_released"] as Bool) else { return false }
+            let intent = try JSONDecoder().decode(V2ProfileIntent.self, from: row["payload"])
+            let terminal: String? = row["local_terminal"]
+            let now = Date()
+            guard intent.deadline > now, terminal == nil || terminal == "preparationFailed" else { return false }
+            if let source = intent.avatarImport {
+                guard let job = try Self.readResourceImport(source.id, db: db), job.request == source.request,
+                      !job.cancellationRequested, job.control == .run,
+                      job.status.map({ ![.cancelled, .failed].contains($0.state) }) ?? true else { return false }
+                if let status = job.status, status.state == .ready {
+                    guard let until = status.bindableUntilUnixMilliseconds,
+                          Double(until) / 1000 > now.timeIntervalSince1970 else { return false }
+                }
+                // A missing response does not prove the copy failed. Recover
+                // the same import/target rather than abandoning a ready avatar.
+                try Self.retryResourceImport(id: source.id, db: db)
+            } else if terminal != nil { return false }
+            try db.execute(sql: "UPDATE v2_profile_intents SET local_terminal=NULL,preparation_attempts=0,preparation_error=NULL,preparation_next_at=? WHERE intent_id=?", arguments: [now.timeIntervalSince1970,id.uuidString])
             return true
         }
     }

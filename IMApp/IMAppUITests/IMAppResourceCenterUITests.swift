@@ -738,6 +738,7 @@ final class IMAppResourceCenterUITests: XCTestCase {
         app.launch()
         let profile = app.buttons["v2.identity.open"]
         XCTAssertTrue(profile.waitForExistence(timeout: 15)); profile.tap()
+        app.buttons["v2.profile.avatar.choose"].tap()
         let choose = app.buttons["v2.profile.avatar.choose-resource"]
         XCTAssertTrue(choose.waitForExistence(timeout: 5)); choose.tap()
         let search = app.textFields["v2.avatar.resources.search"]
@@ -746,9 +747,7 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(image.waitForExistence(timeout: 5))
         attach(app, name: "Existing JPEG and PNG picker uses the local resource catalog")
         image.tap()
-        let save = app.buttons["v2.identity.save"]
-        XCTAssertTrue(save.waitForExistence(timeout: 5)); XCTAssertTrue(save.isEnabled); save.tap()
-        XCTAssertTrue(app.staticTexts["已有图片正在准备"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["正在更新头像…"].waitForExistence(timeout: 5))
         app.buttons["v2.resources.fixture.profile.done"].tap()
         app.buttons["v2.resources.open"].tap(); app.buttons["v2.resources.transfers.open"].tap()
         let owner = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.resources.transfers.owners.")).firstMatch

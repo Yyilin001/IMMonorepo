@@ -8,6 +8,41 @@ import Testing
 @MainActor
 @Suite("Durable account resource closure", .timeLimit(.minutes(1)))
 struct V2DurableResourceLifecycleTests {
+    @Test(arguments: [false, true])
+    func avatarCopyQueriesItsOriginalResultBeforeCreatingAnImport(serverAlreadyCopied: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "avatar-copy-recovery-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let user = UserID(uuid: UUID()), id = UUID()
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appending(path: "V2.sqlite"), installationBinding: .init(value: UUID()), userID: user)
+        let resources = try await makeAppResourceTestCenter(store: store, root: root)
+        let transfers = V2ResourceTransferEngine(store: store, control: NoLifecycleUpload(), executor: NoLifecycleUpload(), resources: resources)
+        try await resources.attachUploads(transfers)
+        let groups = V2GroupAvatarIntentEngine(actorUserID: user, store: store, transfers: transfers, submissions: NoLifecycleGroupCommand())
+        let request = try V2ResourceImportRequest(operationID: .init(uuid: UUID()),
+            source: .message(location: .init(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID())),
+                mediaID: .init(uuid: UUID()), variantID: nil), targetUsage: .userAvatar, targetMediaID: .init(uuid: UUID()))
+        let imports = RecoveredProfileImport(request: request, user: user, alreadyCopied: serverAlreadyCopied)
+        let sender = V2DurableConversationSendService(store: store, engine: transfers, resources: resources,
+            messageOperations: .init(accountID: user, store: store, client: NoLifecycleMessageTransport()), imports: imports, groupAvatars: groups)
+        try await store.prepareResourceImport(id: id, request: request)
+        let worker = Task { try await sender.runRecovery() }
+        do {
+            let deadline = ContinuousClock.now + .seconds(10)
+            while try await store.resourceImport(id: id)?.status?.state != .ready {
+                try #require(ContinuousClock.now < deadline)
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(await imports.queries == [.init(home: .account(user), operationID: request.operationID)])
+            #expect(await imports.creations == (serverAlreadyCopied ? [] : [request]))
+            #expect(try await store.resourceImport(id: id)?.status?.mediaID == request.targetMediaID)
+        } catch {
+            worker.cancel(); _ = await worker.result
+            await sender.close(); await resources.close(); try? await store.close(); throw error
+        }
+        worker.cancel(); _ = await worker.result
+        await sender.close(); await resources.close(); try await store.close()
+    }
+
     @Test func localPhotoDimensionsReachFrozenUploadAndPendingLayout() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -325,6 +360,31 @@ struct V2DurableResourceLifecycleTests {
         await #expect(throws: CancellationError.self) { try await sender.runRecovery() }
         await sender.close()
     }
+}
+
+private actor RecoveredProfileImport: V2ResourceImportControlling {
+    let request: V2ResourceImportRequest
+    let user: UserID
+    let alreadyCopied: Bool
+    private(set) var queries: [V2ResourceImportLocator] = []
+    private(set) var creations: [V2ResourceImportRequest] = []
+    init(request: V2ResourceImportRequest, user: UserID, alreadyCopied: Bool) {
+        self.request = request; self.user = user; self.alreadyCopied = alreadyCopied
+    }
+    func create(_ request: V2ResourceImportRequest) throws -> V2ResourceImportStatus {
+        creations.append(request)
+        return try ready()
+    }
+    func status(_ locator: V2ResourceImportLocator) throws -> V2ResourceImportStatus {
+        queries.append(locator)
+        guard alreadyCopied else { throw V2HTTPFailure(kind: .httpStatus, service: "resources", statusCode: 404) }
+        return try ready()
+    }
+    private func ready() throws -> V2ResourceImportStatus {
+        try .init(locator: .init(home: .account(user), operationID: request.operationID),
+            mediaID: request.targetMediaID, state: .ready, bindableUntil: Date().addingTimeInterval(100))
+    }
+    func cancel(_ locator: V2ResourceImportLocator) throws -> V2ResourceImportStatus { throw V2ResourceJournalError.invalidRecord }
 }
 
 private actor LocalImportPauseGate: V2ResourceImportControlling {

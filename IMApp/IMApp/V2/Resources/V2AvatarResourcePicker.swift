@@ -38,12 +38,12 @@ struct V2AvatarResourcePicker: View {
         NavigationStack {
             List {
                 Section {
-                    TextField("搜索图片", text: $library.search).accessibilityIdentifier("v2.avatar.resources.search")
+                    TextField("搜索聊天图片", text: $library.search).accessibilityIdentifier("v2.avatar.resources.search")
                 }
                 Section {
                     if let page = library.content.page {
                         let entries = page.entries.filter { $0.descriptor.state == .ready && ["image/jpeg", "image/png"].contains($0.descriptor.contentType) && $0.descriptor.byteCount <= 50 * 1_024 * 1_024 }
-                        if entries.isEmpty { Text("本页暂无可用图片，可搜索或翻页查看其他记录。").foregroundStyle(.secondary) }
+                        if entries.isEmpty { Text("暂无可选图片，可以先在聊天中发送一张照片。").foregroundStyle(.secondary) }
                         LazyVGrid(columns: [.init(.adaptive(minimum: dynamicTypeSize.isAccessibilitySize ? 240 : 140))], spacing: 16) {
                             ForEach(entries, id: \.descriptor.key) { entry in
                                 Button { selection = entry.descriptor.key } label: {
@@ -53,10 +53,10 @@ struct V2AvatarResourcePicker: View {
                                     .accessibilityIdentifier("v2.avatar.resources.item." + entry.descriptor.key.mediaID.rawValue)
                             }
                         }
-                    } else if case .initial = library.content { ProgressView("正在读取本机目录") }
+                    } else if case .initial = library.content { ProgressView("正在加载图片…") }
                     if case .unavailable(_, let message) = library.content { Text(message).foregroundStyle(.secondary) }
-                } header: { Text("本机已索引的图片") }
-                  footer: { Text("可选择 50 MB 以内的 JPEG 或 PNG。保存时会重新验证来源权限，并通过服务器复制为头像。") }
+                } header: { Text("聊天图片") }
+                  footer: { Text("支持 50 MB 以内的 JPEG 和 PNG 图片。") }
                 if library.pageNumber > 1 || library.content.page?.nextCursor != nil {
                     Section {
                         HStack {
@@ -66,10 +66,10 @@ struct V2AvatarResourcePicker: View {
                         }
                     }
                 }
-                if selection != nil { Section { ProgressView("正在确认图片来源") } }
+                if selection != nil { Section { ProgressView("正在选取图片…") } }
                 if let feedback { Section { Text(feedback).foregroundStyle(.secondary) } }
             }.v2GroupedPageSurface()
-                .navigationTitle("选择已有图片").navigationBarTitleDisplayMode(.inline)
+                .navigationTitle("聊天图片").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
         .task(id: library.query) { await library.observe() }

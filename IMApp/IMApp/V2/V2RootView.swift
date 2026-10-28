@@ -467,6 +467,8 @@ struct V2SignedInRootView: View {
             V2AccountHomeView(
                 displayName: publicIdentitySettingsStore?.displayName ?? "我的资料",
                 handle: publicIdentitySettingsStore?.handle ?? "",
+                avatarKey: publicIdentitySettingsStore?.profileUserID.map { .init(userID: $0, context: .relationship) },
+                avatar: publicIdentitySettingsStore?.currentAvatar,
                 canOpenPublicIdentity: publicIdentitySettingsStore != nil,
                 canOpenDevices: deviceSessionsStore != nil,
                 canOpenSecurity: passwordLifecycleClient != nil,

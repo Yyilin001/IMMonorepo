@@ -30,10 +30,28 @@ final class V2PublicIdentitySettingsStore {
     private(set) var isLoading = false
     private(set) var isSaving = false
     private(set) var isSelectingAvatar = false
-    private(set) var needsAttention = false
+    var needsAttention: Bool { savePhase == .needsAttention || savePhase == .closed }
     private(set) var canReplacePending = false
+    private(set) var savePhase: V2ProfileIntentStatus.Phase?
     private var revision: V2ProfileRevision?
     private var removesAvatar = false
+
+    var isUpdating: Bool {
+        pendingObservation != nil && !needsAttention && savePhase != .committed
+    }
+    var canEdit: Bool { revision != nil && !isSaving && !isSelectingAvatar && !isUpdating && (!needsAttention || canReplacePending) }
+    var confirmedAvatarKey: V2ProfileViewLookupKey? {
+        guard currentAvatar != nil, let profileUserID else { return nil }
+        return .init(userID: profileUserID, context: .relationship)
+    }
+    func nicknameValidation(_ input: String) -> String? {
+        guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "请输入昵称。" }
+        guard let profileUserID else { return "资料正在加载，请稍后重试。" }
+        do {
+            _ = try V2PublicIdentity(userID: profileUserID, handle: .init("profile_edit"), displayName: input, accountKind: .regular)
+            return nil
+        } catch { return "昵称过长或包含不支持的字符，请修改后再试。" }
+    }
 
     init(
         service: any V2ProfileIntentManaging,
@@ -129,24 +147,32 @@ final class V2PublicIdentitySettingsStore {
     }
 
     func selectAvatar(at url: URL) async {
+        _ = await stageAvatar(.file(url))
+    }
+    private enum AvatarSource { case file(URL), photo(V2NormalizedPhoto) }
+    private func stageAvatar(_ source: AvatarSource) async -> Bool {
         guard !isSaving, let attachmentStager else {
             feedback = "头像上传当前不可用。"
-            return
+            return false
         }
         avatarSelectionGeneration &+= 1
         let generation = avatarSelectionGeneration
         isSelectingAvatar = true
         defer { if generation == avatarSelectionGeneration { isSelectingAvatar = false } }
         do {
-            let staged = try await attachmentStager.stageImportedFile(at: url, purpose: .personalAvatar)
+            let staged: V2StagedConversationAttachment
+            switch source {
+            case .file(let url): staged = try await attachmentStager.stageImportedFile(at: url, purpose: .personalAvatar)
+            case .photo(let photo): staged = try await attachmentStager.stageNormalizedPhoto(photo, purpose: .personalAvatar)
+            }
             guard !Task.isCancelled, generation == avatarSelectionGeneration, !isSaving else {
                 await attachmentStager.discard(staged)
-                return
+                return false
             }
             guard staged.contentType.hasPrefix("image/") else {
                 await attachmentStager.discard(staged)
                 feedback = "请选择图片文件。"
-                return
+                return false
             }
             let previous = stagedAvatar
             stagedAvatar = staged
@@ -156,11 +182,13 @@ final class V2PublicIdentitySettingsStore {
             removesAvatar = false
             feedback = "已选择新头像，保存后生效。"
             if let previous { await attachmentStager.discard(previous) }
+            return true
         } catch is CancellationError {
         } catch {
-            guard generation == avatarSelectionGeneration, !Task.isCancelled else { return }
+            guard generation == avatarSelectionGeneration, !Task.isCancelled else { return false }
             feedback = "无法读取这张图片。"
         }
+        return false
     }
 
     func removeAvatar() async {
@@ -178,38 +206,101 @@ final class V2PublicIdentitySettingsStore {
     }
 
     func save() async {
-        guard !isSelectingAvatar else { feedback = "正在准备头像，请稍候。"; return }
-        guard stagedAvatar.map({ $0.availability == .local }) ?? true else { feedback = "头像原件不可用，请重新选择。"; return }
-        guard !isSaving, let revision else { return }
+        _ = await persist(.all)
+    }
+    func saveNickname(_ input: String) async -> Bool {
+        if let message = nicknameValidation(input) { feedback = message; return false }
+        let name = input.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canEdit else { return false }
+        if name == confirmedDisplayName {
+            displayName = name
+            if pendingObservation?.savedName != name, needsAttention, canReplacePending { await cancelPendingChange() }
+            return true
+        }
+        displayName = name
+        return await persist(.nickname)
+    }
+    func saveAvatar(_ photo: V2NormalizedPhoto) async -> Bool {
+        guard canEdit, await stageAvatar(.photo(photo)) else { return false }
+        displayName = confirmedDisplayName ?? displayName
+        return await persist(.avatar)
+    }
+    func saveAvatarResource(_ selection: V2AvatarResourceSelection) async -> Bool {
+        guard canEdit else { return false }
+        await selectAvatarResource(selection)
+        displayName = confirmedDisplayName ?? displayName
+        return await persist(.avatar)
+    }
+    func removeAndSaveAvatar() async -> Bool {
+        guard canEdit else { return false }
+        await removeAvatar()
+        if currentAvatar == nil {
+            removesAvatar = false
+            feedback = nil
+            if needsAttention, canReplacePending { await cancelPendingChange() }
+            return true
+        }
+        displayName = confirmedDisplayName ?? displayName
+        return await persist(.avatar)
+    }
+    private enum SaveFields: Equatable { case all, nickname, avatar }
+    private func persist(_ fields: SaveFields) async -> Bool {
+        guard !isSelectingAvatar else { feedback = "正在准备头像，请稍候。"; return false }
+        guard fields == .nickname || (stagedAvatar.map({ $0.availability == .local }) ?? true) else { feedback = "头像原件不可用，请重新选择。"; return false }
+        guard !isSaving, let revision, !isUpdating else { return false }
         isSaving = true
         defer { isSaving = false }
         let savedName = displayName
         do {
-            let avatar: V2ProfileAvatarPatch = removesAvatar ? .remove : .unchanged
-            let name: V2ProfileDisplayNamePatch = savedName == confirmedDisplayName ? .unchanged : .set(savedName)
-            let source = try stagedAvatar.map { try V2ProfileAvatarUpload(id: $0.id, localAssetID: $0.localAssetID, displayName: $0.displayName, contentType: $0.contentType, byteCount: $0.byteCount) }
-            let imported = try existingAvatar.map { selection in
+            var expectedRevision = revision
+            if let pendingObservation, needsAttention {
+                guard canReplacePending else { return false }
+                let latest = try await service.refreshProfile()
+                apply(latest, preserveDraft: true)
+                expectedRevision = latest.revision
+                try await service.discard(intentID: pendingObservation.id)
+                stopObserving()
+                self.pendingObservation = nil
+                savedAvatarDraft = nil; savedAvatarImport = nil
+                canReplacePending = false
+                savePhase = nil
+            }
+            if fields == .nickname, savedName == confirmedDisplayName {
+                savePhase = .committed; feedback = "已保存到服务器。"
+                return true
+            }
+            if fields == .avatar, removesAvatar, currentAvatar == nil {
+                removesAvatar = false; savePhase = .committed; feedback = "已保存到服务器。"
+                return true
+            }
+            let includesAvatar = fields != .nickname
+            let avatar: V2ProfileAvatarPatch = includesAvatar && removesAvatar ? .remove : .unchanged
+            let name: V2ProfileDisplayNamePatch = fields == .avatar || savedName == confirmedDisplayName ? .unchanged : .set(savedName)
+            let source = try (includesAvatar ? stagedAvatar : nil).map { try V2ProfileAvatarUpload(id: $0.id, localAssetID: $0.localAssetID, displayName: $0.displayName, contentType: $0.contentType, byteCount: $0.byteCount) }
+            let imported = try (includesAvatar ? existingAvatar : nil).map { selection in
                 try V2ProfileAvatarImport(id: UUID(), request: .init(operationID: .init(uuid: UUID()), source: selection.importSource,
                     targetUsage: .userAvatar, targetMediaID: .init(uuid: UUID())))
             }
             // The upload dependency is persisted before any transfer begins.
             let patch = try V2ProfilePatch(displayName: name, avatar: imported.map { .set(.init(mediaID: $0.request.targetMediaID)) } ?? source.map { .set(.init(mediaID: .init(uuid: $0.id))) } ?? avatar)
             let intent: V2ProfileIntent
-            if let imported { intent = try await service.enqueueImportedAvatar(expectedRevision: revision, patch: patch, source: imported) }
-            else { intent = try await service.enqueue(expectedRevision: revision, patch: patch, avatarUpload: source) }
+            if let imported { intent = try await service.enqueueImportedAvatar(expectedRevision: expectedRevision, patch: patch, source: imported) }
+            else { intent = try await service.enqueue(expectedRevision: expectedRevision, patch: patch, avatarUpload: source) }
             // The account intent now owns the staged source. Keep its preview
             // reference until commit/discard rather than reverting to old avatar.
             savedAvatarDraft = source
-            savedAvatarImport = imported; existingAvatar = nil
-            stagedAvatar = nil
-            removesAvatar = false
+            savedAvatarImport = imported
+            if includesAvatar { existingAvatar = nil; stagedAvatar = nil; removesAvatar = false }
             feedback = "已保存，等待同步。"
+            savePhase = source != nil || imported != nil ? .preparingAvatar : .waitingToSubmit
             pendingObservation = (intent.id, savedName)
             observe(intent.id, savedName: savedName)
+            return true
         } catch is CancellationError {
         } catch {
             feedback = "未能保存到本机，编辑内容已保留。"
         }
+        return false
     }
 
     func resumePendingSave() async {
@@ -218,21 +309,36 @@ final class V2PublicIdentitySettingsStore {
         do {
             let next = try await service.resumeOrReapply(intentID: pendingObservation.id)
             self.pendingObservation = (next.id, pendingObservation.savedName)
-            needsAttention = false
+            savedAvatarDraft = next.avatarUpload
+            savedAvatarImport = next.avatarImport
+            canReplacePending = false
+            feedback = "已保存，等待同步。"
+            savePhase = next.avatarPreparation == nil ? .waitingToSubmit : .preparingAvatar
             observe(next.id, savedName: pendingObservation.savedName)
         } catch { feedback = "无法继续保存，编辑内容已保留。" }
     }
     func discardPendingSave() async {
         guard let pendingObservation, canReplacePending, !isSaving else { return }
+        isSaving = true; defer { isSaving = false }
         do {
             try await service.discard(intentID: pendingObservation.id)
             stopObserving()
             self.pendingObservation = nil
             savedAvatarDraft = nil; savedAvatarImport = nil
             canReplacePending = false
-            needsAttention = false
+            savePhase = nil
             feedback = "已丢弃保存操作，文字编辑仍保留。"
         } catch { feedback = "无法丢弃仍在确认的操作。" }
+    }
+    func cancelPendingChange() async {
+        await discardPendingSave()
+        guard pendingObservation == nil else { return }
+        avatarSelectionGeneration &+= 1
+        let previous = stagedAvatar
+        stagedAvatar = nil; existingAvatar = nil; removesAvatar = false
+        displayName = confirmedDisplayName ?? displayName
+        feedback = nil
+        if let previous, let attachmentStager { await attachmentStager.discard(previous) }
     }
 
     func stopObserving() {
@@ -249,12 +355,13 @@ final class V2PublicIdentitySettingsStore {
                     guard let self else { return }
                     if !status.sourceRetained, status.phase != .committed {
                         self.pendingObservation = nil; self.savedAvatarDraft = nil; self.savedAvatarImport = nil
-                        self.needsAttention = false; self.canReplacePending = false
+                        self.canReplacePending = false
+                        self.savePhase = nil
                         self.feedback = "此次保存操作已结束，当前编辑内容已保留。"
                         return
                     }
-                    self.needsAttention = status.phase == .needsAttention || status.phase == .closed
                     self.canReplacePending = status.canReplace
+                    self.savePhase = status.phase
                     switch status.phase {
                     case .waitingToSubmit: self.feedback = "已保存，等待同步。"
                     case .preparingAvatar: self.feedback = "正在准备头像。"
@@ -265,7 +372,12 @@ final class V2PublicIdentitySettingsStore {
                             self.apply(profile, preserveDraft: self.displayName != savedName)
                         }
                         self.feedback = "已保存到服务器。"
-                    case .needsAttention: self.feedback = "保存需要处理，编辑内容已保留。"
+                        self.pendingObservation = nil
+                        return
+                    case .needsAttention:
+                        self.feedback = status.intent.workID == nil && status.intent.avatarPreparation != nil
+                            ? "头像准备未完成，可重试保存或重新选择图片。"
+                            : "保存需要处理，编辑内容已保留。"
                     case .closed: self.feedback = "保存操作已关闭，编辑内容已保留。"
                     }
                 }
@@ -335,134 +447,162 @@ final class V2PublicIdentitySettingsStore {
 }
 
 struct V2PublicIdentitySettingsView: View {
-    @Environment(\.v2ResourceManagement) private var resources
-    @Environment(\.v2MediaThumbnailCache) private var thumbnailCache
-    @Environment(\.v2AvatarPipeline) private var avatarPipeline
     @Bindable var store: V2PublicIdentitySettingsStore
-    @State private var isImportingAvatar = false
-    @State private var isChoosingResource = false
-    @State private var avatarSelectionTask: Task<Void, Never>?
-    @State private var saveTask: Task<Void, Never>?
-    @State private var avatarPreviewImage: UIImage?
+    @Environment(\.v2AvatarPipeline) private var avatarPipeline
+    @State private var modal: Modal?
+    @State private var actionTask: Task<Void, Never>?
+    @State private var copied = false
+    private enum Modal: String, Identifiable {
+        case avatar, nickname, cancelChange
+        var id: String { rawValue }
+    }
 
     var body: some View {
         Form {
-            Section("头像") {
-                HStack(spacing: 12) {
-                    avatarPreview
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(avatarDescription)
-                        Text("头像以受控媒体保存；仅有权查看资料的用户可读取。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+            Section {
+                Button { modal = .avatar } label: {
+                    HStack(spacing: 16) {
+                        Text("头像").foregroundStyle(.primary)
+                        Spacer()
+                        V2ProfileAvatarThumbnail(store: store, size: 64)
+                        chevron
+                    }.frame(minHeight: 76)
                 }
-                Button("选择头像") { isImportingAvatar = true }
-                    .disabled(store.isSaving)
-                    .accessibilityIdentifier("v2.profile.avatar.choose")
-                if resources != nil {
-                    Button("从已有图片选择", systemImage: "photo.on.rectangle") { isChoosingResource = true }
-                        .disabled(store.isSaving).accessibilityIdentifier("v2.profile.avatar.choose-resource")
+                .disabled(!store.canEdit)
+                .accessibilityLabel("更换头像")
+                .accessibilityIdentifier("v2.profile.avatar.choose")
+
+                Button { modal = .nickname } label: {
+                    HStack(spacing: 16) {
+                        Text("昵称").foregroundStyle(.primary)
+                        Spacer()
+                        Text(store.displayName.isEmpty ? "未设置" : store.displayName)
+                            .foregroundStyle(.secondary).lineLimit(1)
+                        chevron
+                    }.frame(minHeight: 36)
                 }
-                if store.currentAvatar != nil || store.stagedAvatar != nil || store.existingAvatar != nil {
-                    Button("移除头像", role: .destructive) {
-                        Task { await store.removeAvatar() }
-                    }
-                    .disabled(store.isSaving)
-                    .accessibilityIdentifier("v2.profile.avatar.remove")
+                .disabled(!store.canEdit)
+                .accessibilityIdentifier("v2.identity.name.open")
+
+                Button {
+                    guard !store.handle.isEmpty else { return }
+                    UIPasteboard.general.string = store.handle
+                    copied = true
+                    announceV2AccessibilityAnnouncement("已复制公开 ID")
+                } label: {
+                    HStack(spacing: 16) {
+                        Text("公开 ID").foregroundStyle(.primary)
+                        Spacer()
+                        Text(store.handle.isEmpty ? "正在加载…" : store.handle)
+                            .foregroundStyle(.secondary).textSelection(.enabled)
+                            .accessibilityIdentifier("v2.identity.handle")
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.subheadline).foregroundStyle(copied ? .green : .secondary)
+                            .accessibilityHidden(true)
+                    }.frame(minHeight: 36)
                 }
+                .disabled(store.handle.isEmpty)
+                .accessibilityHint("复制用于查找和添加好友的公开 ID")
+                .accessibilityIdentifier("v2.identity.handle.copy")
+            } footer: {
+                Text(copied ? "已复制公开 ID" : "公开 ID 用于查找和添加好友，目前不可修改。")
             }
-            Section("公开 ID") {
-                Text(store.handle.isEmpty ? "正在加载…" : store.handle)
-                    .textSelection(.enabled)
-                    .accessibilityIdentifier("v2.identity.handle")
-                Text("公开 ID 暂不可修改；它与登录账号相互独立。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            Section("显示名称") {
-                TextField("显示名称", text: $store.displayName)
-                    .accessibilityIdentifier("v2.identity.display-name.edit")
-                Button("保存") {
-                    saveTask?.cancel()
-                    saveTask = Task { await store.save() }
-                }
-                .disabled(!store.canSave)
-                .accessibilityIdentifier("v2.identity.save")
-            }
-            if store.needsAttention {
-                Section("处理保存") {
-                    Button(store.canReplacePending ? "重新应用保存的草稿" : "继续确认原操作") { Task { await store.resumePendingSave() } }
-                        .disabled(store.isSaving)
-                    if store.canReplacePending {
-                        Button("丢弃保存操作", role: .destructive) { Task { await store.discardPendingSave() } }
-                    }
-                }
-            }
-            if let feedback = store.feedback {
+
+            if let phase = store.savePhase {
                 Section {
-                    Text(feedback)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("v2.profile.feedback")
-                        .onAppear { announceV2AccessibilityAnnouncement(feedback) }
-                        .onChange(of: feedback) { _, updatedFeedback in
-                            announceV2AccessibilityAnnouncement(updatedFeedback)
+                    HStack(spacing: 12) {
+                        if store.isUpdating { ProgressView().accessibilityHidden(true) }
+                        else { Image(systemName: phase == .committed ? "checkmark.circle.fill" : "exclamationmark.circle")
+                            .foregroundStyle(phase == .committed ? .green : .orange).accessibilityHidden(true) }
+                        Text(statusText(phase)).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("v2.profile.feedback")
+                    }
+                    if store.needsAttention {
+                        Button("重试") { run { await store.resumePendingSave() } }
+                            .disabled(store.isSaving).accessibilityIdentifier("v2.profile.save.retry")
+                        if store.canReplacePending {
+                            Button("取消这次更改", role: .destructive) { modal = .cancelChange }
+                                .disabled(store.isSaving)
                         }
+                    }
+                } footer: {
+                    if store.isUpdating { Text("你可以离开此页面，更新会在后台继续。") }
                 }
+            } else if store.canSave {
+                Section {
+                    Text("有尚未保存的更改").foregroundStyle(.secondary)
+                    if let feedback = store.feedback { Text(feedback).font(.footnote).foregroundStyle(.secondary) }
+                    Button("保存更改") { run { await store.save() } }
+                        .accessibilityIdentifier("v2.identity.save")
+                }
+            } else if let feedback = store.feedback {
+                Section { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("v2.profile.feedback") }
             }
         }
-        .navigationTitle("我的资料")
-        .navigationBarTitleDisplayMode(.inline)
+        .v2GroupedPageSurface()
+        .navigationTitle("个人资料").navigationBarTitleDisplayMode(.inline)
         .task { await store.load() }
+        .refreshable { await store.load() }
+        .task(id: store.currentAvatar?.mediaID) {
+            if let user = store.profileUserID, let avatarPipeline {
+                await avatarPipeline.profiles.invalidate([.init(userID: user, context: .relationship)])
+            }
+        }
+        .task(id: copied) {
+            guard copied else { return }
+            do { try await Task.sleep(for: .seconds(3)); copied = false } catch { }
+        }
+        .sheet(item: Binding(get: { modal == .cancelChange ? nil : modal }, set: { modal = $0 })) { item in
+            switch item {
+            case .avatar: V2ProfileAvatarEditor(store: store)
+            case .nickname: V2ProfileNicknameEditor(store: store)
+            case .cancelChange: EmptyView()
+            }
+        }
+        .confirmationDialog("取消这次更改？", isPresented: Binding(get: { modal == .cancelChange }, set: { if !$0, modal == .cancelChange { modal = nil } }), titleVisibility: .visible) {
+            Button("取消更改", role: .destructive) { run { await store.cancelPendingChange() } }
+            Button("继续保留", role: .cancel) { }
+        } message: { Text("已生效的昵称和头像不会改变。") }
+        .onDisappear { actionTask?.cancel(); store.stopObserving() }
+    }
+    private var chevron: some View {
+        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+            .foregroundStyle(.tertiary).accessibilityHidden(true)
+    }
+    private func statusText(_ phase: V2ProfileIntentStatus.Phase) -> String {
+        switch phase {
+        case .waitingToSubmit: "正在保存…"
+        case .preparingAvatar: "正在更新头像…"
+        case .confirming: "正在确认更新…"
+        case .committed: "已保存"
+        case .needsAttention, .closed: "更新未完成，请重试或重新编辑。"
+        }
+    }
+    private func run(_ operation: @escaping @MainActor () async -> Void) {
+        actionTask?.cancel(); actionTask = Task { await operation() }
+    }
+}
+
+struct V2ProfileAvatarThumbnail: View {
+    let store: V2PublicIdentitySettingsStore
+    var size: CGFloat = 64
+    @Environment(\.v2MediaThumbnailCache) private var thumbnailCache
+    @State private var preview: UIImage?
+    var body: some View {
+        Group {
+            if let preview {
+                Image(uiImage: preview).resizable().scaledToFill()
+                    .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.25))
+            } else if let key = store.confirmedAvatarKey {
+                V2AuthorizedAvatarView(key: key, size: size).id(store.currentAvatar?.mediaID)
+            } else { V2AvatarPlaceholder(title: store.displayName, size: size) }
+        }
+        .accessibilityLabel("头像")
         .task(id: store.avatarPresentationKey) {
-            avatarPreviewImage = nil
-            if let key = store.currentAvatarKey, let avatarPipeline {
-                await avatarPipeline.profiles.invalidate([key])
-            }
             guard !Task.isCancelled, let thumbnailCache else { return }
-            let preview = await store.avatarPreviewImage(cache: thumbnailCache)
+            let image = await store.avatarPreviewImage(cache: thumbnailCache)
             guard !Task.isCancelled else { return }
-            avatarPreviewImage = preview
-        }
-        .fileImporter(isPresented: $isImportingAvatar, allowedContentTypes: [.image]) { result in
-            guard case .success(let url) = result else { return }
-            Task { await store.selectAvatar(at: url) }
-        }
-        .sheet(isPresented: $isChoosingResource) {
-            if let resources {
-                V2AvatarResourcePicker(service: resources) { value in
-                    avatarSelectionTask?.cancel()
-                    avatarSelectionTask = Task { await store.selectAvatarResource(value) }
-                }
-            }
-        }
-        .onDisappear { avatarSelectionTask?.cancel(); store.stopObserving() }
-    }
-
-    private var avatarDescription: String {
-        if let existing = store.existingAvatar { return "已选择 \(existing.displayName)" }
-        if store.hasPendingAvatarImport { return "已有图片正在准备" }
-        if let staged = store.stagedAvatar { return "已选择 \(staged.displayName)" }
-        return store.currentAvatarKey == nil ? "未设置" : "已设置"
-    }
-
-    @ViewBuilder
-    private var avatarPreview: some View {
-        if let avatarPreviewImage {
-            Image(uiImage: avatarPreviewImage)
-                .resizable()
-                .scaledToFill()
-                .frame(width: 56, height: 56)
-                .clipShape(Circle())
-                .accessibilityLabel("当前头像")
-        } else if store.stagedAvatar == nil, let key = store.currentAvatarKey {
-            V2AuthorizedAvatarView(key: key, size: 56)
-                .id(store.avatarPresentationKey)
-        } else {
-            Image(systemName: "person.crop.circle.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(.secondary)
-                .accessibilityLabel(store.existingAvatar != nil || store.hasPendingAvatarImport ? "已选择的头像图片" : "未设置头像")
+            preview = image
         }
     }
 }

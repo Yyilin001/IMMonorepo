@@ -1,0 +1,58 @@
+{
+  "status": "profile_refactored_live_simulator_verified_device_installed",
+  "features": [
+    "Native profile list with separate avatar and nickname editors",
+    "Photo library, camera permission and capture, file import, chat image selection",
+    "Pan and zoom crop, bounded metadata-free JPEG export, avatar removal",
+    "Independent nickname save with domain validation",
+    "Copy immutable public ID",
+    "Durable background save feedback, retry and safe cancellation"
+  ],
+  "verification": {
+    "unit": {
+      "passed": 14,
+      "suites": 2
+    },
+    "live_ui": {
+      "passed": 2,
+      "isolated_test_accounts": true,
+      "actual_services": true,
+      "scenarios": [
+        "Album selection, pinch crop, upload, actual image pixels in profile and account home",
+        "Chat image selection, nickname update, public ID copy, relaunch persistence, avatar removal"
+      ],
+      "xcresult": "/tmp/im-profile-editor-20261028/live-r2.xcresult",
+      "screenshots": "/tmp/im-profile-editor-20261028/attachments"
+    },
+    "additional_fixture_ui": {
+      "status": "blocked_before_execution",
+      "reason": "Concurrent group test V2ConversationStoreTests.swift references removed V2ConversationListStore.prepareGroupConversation",
+      "log": "/tmp/im-profile-editor-20261028/fixture.log"
+    },
+    "release": {
+      "version": "1.0 (15)",
+      "build": "passed",
+      "signature_and_device_provision": "verified",
+      "profile_sources_match_build": true,
+      "unrelated_source_changes_after_build": [
+        "IMApp/IMApp/V2/V2ConversationUI.swift",
+        "IMApp/IMApp/V2/V2GroupCreationSheet.swift",
+        "IMApp/IMApp/V2/V2GroupDirectoryView.swift",
+        "IMApp/IMApp/V2/V2MockPreview.swift",
+        "IMApp/IMApp/V2/V2RootView.swift"
+      ],
+      "source_hash_manifest": "/tmp/im-profile-editor-20261028/release-source-hashes.json"
+    },
+    "device": {
+      "installation": "success",
+      "version_readback": "15",
+      "uninstalled": false,
+      "automatic_launch": "blocked_by_device_lock"
+    }
+  },
+  "limits": [
+    "Simulator has no physical camera; actual camera capture not exercised.",
+    "File-provider UI path was not exercised end to end.",
+    "The physical phone was locked; installed version was read back but automatic launch was denied."
+  ]
+}

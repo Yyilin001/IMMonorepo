@@ -1,0 +1,64 @@
+{
+  "status": "live_simulator_verified_and_direct_installed",
+  "findings": [
+    "The client retained an unsubmitted profile change after an avatar import exhausted its retry budget, while the server already held the ready copy.",
+    "The account home header always rendered V2AvatarPlaceholder, even when an avatar had been saved."
+  ],
+  "changes": [
+    "Query the account-bound original avatar import locator before attempting idempotent creation.",
+    "Resume an uncertain import with the same operation and target media identity instead of creating a second copy.",
+    "Keep expired or rejected imports on the existing replacement path.",
+    "Refresh the pending source references and distinguish incomplete avatar preparation from active progress.",
+    "Render the confirmed account avatar through the authorized presentation pipeline and refresh the view when its media identity changes."
+  ],
+  "verification": {
+    "client": {
+      "tests": 25,
+      "suites": 3,
+      "result": "passed",
+      "log": "/tmp/im-own-avatar-fix-20261028/client-tests-final.log"
+    },
+    "app": {
+      "tests": 17,
+      "suites": 2,
+      "result": "passed",
+      "xcresult": "/tmp/im-own-avatar-fix-20261028/app-tests.xcresult"
+    },
+    "live_simulator": {
+      "tests": 1,
+      "result": "passed",
+      "scenario": "testOwnAvatarUsingExistingPhotoAppearsInProfileAndAccountPage",
+      "isolated_test_accounts": true,
+      "actual_https_and_tls_services": true,
+      "path": [
+        "Register two independently scoped test accounts through the real UI",
+        "Select a synthetic blue image from the system photo picker and send it as a real message",
+        "Choose that indexed image as the owner's avatar and save",
+        "Require the server-committed feedback and verify the actual image pixels in the profile editor",
+        "Verify actual avatar image pixels on the account home page",
+        "Relaunch the application, restore the same test account and verify the avatar pixels again",
+        "Clean up both local test credential and storage scopes"
+      ],
+      "xcresult": "/tmp/im-own-avatar-fix-20261028/live-avatar-r2.xcresult",
+      "screenshots": "/tmp/im-own-avatar-fix-20261028/live-verified-attachments"
+    },
+    "release": {
+      "version": "1.0 (14)",
+      "build": "passed",
+      "signature": "verified",
+      "source_drift": []
+    },
+    "device": {
+      "version": "1.0 (14)",
+      "installation": "success",
+      "version_readback": "14",
+      "launch": "blocked_by_device_lock",
+      "uninstalled": false
+    }
+  },
+  "limits": [
+    "The original app did not persist the initial import error classification; its exact first-response failure is not established.",
+    "The live end-to-end scenario covers selection from existing images. It does not exercise file-picker avatar upload or every image format.",
+    "The physical phone was locked after the final installation, so automatic launch was denied. Actual avatar pixels were verified on the live-account simulator."
+  ]
+}

@@ -133,6 +133,8 @@ struct V2SettingsLabel: View {
 struct V2AccountHomeView: View {
     var displayName: String = "我的资料"
     var handle: String = ""
+    var avatarKey: V2ProfileViewLookupKey? = nil
+    var avatar: V2AvatarReference? = nil
     let canOpenPublicIdentity: Bool
     let canOpenDevices: Bool
     let canOpenSecurity: Bool
@@ -146,7 +148,12 @@ struct V2AccountHomeView: View {
 
     private var profileHeader: some View {
         HStack(spacing: 16) {
-            V2AvatarPlaceholder(title: displayName, size: 64)
+            if let avatarKey {
+                V2AuthorizedAvatarView(key: avatarKey, size: 64)
+                    .id(avatar?.mediaID)
+            } else {
+                V2AvatarPlaceholder(title: displayName, size: 64)
+            }
             VStack(alignment: .leading, spacing: 6) {
                 Text(displayName.isEmpty ? "我的资料" : displayName)
                     .font(.title3.weight(.semibold)).foregroundStyle(.primary)
