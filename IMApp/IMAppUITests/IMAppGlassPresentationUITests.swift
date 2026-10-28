@@ -13,6 +13,77 @@ final class IMAppGlassPresentationUITests: XCTestCase {
     }
 
     @MainActor
+    func testContactsGroupsNavigateToChatSettingsAndBackToDirectory() {
+        let app = launch("contacts")
+        let entry = app.buttons["v2.contacts.groups"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 10)); entry.tap()
+        let room = app.buttons["v2.groups.room.00000000-0000-0000-0000-000000000106"]
+        XCTAssertTrue(room.waitForExistence(timeout: 10))
+        let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.lifetime = .keepAlways; add(screenshot)
+        room.tap()
+        let tools = app.buttons["v2.conversation.detail.tools"]
+        XCTAssertTrue(tools.waitForExistence(timeout: 5)); tools.tap()
+        XCTAssertTrue(app.navigationBars["群聊设置"].waitForExistence(timeout: 5))
+        app.navigationBars["群聊设置"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(tools.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(room.waitForExistence(timeout: 5))
+        app.navigationBars["我的群组"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(entry.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.tabBars.buttons["联系人"].isSelected)
+    }
+
+    @MainActor
+    func testGroupDirectorySearchAndEmptyState() {
+        let app = launch("contacts")
+        let entry = app.buttons["v2.contacts.groups"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 10)); entry.tap()
+        let query = app.searchFields.firstMatch
+        XCTAssertTrue(query.waitForExistence(timeout: 5)); query.tap(); query.typeText("iOS")
+        XCTAssertTrue(app.buttons["v2.groups.room.00000000-0000-0000-0000-000000000103"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["v2.groups.room.00000000-0000-0000-0000-000000000101"].exists)
+        query.buttons.firstMatch.tap(); query.typeText("zzznomatch")
+        XCTAssertTrue(app.staticTexts["未找到群组"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testGroupCreationFromContactsCanCancelWithoutChangingNavigation() {
+        let app = launch("contacts")
+        let entry = app.buttons["v2.contacts.groups"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 10)); entry.tap()
+        let create = app.buttons["v2.groups.create"]
+        XCTAssertTrue(create.waitForExistence(timeout: 5)); create.tap()
+        let title = app.textFields["v2.conversation.group-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["v2.conversation.group-submit"].isEnabled)
+        title.tap(); title.typeText("Test group")
+        XCTAssertTrue(app.buttons["v2.conversation.group-submit"].isEnabled)
+        XCTAssertTrue(app.buttons["从好友中选择"].exists)
+        app.buttons["v2.conversation.group-cancel"].tap()
+        XCTAssertTrue(create.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.sheets.count, 0)
+    }
+
+    @MainActor
+    func testCreateGroupOpensChatAndReturnsToContactsGroupDirectory() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-v2-mock-preview", "-v2-mock-hide-controls", "-v2-mock-screen", "contacts", "-v2-mock-group-queued"]
+        app.launch()
+        let entry = app.buttons["v2.contacts.groups"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 10)); entry.tap()
+        let create = app.buttons["v2.groups.create"]
+        XCTAssertTrue(create.waitForExistence(timeout: 5)); create.tap()
+        let title = app.textFields["v2.conversation.group-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5)); title.tap(); title.typeText("My new group")
+        app.buttons["v2.conversation.group-submit"].tap()
+        XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.sheets.count, 0)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["v2.groups.room.00000000-0000-0000-0000-000000000105"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["My new group"].exists)
+    }
+
+    @MainActor
     func testChatToolsNavigateDirectlyToGroupedSettingsAndBack() {
         let app = launch()
         let room = "00000000-0000-0000-0000-000000000101"

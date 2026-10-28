@@ -22,7 +22,7 @@ struct V2MockPreview: View {
         let notifier = V2ProjectionChangeNotifier()
         self.source = source
         self.notifier = notifier
-        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source, messageSearcher: ProcessInfo.processInfo.arguments.contains("-v2-mock-search") ? source : nil), messages: .init(sender: source), discovery: .init(directConversationOpener: source), runtime: .init(projectionChangeNotifier: notifier))))
+        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source, messageSearcher: ProcessInfo.processInfo.arguments.contains("-v2-mock-search") ? source : nil), messages: .init(sender: source), groups: .init(conversationCreator: source), discovery: .init(directConversationOpener: source), runtime: .init(projectionChangeNotifier: notifier))))
         _contacts = State(initialValue: .init(dataSource: source, identityResolver: source, relationshipChanger: source,
             userBlockChanger: source, directConversationOpener: source, currentUserID: source.user))
         _privacy = State(initialValue: .init(reader: source, updater: source))
@@ -176,14 +176,59 @@ private struct V2MockResourceBinding: V2InstallationBindingStore {
     func delete() throws { throw V2ResourceStorageError.unavailable }
 }
 
-private actor V2MockPreviewSource: V2ConversationDataSource, V2ConversationMessageSearching, V2ContactsReading, V2PublicIdentityPresentationResolving,
+private actor V2MockPreviewSource: V2GroupCreationRecovering, V2GroupDirectoryReading, V2ConversationDataSource, V2ConversationMessageSearching, V2ContactsReading, V2PublicIdentityPresentationResolving,
     V2RelationshipChanging, V2UserBlockChanging, V2DirectConversationOpening, V2StrangerMessagePreferenceReading, V2StrangerMessagePreferenceUpdating, V2GroupRolePolicyAccessing, V2ConversationSending {
     let user = try! UserID("00000000-0000-0000-0000-000000000001")
     private var sentMessages: [String: [V2ConversationMessageItem]] = [:]
     static let room = "00000000-0000-0000-0000-000000000101"
+    private var createdGroupTitle: String?
+    private var creationStatus: V2RestoredGroupConversationCreationStatus?
+    private var creationContinuation: AsyncThrowingStream<Void, any Error>.Continuation?
+    private var creationTask: Task<Void, Never>?
+    deinit { creationTask?.cancel(); creationContinuation?.finish() }
+    func creationUpdates() async -> AsyncThrowingStream<Void, any Error> {
+        let stream = AsyncThrowingStream<Void, any Error>.makeStream()
+        creationContinuation = stream.continuation
+        return stream.stream
+    }
+    func resumeCreation(operationID: String) async throws { }
+    func createConversation(title: String, initialMemberUserIDs: [String]) async throws -> V2GroupConversationCreationOutcome {
+        if ProcessInfo.processInfo.arguments.contains("-v2-mock-group-queued") {
+            creationStatus = .queuedForRetry(operationID: "mock-group-operation")
+            creationTask = Task {
+                do { try await Task.sleep(for: .milliseconds(350)); try Task.checkCancellation() } catch { return }
+                creationStatus = .finalizing(operationID: "mock-group-operation")
+                creationContinuation?.yield(())
+                do { try await Task.sleep(for: .milliseconds(350)); try Task.checkCancellation() } catch { return }
+                completeGroupCreation(title: title)
+            }
+            return .queuedForRetry(operationID: "mock-group-operation")
+        }
+        createdGroupTitle = title
+        return .created(roomID: "00000000-0000-0000-0000-000000000105")
+    }
+    private func completeGroupCreation(title: String) {
+        createdGroupTitle = title
+        creationStatus = .created(roomID: "00000000-0000-0000-0000-000000000105")
+        creationContinuation?.yield(())
+        creationTask = nil
+    }
+    func cancelConversationCreation(operationID: String) async throws -> V2GroupConversationCancellationOutcome {
+        creationTask?.cancel(); creationTask = nil; creationStatus = .cancelled
+        return .cancelled
+    }
+    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? { creationStatus }
+    func groupDirectoryPage(matching query: String, after cursor: V2ClientGroupDirectoryCursor?, limit: Int) async throws -> V2ClientGroupDirectoryPage {
+        let page = try await conversationSummaryPage(for: user.rawValue, isArchived: false, before: nil, limit: limit)
+        let groups = try page.items.map {
+            try V2ClientGroupDirectoryItem(roomID: .init($0.id), title: $0.title, isArchived: false)
+        } + [.init(roomID: .init("00000000-0000-0000-0000-000000000106"), title: "归档的项目群", isArchived: true)]
+        let items = groups.filter { query.isEmpty || $0.title.localizedStandardContains(query) }
+        return .init(items: cursor == nil ? items : [], nextCursor: nil)
+    }
     func conversationSummaryPage(for userID: String, isArchived: Bool, before cursor: V2ClientConversationListCursor?, limit: Int) async throws -> V2ConversationListPage {
-        let names = ["产品设计讨论", "周末出行计划", "iOS 开发交流", "读书分享"]
-        let previews = ["新的界面方案已经整理好了，大家看看～", "周六上午十点集合，可以吗？", "这个版本的动画流畅了很多 👍", "推荐大家看看这本书"]
+        let names = ["产品设计讨论", "周末出行计划", "iOS 开发交流", "读书分享"] + (createdGroupTitle.map { [$0] } ?? [])
+        let previews = ["新的界面方案已经整理好了，大家看看～", "周六上午十点集合，可以吗？", "这个版本的动画流畅了很多 👍", "推荐大家看看这本书", "暂无消息"]
         let items = names.indices.map { i in V2ConversationListItem(id: String(format: "00000000-0000-0000-0000-%012d", 101 + i), title: names[i], preview: previews[i], lastActivity: Date().addingTimeInterval(Double(-i * 1800)), isOutgoing: i == 2, kind: .group, isPinned: i == 0, unreadCount: i == 0 ? 3 : 0) }
         return .init(items: isArchived || cursor != nil ? [] : items, nextCursor: nil)
     }

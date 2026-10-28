@@ -1952,6 +1952,57 @@ struct V2SyncEngineTests {
         #expect(try await store.messages(in: try .init(roomA)).map(\.text) == ["older", "latest"])
     }
 
+    @Test("group directory includes archived and empty groups with stable search pagination and excludes revoked rooms")
+    func groupDirectoryPaginationAndAuthorization() async throws {
+        let url = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: .init("00000000-0000-0000-0000-000000007777"))
+        let rooms = try (1...4).map { try RoomID(String(format: "00000000-0000-0000-0000-%012d", 7700 + $0)) }
+        let names = ["Alpha", "alpha", "中文测试群", "撤销授权群"]
+        var records: [V2ClientSyncRecord] = []
+        for index in rooms.indices {
+            records.append(try .init(sequence: UInt64(index + 1), sourceEventID: .init("directory-created-\(index)"), projectionKind: "room",
+                payload: JSONSerialization.data(withJSONObject: ["event_type": "room.created", "room_id": rooms[index].rawValue,
+                    "title": names[index], "owner_user_id": "directory-owner", "membership_revision": 1,
+                    "capacity_class": "standard", "created_at_ms": 1_750_000_001_500])))
+        }
+        records.append(try .init(sequence: 5, sourceEventID: .init("directory-archive"), projectionKind: "conversation_state",
+            payload: JSONSerialization.data(withJSONObject: ["revision": 1, "room_id": rooms[0].rawValue,
+                "is_pinned": false, "is_archived": true, "mute_until_ms": 0, "updated_at_ms": 1_750_000_004_000])))
+        records.append(try .init(sequence: 6, sourceEventID: .init("directory-direct"), projectionKind: "direct_room_profile",
+            payload: JSONSerialization.data(withJSONObject: ["room_id": "00000000-0000-0000-0000-000000007788",
+                "target_user_id": "00000000-0000-0000-0000-000000007789", "public_handle": "directory_person",
+                "display_name": "Alpha private chat", "account_kind": "regular", "revision": 1,
+                "room_created_at_ms": 1_750_000_001_500, "updated_at_ms": 1_750_000_001_500])))
+        _ = try await store.apply(.init(generation: 1, records: records, nextSyncToken: .init("directory-1"),
+            receipt: .init("directory-receipt-1"), hasMore: false, capabilityProfile: "base"))
+        try await store.markRoomEventUnauthorized(roomID: rooms[3])
+        let first = try await store.groupDirectoryPage(limit: 1)
+        #expect(first.items.map(\.roomID) == [rooms[0]])
+        #expect(first.items.first?.isArchived == true)
+        let second = try await store.groupDirectoryPage(after: #require(first.nextCursor), limit: 1)
+        #expect(second.items.map(\.roomID) == [rooms[1]])
+        let third = try await store.groupDirectoryPage(after: #require(second.nextCursor), limit: 1)
+        #expect(third.items.map(\.roomID) == [rooms[2]])
+        #expect(third.nextCursor == nil)
+        #expect(try await store.groupDirectoryPage(matching: "ALPHA").items.count == 2)
+        #expect(try await store.groupDirectoryPage(matching: "测试").items.map(\.roomID) == [rooms[2]])
+        #expect(try await store.groupDirectoryPage(matching: "%").items.isEmpty)
+        let removal = try V2ClientSyncRecord(sequence: 7, sourceEventID: .init("directory-removed"), projectionKind: "membership",
+            payload: JSONSerialization.data(withJSONObject: ["event_type": "membership_changed", "room_id": rooms[2].rawValue,
+                "title": names[2], "owner_user_id": "directory-owner", "target_user_id": "00000000-0000-0000-0000-000000007777",
+                "action": "remove", "membership_revision": 2, "capacity_class": "standard",
+                "created_at_ms": 1_750_000_001_500, "server_created_at_ms": 1_750_000_005_000]))
+        _ = try await store.apply(.init(generation: 1, records: [removal], nextSyncToken: .init("directory-2"),
+            receipt: .init("directory-receipt-2"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.groupDirectoryPage(matching: "测试").items.isEmpty)
+        #expect(try await store.groupDirectoryPage().items.count == 2)
+        try await store.close()
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding,
+            userID: .init("00000000-0000-0000-0000-000000007777"))
+        #expect(try await reopened.groupDirectoryPage().items.map(\.roomID) == [rooms[0], rooms[1]])
+        await #expect(throws: V2ClientProjectionError.self) { _ = try await reopened.groupDirectoryPage(limit: 0) }
+    }
+
     @Test("conversation list uses an indexed stable keyset across pinned, empty, and archived rooms")
     func conversationListPagination() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)

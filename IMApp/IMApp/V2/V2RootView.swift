@@ -452,8 +452,7 @@ struct V2SignedInRootView: View {
             V2ConversationListView(
                 store: conversationStore,
                 localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
-                rootNavigation: rootNavigation,
-                groupInvitationStore: groupInvitationStore
+                rootNavigation: rootNavigation
             )
             .environment(\.v2UserInteractionContext, .init(contacts: contactsStore, conversations: conversationStore, navigation: rootNavigation))
             .tabItem { Label("消息", systemImage: "message") }
@@ -576,6 +575,9 @@ struct V2SignedInRootView: View {
             }
             .navigationDestination(for: V2ContactsRoute.self) { route in
                 switch route {
+                case .groups:
+                    V2GroupDirectoryView(store: conversationStore.makeGroupDirectoryStore(), conversations: conversationStore,
+                        navigation: rootNavigation, invitations: groupInvitationStore)
                 case .requests: V2FriendRequestsView(store: contactsStore)
                 case .addFriend: V2AddFriendView(store: contactsStore)
                 case .contact(let userID):
@@ -588,7 +590,7 @@ struct V2SignedInRootView: View {
                 guard scenePhase == .active,
                       let url = pendingGroupInvitationURL, let invitations = groupInvitationStore else { return }
                 // The signed-in presentation owns this work. Cold-start URLs
-                // remain pending until its conversation sheet host is mounted.
+                // remain pending until its shared invitation sheet host is mounted.
                 rootNavigation.selectedTab = .conversations
                 Logger(subsystem: "com.stskcxfz.imapp", category: "GroupInvitationRouting")
                     .info("Opening pending invitation on active signed-in presentation")
@@ -661,6 +663,13 @@ struct V2SignedInRootView: View {
                 }
             }
         }
+        .sheet(isPresented: Binding(
+            get: { groupInvitationStore?.isPresentingJoin == true },
+            set: { if !$0 { groupInvitationStore?.dismissJoin() } }
+        )) {
+            if let groupInvitationStore { V2GroupJoinSheet(store: groupInvitationStore) }
+        }
+        .task { await conversationStore.observeGroupCreation() }
         .authorPresentationPage(context: .list(signedInProfilePageID))
         .environment(\.v2ResourceNavigation, rootNavigation)
         .environment(\.v2ResourceManagement, appStore.resourceManagement)

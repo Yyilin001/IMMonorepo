@@ -1869,6 +1869,37 @@ struct V2ConversationStoreTests {
         #expect(store.detailStore(for: "room-group").isGroupConversation)
     }
 
+    @Test func directoryGroupOutsideInboxRetainsItsGroupCapabilitiesAndTitle() throws {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
+        let group = try V2ClientGroupDirectoryItem(roomID: .init("archived-group"), title: "归档群", isArchived: true)
+        store.prepareGroupConversation(group)
+        let detail = store.detailStore(for: group.roomID.rawValue)
+        #expect(detail.isGroupConversation)
+        #expect(detail.title == "归档群")
+        #expect(store.items.isEmpty)
+    }
+
+    @Test func queuedGroupCreationCompletionIsMatchedToItsOriginalOperation() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let creator = V2GroupConversationCreatorFake(result: .queuedForRetry(operationID: "original-group-operation"))
+        let store = makeConversationListStore(dataSource: source, userID: "current-user", groupConversationCreator: creator)
+        #expect(await store.createGroupConversation(title: "群", memberHandlesText: "") == nil)
+        #expect(store.completedGroupCreation == nil)
+        #expect(await store.createGroupConversation(title: "重复提交", memberHandlesText: "") == nil)
+        #expect(await creator.requests().count == 1)
+        await creator.setRestoredStatus(.finalizing(operationID: "original-group-operation"))
+        await store.refresh()
+        #expect(store.activeGroupCreationOperationID == "original-group-operation")
+        #expect(store.pendingGroupConversationOperationID == nil)
+        await creator.setRestoredStatus(.created(roomID: "created-group"))
+        await store.refresh()
+        #expect(store.completedGroupCreation == .init(operationID: "original-group-operation", roomID: "created-group"))
+        #expect(store.detailStore(for: "created-group").isGroupConversation)
+        #expect(store.detailStore(for: "created-group").title == "群")
+        #expect(store.pendingGroupConversationOperationID == nil)
+    }
+
     @Test func groupConversationKeepsDurableRetryVisible() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let creator = V2GroupConversationCreatorFake(result: .queuedForRetry(operationID: "group-operation-1"))
@@ -4295,7 +4326,7 @@ private actor V2CancellationIgnoringConversationPublicIdentityResolver: V2Conver
 
 private actor V2GroupConversationCreatorFake: V2GroupConversationCreating {
     private let result: V2GroupConversationCreationOutcome
-    private let restoredStatus: V2RestoredGroupConversationCreationStatus?
+    private var restoredStatus: V2RestoredGroupConversationCreationStatus?
     private var requestsValue: [Request] = []
     private var cancelledOperationIDsValue: [String] = []
     init(result: V2GroupConversationCreationOutcome, restoredStatus: V2RestoredGroupConversationCreationStatus? = nil) {
@@ -4310,6 +4341,7 @@ private actor V2GroupConversationCreatorFake: V2GroupConversationCreating {
         cancelledOperationIDsValue.append(operationID)
         return .queuedForRetry
     }
+    func setRestoredStatus(_ value: V2RestoredGroupConversationCreationStatus) { restoredStatus = value }
     func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? { restoredStatus }
     func requests() -> [Request] { requestsValue }
     func cancelledOperationIDs() -> [String] { cancelledOperationIDsValue }

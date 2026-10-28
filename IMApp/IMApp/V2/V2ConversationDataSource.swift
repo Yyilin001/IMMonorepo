@@ -13,7 +13,7 @@ protocol V2DiscoveredConversationRefreshing: Sendable {
     func refreshDiscoveredConversations(roomIDs: [RoomID]) async throws
 }
 
-actor V2GRDBConversationDataSource: V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
+actor V2GRDBConversationDataSource: V2GroupDirectoryReading, V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
     private let requiresLocalReadAuthorization: Bool
     private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
@@ -28,6 +28,10 @@ actor V2GRDBConversationDataSource: V2DiscoveredConversationRefreshing, V2Conver
             try Task.checkCancellation()
             try await requestLatestVisible(Array(roomIDs[start..<min(start + 100, roomIDs.count)]))
         }
+    }
+
+    func groupDirectoryPage(matching query: String, after cursor: V2ClientGroupDirectoryCursor?, limit: Int) async throws -> V2ClientGroupDirectoryPage {
+        try await localStore.groupDirectoryPage(matching: query, after: cursor, limit: limit)
     }
 
     func currentTitle(in roomID: RoomID) async throws -> String? {

@@ -507,6 +507,28 @@ final class V2ConversationListStore {
         projectionChangeNotifier = environment.runtime.projectionChangeNotifier
     }
 
+    struct CompletedGroupCreation: Equatable {
+        let operationID: String
+        let roomID: String
+    }
+    private(set) var completedGroupCreation: CompletedGroupCreation?
+    private(set) var activeGroupCreationOperationID: String?
+    @ObservationIgnored private var activeGroupCreationTitle: String?
+
+    @ObservationIgnored private var cachedGroupDirectoryStore: V2GroupDirectoryStore?
+
+    func prepareGroupConversation(_ item: V2ClientGroupDirectoryItem) {
+        explicitRoomTitles[item.roomID.rawValue] = item.title
+        explicitRoomKinds[item.roomID.rawValue] = .group
+    }
+
+    func makeGroupDirectoryStore() -> V2GroupDirectoryStore {
+        if let cachedGroupDirectoryStore { return cachedGroupDirectoryStore }
+        let directory = V2GroupDirectoryStore(reader: dataSource as? any V2GroupDirectoryReading, notifier: projectionChangeNotifier)
+        cachedGroupDirectoryStore = directory
+        return directory
+    }
+
     func createGroupConversation(title: String, memberHandlesText: String) async -> String? {
         let handles = memberHandlesText
             .split(whereSeparator: { $0 == "," || $0 == "\n" })
@@ -529,6 +551,12 @@ final class V2ConversationListStore {
             return nil
         }
         guard !isCreatingGroupConversation else { return nil }
+        guard activeGroupCreationOperationID == nil, pendingGroupConversationOperationID == nil else {
+            groupConversationFeedback = "已有建群请求正在处理，请等待原请求完成或取消。"
+            return nil
+        }
+        completedGroupCreation = nil
+        activeGroupCreationTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         isCreatingGroupConversation = true
         defer { isCreatingGroupConversation = false }
         do {
@@ -550,16 +578,23 @@ final class V2ConversationListStore {
             try Task.checkCancellation()
             switch outcome {
             case .created(let roomID):
+                activeGroupCreationOperationID = nil
                 pendingGroupConversationOperationID = nil
                 explicitRoomTitles[roomID] = title.trimmingCharacters(in: .whitespacesAndNewlines)
                 explicitRoomKinds[roomID] = .group
                 groupConversationFeedback = nil
                 return roomID
             case .queuedForRetry(let operationID):
+                activeGroupCreationOperationID = operationID
                 pendingGroupConversationOperationID = operationID
                 groupConversationFeedback = "建群请求已安全保存；取消结果由服务器确认。"
+                await restoreDurableGroupCreationStatusIfNeeded()
+                if let completedGroupCreation, completedGroupCreation.operationID == operationID {
+                    return completedGroupCreation.roomID
+                }
                 return nil
             case .rejected(let code):
+                activeGroupCreationOperationID = nil
                 pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "无法创建群聊（\(code)）。"
                 return nil
@@ -630,6 +665,7 @@ final class V2ConversationListStore {
         do {
             switch try await groupConversationCreator.cancelConversationCreation(operationID: operationID) {
             case .cancelled:
+                activeGroupCreationOperationID = nil
                 pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "建群请求已取消。"
             case .queuedForRetry:
@@ -892,28 +928,42 @@ final class V2ConversationListStore {
             groupCreationNeedsConfirmation=false
             switch status {
             case .expired:
+                activeGroupCreationOperationID = nil
                 pendingGroupConversationOperationID=nil
                 groupConversationFeedback="建群请求已过期，未创建群聊。可重新创建。"
             case .needsConfirmation(let operationID):
+                activeGroupCreationOperationID = operationID
                 pendingGroupConversationOperationID=operationID
                 groupCreationNeedsConfirmation=true
                 groupConversationFeedback="建群结果待确认，可继续核对原请求。"
-            case .created:
+            case .created(let roomID):
+                explicitRoomKinds[roomID] = .group
+                if let title = activeGroupCreationTitle { explicitRoomTitles[roomID] = title }
+                activeGroupCreationTitle = nil
+                if let operationID = activeGroupCreationOperationID {
+                    completedGroupCreation = .init(operationID: operationID, roomID: roomID)
+                }
+                activeGroupCreationOperationID = nil
                 pendingGroupConversationOperationID=nil
-                groupConversationFeedback="群聊已创建，可从会话列表打开。"
+                groupConversationFeedback="群聊已创建，可从群组或会话列表打开。"
             case .queuedForRetry(let operationID):
+                activeGroupCreationOperationID = operationID
                 pendingGroupConversationOperationID = operationID
                 groupConversationFeedback = "建群请求已安全保存；取消结果由服务器确认。"
-            case .cancelling:
+            case .cancelling(let operationID):
+                activeGroupCreationOperationID = operationID
                 pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "正在核对取消结果；若创建已开始，将继续确认原结果。"
-            case .finalizing:
+            case .finalizing(let operationID):
+                activeGroupCreationOperationID = operationID
                 pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "群聊已进入创建阶段，无法取消；完成后会显示在会话列表。"
             case .cancelled:
+                activeGroupCreationOperationID = nil
                 pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "建群请求已取消。"
             case .rejected(let code):
+                activeGroupCreationOperationID = nil
                 pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "无法创建群聊（\(code)）。"
             case nil:
@@ -1187,20 +1237,16 @@ struct V2ConversationListView: View {
     }
 
     @Environment(\.v2UserInteractionContext) private var userContext
-    @State private var choosingGroupFriends = false
     @Bindable var store: V2ConversationListStore
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     private let accountMenu: V2ConversationAccountMenu?
     private let rootNavigation: V2RootNavigationStore
-    private let groupInvitationStore: V2GroupInvitationStore?
     @State private var newConversationSheet: NewConversationSheet?
     @State private var conversationAfterSheetDismissal: V2ConversationDestination?
     @State private var directTargetUserID: String
     @State private var groupTitle = ""
     @State private var groupMemberUserIDs = ""
     @State private var directSubmissionTask: Task<Void, Never>?
-    @State private var groupSubmissionTask: Task<Void, Never>?
-    @State private var groupCancellationTask: Task<Void, Never>?
     @State private var messageSearchStore: V2ConversationSearchStore?
     @State private var isPresentingMessageSearch = false
     @State private var isPresentingPreferenceActivity = false
@@ -1211,14 +1257,12 @@ struct V2ConversationListView: View {
         store: V2ConversationListStore,
         localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture? = nil,
         accountMenu: V2ConversationAccountMenu? = nil,
-        rootNavigation: V2RootNavigationStore? = nil,
-        groupInvitationStore: V2GroupInvitationStore? = nil
+        rootNavigation: V2RootNavigationStore? = nil
     ) {
         self.store = store
         self.localE2EConversationLaunchFixture = localE2EConversationLaunchFixture
         self.accountMenu = accountMenu
         self.rootNavigation = rootNavigation ?? V2RootNavigationStore()
-        self.groupInvitationStore = groupInvitationStore
         _directTargetUserID = State(
             initialValue: localE2EConversationLaunchFixture?.directTargetHandle ?? ""
         )
@@ -1409,7 +1453,6 @@ struct V2ConversationListView: View {
                     isPresentingFavorites = false
                 }
             }
-            .task { await store.observeGroupCreation() }
             .task { await store.observeDirectConversationRequests() }
         .task { await store.observeProjectionChanges() }
             .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
@@ -1479,110 +1522,11 @@ struct V2ConversationListView: View {
                     }
                 }
                 case .group:
-                NavigationStack {
-                    Form {
-                        Section("群名称") {
-                            TextField("群名称", text: $groupTitle)
-                                .disabled(store.isCreatingGroupConversation)
-                                .accessibilityIdentifier("v2.conversation.group-title")
-                        }
-                        Section("初始成员") {
-                            if userContext != nil {
-                                Button("从好友中选择", systemImage: "person.2") { choosingGroupFriends = true }
-                                    .sheet(isPresented: $choosingGroupFriends) {
-                                        if let context = userContext {
-                                            V2FriendPickerView(store: context.contacts) { handles in
-                                                let existing = groupMemberUserIDs.components(separatedBy: CharacterSet(charactersIn: ",\n"))
-                                                groupMemberUserIDs = Array(Set(existing.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } + handles)).sorted().joined(separator: ", ")
-                                            }
-                                        }
-                                    }
-                            }
-                            TextEditor(text: $groupMemberUserIDs)
-                                .frame(minHeight: 110)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .disabled(store.isCreatingGroupConversation)
-                                .accessibilityLabel("初始成员公开 ID")
-                                .accessibilityHint("输入 @handle，用逗号或换行分隔；可留空创建仅自己的群聊")
-                                .accessibilityIdentifier("v2.conversation.group-members")
-                            Text("用逗号或换行分隔公开 ID，例如 @alice。")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        if store.groupCreationNeedsConfirmation {
-                            Button("继续核对建群结果") { Task { await store.resumePendingGroupCreation() } }
-                        }
-                        if let feedback = store.groupConversationFeedback {
-                            Text(feedback)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("v2.conversation.group-feedback")
-                        }
-                    }
-                    .v2GroupedPageSurface()
-                    .navigationTitle("新建群聊")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("取消") {
-                                groupSubmissionTask?.cancel()
-                                groupSubmissionTask = nil
-                                guard store.pendingGroupConversationOperationID != nil else {
-                                    newConversationSheet = nil
-                                    return
-                                }
-                                guard groupCancellationTask == nil else { return }
-                                groupCancellationTask = Task {
-                                    await store.cancelPendingGroupConversationCreation()
-                                    guard !Task.isCancelled else { return }
-                                    groupCancellationTask = nil
-                                    newConversationSheet = nil
-                                }
-                            }
-                                .accessibilityIdentifier("v2.conversation.group-cancel")
-                        }
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("创建") {
-                                guard groupSubmissionTask == nil else { return }
-                                let title = groupTitle
-                                let members = groupMemberUserIDs
-                                groupSubmissionTask = Task {
-                                    if let roomID = await store.createGroupConversation(title: title, memberHandlesText: members), !Task.isCancelled {
-                                        groupSubmissionTask = nil
-                                        groupTitle = ""
-                                        groupMemberUserIDs = ""
-                                        // The local E2E fixture only supplies a draft to the
-                                        // room created by this real UI action. Keep the same
-                                        // state handoff as the direct-conversation path.
-                                        rootNavigation.fixtureRoomID = roomID
-                                        conversationAfterSheetDismissal = .init(roomID: roomID)
-                                        newConversationSheet = nil
-                                    } else if !Task.isCancelled {
-                                        groupSubmissionTask = nil
-                                    }
-                                }
-                            }
-                            .disabled(
-                                groupTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                    || store.isCreatingGroupConversation
-                            )
-                            .accessibilityIdentifier("v2.conversation.group-submit")
-                        }
-                    }
-                    .onDisappear {
-                        groupSubmissionTask?.cancel()
-                        groupSubmissionTask = nil
-                        groupCancellationTask?.cancel()
-                        groupCancellationTask = nil
+                    V2GroupCreationSheet(store: store, groupTitle: $groupTitle, groupMemberUserIDs: $groupMemberUserIDs) { roomID in
+                        rootNavigation.fixtureRoomID = roomID
+                        conversationAfterSheetDismissal = .init(roomID: roomID)
                     }
                 }
-                }
-            }
-            .sheet(isPresented: Binding(
-                get: { groupInvitationStore?.isPresentingJoin == true },
-                set: { if !$0 { groupInvitationStore?.dismissJoin() } }
-            )) {
-                if let groupInvitationStore { V2GroupJoinSheet(store: groupInvitationStore) }
             }
         }
     }

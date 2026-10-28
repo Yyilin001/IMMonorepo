@@ -1079,6 +1079,7 @@ final class V2RootNavigationStore {
 
 enum V2ContactsRoute: Hashable {
     case requests
+    case groups
     case addFriend
     case contact(String)
 }
@@ -1135,6 +1136,20 @@ struct V2ContactsRootView: View {
             }
             .accessibilityValue(store.incomingRequestCount == 0 ? "" : "\(store.incomingRequestCount) 个待处理申请")
             .accessibilityIdentifier("v2.contacts.requests")
+
+            NavigationLink(value: V2ContactsRoute.groups) {
+                HStack(spacing: 14) {
+                    Image(systemName: "person.2")
+                        .font(.title3).foregroundStyle(.blue)
+                        .frame(width: 48, height: 48)
+                        .background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 16))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("我的群组").font(.body.weight(.semibold))
+                        Text("查看、创建和加入群聊").font(.caption).foregroundStyle(.secondary)
+                    }
+                }.padding(.vertical, 8)
+            }
+            .accessibilityIdentifier("v2.contacts.groups")
 
             Section("我的好友") {
                 if store.hasEarlierFriends {

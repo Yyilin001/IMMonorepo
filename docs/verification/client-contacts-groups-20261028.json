@@ -1,0 +1,95 @@
+{
+  "date": "2026-10-28",
+  "objective": "联系人界面新增群组入口并完善相关功能",
+  "status": "implementation_verified",
+  "requirements": [
+    {
+      "requirement": "联系人页我的群组入口与返回路径",
+      "evidence": "V2ContactsRoute.groups; UI: testContactsGroupsNavigateToChatSettingsAndBackToDirectory"
+    },
+    {
+      "requirement": "独立读取账号本地群目录，包含归档群和空群，排除私聊、退出及撤权群",
+      "evidence": "GRDBV2LocalSyncStore.groupDirectoryPage; V2SyncEngineTests.groupDirectoryPaginationAndAuthorization; SQLite reopened persistence assertions"
+    },
+    {
+      "requirement": "群名搜索、稳定分页、空态、失败重试和保留已有内容",
+      "evidence": "V2GroupDirectoryStoreTests (5 tests); UI: testGroupDirectorySearchAndEmptyState"
+    },
+    {
+      "requirement": "投影更新刷新及迟到搜索结果隔离",
+      "evidence": "projectionNotificationsRefreshVisibleDirectory; lateSearchResultCannotOverwriteNewerSearch"
+    },
+    {
+      "requirement": "从群目录进入未在收件箱加载的归档群，保留群名、群类型与群设置",
+      "evidence": "directoryGroupOutsideInboxRetainsItsGroupCapabilitiesAndTitle; UI archived room 106 -> 群聊设置 -> chat -> directory -> contacts"
+    },
+    {
+      "requirement": "复用建群、好友选择、取消及重试，异步完成后按原请求进入新群",
+      "evidence": "V2GroupCreationSheet; queuedGroupCreationCompletionIsMatchedToItsOriginalOperation; UI mock queued -> finalizing -> created, then chat -> directory"
+    },
+    {
+      "requirement": "加入群聊入口复用邀请链接、扫码与申请流程，在联系人导航层级可呈现",
+      "evidence": "V2GroupDirectoryView invitations action; V2SignedInRootView shared V2GroupJoinSheet host; existing V2GroupInvitationStoreTests (7 tests, with parameterized cases)"
+    }
+  ],
+  "verification": {
+    "clientkit": {
+      "log": "/tmp/im-groups-client-tests-r3.log",
+      "passed_tests": 1
+    },
+    "app": {
+      "log": "/tmp/im-groups-acceptance-r2.log",
+      "result_bundle": "/tmp/im-groups-acceptance-r2.xcresult",
+      "passed_unit_tests": 17,
+      "passed_ui_tests": [
+        "testContactsGroupsNavigateToChatSettingsAndBackToDirectory",
+        "testCreateGroupOpensChatAndReturnsToContactsGroupDirectory",
+        "testGroupDirectorySearchAndEmptyState",
+        "testGroupCreationFromContactsCanCancelWithoutChangingNavigation"
+      ]
+    },
+    "visual_review": {
+      "screenshot": "/tmp/im-groups-acceptance-screenshots/5AB7E431-4D71-4EB3-9D23-1A241F62144A.png",
+      "reviewed": true,
+      "notes": "Inline title, top search, grouped actions and rows, archived subtitle, person.2 avatar fallback; join action is absent in mock because mock has no invitation service."
+    },
+    "simulator": "D83B9292-E9BA-4CD2-B450-505184202553",
+    "derived_data": "/tmp/IMGroupsDerivedData",
+    "source_hashes_sha256": {
+      "IMApp/IMApp/V2/V2ContactsUI.swift": "ee38fcbb685653c5f91eb1c69c2224cc9f38f0b1a85cc4e3862d32ef3bd0f2e5",
+      "IMApp/IMApp/V2/V2ConversationUI.swift": "52f8612bdf40e8141ebe3757a21cd7063b81af4b19b922bd356d3fefde29d970",
+      "IMApp/IMApp/V2/V2ConversationDataSource.swift": "d646daa606aaccadd9c54267e991b74a7fedc1c8998b329309a57f7a45b64c36",
+      "IMApp/IMApp/V2/V2MockPreview.swift": "ef9a81cfccc138d2d625b313ab69cab877c9f53ab8207cde8fff59540e78bb77",
+      "IMApp/IMApp/V2/V2RootView.swift": "2e1570a6c83ec66a36e04948a7bf5f89569dd6641902297cdecc408b3be5eab0",
+      "IMApp/IMApp/V2/V2GroupCreationSheet.swift": "d68ef83f038ca76a9c0758550187cfd05b42a761af990583a945be492efb8713",
+      "IMApp/IMApp/V2/V2GroupDirectoryView.swift": "fd40962717093fa2ac27191f023c7c7ec519513e2f9a7f00343f0f3e431b5ccf",
+      "IMApp/IMAppTests/V2GroupDirectoryStoreTests.swift": "1624fd90ac89353d6e47ccef805fa384b2046c845d328d67395e3be45cc6bae3",
+      "IMApp/IMAppUITests/IMAppGlassPresentationUITests.swift": "c6ffa9ab5d0bb5b6733eee21061081c02a69dba8162047c699236cfe8d25cf44",
+      "IMV2ClientKit/Sources/IMV2ClientKit/V2ClientGroupDirectory.swift": "047fab48b3a4fc2b386faae232f8a68abf173dfb5c3b7318a10a4fd2cbd8bb35",
+      "IMV2ClientKit/Tests/IMV2ClientKitTests/V2SyncEngineTests.swift": "33ff80637d322dd59e2631e57fd4e9967043558ef4fd3235a1ee26ab0127866a",
+      "IMApp/IMAppTests/V2ConversationStoreTests.swift": "e35145bb905ef37b0921dcc9b0be2bfaa058388487f29aa9f62befe12c6d6d15"
+    },
+    "source_unchanged_during_final_run": true,
+    "scoped_diff_check": "passed"
+  },
+  "limitations": [
+    "UI tests use synthetic mock accounts and rooms. No real server-side group creation, invitation application, camera scan or physical-device validation was performed in this task.",
+    "Existing unrelated avatar/profile work remains in the same checkout and was preserved.",
+    "No backend schema or deployment change; no TestFlight upload. Unrelated profile changes were committed separately in 04b8c23d."
+  ],
+  "resolved_validation_issues": [
+    "Initial database fixture used non-UUID membership identifiers; corrected fixture to protocol-valid UUIDs.",
+    "Concurrent UI work used the original simulator; final verification uses a separate simulator and build directory.",
+    "Queued creation exposed a missing observer when the message tab was not mounted; moved ownership to the signed-in root and verified final queued/finalizing completion navigation."
+  ],
+  "device_delivery": {
+    "device": "徐徐年年的 iPhone",
+    "version": "1.0",
+    "build": "16",
+    "release_build_and_signature": "verified",
+    "installation": "success",
+    "launch": "success",
+    "installed_version_readback": "1.0 (16)",
+    "evidence_directory": "/tmp/im-groups-device-20261028"
+  }
+}
