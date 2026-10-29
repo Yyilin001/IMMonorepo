@@ -1394,27 +1394,8 @@ struct V2ConversationListView: View {
             .navigationBarTitleDisplayMode(.inline)
             .v2PageSurface()
             .safeAreaInset(edge: .top) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").font(.body)
-                        .foregroundStyle(.secondary).accessibilityHidden(true)
-                    TextField("搜索会话", text: $conversationQuery, axis: .vertical)
-                        .font(.body).foregroundStyle(.primary).lineLimit(1...3)
-                        .submitLabel(.search)
-                        .accessibilityIdentifier("v2.conversation.summary-search")
-                    if !conversationQuery.isEmpty {
-                        Button { conversationQuery = "" } label: {
-                            Image(systemName: "xmark.circle.fill").font(.body)
-                                .frame(minWidth: 44, minHeight: 44)
-                        }
-                        .accessibilityLabel("清除会话搜索")
-                        .accessibilityIdentifier("v2.conversation.summary-search.clear")
-                    }
-                }
-                .padding(12)
-                .background(V2VisualStyle.surface, in: RoundedRectangle(cornerRadius: 16))
-                .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(V2VisualStyle.separator) }
-                .padding(.horizontal, 20).padding(.vertical, 8)
-                .background(V2VisualStyle.canvas)
+                V2SearchField(title: "搜索会话", text: $conversationQuery,
+                    identifier: "v2.conversation.summary-search", clearLabel: "清除会话搜索")
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 4) {
@@ -1604,13 +1585,6 @@ struct V2MessageSearchView: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 10) {
-                TextField("搜索消息", text: $store.query)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("搜索消息")
-                    .accessibilityHint("支持单个字符和连续文本搜索；选择媒体类别后可不输入文本")
-                    .accessibilityIdentifier("v2.message.search.query")
                 Picker("内容类型", selection: $store.contentFilter) {
                     Text("全部文字").tag(V2MessageSearchContentFilter.all)
                     Text("所有媒体").tag(V2MessageSearchContentFilter.media)
@@ -1720,6 +1694,10 @@ struct V2MessageSearchView: View {
         }
         .navigationTitle("搜索消息")
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .top) {
+            V2SearchField(title: "搜索消息", text: $store.query, identifier: "v2.message.search.query",
+                hint: "支持单个字符和连续文本搜索；选择媒体类别后可不输入文本")
+        }
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("关闭") { dismiss() }

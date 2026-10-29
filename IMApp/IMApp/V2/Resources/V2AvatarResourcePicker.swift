@@ -38,9 +38,6 @@ struct V2AvatarResourcePicker: View {
         NavigationStack {
             List {
                 Section {
-                    TextField("搜索聊天图片", text: $library.search).accessibilityIdentifier("v2.avatar.resources.search")
-                }
-                Section {
                     if let page = library.content.page {
                         let entries = page.entries.filter { $0.descriptor.state == .ready && ["image/jpeg", "image/png"].contains($0.descriptor.contentType) && $0.descriptor.byteCount <= 50 * 1_024 * 1_024 }
                         if entries.isEmpty { Text("暂无可选图片，可以先在聊天中发送一张照片。").foregroundStyle(.secondary) }
@@ -69,6 +66,9 @@ struct V2AvatarResourcePicker: View {
                 if selection != nil { Section { ProgressView("正在选取图片…") } }
                 if let feedback { Section { Text(feedback).foregroundStyle(.secondary) } }
             }.v2GroupedPageSurface()
+                .safeAreaInset(edge: .top) {
+                    V2SearchField(title: "搜索聊天图片", text: $library.search, identifier: "v2.avatar.resources.search")
+                }
                 .navigationTitle("聊天图片").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }

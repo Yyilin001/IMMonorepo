@@ -1181,7 +1181,10 @@ struct V2ContactsRootView: View {
         .listStyle(.insetGrouped)
         .v2GroupedPageSurface()
         .modifier(V2ListViewportContainer(viewport: store.friendsViewport, coordinateSpace: "v2.contacts.friends.viewport"))
-        .searchable(text: $store.searchQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索好友")
+        .accessibilityIdentifier("v2.contacts.list")
+        .safeAreaInset(edge: .top) {
+            V2SearchField(title: "搜索好友", text: $store.searchQuery, identifier: "v2.contacts.search")
+        }
         .task(id: store.searchQuery) {
             guard !store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 await store.refreshFriendSearch()
@@ -1191,7 +1194,6 @@ struct V2ContactsRootView: View {
             guard !Task.isCancelled else { return }
             await store.refreshFriendSearch()
         }
-        .accessibilityIdentifier("v2.contacts.list")
         .authorPresentationPage(context: .list(profilePageID))
     }
 
@@ -1314,11 +1316,6 @@ struct V2AddFriendView: View {
     var body: some View {
         Form {
             Section("公开 ID") {
-                TextField("例如 @alice", text: $store.addFriendHandle)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .disabled(store.addFriendState == .resolving)
-                    .accessibilityIdentifier("v2.contacts.add.handle")
                 Button("查找") { run { await store.resolveAddFriend() } }
                     .disabled(store.addFriendHandle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.addFriendState == .resolving)
                     .accessibilityIdentifier("v2.contacts.add.resolve")
@@ -1351,6 +1348,11 @@ struct V2AddFriendView: View {
         .v2GroupedPageSurface()
         .navigationTitle("添加好友")
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .top) {
+            V2SearchField(title: "输入公开 ID，例如 @alice", text: $store.addFriendHandle,
+                identifier: "v2.contacts.add.handle")
+                .disabled(store.addFriendState == .resolving)
+        }
         .task(id: store.addFriendExpiration) {
             guard let deadline = store.addFriendExpiration else { return }
             do { try await ContinuousClock().sleep(until: deadline) } catch { return }

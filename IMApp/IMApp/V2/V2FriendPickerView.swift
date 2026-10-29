@@ -36,7 +36,9 @@ struct V2FriendPickerView: View {
             .v2GroupedPageSurface()
             .navigationTitle("选择好友")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(text: $query, prompt: "搜索好友")
+            .safeAreaInset(edge: .top) {
+                V2SearchField(title: "搜索好友", text: $query, identifier: "v2.friend-picker.search")
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {

@@ -142,8 +142,10 @@ struct V2GroupDirectoryView: View {
         .v2GroupedPageSurface()
         .navigationTitle("我的群组")
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $store.query, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索群名称")
         .accessibilityIdentifier("v2.groups.list")
+        .safeAreaInset(edge: .top) {
+            V2SearchField(title: "搜索群名称", text: $store.query, identifier: "v2.groups.search")
+        }
         .task { await store.observe() }
         .task(id: store.query) {
             if !store.query.isEmpty {

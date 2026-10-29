@@ -151,25 +151,6 @@ struct V2ResourceLibraryView: View {
     @ViewBuilder private var pageContent: some View {
         @Bindable var store = store
         Group {
-            Section {
-                HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass").accessibilityHidden(true)
-                    TextField("搜索资源", text: $store.search,
-                              prompt: Text("搜索资源").foregroundStyle(Color.primary))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .submitLabel(.search)
-                        .accessibilityIdentifier("v2.resources.library.search")
-                    if !store.search.isEmpty {
-                        Button("清除搜索", systemImage: "xmark.circle.fill") { store.search = "" }
-                            .labelStyle(.iconOnly)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .accessibilityIdentifier("v2.resources.library.search.clear")
-                    }
-                }
-                .foregroundStyle(Color.primary)
-                .frame(minHeight: 44)
-            }
             selectionControls
             Section {
                 Picker("类型", selection: $store.category) {
@@ -309,6 +290,11 @@ struct V2ResourceLibraryView: View {
         .v2GroupedPageSurface().listRowSpacing(0)
         .scrollDismissesKeyboard(.interactively)
         .navigationTitle(store.room == nil ? "资源" : "聊天文件").navigationBarTitleDisplayMode(.inline)
+        .accessibilityIdentifier("v2.resources.library")
+        .safeAreaInset(edge: .top) {
+            V2SearchField(title: "搜索资源", text: $store.search, identifier: "v2.resources.library.search")
+                .disabled(selection.isBusy)
+        }
         .toolbar(.hidden, for: .tabBar)
         .toolbarBackground(Color(uiColor: .systemGroupedBackground), for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
@@ -326,7 +312,6 @@ struct V2ResourceLibraryView: View {
                 }
             }
         }
-        .accessibilityIdentifier("v2.resources.library")
         .onChange(of: store.query) { selection.resetForQueryChange() }
         .task(id: selection.command) { if let command = selection.command { await selection.execute(command) } }
         .alert("批量选择说明", isPresented: $showingSelectionExplanation) {

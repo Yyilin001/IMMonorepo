@@ -38,11 +38,11 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let app = launch("contacts")
         let entry = app.buttons["v2.contacts.groups"]
         XCTAssertTrue(entry.waitForExistence(timeout: 10)); entry.tap()
-        let query = app.searchFields.firstMatch
+        let query = app.textFields["v2.groups.search"]
         XCTAssertTrue(query.waitForExistence(timeout: 5)); query.tap(); query.typeText("iOS")
         XCTAssertTrue(app.buttons["v2.groups.room.00000000-0000-0000-0000-000000000103"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["v2.groups.room.00000000-0000-0000-0000-000000000101"].exists)
-        query.buttons.firstMatch.tap(); query.typeText("zzznomatch")
+        app.buttons["v2.groups.search.clear"].tap(); query.typeText("zzznomatch")
         XCTAssertTrue(app.staticTexts["未找到群组"].waitForExistence(timeout: 5))
     }
 
