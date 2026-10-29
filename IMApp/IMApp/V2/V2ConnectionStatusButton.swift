@@ -1,4 +1,5 @@
 import SwiftUI
+import IMV2ClientKit
 
 /// Compact account-level status; details remain live while the sheet is open.
 struct V2ConnectionStatusButton: View {
@@ -11,7 +12,8 @@ struct V2ConnectionStatusButton: View {
         if store.accountWorkPaused { return "同步已暂停" }
         switch store.realtimeCoverage?.state {
         case .ready: return "实时通知正常"
-        case .recovering: return "实时通知正在恢复"
+        case .recovering:
+            return store.realtimeCoverage?.reason == .installing ? "正在准备连接" : "实时通知正在恢复"
         case .disconnected: return "实时通知未连接"
         case nil: return "正在准备连接"
         }
@@ -40,7 +42,11 @@ struct V2ConnectionStatusButton: View {
     private var notificationDescription: String {
         switch store.realtimeCoverage?.state {
         case .ready: return "实时通知已就绪。每条消息是否发送成功，请以聊天中的发送状态为准。"
-        case .recovering: return "实时通知正在恢复，可继续发送消息。新消息和状态变化可能延迟显示，请以聊天中的发送状态为准。"
+        case .recovering:
+            if store.realtimeCoverage?.reason == .installing {
+                return "正在准备实时通知连接，连接状态确认后会自动更新。"
+            }
+            return "实时通知正在恢复，可继续发送消息。新消息和状态变化可能延迟显示，请以聊天中的发送状态为准。"
         case .disconnected: return "实时通知连接已断开，暂时无法及时接收新消息和状态变化。应用会在连接恢复后继续同步。"
         case nil: return "正在准备实时通知连接，连接状态确认后会自动更新。"
         }

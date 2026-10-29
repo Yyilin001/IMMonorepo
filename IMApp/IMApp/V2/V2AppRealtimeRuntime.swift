@@ -878,8 +878,10 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 @MainActor @Observable
 final class V2AppRealtimeCoverage {
     enum State: Equatable { case disconnected, recovering, ready }
-    private(set) var state: State = .disconnected
-    private(set) var reason: V2RealtimeCoverageState.Reason?
+    // Publishing a restored account precedes its first authenticated loop.
+    // No connection has failed at this point.
+    private(set) var state: State = .recovering
+    private(set) var reason: V2RealtimeCoverageState.Reason? = .installing
     private(set) var scopes: [V2RealtimeCoverageState.Scope: V2RealtimeCoverageState] = [:]
     private var loopID: UUID?
     private var connectionGeneration: UUID?
@@ -922,15 +924,24 @@ final class V2AppRealtimeCoverage {
             reason = endedScopes.contains(.account) ? .cancelled : .installing
             return
         }
-        // A received active scope is this physical connection's requested
-        // coverage. Unrequested kinds and Ended scopes are not prerequisites.
-        // Ready concerns notification coverage, never durable cursor catch-up.
+        // Report a received recovery/failure even while another required scope
+        // has not arrived, rather than replacing it with "installing".
         let priority: [V2RealtimeCoverageState.Scope] = [.account, .room, .directory, .presence, .typing]
         if let pending = priority.compactMap({ scopes[$0] }).first(where: { $0.status != .ready }) {
             state = .recovering; reason = pending.reason
-        } else {
-            state = .ready; reason = .confirmed
+            return
         }
+        // The app always installs both account and account-room directory
+        // notifications. Their frames can arrive separately (or be replayed
+        // separately to this observer); account Ready alone is not app Ready.
+        guard scopes[.directory] != nil else {
+            state = .recovering
+            reason = endedScopes.contains(.directory) ? .cancelled : .installing
+            return
+        }
+        // Optional room/presence/typing scopes only participate while active.
+        // Ready concerns notification coverage, never durable cursor catch-up.
+        state = .ready; reason = .confirmed
     }
 
     func end(_ id: UUID) {

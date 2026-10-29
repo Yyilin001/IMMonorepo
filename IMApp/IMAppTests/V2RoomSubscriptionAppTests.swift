@@ -82,6 +82,42 @@ actor AppSubscriptionWire: V2ClientGroupEventSubscriptionTransport, V2ClientLive
 
 @Suite("App room subscription ownership", .timeLimit(.minutes(1)))
 struct V2RoomSubscriptionAppTests {
+    @MainActor @Test("cold launch stays preparing until both required notification scopes are ready", arguments: [false, true])
+    func coldLaunchCoverageDoesNotFlashDisconnectedOrPrematureReady(directoryFirst: Bool) throws {
+        let coverage = V2AppRealtimeCoverage()
+        let account = UserID(uuid: UUID()), physical = UUID(), loop = UUID()
+        var transitions = [coverage.state]
+        func receive(_ scope: IMV2RealtimeCoverage.Scope, _ status: IMV2RealtimeCoverage.State,
+                     revision: UInt64, reason: IMV2RealtimeCoverage.Reason) throws {
+            var wire = IMV2RealtimeCoverage()
+            wire.scope = scope; wire.state = status; wire.revision = revision
+            wire.scopeGeneration = 1; wire.scopeID = account.rawValue
+            wire.connectionEpoch = physical.uuidString; wire.reason = reason
+            coverage.receive(try V2RealtimeCoverageState(wire: wire, generation: physical), loop: loop, account: account)
+            if transitions.last != coverage.state { transitions.append(coverage.state) }
+        }
+        #expect(coverage.reason == .installing)
+        coverage.begin(loop)
+        let first: IMV2RealtimeCoverage.Scope = directoryFirst ? .directory : .account
+        let second: IMV2RealtimeCoverage.Scope = directoryFirst ? .account : .directory
+        try receive(first, .ready, revision: 1, reason: .unspecified)
+        #expect(coverage.state == .recovering && coverage.reason == .installing)
+        try receive(second, .recovering, revision: 2, reason: .installing)
+        #expect(coverage.state == .recovering)
+        try receive(second, .ready, revision: 3, reason: .unspecified)
+        #expect(transitions == [.recovering, .ready])
+
+        // Losing required directory coverage must immediately revoke Ready,
+        // including Ended, which cannot be treated as an optional unsubscribe.
+        try receive(.directory, .recovering, revision: 4, reason: .coverageLost)
+        #expect(coverage.state == .recovering && coverage.reason == .coverageLost)
+        try receive(.directory, .ready, revision: 5, reason: .unspecified)
+        try receive(.directory, .ended, revision: 6, reason: .cancelled)
+        #expect(coverage.state == .recovering && coverage.reason == .cancelled)
+        coverage.end(loop)
+        #expect(coverage.state == .disconnected)
+    }
+
     @MainActor @Test("coverage presentation waits for every active scope and discards ended and old generations")
     func realtimeCoverageAggregatesRequestedScopes() throws {
         let coverage = V2AppRealtimeCoverage()
@@ -92,13 +128,16 @@ struct V2RoomSubscriptionAppTests {
             var wire = IMV2RealtimeCoverage()
             wire.scope = scope; wire.state = status; wire.revision = revision; wire.scopeGeneration = generation
             wire.scopeID = scope == .account || scope == .directory ? account.rawValue : room.uuidString
+            wire.connectionEpoch = UUID().uuidString
             wire.highWatermark = 8
             wire.reason = reason
             return try V2RealtimeCoverageState(wire: wire, generation: physical)
         }
         coverage.begin(loop)
         coverage.receive(try value(.account, .ready, revision: 1), loop: loop, account: account)
-        #expect(coverage.state == .ready) // Unrequested directory/presence/typing do not block.
+        #expect(coverage.state == .recovering)
+        coverage.receive(try value(.directory, .ready, revision: 1), loop: loop, account: account)
+        #expect(coverage.state == .ready) // Optional presence/typing do not block.
         coverage.receive(try value(.room, .recovering, revision: 2, reason: .installing), loop: loop, account: account)
         coverage.receive(try value(.account, .ready, revision: 3), loop: loop, account: account)
         #expect(coverage.state == .recovering && coverage.reason == .installing)
