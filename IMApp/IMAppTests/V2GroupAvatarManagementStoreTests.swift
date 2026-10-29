@@ -8,6 +8,20 @@ import Testing
 @MainActor
 @Suite("Group avatar page state and dismissal", .timeLimit(.minutes(1)))
 struct V2GroupAvatarManagementStoreTests {
+    @Test func normalizedPhotoUsesDurableGroupAvatarStaging() async throws {
+        let room = RoomID(uuid: UUID()), manager = PageAvatarManager(snapshot: try snapshot(room: room))
+        let stager = PageAvatarStager(), store = V2GroupAvatarManagementStore(roomID: room, manager: manager, stager: stager, notifier: nil)
+        await store.observe()
+        store.importPhoto(.init(data: Data([1, 2, 3]), format: .jpeg, imageDimensions: try .init(width: 64, height: 64)))
+        await settle(store)
+        #expect(await stager.staged == 1)
+        #expect(await manager.changes.count == 1)
+        #expect(await manager.changes.first?.image != nil)
+        store.suspend()
+        store.importPhoto(.init(data: Data([1]), format: .jpeg, imageDimensions: try .init(width: 1, height: 1)))
+        #expect(await stager.staged == 1)
+    }
+
     @Test(arguments: [false, true])
     func preparationRetryIsAvailableOnlyWithCurrentManagementPermission(authorized: Bool) async throws {
         let room = RoomID(uuid: UUID())
@@ -197,6 +211,10 @@ private actor PageAvatarStager: V2ConversationAttachmentStaging {
     let gate: AvatarPageGate?
     private(set) var staged = 0, discarded = 0
     init(gate: AvatarPageGate? = nil) { self.gate = gate }
+    func stageNormalizedPhoto(_ photo: V2NormalizedPhoto, purpose: V2LocalResourceAssetPurpose) async -> V2StagedConversationAttachment {
+        staged += 1; await gate?.wait()
+        return .init(id: UUID(), displayName: photo.displayName, contentType: photo.contentType, byteCount: Int64(photo.data.count))
+    }
     func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) async -> V2StagedConversationAttachment {
         staged += 1; await gate?.wait()
         return .init(id: UUID(), displayName: "image.png", contentType: "image/png", byteCount: 3)

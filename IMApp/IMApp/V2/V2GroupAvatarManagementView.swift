@@ -6,9 +6,12 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct V2GroupAvatarManagementView: View {
-    private enum Modal: Equatable { case chooseImage, chooseResource, remove }
+    private enum Modal: Equatable { case chooseImage, chooseResource, remove, library }
     @State private var store: V2GroupAvatarManagementStore
     @State private var modal: Modal?
+    @State private var isReadingPhoto = false
+    @State private var selectedPhoto: V2NormalizedPhoto?
+    @State private var processor = V2ProfileAvatarImageProcessor()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @Environment(\.v2AvatarPipeline) private var pipeline
@@ -20,23 +23,27 @@ struct V2GroupAvatarManagementView: View {
         NavigationStack {
             Form {
                 Section {
-                    HStack {
-                        Spacer()
-                        V2AuthorizedGroupAvatarView(roomID: store.roomID, size: 88)
-                        Spacer()
-                    }
-                    accessDescription
-                    Button("选择新头像", systemImage: "photo") { modal = .chooseImage }
-                        .disabled(!store.canUpload)
-                        .accessibilityIdentifier("v2.group.avatar.choose")
+                    V2AuthorizedGroupAvatarView(roomID: store.roomID, size: 144)
+                        .frame(maxWidth: .infinity).padding(.vertical, 24)
+                }.listRowBackground(Color.clear).listRowSeparator(.hidden)
+                Section {
+                    Button("从相册选择", systemImage: "photo.on.rectangle") { modal = .library }
+                        .disabled(!store.canUpload || isReadingPhoto)
+                        .accessibilityIdentifier("v2.group.avatar.library")
                     if resources != nil {
-                        Button("从已有图片选择", systemImage: "photo.on.rectangle") { modal = .chooseResource }
+                        Button("从聊天图片选择", systemImage: "bubble.left.and.text.bubble.right") { modal = .chooseResource }
                             .disabled(!store.canChange).accessibilityIdentifier("v2.group.avatar.choose-resource")
                     }
-                    Button("移除群头像", role: .destructive) { modal = .remove }
-                        .disabled(!store.canRemove)
-                        .accessibilityIdentifier("v2.group.avatar.remove")
+                    Button("从文件选择", systemImage: "folder") { modal = .chooseImage }
+                        .disabled(!store.canUpload).accessibilityIdentifier("v2.group.avatar.choose")
+                } footer: { accessDescription }
+                if store.displayAuthority?.state.mediaID != nil {
+                    Section {
+                        Button("移除群头像", role: .destructive) { modal = .remove }
+                            .disabled(!store.canRemove).accessibilityIdentifier("v2.group.avatar.remove")
+                    }
                 }
+                if isReadingPhoto { Section { ProgressView("正在读取照片…") } }
                 if !store.drafts.isEmpty {
                     Section("本机头像草稿") {
                         ForEach(store.drafts) { image in
@@ -56,17 +63,26 @@ struct V2GroupAvatarManagementView: View {
                 if let feedback = store.feedback {
                     Section { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("v2.group.avatar.feedback") }
                 }
-                Section {
-                    Button("刷新状态", systemImage: "arrow.clockwise") { store.refresh() }
-                        .disabled(store.isPerformingAction)
-                        .accessibilityIdentifier("v2.group.avatar.refresh")
-                }
             }
+            .v2GroupedPageSurface()
+            .refreshable { store.refresh() }
             .navigationTitle("群头像")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }.accessibilityIdentifier("v2.group.avatar.done")
+                }
+            }
+        }
+        .v2PhotoLibraryPicker(isPresented: modalBinding(.library), isImporting: $isReadingPhoto, maximumSelectionCount: 1) { selectedPhoto = $0 }
+        .sheet(isPresented: Binding(get: { selectedPhoto != nil }, set: { if !$0 { selectedPhoto = nil } })) {
+            if let selectedPhoto {
+                NavigationStack {
+                    V2ProfileAvatarCropView(photo: selectedPhoto, processor: processor) { photo in
+                        guard store.canUpload else { return "当前无法更改群头像，请关闭后刷新重试。" }
+                        store.importPhoto(photo)
+                        return nil
+                    }
                 }
             }
         }
@@ -114,41 +130,31 @@ struct V2GroupAvatarManagementView: View {
     }
 
     @ViewBuilder private func pendingRow(_ intent: V2GroupAvatarIntent) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if intent.id == store.focusedOperationID {
-                Text("选中的更改").font(.caption).foregroundStyle(.secondary)
-            }
-            if intent.stage == .closed {
-                Text("头像更新失败")
-                Button("重试") { store.replace(intent) }
-                    .disabled(!store.canReplace(intent))
-                    .accessibilityIdentifier("v2.group.avatar.retry-closed")
-                Button("取消", role: .destructive) { store.act(intent, action: .abandon) }
-                    .disabled(store.isPerformingAction)
-                    .accessibilityIdentifier("v2.group.avatar.abandon")
-            } else if intent.submissionStarted {
-                ProgressView("正在更新头像…")
-                    .accessibilityIdentifier("v2.group.avatar.updating")
-                Text("网络恢复后会自动继续，可以关闭此页面。")
-                    .font(.footnote).foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            if intent.stage == .closed || intent.stage == .needsAttention {
+                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+                Text("头像未更新，原头像仍保留")
             } else {
-                if intent.stage == .needsAttention {
-                    Text("头像更新失败")
-                    Button("重试") { store.act(intent, action: .retry) }
-                        .disabled(!store.canRetryPreparation(intent))
-                        .accessibilityIdentifier("v2.group.avatar.retry")
-                } else {
-                    ProgressView("正在更新头像…")
-                        .accessibilityIdentifier("v2.group.avatar.updating")
-                }
-                Button("取消", role: .destructive) { store.act(intent, action: .cancel) }
-                    .disabled(store.isPerformingAction)
-                    .accessibilityIdentifier("v2.group.avatar.cancel-preparation")
+                ProgressView()
+                Text("正在更新头像…")
             }
+        }.accessibilityIdentifier("v2.group.avatar.updating")
+        if intent.stage == .closed {
+            Button("重新尝试", systemImage: "arrow.clockwise") { store.replace(intent) }
+                .disabled(!store.canReplace(intent)).accessibilityIdentifier("v2.group.avatar.retry-closed")
+            Button("取消这次更改", role: .destructive) { store.act(intent, action: .abandon) }
+                .disabled(store.isPerformingAction).accessibilityIdentifier("v2.group.avatar.abandon")
+        } else if !intent.submissionStarted {
+            if intent.stage == .needsAttention {
+                Button("重新尝试", systemImage: "arrow.clockwise") { store.act(intent, action: .retry) }
+                    .disabled(!store.canRetryPreparation(intent)).accessibilityIdentifier("v2.group.avatar.retry")
+            }
+            Button("取消这次更改", role: .destructive) { store.act(intent, action: .cancel) }
+                .disabled(store.isPerformingAction).accessibilityIdentifier("v2.group.avatar.cancel-preparation")
+        } else {
+            Text("可以离开此页面，恢复连接后会继续更新。")
+                .font(.footnote).foregroundStyle(.secondary)
         }
-        // Keep retry and cancellation as separate hit targets inside a Form row.
-        .buttonStyle(.bordered)
-        .controlSize(.large)
     }
 
     private func modalBinding(_ value: Modal) -> Binding<Bool> {

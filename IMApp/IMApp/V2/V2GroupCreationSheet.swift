@@ -1,4 +1,5 @@
 import SwiftUI
+import IMV2Core
 
 struct V2GroupCreationSheet: View {
     @Bindable var store: V2ConversationListStore
@@ -7,6 +8,9 @@ struct V2GroupCreationSheet: View {
     let created: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.v2UserInteractionContext) private var userContext
+    @State private var memberHandle = ""
+    @State private var memberFeedback: String?
+    @State private var didSubmit = false
     @State private var awaitingOperationID: String?
     @State private var choosingGroupFriends = false
     @State private var groupSubmissionTask: Task<Void, Never>?
@@ -17,40 +21,51 @@ struct V2GroupCreationSheet: View {
             Form {
                 Section("群名称") {
                     TextField("群名称", text: $groupTitle)
-                        .disabled(store.isCreatingGroupConversation)
+                        .disabled(store.isCreatingGroupConversation || store.activeGroupCreationOperationID != nil)
                         .accessibilityIdentifier("v2.conversation.group-title")
                 }
-                Section("初始成员") {
+                Section {
                     if userContext != nil {
-                        Button("从好友中选择", systemImage: "person.2") { choosingGroupFriends = true }
-                            .sheet(isPresented: $choosingGroupFriends) {
-                                if let context = userContext {
-                                    V2FriendPickerView(store: context.contacts) { handles in
-                                        let existing = groupMemberUserIDs.components(separatedBy: CharacterSet(charactersIn: ",\n"))
-                                        groupMemberUserIDs = Array(Set(existing.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } + handles)).sorted().joined(separator: ", ")
-                                    }
-                                }
-                            }
+                        Button("从好友中选择", systemImage: "person.badge.plus") { choosingGroupFriends = true }
+                            .accessibilityIdentifier("v2.conversation.group.choose-friends")
                     }
-                    TextEditor(text: $groupMemberUserIDs)
-                        .frame(minHeight: 110)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .disabled(store.isCreatingGroupConversation)
-                        .accessibilityLabel("初始成员公开 ID")
-                        .accessibilityHint("输入 @handle，用逗号或换行分隔；可留空创建仅自己的群聊")
-                        .accessibilityIdentifier("v2.conversation.group-members")
-                    Text("用逗号或换行分隔公开 ID，例如 @alice。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                    ForEach(selectedHandles, id: \.self) { handle in
+                        HStack(spacing: 12) {
+                            if let friend = userContext?.contacts.friends.first(where: { $0.handle == handle }) {
+                                V2ContactRow(item: friend)
+                            } else {
+                                Image(systemName: "person.crop.circle").font(.title2).foregroundStyle(.secondary)
+                                Text(handle)
+                            }
+                            Spacer()
+                            Button { remove(handle) } label: { Image(systemName: "minus.circle.fill").foregroundStyle(.red) }
+                                .buttonStyle(.borderless).accessibilityLabel("移除 \(handle)")
+                        }
+                    }
+                    if selectedHandles.isEmpty { Text("尚未选择成员").foregroundStyle(.secondary) }
+                } header: { Text("群成员（\(selectedHandles.count + 1)）") }
+                  footer: { Text("你将自动加入群聊，也可以创建后再邀请好友。") }
+                .disabled(store.isCreatingGroupConversation || store.activeGroupCreationOperationID != nil)
+                Section {
+                    DisclosureGroup("通过公开 ID 添加") {
+                        TextField("@handle", text: $memberHandle)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .accessibilityIdentifier("v2.conversation.group-members")
+                        Button("添加成员") {
+                            guard let handle = try? V2PublicHandle(memberHandle) else { memberFeedback = "请输入有效的公开 ID，例如 @alice。"; return }
+                            append([handle.description]); memberHandle = ""; memberFeedback = nil
+                        }
+                            .disabled(memberHandle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if let memberFeedback { Text(memberFeedback).font(.footnote).foregroundStyle(.red) }
+                    }
+                }.disabled(store.isCreatingGroupConversation || store.activeGroupCreationOperationID != nil)
                 if store.groupCreationNeedsConfirmation {
                     Button("继续核对建群结果") {
                         awaitingOperationID = store.activeGroupCreationOperationID
                         Task { await store.resumePendingGroupCreation() }
                     }
                 }
-                if let feedback = store.groupConversationFeedback {
+                if (didSubmit || store.activeGroupCreationOperationID != nil), let feedback = store.groupConversationFeedback {
                     Text(feedback)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("v2.conversation.group-feedback")
@@ -81,6 +96,7 @@ struct V2GroupCreationSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("创建") {
                         guard groupSubmissionTask == nil else { return }
+                        didSubmit = true
                         let title = groupTitle
                         let members = groupMemberUserIDs
                         groupSubmissionTask = Task {
@@ -104,6 +120,11 @@ struct V2GroupCreationSheet: View {
                     .accessibilityIdentifier("v2.conversation.group-submit")
                 }
             }
+            .sheet(isPresented: $choosingGroupFriends) {
+                if let context = userContext {
+                    V2FriendPickerView(store: context.contacts) { append($0) }
+                }
+            }
             .onAppear { awaitingOperationID = store.activeGroupCreationOperationID }
             .onChange(of: store.completedGroupCreation) { _, _ in openCompletedCreationIfNeeded() }
             .onDisappear {
@@ -114,6 +135,15 @@ struct V2GroupCreationSheet: View {
             }
         }
     }
+
+    private var selectedHandles: [String] {
+        groupMemberUserIDs.split(whereSeparator: { $0 == "," || $0 == "\n" })
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+    private func append(_ handles: [String]) {
+        groupMemberUserIDs = Array(Set(selectedHandles + handles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })).sorted().joined(separator: ", ")
+    }
+    private func remove(_ handle: String) { groupMemberUserIDs = selectedHandles.filter { $0 != handle }.joined(separator: ", ") }
 
     private func openCompletedCreationIfNeeded() {
         guard let result = store.completedGroupCreation, result.operationID == awaitingOperationID else { return }

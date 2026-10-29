@@ -325,6 +325,8 @@ struct V2GroupReadReceiptsSheet: View {
 /// 提供成员列表、成员增删与角色调整入口，所有变更都以任务串行化。
 struct V2GroupMembersSheet: View {
     @Environment(\.v2UserInteractionContext) private var userContext
+    @State private var addingMember = false
+    @State private var removal: V2GroupMemberItem?
     @State private var choosingFriend = false
     @Bindable var store: V2ConversationDetailStore
     @Environment(\.dismiss) private var dismiss
@@ -340,107 +342,50 @@ struct V2GroupMembersSheet: View {
         NavigationStack {
             List {
                 if store.canAddGroupMembers {
-                    Section("添加成员") {
-                        if userContext != nil {
-                            Button("从好友中选择", systemImage: "person.badge.plus") { choosingFriend = true }
-                                .sheet(isPresented: $choosingFriend) {
-                                    if let context = userContext {
-                                        V2FriendPickerView(store: context.contacts, maximumSelection: 1, excludedUserIDs: Set(store.groupMembers.map(\.id))) { handles in newMemberUserID = handles.first ?? "" }
-                                    }
-                                }
-                        }
-                        TextField("成员公开 ID（@handle）", text: $newMemberUserID)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .disabled(
-                                store.isLoadingGroupMembers
-                                    || store.isChangingGroupMembership
-                                    || store.isApplyingGroupModeration
-                            )
-                            .accessibilityIdentifier("v2.group.members.add-input")
-                        Button("添加") {
-                            let target = newMemberUserID
-                            runMembershipChange(target: target, action: .add)
-                        }
-                        .disabled(
-                            store.isLoadingGroupMembers
-                                || store.isChangingGroupMembership
-                                || store.isApplyingGroupModeration
-                                || newMemberUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        )
-                        .accessibilityValue(
-                            store.isChangingGroupMembership || store.isApplyingGroupModeration
-                                ? "正在保存成员变更"
-                                : ""
-                        )
-                        .accessibilityIdentifier("v2.group.members.add")
-                    }
-                }
-                if store.groupActorRole == "群主" || store.groupActorRole == "管理员" {
                     Section {
-                        Text("管理操作将在确认后提交；处理中请避免重复操作。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                        Button("添加群成员", systemImage: "person.badge.plus") { addingMember = true }
+                            .accessibilityIdentifier("v2.group.members.add-open")
                     }
                 }
+                Section("群成员（\(store.groupMembers.count)\(store.canLoadMoreGroupMembers ? "+" : "")）") {
                 if store.hasEarlierGroupMembers {
                     Button("返回成员列表开头") { Task { await store.loadGroupMembers(reset: true) } }
                 }
                 ForEach(store.groupMembers) { member in
                     HStack {
                         if let user = try? UserID(member.id), let key = store.groupPresentationKey(for: user) {
-                            Button { userProfile = .init(key: key) } label: { V2AuthorizedAvatarView(key: key, showsName: true) }
+                            Button { userProfile = .init(key: key) } label: {
+                                HStack(spacing: 12) {
+                                    V2AuthorizedAvatarView(key: key, size: 44)
+                                    V2AuthorizedProfileNameView(key: key).font(.body).foregroundStyle(.primary)
+                                }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                            }
                                 .buttonStyle(.plain).accessibilityLabel("查看成员资料")
                         }
                         Spacer()
                         Text(member.role).foregroundStyle(.secondary)
-                        if store.canChangeGroupMemberRole(member) {
+                        if store.canChangeGroupMemberRole(member) || store.canRemoveGroupMember(member) {
                             Menu {
-                                Button("设为管理员") { runRoleChange(member, role: .admin) }
-                                    .disabled(member.role == "管理员")
-                                    .accessibilityIdentifier("v2.group.member.role.admin.\(member.id)")
-                                Button("设为普通成员") { runRoleChange(member, role: .member) }
-                                    .disabled(member.role == "成员")
-                                    .accessibilityIdentifier("v2.group.member.role.member.\(member.id)")
-                            } label: {
-                                Image(systemName: "person.badge.key")
-                                    .frame(minWidth: 44, minHeight: 44)
-                                    .contentShape(.rect)
-                            }
-                            .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
-                            .accessibilityLabel("修改此成员的角色")
-                            .accessibilityHint("可设为管理员或普通成员")
-                            .accessibilityIdentifier("v2.group.member.role.\(member.id)")
-                        }
-                        if store.canRemoveGroupMember(member) {
-                            Menu {
-                                Button("禁言 1 小时") {
-                                    runMute(member)
+                                if store.canChangeGroupMemberRole(member) {
+                                    Button("设为管理员", systemImage: "person.badge.key") { runRoleChange(member, role: .admin) }
+                                        .disabled(member.role == "管理员")
+                                    Button("设为普通成员", systemImage: "person") { runRoleChange(member, role: .member) }
+                                        .disabled(member.role == "成员")
                                 }
-                                .accessibilityIdentifier("v2.group.member.mute.\(member.id)")
-                                Button("管理员移除", role: .destructive) {
-                                    pendingModeratedRemoval = member
+                                if store.canRemoveGroupMember(member) {
+                                    Button("禁言 1 小时", systemImage: "bell.slash") { runMute(member) }
+                                    Button("移出群聊", systemImage: "person.badge.minus", role: .destructive) { removal = member }
+                                    Button("管理员移除（填写原因）", role: .destructive) { pendingModeratedRemoval = member }
                                 }
-                                .accessibilityIdentifier("v2.group.member.moderated-remove.\(member.id)")
-                            } label: {
-                                Image(systemName: "shield")
-                                    .frame(minWidth: 44, minHeight: 44)
-                                    .contentShape(.rect)
-                            }
+                            } label: { Image(systemName: "ellipsis.circle").font(.title3).frame(minWidth: 44, minHeight: 44) }
                             .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
                             .accessibilityLabel("管理此成员")
-                            .accessibilityHint("可禁言一小时或执行带审计记录的管理员移除")
-                            .accessibilityIdentifier("v2.group.member.moderation.\(member.id)")
-                            Button("移除", role: .destructive) {
-                                runMembershipChange(target: member.id, action: .remove)
-                            }
-                            .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
-                            .accessibilityValue(store.isChangingGroupMembership || store.isApplyingGroupModeration ? "正在保存成员变更" : "")
-                            .accessibilityIdentifier("v2.group.member.remove.\(member.id)")
+                            .accessibilityIdentifier("v2.group.member.actions.\(member.id)")
                         }
                     }
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("v2.group.member.\(member.id)")
+                }
                 }
                 if store.canLeaveGroup {
                     Section {
@@ -484,7 +429,7 @@ struct V2GroupMembersSheet: View {
                         .accessibilityIdentifier("v2.group.members.close")
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("刷新") { Task { await store.loadGroupMembers(reset: true) } }
+                    Button("刷新", systemImage: "arrow.clockwise") { Task { await store.loadGroupMembers(reset: true) } }
                         .disabled(store.isLoadingGroupMembers)
                         .accessibilityValue(store.isLoadingGroupMembers ? "正在读取成员" : "")
                 }
@@ -494,6 +439,54 @@ struct V2GroupMembersSheet: View {
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("退出后将不能接收或发送该群的新消息。")
+            }
+            .refreshable { await store.loadGroupMembers(reset: true) }
+            .alert("移出这位成员？", isPresented: Binding(get: { removal != nil }, set: { if !$0 { removal = nil } })) {
+                Button("移出群聊", role: .destructive) { if let member = removal { removal = nil; runMembershipChange(target: member.id, action: .remove) } }
+                Button("取消", role: .cancel) { removal = nil }
+            } message: { Text("移出后，对方将无法接收该群的新消息。") }
+            .sheet(isPresented: $addingMember) {
+                NavigationStack {
+                    Form {
+                    Section("添加成员") {
+                        if userContext != nil {
+                            Button("从好友中选择", systemImage: "person.badge.plus") { choosingFriend = true }
+                                .sheet(isPresented: $choosingFriend) {
+                                    if let context = userContext {
+                                        V2FriendPickerView(store: context.contacts, maximumSelection: 1, excludedUserIDs: Set(store.groupMembers.map(\.id))) { handles in newMemberUserID = handles.first ?? "" }
+                                    }
+                                }
+                        }
+                        TextField("成员公开 ID（@handle）", text: $newMemberUserID)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .disabled(
+                                store.isLoadingGroupMembers
+                                    || store.isChangingGroupMembership
+                                    || store.isApplyingGroupModeration
+                            )
+                            .accessibilityIdentifier("v2.group.members.add-input")
+                        Button("添加") {
+                            let target = newMemberUserID
+                            runMembershipChange(target: target, action: .add)
+                        }
+                        .disabled(
+                            store.isLoadingGroupMembers
+                                || store.isChangingGroupMembership
+                                || store.isApplyingGroupModeration
+                                || newMemberUserID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
+                        .accessibilityValue(
+                            store.isChangingGroupMembership || store.isApplyingGroupModeration
+                                ? "正在保存成员变更"
+                                : ""
+                        )
+                        .accessibilityIdentifier("v2.group.members.add")
+                    }
+                    }
+                    .navigationTitle("添加群成员").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { addingMember = false } } }
+                }
             }
             .task { await store.loadGroupMembers(reset: true) }
             .sheet(item: $pendingModeratedRemoval) { member in
@@ -520,7 +513,7 @@ struct V2GroupMembersSheet: View {
         guard membershipChangeTask == nil else { return }
         membershipChangeTask = Task {
             let saved=await store.changeGroupMembership(targetUserID:target,action:action)
-            if saved,action == .add,newMemberUserID==target { newMemberUserID="" }
+            if saved,action == .add,newMemberUserID==target { newMemberUserID=""; addingMember = false }
             guard !Task.isCancelled else { return }
             membershipChangeTask = nil
         }

@@ -82,6 +82,20 @@ final class V2GroupAvatarManagementStore {
         startAction { epoch in await self.reload(epoch: epoch) }
     }
 
+    func importPhoto(_ photo: V2NormalizedPhoto) {
+        guard canUpload, let expected = authority?.state.revision else { return }
+        startAction { epoch in
+            let image = try await self.stager.stageNormalizedPhoto(photo, purpose: .groupAvatar(self.roomID))
+            guard !Task.isCancelled, self.activation == epoch else {
+                await self.stager.discard(image)
+                throw CancellationError()
+            }
+            await self.reloadSelections(epoch: epoch)
+            try await self.manager.change(roomID: self.roomID, expectedRevision: expected, image: image)
+            await self.reload(epoch: epoch)
+        }
+    }
+
     func importImage(from url: URL) {
         guard canUpload, let expected = authority?.state.revision else { return }
         startAction { epoch in

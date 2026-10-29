@@ -81,6 +81,49 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.buttons["v2.groups.room.00000000-0000-0000-0000-000000000105"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["My new group"].exists)
+        app.buttons["v2.groups.create"].tap()
+        XCTAssertTrue(app.textFields["v2.conversation.group-title"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["v2.conversation.group-feedback"].exists)
+    }
+
+    @MainActor
+    func testGroupCreationUsesSelectedMembersAndCompactHandleEntry() {
+        let app = launch("contacts")
+        let groups = app.buttons["v2.contacts.groups"]
+        XCTAssertTrue(groups.waitForExistence(timeout: 10)); groups.tap()
+        app.buttons["v2.groups.create"].tap()
+        XCTAssertFalse(app.textViews["v2.conversation.group-members"].exists)
+        XCTAssertFalse(app.staticTexts["v2.conversation.group-feedback"].exists)
+        app.buttons["通过公开 ID 添加"].tap()
+        let handle = app.textFields["v2.conversation.group-members"]
+        XCTAssertTrue(handle.waitForExistence(timeout: 5)); handle.tap(); handle.typeText("@alice")
+        app.buttons["添加成员"].tap()
+        let remove = app.buttons["移除 @alice"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5)); remove.tap()
+        XCTAssertTrue(app.staticTexts["尚未选择成员"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.lifetime = .keepAlways; add(screenshot)
+    }
+
+    @MainActor
+    func testGroupMembersSeparateManagementFromMemberRows() {
+        let app = launch()
+        let room = app.buttons["v2.conversation.group.00000000-0000-0000-0000-000000000101"]
+        XCTAssertTrue(room.waitForExistence(timeout: 10)); room.tap()
+        app.buttons["v2.conversation.detail.tools"].tap()
+        app.swipeUp()
+        let members = app.buttons["v2.group.members"]
+        XCTAssertTrue(members.waitForExistence(timeout: 5)); members.tap()
+        let actions = app.buttons["v2.group.member.actions.00000000-0000-0000-0000-000000000201"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.textFields["v2.group.members.add-input"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.lifetime = .keepAlways; add(screenshot)
+        actions.tap()
+        app.buttons["移出群聊"].tap()
+        XCTAssertTrue(app.alerts["移出这位成员？"].waitForExistence(timeout: 5))
+        app.alerts.buttons["取消"].tap()
+        app.buttons["v2.group.members.add-open"].tap()
+        XCTAssertTrue(app.textFields["v2.group.members.add-input"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["从好友中选择"].exists)
     }
 
     @MainActor

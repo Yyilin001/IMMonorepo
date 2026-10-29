@@ -1,0 +1,52 @@
+{
+  "date": "2026-10-29",
+  "status": "verified",
+  "changes": {
+    "creation": [
+      "Selected-member rows with individual removal and count including creator.",
+      "Compact disclosure for manual public ID entry, validation, no blank text editor.",
+      "Hide previous creation feedback until a current submission or active operation; keep automatic navigation after queued completion."
+    ],
+    "members": [
+      "Horizontal avatar/name/role rows.",
+      "Separate add-member sheet, friend picker retained.",
+      "Single management menu per eligible member, explicit confirmation before direct removal; audited removal, mute and role actions retain permission checks.",
+      "Pull to refresh, inline-title navigation and paging retained."
+    ],
+    "avatar": [
+      "Large standalone preview, album selection and shared square crop, chat-image and file options.",
+      "Normalized photos stage through the existing durable group-avatar flow.",
+      "Failure state and retry/cancel are independent native rows; refresh uses pull gesture."
+    ]
+  },
+  "verification": {
+    "first_log": "/tmp/im-group-ui-redesign-tests.log",
+    "first_result": "/tmp/im-group-ui-redesign-tests.xcresult",
+    "unit_tests": 11,
+    "ui_tests": 4,
+    "final_creation_log": "/tmp/im-group-ui-redesign-r2.log",
+    "final_creation_result": "/tmp/im-group-ui-redesign-r2.xcresult",
+    "final_creation_ui_tests": 2,
+    "visual_review": [
+      "/tmp/im-group-ui-redesign-screenshots/86FFF4D5-A60C-41E1-9BB2-A9E7B6DFC253.png",
+      "/tmp/im-group-ui-redesign-screenshots/A9EB9EBF-645B-4DB8-8CB9-B28D05931E9E.png",
+      "/tmp/im-group-ui-redesign-screenshots/17DEBA2B-9169-48ED-9510-6C13E2C380F1.png"
+    ],
+    "diff_check": "passed"
+  },
+  "source_sha256": {
+    "IMApp/IMApp/V2/V2GroupCreationSheet.swift": "217aa37c56f05b9c4fe0cc539fc4c6b41bf94506453becef9dfd709a93689827",
+    "IMApp/IMApp/V2/V2ConversationGroupManagementViews.swift": "6d65dfeea3d5d5803976d5a67266f2a50185737d6dd9980bafbd657c5a74163d",
+    "IMApp/IMApp/V2/V2GroupAvatarManagementStore.swift": "023cc2de17d2d50f5b1bde3aee18ad2dabdbd25018096440a3c3730d24d85009",
+    "IMApp/IMApp/V2/V2GroupAvatarManagementView.swift": "6cb6491bdfaf5b2632e70066167562c1afac51b5793290ba2d84ac0b4124222e",
+    "IMApp/IMApp/V2/V2ProfileAvatarEditor.swift": "f3ad77e48a7addf2796bbe25170b64169967b6a09f6ecb6b326b86e1724c069a",
+    "IMApp/IMApp/V2/V2MockPreview.swift": "4782b25470f61491fb43f19261b44b9ac1c581bf76aca5e02df38e9cf668faff",
+    "IMApp/IMAppTests/V2GroupAvatarManagementStoreTests.swift": "42763c7317dc51356467f304915ee169c61382ff609d80c506213ae0c5a5eaa0",
+    "IMApp/IMAppUITests/IMAppGlassPresentationUITests.swift": "d789ef30996f0b10bf5402eb71954c290c1a4b310bfb6e61f4ec05f68b42aadb"
+  },
+  "limits": [
+    "No physical-device installation, real group mutations or camera testing in this task. Photo decoding/cropping unit tests and durable normalized-photo staging test passed; real photo-library selection for group avatars still requires device verification.",
+    "Existing server-side avatar-import failure was not changed by this UI task.",
+    "Other concurrent search-field changes in this checkout are outside this feature."
+  ]
+}

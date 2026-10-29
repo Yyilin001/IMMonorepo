@@ -22,7 +22,7 @@ struct V2MockPreview: View {
         let notifier = V2ProjectionChangeNotifier()
         self.source = source
         self.notifier = notifier
-        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source, messageSearcher: ProcessInfo.processInfo.arguments.contains("-v2-mock-search") ? source : nil), messages: .init(sender: source), groups: .init(conversationCreator: source), discovery: .init(directConversationOpener: source), runtime: .init(projectionChangeNotifier: notifier))))
+        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source, messageSearcher: ProcessInfo.processInfo.arguments.contains("-v2-mock-search") ? source : nil), messages: .init(sender: source), groups: .init(conversationCreator: source, memberDirectory: source), discovery: .init(directConversationOpener: source), runtime: .init(projectionChangeNotifier: notifier))))
         _contacts = State(initialValue: .init(dataSource: source, identityResolver: source, relationshipChanger: source,
             userBlockChanger: source, directConversationOpener: source, currentUserID: source.user))
         _privacy = State(initialValue: .init(reader: source, updater: source))
@@ -176,11 +176,17 @@ private struct V2MockResourceBinding: V2InstallationBindingStore {
     func delete() throws { throw V2ResourceStorageError.unavailable }
 }
 
-private actor V2MockPreviewSource: V2GroupCreationRecovering, V2GroupDirectoryReading, V2ConversationDataSource, V2ConversationMessageSearching, V2ContactsReading, V2PublicIdentityPresentationResolving,
+private actor V2MockPreviewSource: V2GroupMemberDirectoryReading, V2GroupCreationRecovering, V2GroupDirectoryReading, V2ConversationDataSource, V2ConversationMessageSearching, V2ContactsReading, V2PublicIdentityPresentationResolving,
     V2RelationshipChanging, V2UserBlockChanging, V2DirectConversationOpening, V2StrangerMessagePreferenceReading, V2StrangerMessagePreferenceUpdating, V2GroupRolePolicyAccessing, V2ConversationSending {
     let user = try! UserID("00000000-0000-0000-0000-000000000001")
     private var sentMessages: [String: [V2ConversationMessageItem]] = [:]
     static let room = "00000000-0000-0000-0000-000000000101"
+    func members(in roomID: String, cursor: String?) async throws -> V2GroupMemberPage {
+        .init(membershipRevision: 1, actorRole: "群主", members: cursor == nil ? [
+            .init(id: user.rawValue, role: "群主"),
+            .init(id: "00000000-0000-0000-0000-000000000201", role: "成员")
+        ] : [], nextCursor: nil)
+    }
     private var createdGroupTitle: String?
     private var creationStatus: V2RestoredGroupConversationCreationStatus?
     private var creationContinuation: AsyncThrowingStream<Void, any Error>.Continuation?

@@ -210,7 +210,7 @@ private struct V2ProfileAvatarCamera: UIViewControllerRepresentable {
     }
 }
 
-private struct V2ProfileAvatarCropView: View {
+struct V2ProfileAvatarCropView: View {
     let photo: V2NormalizedPhoto
     let processor: V2ProfileAvatarImageProcessor
     let save: @MainActor (V2NormalizedPhoto) async -> String?
