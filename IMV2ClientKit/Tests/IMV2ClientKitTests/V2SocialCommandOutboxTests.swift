@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
@@ -84,4 +85,27 @@ private actor SocialOperationFixtureRemote:V2SocialOperationClient,V2AccountPref
         return .receipt(try .init(identity:command.identity,fingerprint:command.fingerprint,outcome:.applied(value:command.value,revision:command.expectedRevision+1),resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1000)))
     }
     func recover(_ command:V2AccountPreferenceCommand,action:V2OperationRecoveryRequest.Action) async throws -> V2AccountPreferenceRecoveryResult { try await submit(command) }
+}
+
+extension V2SocialOperationPersistenceTests {
+    @Test(arguments: [-120.0, 120.0])
+    func preferenceDraftUsesServerClock(skew: Double) async throws {
+        let account = UserID(uuid: UUID())
+        let url = FileManager.default.temporaryDirectory.appending(path: "preference-clock-" + UUID().uuidString).appending(path: "state.sqlite")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: .init(value: UUID()), userID: account)
+        let serverNow = Date().addingTimeInterval(-skew)
+        let service = V2AccountPreferenceService(accountID: account, store: store,
+            client: SocialOperationFixtureRemote(account: account), commandNow: { serverNow })
+        let draftID = try await service.enqueue(patch: .strangerMessage(.deny))
+        #expect(try await service.prepareNext())
+        let workID = try await store.databasePool.read { db in
+            try String.fetchOne(db, sql: "SELECT work_id FROM v2_account_preference_intents WHERE intent_id=?", arguments: [draftID.uuidString])
+        }
+        let id = try #require(workID.flatMap(UUID.init(uuidString:)))
+        let command = try await store.accountPreferenceCommand(workID: id)
+        let remaining = Double(command.firstSubmissionDeadlineMilliseconds) / 1000 - serverNow.timeIntervalSince1970
+        #expect(remaining > 100 && remaining <= 120)
+        try await store.close()
+    }
 }

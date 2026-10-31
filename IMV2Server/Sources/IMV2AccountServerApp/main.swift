@@ -401,19 +401,23 @@ enum IMV2AccountServerApp {
                             uploads: try V2BoundMediaProvider(database: ownerDatabase, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports)))
                     let retention = try V2MediaRetentionWorker(store: PostgresV2MediaRetentionStore(database: ownerDatabase))
                     let recovery = V2ResourceRecoveryWorker(database: ownerDatabase, service: resourceService)
-                    await runtimeTasks.start {
-                        while !Task.isCancelled {
-                            do {
-                                try await recovery.runOnce(limit: 16)
-                                try await resourceImports.runOnce(ownerID: ownerID, limit: 16)
-                                _ = try await scanner.runOnce(limit: 16)
-                                _ = try await retention.runOnce(limit: 16)
-                                _ = try await purger.runOnce(limit: 16)
-                            } catch is CancellationError { break
-                            } catch {
-                                V2ServiceLogging.logWorkerFailure(logger, worker: "resource_maintenance_worker", error: error)
+                    // Each durable queue owns its loop: a slow provider must not
+                    // delay expiry, crash recovery, or deletion on the same owner.
+                    let maintenance: [(String, @Sendable () async throws -> Void)] = [
+                        ("resource_recovery", { try await recovery.runOnce(limit: 16) }),
+                        ("resource_import", { try await resourceImports.runOnce(ownerID: ownerID, limit: 16) }),
+                        ("resource_scan", { _ = try await scanner.runOnce(limit: 16) }),
+                        ("resource_retention", { _ = try await retention.runOnce(limit: 16) }),
+                        ("resource_purge", { _ = try await purger.runOnce(limit: 16) })
+                    ]
+                    for (worker, runOnce) in maintenance {
+                        await runtimeTasks.start {
+                            while !Task.isCancelled {
+                                do { try await runOnce() }
+                                catch is CancellationError { break }
+                                catch { V2ServiceLogging.logWorkerFailure(logger, worker: worker, error: error) }
+                                do { try await v2Sleep(for: .milliseconds(200)) } catch { break }
                             }
-                            do { try await v2Sleep(for: .milliseconds(200)) } catch { break }
                         }
                     }
                 }

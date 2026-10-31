@@ -906,6 +906,47 @@ struct V2ConversationStoreTests {
         #expect(await sender.sentMessages() == [.init(text: "离线消息", roomID: "room-a")])
     }
 
+    @Test func fileImportBlocksSendAndPreservesTheImportedDraft() async throws {
+        let stager = V2SuspendingFileImportStager()
+        let sender = V2ConversationSenderFake(result: .queuedForRetry)
+        let store = makeConversationDetailStore(
+            dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: sender, userID: "current-user", roomID: "room-a", attachmentStager: stager)
+        store.draft = "File description"
+        let importing = Task { await store.stageAttachment(from: URL(fileURLWithPath: "/tmp/import.pdf")) }
+        await stager.waitUntilStarted()
+        await store.sendDraft()
+        #expect(await sender.sentMessages().isEmpty)
+        #expect(store.draft == "File description")
+        await stager.complete()
+        await importing.value
+        #expect(store.attachments.count == 1)
+        #expect(store.attachmentImportsInFlight == 0)
+        #expect(await stager.discarded == 0)
+    }
+
+    @Test func sendKeepsReplyFrozenDuringMentionResolution() async throws {
+        let resolver = V2CancellationIgnoringConversationPublicIdentityResolver()
+        let sender = V2ConversationSenderFake(result: .queuedForRetry)
+        let store = makeConversationDetailStore(
+            dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: sender, userID: "current-user", roomID: "room-group", kind: .group,
+            publicIdentityResolver: resolver)
+        let reply = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "Original",
+            createdAt: Date(), isOutgoing: false, isWithdrawn: false)
+        store.beginReply(to: reply)
+        store.draft = "Reply"
+        store.mentionHandlesText = "@other_user"
+        let sending = Task { await store.sendDraft() }
+        await resolver.waitUntilResolving()
+        store.cancelReply()
+        await resolver.completeResolution()
+        await sending.value
+        let messages = await sender.sentMessages()
+        #expect(messages.count == 1)
+        #expect(messages.first?.replyTo?.messageID.rawValue == reply.id)
+    }
+
     @Test func messageSendAllowsOnlyOneDurableSubmissionAtATime() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2SuspendingConversationSender()
@@ -5198,4 +5239,23 @@ private actor V2PreviewDemandGate: V2ConversationMediaDownloading {
 private actor FirstPreviewDecodeCount {
     private(set) var value = 0
     func record() { value += 1 }
+}
+
+private actor V2SuspendingFileImportStager: V2ConversationAttachmentStaging {
+    private var started = false
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+    var discarded = 0
+    func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) async throws -> V2StagedConversationAttachment {
+        started = true
+        startWaiter?.resume(); startWaiter = nil
+        await withCheckedContinuation { completion = $0 }
+        return .init(id: UUID(), displayName: "import.pdf", contentType: "application/pdf", byteCount: 42)
+    }
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
+    func complete() { completion?.resume(); completion = nil }
+    func discard(_ attachment: V2StagedConversationAttachment) { discarded += 1 }
 }

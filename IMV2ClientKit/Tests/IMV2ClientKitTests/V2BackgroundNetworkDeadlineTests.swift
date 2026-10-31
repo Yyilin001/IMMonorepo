@@ -164,6 +164,7 @@ private actor DeadlineSocketServer {
         case .clientHello:
             current = .hello
             response.serverHello = .init()
+            response.serverHello.serverTimeMs = Int64(Date().timeIntervalSince1970 * 1000)
             response.serverHello.selectedProtocolVersion = IMV2ProtocolVersion.current
             response.serverHello.selectedCapabilityProfile = "base"
         case .authenticate(let authentication):

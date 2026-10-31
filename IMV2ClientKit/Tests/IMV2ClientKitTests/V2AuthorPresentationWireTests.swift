@@ -406,6 +406,7 @@ private actor AuthorWirePeer {
         var response = IMV2Envelope(); response.requestID = request.requestID; response.protocolVersion = IMV2ProtocolVersion.current
         switch request.body {
         case .clientHello:
+            response.serverHello.serverTimeMs = Int64(Date().timeIntervalSince1970 * 1000)
             response.serverHello.selectedProtocolVersion = IMV2ProtocolVersion.current
             response.serverHello.selectedCapabilityProfile = "base"
             response.serverHello.authorPresentationStreamID = select ? streamID.uuidString : ""

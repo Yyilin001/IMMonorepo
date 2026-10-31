@@ -1027,6 +1027,7 @@ struct V2AppRealtimeRuntime {
         let connection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits,
                                               supportsAuthorPresentationDelta: true, workScheduler: accountRuntime.scheduler,
                                               testRoomNotificationInterceptor: testRoomNotificationInterceptor)
+        await localStore.useCommandTimeAnchor(connection.serverTime)
         testConnectionObserver?(connection)
         lastTimedOutRealtimeCommand = { await connection.lastTimedOutCommand() }
         let transport = V2ProtobufSyncTransport(
@@ -1047,7 +1048,8 @@ struct V2AppRealtimeRuntime {
             client:try V2HTTPSocialOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
         self.socialOperations=socialOperations
         let accountPreferences=V2AccountPreferenceService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
-            client:try V2HTTPAccountPreferenceOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+            client:try V2HTTPAccountPreferenceOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP),
+            commandNow: { try connection.serverTime.now() })
         self.accountPreferences=accountPreferences
         let groupCreationOperations=V2GroupCreationOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPGroupCreationOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))

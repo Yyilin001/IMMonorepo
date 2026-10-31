@@ -2460,6 +2460,7 @@ struct V2ConversationDetailView: View {
 
     private var canSendDraft: Bool {
         !store.isSending
+            && store.attachmentImportsInFlight == 0
             && !isImportingPhotos
             && store.directAccountKind != .system
             && store.canSendInDirectConversation != false

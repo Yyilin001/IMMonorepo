@@ -53,6 +53,9 @@ public protocol V2MediaScanStore: Sendable {
     /// - Throws: 持久化失败时抛出。
     func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2MediaScanLease]
 
+    /// Renew only a live claim with the same fencing token.
+    func renew(_ lease: V2MediaScanLease, now: Date, leaseDuration: TimeInterval) async throws -> Bool
+
     /// 记录扫描结论并推进媒体状态。
     ///
     /// - Parameters:
@@ -122,7 +125,7 @@ public struct V2MediaScanWorker: Sendable {
     ///   ``V2MediaScanWorkerError/invalidLeaseDuration``；并发非正时抛出
     ///   ``V2MediaScanWorkerError/invalidMaximumConcurrency``。
     public init(store: any V2MediaScanStore, provider: any V2MediaScanProvider, leaseDuration: TimeInterval = 30, retryPolicy: V2DurableRetryPolicy = .standard, maximumConcurrency: Int = 4, now: @escaping @Sendable () -> Date = Date.init) throws {
-        guard leaseDuration > 0 else { throw V2MediaScanWorkerError.invalidLeaseDuration }
+        guard leaseDuration.isFinite, leaseDuration > 0 else { throw V2MediaScanWorkerError.invalidLeaseDuration }
         guard maximumConcurrency > 0 else { throw V2MediaScanWorkerError.invalidMaximumConcurrency }
         self.store = store
         self.provider = provider
@@ -130,6 +133,24 @@ public struct V2MediaScanWorker: Sendable {
         self.retryPolicy = retryPolicy
         self.maximumConcurrency = maximumConcurrency
         self.now = now
+    }
+
+    private func scanWithLease(_ lease: V2MediaScanLease) async throws -> V2MediaScanResult {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(900))
+        return try await withThrowingTaskGroup(of: V2MediaScanResult.self) { group in
+            group.addTask { try await self.provider.scan(mediaID: lease.mediaID) }
+            group.addTask {
+                while true {
+                    try await Task.sleep(for: .seconds(min(self.leaseDuration / 3, 30)))
+                    guard ContinuousClock.now < deadline else { throw V2ResourceProviderError.temporarilyUnavailable }
+                    guard try await self.store.renew(lease, now: self.now(), leaseDuration: self.leaseDuration)
+                    else { throw V2MediaScanWorkerError.leaseLost }
+                }
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw CancellationError() }
+            return result
+        }
     }
 
     /// 执行一轮有界扫描。
@@ -157,9 +178,12 @@ public struct V2MediaScanWorker: Sendable {
             let batchOutcomes: [V2MediaWorkOutcome] = try await v2ProcessClaimedWorkBatch(
                 batch, initial: [], process: { lease in
                     do {
-                        let result = try await self.provider.scan(mediaID: lease.mediaID)
+                        let result = try await self.scanWithLease(lease)
+                        try Task.checkCancellation()
                         try await self.store.complete(lease, result: result, now: self.now())
                         return .completed
+                    } catch V2MediaScanWorkerError.leaseLost {
+                        return .released
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
@@ -190,6 +214,8 @@ public struct V2MediaScanWorker: Sendable {
 
 /// 媒体扫描工作器错误。
 public enum V2MediaScanWorkerError: Error, Equatable, Sendable {
+    /// The claim expired or was replaced; no scan result was committed.
+    case leaseLost
     /// 租约时长非正。
     case invalidLeaseDuration
     /// 单轮上限非正。

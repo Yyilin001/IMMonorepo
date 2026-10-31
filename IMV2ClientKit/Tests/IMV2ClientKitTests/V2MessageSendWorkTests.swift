@@ -624,3 +624,25 @@ private struct CorrelatedRejectedSendWorkRemote: V2MessageSendOperationClient {
             identity: identity, fingerprint: fingerprint)
     }
 }
+
+extension V2MessageSendWorkTests {
+    @Test(arguments: [-120.0, 30.0, 120.0])
+    func handoffFreezesServerDeadlineDespiteDeviceSkew(skew: Double) async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let localNow = Date()
+        let serverNow = localNow.addingTimeInterval(-skew)
+        let anchor = V2ServerTimeAnchor()
+        try anchor.observe(milliseconds: Int64(serverNow.timeIntervalSince1970 * 1000))
+        await f.store.useCommandTimeAnchor(anchor)
+        let intent = try f.intent("Clock skew")
+        try await f.store.freezeMetadataSendIntent(intent, now: localNow)
+        try await f.store.handOffSendIntent(intent.id, now: localNow)
+        let work = try await f.head()
+        let command = try await f.store.messageSendCommand(workID: work.id)
+        let remaining = Double(command.firstSubmissionDeadlineMilliseconds) / 1000 - serverNow.timeIntervalSince1970
+        #expect(remaining > 86_390 && remaining <= 86_400)
+        try await f.store.handOffSendIntent(intent.id, now: localNow.addingTimeInterval(60))
+        #expect(try await f.store.messageSendCommand(workID: work.id) == command)
+        try await f.store.close()
+    }
+}

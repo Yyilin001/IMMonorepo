@@ -6,6 +6,7 @@ import Foundation
 public struct V2LocalResourceScanner: V2ResourceScanner {
     public init() {}
     public func scan(_ input: V2StoredObjectFacts, storage: any V2ObjectStorage) async throws -> V2ResourceScanReceipt {
+        try Task.checkCancellation()
         let facts = try await storage.inspect(input.reference)
         guard facts == input else { throw V2ResourceProviderError.integrityMismatch }
         let stream = try await storage.read(input.reference)
@@ -13,6 +14,7 @@ public struct V2LocalResourceScanner: V2ResourceScanner {
         var tail = Data()
         var result = V2MediaScanResult.passed
         while let chunk = try await stream.next() {
+            try Task.checkCancellation()
             tail.append(chunk)
             if tail.range(of: marker) != nil { result = .failed }
             tail = Data(tail.suffix(marker.count - 1))

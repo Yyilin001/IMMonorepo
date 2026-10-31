@@ -95,6 +95,22 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
         }
     }
 
+    public func renew(_ lease: V2MediaScanLease, now: Date, leaseDuration: TimeInterval) async throws -> Bool {
+        guard let sql = database as? any SQLDatabase,
+              let expires = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let id = try mediaScanUUID(lease.mediaID)
+        return try await sql.raw("""
+            UPDATE im_v2.media_scan_outbox o SET lease_expires_at=\(bind: expires)
+            WHERE o.media_id=\(bind: id) AND o.state='claimed' AND o.claim_token=\(bind: lease.claimToken)
+              AND o.lease_expires_at>\(bind: now)
+              AND EXISTS(SELECT 1 FROM im_v2.media_objects m WHERE m.media_id=o.media_id
+                AND m.state='scanning' AND m.expires_at>\(bind: now))
+            RETURNING o.media_id
+            """).first() != nil
+    }
+
     /// 提交扫描结论。
     ///
     /// 仅当前未过期的 claim 可以提交；迟到结果不写状态，等待重新认领。
@@ -114,9 +130,9 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
                 SELECT media_id, lease_expires_at FROM im_v2.media_scan_outbox
                 WHERE media_id = \(bind: mediaID) AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
                 FOR UPDATE
-                """).first(decoding: MediaScanClaimRow.self) else { return }
+                """).first(decoding: MediaScanClaimRow.self) else { throw V2MediaScanWorkerError.leaseLost }
             let currentTime = try V2PersistenceTimestamp(date: now)
-            guard scan.leaseExpiresAt.microseconds > currentTime.microseconds else { return }
+            guard scan.leaseExpiresAt.microseconds > currentTime.microseconds else { throw V2MediaScanWorkerError.leaseLost }
             guard let media = try await sql.raw("SELECT state, expires_at FROM im_v2.media_objects WHERE media_id = \(bind: scan.mediaID) FOR UPDATE").first(decoding: MediaScanObjectRow.self), media.expiresAt.microseconds > currentTime.microseconds, media.state == "scanning" else {
                 try await sql.raw("""
                     UPDATE im_v2.media_scan_outbox

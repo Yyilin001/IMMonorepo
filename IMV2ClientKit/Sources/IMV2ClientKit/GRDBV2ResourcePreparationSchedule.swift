@@ -73,11 +73,11 @@ extension GRDBV2LocalSyncStore {
     public func resourceImportDeadline(_ id: UUID) throws -> Date? {
         try databasePool.read { try Double.fetchOne($0, sql: "SELECT round_deadline FROM v2_resource_import_jobs WHERE job_id=?", arguments: [id.uuidString]).map(Date.init(timeIntervalSince1970:)) }
     }
-    public func deferPreparedSendIntent(_ id: UUID, now: Date = Date()) throws {
+    public func deferPreparedSendIntent(_ id: UUID, now: Date = Date(), consumeAttempt: Bool = true) throws {
         try databasePool.write { db in
             let attempts = try Int.fetchOne(db, sql: "SELECT attempts FROM v2_send_intents WHERE intent_id=?", arguments: [id.uuidString]) ?? 0
             let delay = Double.random(in: 0.5...1) * min(30, pow(2, Double(min(attempts,5))))
-            try db.execute(sql: "UPDATE v2_send_intents SET attempts=attempts+1,retry_at=? WHERE intent_id=? AND stage='preparing'", arguments: [now.addingTimeInterval(delay).timeIntervalSince1970,id.uuidString])
+            try db.execute(sql: "UPDATE v2_send_intents SET attempts=attempts+?,retry_at=? WHERE intent_id=? AND stage='preparing'", arguments: [consumeAttempt ? 1 : 0,now.addingTimeInterval(consumeAttempt ? delay : 2).timeIntervalSince1970,id.uuidString])
         }
     }
     public func dueResourceImports(now: Date = Date()) throws -> [V2ResourceImportJob] {

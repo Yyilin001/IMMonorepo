@@ -350,6 +350,10 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
             try requireOpen()
             do { _ = try await store.handOffSendIntent(intent.id) }
             catch is CancellationError { throw CancellationError() }
+            catch V2ServerTimeAnchor.Failure.unavailable {
+                try requireOpen()
+                try await store.deferPreparedSendIntent(intent.id, consumeAttempt: false)
+            }
             catch { try requireOpen(); try await store.deferPreparedSendIntent(intent.id) }
         }
         // The outbox and byte journal have their own owners and DB schedules.

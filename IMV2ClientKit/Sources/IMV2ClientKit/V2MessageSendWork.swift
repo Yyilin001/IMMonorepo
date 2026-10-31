@@ -181,7 +181,7 @@ public actor V2MessageSendOperationService {
                 try await store.deferOperationWork(claim,until:max(retry ?? now,floor),code:hint.reason == .rateLimited ? "RATE_LIMITED" : "ADMISSION_UNAVAILABLE",scheduling:retry == nil ? .needsAttention : .backingOff,nextAction:claim.action)
             case .unresolved:
                 let now = Date()
-                let canResubmit = now.timeIntervalSince1970 * 1_000 < Double(command.firstSubmissionDeadlineMilliseconds)
+                let canResubmit = claim.work.admissionDeadline.map { now < $0 } ?? false
                 try await store.deferOperationWork(claim,
                     until: now.addingTimeInterval(V2NetworkWorkPolicy.acceptedResultPollDelay(attempt: claim.work.reconciliationRoundAttempts)),
                     code: "MESSAGE_SEND_UNRESOLVED",

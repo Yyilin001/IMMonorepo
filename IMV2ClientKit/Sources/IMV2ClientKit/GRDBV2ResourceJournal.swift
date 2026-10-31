@@ -261,10 +261,19 @@ extension GRDBV2LocalSyncStore {
                 media.append(.init(mediaID: transfer.request.mediaID))
             }
             guard let deadline=try Int64.fetchOne(db,sql:"SELECT admission_deadline FROM v2_send_intents WHERE intent_id=?",arguments:[id.uuidString]),deadline>0 else { throw V2OperationWorkError.invalidRecord }
-            let command=try Self.messageSendEnvelope(intent,media:media,deadline:UInt64(deadline),db:db)
+            let submissionDeadline: UInt64
+            if let anchor = commandTimeAnchor {
+                submissionDeadline = try anchor.submissionDeadline(localDeadline: UInt64(deadline), localNow: now,
+                    maximumRemainingSeconds: 86_395)
+            } else { submissionDeadline = UInt64(deadline) }
+            let command=try Self.messageSendEnvelope(intent,media:media,deadline:submissionDeadline,db:db)
             // Transfer the preparation reservation atomically, so a full queue still permits its own handoff.
             try db.execute(sql: "UPDATE v2_send_intents SET stage='handedOff' WHERE intent_id=?", arguments: [id.uuidString])
             let workID=try Self.insertMessageSendWork(command,intentID:id,now:now,limits:limits,db:db)
+            // Retry scheduling remains in the local clock domain; the immutable
+            // command envelope carries the separately anchored server deadline.
+            try db.execute(sql: "UPDATE v2_operation_work SET admission_deadline=? WHERE work_id=?",
+                arguments: [Double(deadline) / 1000, workID.uuidString])
             try db.execute(sql:"UPDATE v2_send_intents SET work_id=? WHERE intent_id=?",arguments:[workID.uuidString,id.uuidString])
             return intent.clientMessageID
         }

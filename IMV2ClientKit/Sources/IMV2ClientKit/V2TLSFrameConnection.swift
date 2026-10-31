@@ -349,6 +349,7 @@ struct V2NetworkTLSByteConnection: V2TLSByteConnection {
 /// 每轮连接持有独立代际与接收缓冲，异步操作恢复时核对代际，防止旧回调影响替换连接。
 public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2AccountRoomChangeSource, V2LiveActivityEventSource, V2AuthorPresentationSource, V2RealtimeConnection, V2RealtimeCoverageSource, V2RoomProgressConnection {
     /// 每代创建新字节连接的工厂。
+    public nonisolated let serverTime = V2ServerTimeAnchor()
     private let connectionFactory: @Sendable () -> any V2TLSByteConnection
     /// 当前连接允许占用的在途关联槽位上限。
     private let maximumPendingRequests: Int
@@ -579,6 +580,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                   let userID = try? UserID(response.userID)
             else { throw V2TLSFrameConnectionError.invalidHandshake }
             try requireGeneration(generation)
+            try serverTime.observe(milliseconds: serverHello.serverTimeMs)
             authenticatedVersion = version
             if version >= 45, serverHello.supportsMessageSendOperations,
                response.supportsMessageSendOperations,
@@ -1179,6 +1181,12 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         }
         guard let waiter = responseWaiters[frame.requestID] else {
             throw V2TLSFrameConnectionError.unexpectedResponse
+        }
+        if waiter.command == .heartbeat {
+            let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)
+            if case .heartbeatAck(let ack)? = envelope.body {
+                try serverTime.observe(milliseconds: ack.serverTimeMs)
+            }
         }
         if waiter.command == .authorPresentationStart {
             let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)

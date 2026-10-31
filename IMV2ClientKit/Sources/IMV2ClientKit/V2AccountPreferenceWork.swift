@@ -15,7 +15,7 @@ extension GRDBV2LocalSyncStore {
     );
     CREATE INDEX v2_account_preference_operations_target ON v2_account_preference_operations(preference_kind);
     """
-    @discardableResult public func enqueueAccountPreference(_ command:V2AccountPreferenceCommand,now:Date=Date()) throws -> UUID {
+    @discardableResult public func enqueueAccountPreference(_ command:V2AccountPreferenceCommand,now:Date=Date(),localAdmissionDeadline:Date?=nil) throws -> UUID {
         let identity=command.identity,fingerprint=try command.fingerprint
         let encoder=JSONEncoder();encoder.outputFormatting=[.sortedKeys]
         let bytes=try encoder.encode(command)
@@ -29,7 +29,7 @@ extension GRDBV2LocalSyncStore {
             // A frozen operation cannot be merged with a later click or silently rebased.
             guard try Int.fetchOne(db,sql:"SELECT count(*) FROM v2_account_preference_operations s JOIN v2_operation_work w USING(work_id) WHERE s.preference_kind=? AND w.scheduling_state<>'finished'",arguments:[command.identity.kind.rawValue])==0 else { throw V2OperationWorkError.invalidTransition }
             let id=UUID()
-            try Self.insertOperationWork(.init(id:id,intentID:id,identity:identity,fingerprint:fingerprint,orderingKey:"accountPreference:"+command.identity.accountID.rawValue+":"+command.identity.kind.rawValue,payloadBytes:Int64(bytes.count)+65_536,admissionDeadline:Date(timeIntervalSince1970:Double(command.firstSubmissionDeadlineMilliseconds)/1000)),now:now,limits:.init(),db:db)
+            try Self.insertOperationWork(.init(id:id,intentID:id,identity:identity,fingerprint:fingerprint,orderingKey:"accountPreference:"+command.identity.accountID.rawValue+":"+command.identity.kind.rawValue,payloadBytes:Int64(bytes.count)+65_536,admissionDeadline:localAdmissionDeadline ?? Date(timeIntervalSince1970:Double(command.firstSubmissionDeadlineMilliseconds)/1000)),now:now,limits:.init(),db:db)
             try db.execute(sql:"INSERT INTO v2_account_preference_operations(work_id,preference_kind,command) VALUES(?,?,?)",arguments:[id.uuidString,command.identity.kind.rawValue,bytes])
             return id
         }

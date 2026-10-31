@@ -850,7 +850,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 lease = try #require(try await scans.claimPending(now: base.addingTimeInterval(60), leaseDuration: 30, limit: 1).first)
                 #expect(lease.claimToken != oldLease.claimToken)
                 let reclaimed = try await snapshot()
-                try await scans.complete(oldLease, result: result, now: base.addingTimeInterval(61))
+                await #expect(throws: V2MediaScanWorkerError.leaseLost) { try await scans.complete(oldLease, result: result, now: base.addingTimeInterval(61)) }
                 #expect(try await snapshot() == reclaimed)
                 completedAt = base.addingTimeInterval(61)
             }
@@ -863,7 +863,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await sql.raw("SELECT state = 'completed' AND completed_at = \(bind: completedAt) AND claim_token IS NULL AND lease_expires_at IS NULL AND next_attempt_at IS NULL AND paused_at IS NULL AS exists FROM im_v2.media_scan_outbox").first(decoding: ExistsRow.self)?.exists == true)
             #expect(try await uploads.status(session: upload.sessionID, actor: senderUUID, device: device.uuidValue!).mediaState == (passed ? "available" : "failed"))
             let scanned = try await snapshot()
-            try await scans.complete(lease, result: passed ? .failed : .passed, now: completedAt.addingTimeInterval(1))
+            await #expect(throws: V2MediaScanWorkerError.leaseLost) { try await scans.complete(lease, result: passed ? .failed : .passed, now: completedAt.addingTimeInterval(1)) }
             #expect(try await snapshot() == scanned)
             if !passed { return }
             let sender = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
@@ -1049,6 +1049,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await snapshot() == initial)
             let firstScan = try #require(try await scan.claimPending(now: base, leaseDuration: 30, limit: 1).first)
             let firstPurge = try #require(try await purge.claimPending(now: base, leaseDuration: 30, limit: 1).first)
+            #expect(try await scan.renew(firstScan, now: base, leaseDuration: 30))
+            let wrongClaim = V2MediaScanLease(mediaID: firstScan.mediaID, claimToken: UUID())
+            #expect(try await !scan.renew(wrongClaim, now: base, leaseDuration: 30))
+            #expect(try await !scan.renew(firstScan, now: base.addingTimeInterval(30), leaseDuration: 30))
             let claimed = try await snapshot()
             for invalid in badDates {
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await scan.complete(firstScan, result: .passed, now: invalid) }
@@ -1066,7 +1070,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(nextScan.attempt == 2 && nextScan.claimToken != firstScan.claimToken)
             #expect(nextPurge.attempt == 2 && nextPurge.claimToken != firstPurge.claimToken)
             let reclaimed = try await snapshot()
-            try await scan.complete(firstScan, result: .passed, now: badDates[0])
+            await #expect(throws: V2MediaScanWorkerError.leaseLost) { try await scan.complete(firstScan, result: .passed, now: badDates[0]) }
             try await purge.markCompleted(firstPurge, now: base)
             try await scan.scheduleRetry(firstScan, disposition: .retry(at: base), now: badDates[0])
             try await purge.scheduleRetry(firstPurge, disposition: .retry(at: base), now: badDates[0])

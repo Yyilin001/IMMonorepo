@@ -108,6 +108,7 @@ private actor V2OSSRangeReader {
         self.client = client; self.key = key; self.size = size; self.etag = etag; self.expectedHash = expectedHash
     }
     func next() async throws -> Data? {
+        try Task.checkCancellation()
         guard !reading, !failed else { throw V2ResourceProviderError.preconditionFailed }
         guard offset < size else { return nil }
         reading = true

@@ -1216,7 +1216,10 @@ final class V2ConversationDetailStore {
         catch { if trackedSendIntentID == id { sendFeedback = "暂时无法确认发送状态，请查看待处理消息。" } }
     }
 
+    private(set) var attachmentImportsInFlight = 0
+
     func sendDraft() async {
+        guard attachmentImportsInFlight == 0 else { return }
         guard await restoreAttachmentDraft() else { return }
         guard !isSending else { return }
         guard isGroupConversation || canSendInDirectConversation != false else {
@@ -1242,7 +1245,7 @@ final class V2ConversationDetailStore {
             // staged attachment state.
             let mentions = try await resolvedMentions()
             try Task.checkCancellation()
-            if !attachments.isEmpty {
+            if !frozenAttachments.isEmpty {
                 guard let durable = resourceSender else {
                     sendFeedback = "附件发送暂不可用。"
                     return
@@ -1258,7 +1261,7 @@ final class V2ConversationDetailStore {
                 sendFeedback = nil
                 return
             }
-            let replyTo = replyTarget.flatMap { try? V2MessageReplyReference(messageID: .init($0.id)) }
+            let replyTo = try frozenReplyTarget.map { try V2MessageReplyReference(messageID: .init($0.id)) }
             let outcome: V2ConversationSendOutcome
             if let tracking = sender as? any V2ConversationSendTracking {
                 trackedSendIntentID = try await tracking.enqueueTracked(text: text, mentions: mentions, entities: [], replyTo: replyTo, roomID: roomID)
@@ -1383,6 +1386,7 @@ final class V2ConversationDetailStore {
 
     var canAddAttachment: Bool {
         !isSending
+            && attachmentImportsInFlight == 0
             && (isGroupConversation || canSendInDirectConversation != false)
             && attachments.count < V2MessageCommandLimits.maxMediaAttachments
             && !attachments.contains(where: { $0.state == .uploading })
@@ -1408,6 +1412,8 @@ final class V2ConversationDetailStore {
             sendFeedback = "附件暂不可用。"
             return
         }
+        attachmentImportsInFlight += 1
+        defer { attachmentImportsInFlight -= 1 }
         do {
             let purpose = V2LocalResourceAssetPurpose.messageDraft(try .init(roomID))
             let attachment: V2StagedConversationAttachment

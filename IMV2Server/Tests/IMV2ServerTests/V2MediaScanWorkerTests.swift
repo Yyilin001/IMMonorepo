@@ -88,6 +88,7 @@ private actor RecordingMediaScanStore: V2MediaScanStore {
     private var retryValues: [Retry] = []
     init(leases: [V2MediaScanLease]) { self.leases = leases }
     func claimPending(now _: Date, leaseDuration _: TimeInterval, limit: Int) -> [V2MediaScanLease] { Array(leases.prefix(limit)) }
+    func renew(_ lease: V2MediaScanLease, now: Date, leaseDuration: TimeInterval) -> Bool { true }
     func complete(_ lease: V2MediaScanLease, result: V2MediaScanResult, now _: Date) { completionValues.append(.init(lease: lease, result: result)) }
     func scheduleRetry(_ lease: V2MediaScanLease, disposition: V2DurableRetryDisposition, now _: Date) {
         retryValues.append(.init(lease: lease, disposition: disposition))
@@ -142,6 +143,7 @@ private actor BoundedScanClaimStore: V2MediaScanStore {
         for lease in result { active[lease.claimToken] = now.addingTimeInterval(leaseDuration) }
         return result
     }
+    func renew(_ lease: V2MediaScanLease, now: Date, leaseDuration: TimeInterval) -> Bool { true }
     func complete(_ lease: V2MediaScanLease, result: V2MediaScanResult, now: Date) throws {
         let savedDeadline = active.removeValue(forKey: lease.claimToken)
         let deadline = try #require(savedDeadline)
@@ -153,4 +155,51 @@ private actor BoundedScanClaimStore: V2MediaScanStore {
     func evidence() -> (limits: [Int], times: [Date], remaining: Int, active: Int, claimedWhileBusy: Bool, expired: Int) {
         (limits, times, pending.count, active.count, claimedWhileBusy, expired)
     }
+}
+
+extension V2MediaScanWorkerTests {
+    @Test("a long scan renews its live claim before completing")
+    func longScanRenews() async throws {
+        let store = RenewingScanStore(allowRenewal: true)
+        let worker = try V2MediaScanWorker(store: store, provider: SlowRenewalScanner(), leaseDuration: 0.03)
+        let report = try await worker.runOnce(limit: 1)
+        #expect(report.completedCount == 1)
+        #expect(await store.renewals > 0)
+    }
+
+    @Test("losing a scan claim cancels work and never counts completion")
+    func lostClaimDoesNotComplete() async throws {
+        let store = RenewingScanStore(allowRenewal: false)
+        let worker = try V2MediaScanWorker(store: store, provider: SlowRenewalScanner(), leaseDuration: 0.03)
+        let report = try await worker.runOnce(limit: 1)
+        #expect(report.completedCount == 0)
+        #expect(report.releasedCount == 1)
+        #expect(await store.completions == 0)
+    }
+}
+
+private struct SlowRenewalScanner: V2MediaScanProvider {
+    func scan(mediaID: MediaID) async throws -> V2MediaScanResult {
+        try await Task.sleep(for: .milliseconds(80))
+        return .passed
+    }
+}
+
+private actor RenewingScanStore: V2MediaScanStore {
+    let allowRenewal: Bool
+    var renewals = 0
+    var completions = 0
+    private var claimed = false
+    init(allowRenewal: Bool) { self.allowRenewal = allowRenewal }
+    func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) -> [V2MediaScanLease] {
+        guard !claimed else { return [] }
+        claimed = true
+        return [.init(mediaID: .init(uuid: UUID()), claimToken: UUID())]
+    }
+    func renew(_ lease: V2MediaScanLease, now: Date, leaseDuration: TimeInterval) -> Bool {
+        renewals += 1
+        return allowRenewal
+    }
+    func complete(_ lease: V2MediaScanLease, result: V2MediaScanResult, now: Date) { completions += 1 }
+    func scheduleRetry(_ lease: V2MediaScanLease, disposition: V2DurableRetryDisposition, now: Date) {}
 }

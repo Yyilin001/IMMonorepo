@@ -3,6 +3,7 @@ import GRDB
 import IMV2Core
 
 public actor V2AccountPreferenceService {
+    private let commandNow: @Sendable () throws -> Date
     private let activationID:UUID
     private var confirmationEnds:[UUID:ContinuousClock.Instant]=[:]
     private var preparationEnds:[UUID:ContinuousClock.Instant]=[:]
@@ -11,7 +12,7 @@ public actor V2AccountPreferenceService {
     private let store:GRDBV2LocalSyncStore
     private let client:any V2AccountPreferenceClient
     private var deadlines:[UUID:ContinuousClock.Instant]=[:]
-    public init(accountID:UserID,activationID:UUID=UUID(),store:GRDBV2LocalSyncStore,client:any V2AccountPreferenceClient) { self.activationID=activationID;self.accountID=accountID;self.store=store;self.client=client }
+    public init(accountID:UserID,activationID:UUID=UUID(),store:GRDBV2LocalSyncStore,client:any V2AccountPreferenceClient, commandNow: @escaping @Sendable () throws -> Date = { Date() }) { self.commandNow=commandNow; self.activationID=activationID;self.accountID=accountID;self.store=store;self.client=client }
     public func updates() -> AsyncThrowingStream<[V2AccountPreferencePending],any Error> { store.accountPreferenceUpdates() }
     public func cachedBaseline(kind:V2OperationKind) async throws -> V2AccountPreferenceSnapshot? { try await store.cachedAccountPreference(kind:kind) }
     public func refreshAuthority() async {
@@ -71,7 +72,11 @@ public actor V2AccountPreferenceService {
             try await store.saveAccountPreferenceAuthority(snapshot)
             let value=try draft.patch.applying(to:snapshot),reference:V2OperationReference
             switch value { case .strangerMessage:reference = .strangerMessagePreference(.init(uuid:draft.id));case .userAdd:reference = .userAddPreference(.init(uuid:draft.id));case .readReceipt:reference = .readReceiptPreference(.init(uuid:draft.id));case .liveActivity:reference = .liveActivityPreference(.init(uuid:draft.id)) }
-            let command=try V2AccountPreferenceCommand(identity:.init(accountID:accountID,scope:.account(accountID),operation:reference),value:value,expectedRevision:snapshot.revision,firstSubmissionDeadlineMilliseconds:UInt64(draft.deadline.timeIntervalSince1970*1000))
+            let remaining = ContinuousClock.now.duration(to: confirmationEnd).components
+            let remainingSeconds = Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18
+            guard remainingSeconds > 5 else { throw V2ServerTimeAnchor.Failure.submissionExpired }
+            let serverDeadline = try commandNow().addingTimeInterval(min(remainingSeconds - 5, 115))
+            let command=try V2AccountPreferenceCommand(identity:.init(accountID:accountID,scope:.account(accountID),operation:reference),value:value,expectedRevision:snapshot.revision,firstSubmissionDeadlineMilliseconds:UInt64(serverDeadline.timeIntervalSince1970*1000))
             let workID=try await store.freezeAccountPreferenceDraft(draft,command:command);deadlines[workID]=confirmationEnd;confirmationEnds.removeValue(forKey:draft.id);preparationEnds.removeValue(forKey:draft.id)
         } catch is CancellationError { try await store.deferAccountPreferenceDraft(id:draft.id,until:Date(),paused:false);throw CancellationError() }
         catch {
@@ -93,10 +98,10 @@ public actor V2AccountPreferenceService {
         case .liveActivity:reference = .liveActivityPreference(.init(uuid:UUID()))
         }
         let identity=try V2OperationIdentity(accountID:accountID,scope:.account(accountID),operation:reference)
-        let timestamp=confirmedAt.timeIntervalSince1970*1000
+        let timestamp=try commandNow().timeIntervalSince1970*1000
         guard timestamp.isFinite,timestamp>0,timestamp<Double(Int64.max-120_000) else { throw V2OperationWorkError.invalidRecord }
         let command=try V2AccountPreferenceCommand(identity:identity,value:value,expectedRevision:snapshot.revision,firstSubmissionDeadlineMilliseconds:UInt64(timestamp)+V2ClientSubmissionWindow.confirmationMilliseconds)
-        let id=try await store.enqueueAccountPreference(command);deadlines[id]=deadline;return id
+        let id=try await store.enqueueAccountPreference(command,localAdmissionDeadline:confirmedAt.addingTimeInterval(V2ClientSubmissionWindow.confirmationSeconds));deadlines[id]=deadline;return id
     }
     public func resumeConfirmation(workID:UUID) async throws {
         guard let work=try await store.operationWork(id:workID),work.identity.accountID==accountID,[.strangerMessagePreference,.userAddPreference,.readReceiptPreference,.liveActivityPreference].contains(work.identity.kind) else { throw V2OperationWorkError.accountMismatch }
@@ -106,7 +111,7 @@ public actor V2AccountPreferenceService {
         guard claim.work.identity.accountID==accountID,[.strangerMessagePreference,.userAddPreference,.readReceiptPreference,.liveActivityPreference].contains(claim.work.identity.kind) else { throw V2OperationWorkError.accountMismatch }
         let command=try await store.accountPreferenceCommand(workID:claim.work.id)
         guard command.identity==claim.work.identity,try command.fingerprint==claim.work.fingerprint else { throw V2OperationWorkError.identityConflict }
-        let remaining=max(0,Double(command.firstSubmissionDeadlineMilliseconds)/1000-Date().timeIntervalSince1970)
+        let remaining=max(0,(claim.work.admissionDeadline ?? Date()).timeIntervalSinceNow)
         let local=deadlines[claim.work.id] ?? ContinuousClock.now.advanced(by:.seconds(min(remaining,120)))
         deadlines[claim.work.id]=local
         do {

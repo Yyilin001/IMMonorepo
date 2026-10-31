@@ -556,6 +556,7 @@ actor TLSTestPeer {
         switch envelope.body {
         case .clientHello:
             response.serverHello = .init()
+            response.serverHello.serverTimeMs = Int64(Date().timeIntervalSince1970 * 1000)
             response.serverHello.selectedProtocolVersion = IMV2ProtocolVersion.current
             response.serverHello.selectedCapabilityProfile = "base"
         case .authenticate(let auth):
@@ -654,6 +655,7 @@ actor TLSTestPeer {
         var stale = IMV2GroupEventProgressState()
         stale.roomID = room; stale.scopeGeneration = 1; stale.highWatermark = 99; stale.ready = true
         var reply = IMV2Envelope(); reply.protocolVersion = IMV2ProtocolVersion.current; reply.requestID = requestID
+        reply.heartbeatAck.serverTimeMs = Int64(Date().timeIntervalSince1970 * 1000)
         reply.heartbeatAck.roomSubscriptionStates = [stale]
         bytes.append(try V2FrameCodec.encode(V2ProtobufFrameCodec.encode(reply,
             frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits()))

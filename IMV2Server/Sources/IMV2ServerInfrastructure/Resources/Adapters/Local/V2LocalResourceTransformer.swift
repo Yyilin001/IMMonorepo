@@ -40,6 +40,7 @@ public struct V2LocalResourceTransformer: V2ResourceTransformer {
             var total:Int64=0
             var digest = SHA256()
             while let chunk=try await stream.next() {
+                try Task.checkCancellation()
                 digest.update(data: chunk)
                 total += Int64(chunk.count)
                 guard total <= input.byteCount else { throw V2ResourceProviderError.integrityMismatch }
