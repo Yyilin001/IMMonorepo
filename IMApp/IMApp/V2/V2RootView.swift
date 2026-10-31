@@ -529,13 +529,6 @@ struct V2SignedInRootView: View {
                         }
                         .accessibilityIdentifier("v2.message.favorites")
                     }
-                    Section("同步") {
-                        Button("刷新", systemImage: "arrow.clockwise") { Task { await conversationStore.refresh() } }
-                            .accessibilityIdentifier("v2.conversation.refresh")
-                        if conversationStore.preferenceActivity != nil {
-                            Button("待同步设置", systemImage: "arrow.triangle.2.circlepath") { rootNavigation.conversationAction = .preferences }
-                        }
-                    }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
