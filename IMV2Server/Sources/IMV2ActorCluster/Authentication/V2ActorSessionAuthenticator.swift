@@ -319,6 +319,10 @@ public final class V2ActorSessionAuthenticator: Sendable {
         case .invoke(let token, let request):
             guard token.host == host, token.roomID == request.roomID else { throw V2ActorAuthenticationError.wrongRecipient }
             switch request {
+            case .mediaAuthorization(.profileVisibilityCohort(let cohort)):
+                guard call.principal == .service, peer.permissions.contains(.userRoomCalls),
+                      peer.permissions.contains(.roomCoordination) else { throw V2ActorAuthenticationError.forbidden }
+                guard cohort.validatedTargetCount != nil else { throw V2ActorAuthenticationError.invalidRequest }
             case .roomSubscription(let command):
                 guard call.principal == .user(command.actorUserID),
                       peer.permissions.contains(.userRoomCalls), peer.permissions.contains(.realtimeReceive),

@@ -70,7 +70,6 @@ extension GRDBV2LocalSyncStore {
             try db.execute(sql: currentSchemaSQL)
             let accountObjects = Set(try resourceSchemaObjects(db).map(\.name))
             for statement in resourceSchemaStatements { try db.execute(sql: statement) }
-            try db.execute(sql: localResourceImageDimensionsSchemaSQL)
             return try resourceSchemaObjects(db).filter { !accountObjects.contains($0.name) }
         }
     }

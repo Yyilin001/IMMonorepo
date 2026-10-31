@@ -20,12 +20,12 @@ actor V2ProfileControlBatcher {
         init(maximumKeys: Int = 100, maximumBytes: Int = 64 * 1024,
              maximumPendingKeys: Int = 400, maximumPendingBytes: Int = 256 * 1024,
              maximumInFlight: Int = 4, delay: Duration = .milliseconds(3),
-             maximumQueueWait: Duration = .milliseconds(5)) {
+             maximumQueueWait: Duration = .milliseconds(100)) {
             precondition((1...100).contains(maximumKeys) && (256...65_536).contains(maximumBytes))
             precondition(maximumPendingKeys >= maximumKeys && maximumPendingKeys <= 400)
             precondition(maximumPendingBytes >= maximumBytes && maximumPendingBytes <= 262_144)
             precondition((1...4).contains(maximumInFlight) && delay >= .zero && delay <= .milliseconds(5))
-            precondition(maximumQueueWait >= delay && maximumQueueWait <= .milliseconds(5))
+            precondition(maximumQueueWait >= delay && maximumQueueWait <= .milliseconds(100))
             self.maximumKeys = maximumKeys; self.maximumBytes = maximumBytes
             self.maximumPendingKeys = maximumPendingKeys; self.maximumPendingBytes = maximumPendingBytes
             self.maximumInFlight = maximumInFlight; self.delay = delay; self.maximumQueueWait = maximumQueueWait
@@ -37,15 +37,17 @@ actor V2ProfileControlBatcher {
         let executedBatches: Int; let executedRequests: Int; let executedKeys: Int; let rejected: Int
     }
     private struct Entry: Sendable {
-        let id: UUID; let request: V2ProfileControlRequest; let bytes: Int
+        let id: UUID; let requests: [V2ProfileControlRequest]; let bytes: Int
+        var keyCount: Int { requests.reduce(0) { $0 + $1.keys.count } }
         let deadline: ContinuousClock.Instant; let readyAt: ContinuousClock.Instant; let queueExpiresAt: ContinuousClock.Instant
     }
     typealias Execute = @Sendable ([V2ProfileControlRequest], ContinuousClock.Instant) async throws -> [Result<V2ProfileControlSnapshot, any Error>]
     private let execute: Execute
+    private let closeProfiles: @Sendable () async -> Void
     private let configuration: Configuration
     private var pending: [Entry] = []
     private var pendingKeys = 0, pendingBytes = 0
-    private var waiters: [UUID: CheckedContinuation<V2ProfileControlSnapshot, any Error>] = [:]
+    private var waiters: [UUID: CheckedContinuation<[Result<V2ProfileControlSnapshot, any Error>], any Error>] = [:]
     private var activeEntries: [UUID: Entry] = [:]
     private var flights: [UUID: Task<Void, Never>] = [:]
     private var timer: Task<Void, Never>?
@@ -57,19 +59,22 @@ actor V2ProfileControlBatcher {
         configuration = .init()
         let reader = PostgresV2ProfileControlReader(database: database)
         execute = { try await reader.read($0, deadline: $1) }
+        closeProfiles = { await reader.profiles.close() }
     }
 
     // The production initializer always installs the authoritative SQL reader.
     init(configuration: Configuration, execute: @escaping Execute) {
-        self.configuration = configuration; self.execute = execute
+        self.configuration = configuration; self.execute = execute; closeProfiles = {}
     }
 
-    func read(_ request: V2ProfileControlRequest, deadline: ContinuousClock.Instant) async throws -> V2ProfileControlSnapshot {
-        try request.validate()
-        let bytes = try PostgresV2ProfileControlReader.payload([request]).count
+    func readMany(_ requests: [V2ProfileControlRequest], deadline: ContinuousClock.Instant) async throws -> [Result<V2ProfileControlSnapshot, any Error>] {
+        guard !requests.isEmpty, requests.count <= 100 else { throw V2ProfileViewReadError.invalidRequest }
+        for request in requests { try request.validate() }
+        let keyCount = requests.reduce(0) { $0 + $1.keys.count }
+        let bytes = try PostgresV2ProfileControlReader.payload(requests).count
         // Ordinals gain at most two decimal digits when this request is merged.
-        let chargedBytes = bytes + request.keys.count * 2
-        guard request.keys.count <= configuration.maximumKeys, chargedBytes <= configuration.maximumBytes
+        let chargedBytes = bytes + keyCount * 2
+        guard keyCount <= configuration.maximumKeys, chargedBytes <= configuration.maximumBytes
         else { throw V2ProfileViewReadError.invalidRequest }
         let id = UUID()
         return try await withTaskCancellationHandler {
@@ -79,15 +84,24 @@ actor V2ProfileControlBatcher {
                 guard !closed else { continuation.resume(throwing: V2ProfileControlBatchError.closed); return }
                 guard now < deadline else { continuation.resume(throwing: V2ProfileControlBatchError.deadlineExceeded); return }
                 expirePending(now)
-                guard pendingKeys <= configuration.maximumPendingKeys - request.keys.count,
+                guard pendingKeys <= configuration.maximumPendingKeys - keyCount,
                       pendingBytes <= configuration.maximumPendingBytes - chargedBytes else {
                     rejected += 1
                     continuation.resume(throwing: V2ResourceProviderError.throttled(retryAfter: 1)); return
                 }
                 waiters[id] = continuation
-                pending.append(.init(id: id, request: request, bytes: chargedBytes, deadline: deadline,
-                    readyAt: now + configuration.delay, queueExpiresAt: min(deadline, now + configuration.maximumQueueWait)))
-                pendingKeys += request.keys.count; pendingBytes += chargedBytes
+                // The dispatcher has already coalesced multiple recipients.
+                // Do not spend another merge window waiting for that partial
+                // batch to fill; admission, SQL slots and queue expiry still
+                // apply. Independent one-recipient calls retain coalescing.
+                let readyAt = requests.count > 1 ? now : now + configuration.delay
+                // Batch formation and waiting for an occupied SQL slot have
+                // different budgets. A short merge window must not turn a
+                // brief capacity wait into a one-second client retry. The
+                // caller's original cutoff still bounds the entire operation.
+                pending.append(.init(id: id, requests: requests, bytes: chargedBytes, deadline: deadline,
+                    readyAt: readyAt, queueExpiresAt: min(deadline, now + configuration.maximumQueueWait)))
+                pendingKeys += keyCount; pendingBytes += chargedBytes
                 drain()
             }
         } onCancel: { Task { await self.cancel(id) } }
@@ -110,6 +124,7 @@ actor V2ProfileControlBatcher {
         // Cancellation cannot release SQL capacity or the database lifetime.
         // Concurrent close callers all wait for the same actual work to finish.
         for task in running { await task.value }
+        await closeProfiles()
     }
 
     private func cancel(_ id: UUID) {
@@ -117,7 +132,7 @@ actor V2ProfileControlBatcher {
         activeEntries.removeValue(forKey: id)
         if let index = pending.firstIndex(where: { $0.id == id }) {
             let removed = pending.remove(at: index)
-            pendingKeys -= removed.request.keys.count; pendingBytes -= removed.bytes
+            pendingKeys -= removed.keyCount; pendingBytes -= removed.bytes
         }
         // A running batch can serve other callers. Its slot remains occupied
         // even if this was the final interested caller.
@@ -127,7 +142,7 @@ actor V2ProfileControlBatcher {
     private func expirePending(_ now: ContinuousClock.Instant) {
         pending.removeAll { item in
             guard item.queueExpiresAt <= now else { return false }
-            pendingKeys -= item.request.keys.count; pendingBytes -= item.bytes
+            pendingKeys -= item.keyCount; pendingBytes -= item.bytes
             if item.deadline <= now {
                 waiters.removeValue(forKey: item.id)?.resume(throwing: V2ProfileControlBatchError.deadlineExceeded)
             } else {
@@ -151,19 +166,22 @@ actor V2ProfileControlBatcher {
         while flights.count < configuration.maximumInFlight, let first = pending.first {
             var count = 0, keys = 0, bytes = 0
             for item in pending {
-                guard keys + item.request.keys.count <= configuration.maximumKeys,
+                guard keys + item.keyCount <= configuration.maximumKeys,
                       bytes + item.bytes <= configuration.maximumBytes else { break }
-                count += 1; keys += item.request.keys.count; bytes += item.bytes
+                count += 1; keys += item.keyCount; bytes += item.bytes
             }
             guard first.readyAt <= now || keys == configuration.maximumKeys || count < pending.count else { break }
             let batch = Array(pending.prefix(count))
             pending.removeFirst(count); pendingKeys -= keys; pendingBytes -= bytes
-            let flight = UUID(), deadline = batch.map(\.deadline).min()!, execute = self.execute
-            executedBatches += 1; executedRequests += count; executedKeys += keys
+            // Callers expire independently in drain/complete. Shared SQL must
+            // remain usable by a later caller even after an earlier one has
+            // stopped waiting; the original flight stays charged until return.
+            let flight = UUID(), deadline = batch.map(\.deadline).max()!, execute = self.execute
+            executedBatches += 1; executedRequests += batch.reduce(0) { $0 + $1.requests.count }; executedKeys += keys
             for item in batch { activeEntries[item.id] = item }
             flights[flight] = Task {
                 let result: Result<[Result<V2ProfileControlSnapshot, any Error>], any Error>
-                do { result = .success(try await execute(batch.map(\.request), deadline)) }
+                do { result = .success(try await execute(batch.flatMap(\.requests), deadline)) }
                 catch { result = .failure(error) }
                 complete(flight, batch: batch, result: result)
             }
@@ -187,12 +205,16 @@ actor V2ProfileControlBatcher {
     private func complete(_ flight: UUID, batch: [Entry], result: Result<[Result<V2ProfileControlSnapshot, any Error>], any Error>) {
         flights.removeValue(forKey: flight)
         let now = ContinuousClock.now
-        for (index, item) in batch.enumerated() {
+        var offset = 0
+        let expectedCount = batch.reduce(0) { $0 + $1.requests.count }
+        for item in batch {
+            let range = offset..<(offset + item.requests.count)
+            offset += item.requests.count
             activeEntries.removeValue(forKey: item.id)
             guard let continuation = waiters.removeValue(forKey: item.id) else { continue }
             guard now < item.deadline else { continuation.resume(throwing: V2ProfileControlBatchError.deadlineExceeded); continue }
             switch result {
-            case .success(let values) where values.count == batch.count: continuation.resume(with: values[index])
+            case .success(let values) where values.count == expectedCount: continuation.resume(returning: Array(values[range]))
             case .success: continuation.resume(throwing: V2ProfileControlBatchError.corruptResult)
             case .failure(let error): continuation.resume(throwing: error)
             }

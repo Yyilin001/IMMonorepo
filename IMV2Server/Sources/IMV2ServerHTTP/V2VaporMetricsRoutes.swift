@@ -3,10 +3,57 @@ import IMV2ServerContracts
 import Vapor
 import HTTPTypes
 
-/// 注册唯一的 HTTP 指标出口。
+/// 注册内部 HTTP 指标出口。
 ///
 /// 运行时配置会把承载它的 Vapor 应用绑定到回环地址，绝不监听公网端口。
 public enum V2VaporMetricsRoutes {
+    /// Optional-author pressure is separate from the full cross-actor scrape.
+    /// Only fixed metric names and aggregate counts leave the runtime.
+    public static func registerAuthorPresentations(on app: Application, runtime: V2AuthorPresentationRuntime,
+        roomReads: @escaping @Sendable () -> V2ProfilePresentationReadDiagnostics.Snapshot = { .init() }) {
+        app.get("metrics", "authors") { _ async -> Response in
+            let dispatcher = await runtime.dispatcher.statistics()
+            let ingress = runtime.ingress.statistics()
+            let gauges: [(String, Int)] = [
+                ("connections", dispatcher.connections), ("visible_interests", dispatcher.visibleInterests),
+                ("pending_keys", dispatcher.pendingKeys), ("pending_bytes", dispatcher.pendingBytes),
+                ("reading_batches", dispatcher.reading), ("writing_frames", dispatcher.writing),
+                ("output_bytes", dispatcher.outputBytes), ("hint_bytes", dispatcher.hintBytes),
+                ("ingress_pending", ingress.pendingOffers), ("ingress_keys", ingress.retainedKeys)]
+            let counters: [(String, Int)] = [
+                ("rejected_offers", dispatcher.rejectedOffers), ("expired_jobs", dispatcher.expiredJobs),
+                ("suppressed_reads", dispatcher.suppressedReads), ("delivered_frames", dispatcher.deliveredFrames),
+                ("ingress_rejected", ingress.rejected), ("ingress_expired", ingress.expired),
+                ("change_read_failures", await runtime.profileChangeFailures())]
+            var document = ""
+            for (name, count) in gauges {
+                document += "# TYPE im_v2_author_\(name) gauge\nim_v2_author_\(name) \(count)\n"
+            }
+            for (name, count) in counters {
+                document += "# TYPE im_v2_author_\(name)_total counter\nim_v2_author_\(name)_total \(count)\n"
+            }
+            let reads = runtime.readDiagnostics().merging(roomReads())
+            for stage in V2ProfilePresentationReadDiagnostics.Stage.allCases {
+                let value = reads.stages[stage]
+                let prefix = "im_v2_author_read_\(stage.rawValue)"
+                for (suffix, number) in [("calls", value?.calls ?? 0), ("failures", value?.failures ?? 0)] {
+                    document += "# TYPE \(prefix)_\(suffix)_total counter\n\(prefix)_\(suffix)_total \(number)\n"
+                }
+                document += "# TYPE \(prefix)_milliseconds_total counter\n\(prefix)_milliseconds_total \(value?.totalMilliseconds ?? 0)\n"
+                document += "# TYPE \(prefix)_milliseconds_max_lifetime gauge\n\(prefix)_milliseconds_max_lifetime \(value?.maximumMilliseconds ?? 0)\n"
+            }
+            for outcome in V2ProfilePresentationReadDiagnostics.Outcome.allCases {
+                let name = "im_v2_author_read_\(outcome.rawValue)_total"
+                document += "# TYPE \(name) counter\n\(name) \(reads.outcomes[outcome, default: 0])\n"
+            }
+            var response = Response(status: .ok)
+            response.headers[.contentType] = "text/plain; version=0.0.4; charset=utf-8"
+            response.headers[.cacheControl] = "no-store, no-cache"
+            response.body = .init(string: document)
+            return response
+        }
+    }
+
     /// 在给定应用上注册 `/metrics` 路由。
     ///
     /// 响应固定为 Prometheus 文本格式并禁止缓存；遥测之外的各项指标只有在对应来源

@@ -364,7 +364,7 @@ extension GRDBV2LocalSyncStore {
         CREATE TABLE v2_profile_invalidations (
             user_id TEXT PRIMARY KEY,
             minimum_revision INTEGER NOT NULL CHECK (minimum_revision > 0),
-            profile_state TEXT NOT NULL CHECK (profile_state IN ('active', 'deleted', 'suspended', 'hidden')),
+            profile_state TEXT NOT NULL CHECK (profile_state IN ('deleted', 'suspended', 'hidden')),
             updated_at REAL NOT NULL
         );
 

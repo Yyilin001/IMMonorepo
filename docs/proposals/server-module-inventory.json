@@ -1,13 +1,13 @@
 {
   "scope": "IMV2Server/Sources/{IMV2Server,IMV2ServerContracts,IMV2ServerApplication,IMV2ServerInfrastructure,IMV2ServerGateway,IMV2ServerHTTP}/**/*.swift",
-  "sourceCount": 606,
+  "sourceCount": 694,
   "classification": {
-    "IMV2Server": 16,
-    "IMV2ServerApplication": 141,
-    "IMV2ServerContracts": 87,
-    "IMV2ServerGateway": 28,
-    "IMV2ServerHTTP": 49,
-    "IMV2ServerInfrastructure": 285
+    "IMV2Server": 17,
+    "IMV2ServerApplication": 150,
+    "IMV2ServerContracts": 96,
+    "IMV2ServerGateway": 63,
+    "IMV2ServerHTTP": 50,
+    "IMV2ServerInfrastructure": 318
   },
   "files": [
     {
@@ -30,6 +30,7 @@
         "Foundation",
         "IMV2ActorContracts",
         "IMV2ActorRuntime",
+        "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
         "IMV2ServerInfrastructure"
@@ -96,6 +97,17 @@
       ]
     },
     {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2Server/Composition/V2ResourceStorageAssembly.swift",
+      "proposedTarget": "IMV2Server",
+      "imports": [
+        "Foundation",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "IMV2ServerInfrastructure"
+      ]
+    },
+    {
       "source": "IMV2Server/V2AccountRuntimeConfiguration.swift",
       "proposedTarget": "IMV2Server",
       "imports": [
@@ -133,6 +145,17 @@
       "migrationNote": "process configuration, readiness or concrete assembly"
     },
     {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2Server/V2DatabaseWorkloadResources.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "IMV2ServerInfrastructure",
+        "Logging",
+        "NIOPosix",
+        "Synchronization"
+      ]
+    },
+    {
       "source": "IMV2Server/V2EnvironmentParsing.swift",
       "proposedTarget": "IMV2Server",
       "imports": [
@@ -151,7 +174,8 @@
         "IMV2ServerApplication",
         "IMV2ServerContracts",
         "IMV2ServerGateway",
-        "IMV2ServerInfrastructure"
+        "IMV2ServerInfrastructure",
+        "NIOCore"
       ],
       "migrationNote": "process configuration, readiness or concrete assembly"
     },
@@ -190,6 +214,16 @@
       "migrationNote": "process configuration, readiness or concrete assembly"
     },
     {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2Server/V2ResourceRuntimeConfiguration.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
       "source": "IMV2Server/V2ServiceLogging.swift",
       "proposedTarget": "IMV2Server",
       "imports": [
@@ -200,16 +234,6 @@
         "Logging"
       ],
       "migrationNote": "process configuration, readiness or concrete assembly"
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/Forwarding/V2ForwardPersistence.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts"
-      ]
     },
     {
       "migrationNote": "candidate target; verify before physical move",
@@ -224,7 +248,7 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/Forwarding/V2OwnerValidatedForwardMessagePorts.swift",
+      "source": "IMV2ServerApplication/Resources/Application/V2AuthorGroupNicknameChange.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
@@ -238,8 +262,20 @@
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/Resources/Application/V2AuthorPresentationFingerprint.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Crypto",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core"
       ]
     },
     {
@@ -275,12 +311,39 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/Resources/Application/V2AuthorProfileChanges.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/Resources/Application/V2ProfileControlFacts.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
         "IMV2Core",
         "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/Resources/Application/V2ProfilePresentationReadDiagnostics.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/Resources/Application/V2ProfilePresentationReadRequest.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "IMV2Core"
       ]
     },
     {
@@ -337,15 +400,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/Resources/Application/V2ResourceMigrationService.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/Resources/Application/V2ResourceProfilePresentationService.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
@@ -377,6 +431,17 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/Resources/Application/V2RoomResourceDirectoryService.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Crypto",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/Resources/Ports/V2ObjectStorage.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
@@ -396,6 +461,14 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/Resources/Ports/V2ResourceMediaProbe.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/Resources/Ports/V2ResourceScanner.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
@@ -409,6 +482,7 @@
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
+        "IMV2Core",
         "IMV2ServerContracts"
       ]
     },
@@ -603,17 +677,6 @@
     {
       "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/Room/V2ActorForwardingCoordinator.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/Room/V2ActorGrantedSendBatchAdapter.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
@@ -820,16 +883,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/Room/V2SendMessageService.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/Room/V2UserRoomDirectoryCursorCodec.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
@@ -856,6 +909,7 @@
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2ServerContracts",
         "Synchronization"
       ]
@@ -890,7 +944,7 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2AggregatedSendMessageBatchMetrics.swift",
+      "source": "IMV2ServerApplication/V2BoundedBusyDrainCadence.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
@@ -899,11 +953,11 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2BoundedBusyDrainCadence.swift",
+      "source": "IMV2ServerApplication/V2BoundedInitialization.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
-        "IMV2ServerContracts"
+        "Synchronization"
       ]
     },
     {
@@ -934,27 +988,6 @@
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2ConversationCapabilitiesService.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2CrossOwnerForwardService.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2ActorContracts",
-        "IMV2Core",
         "IMV2ServerContracts"
       ]
     },
@@ -1046,16 +1079,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2ForwardMessagesService.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/V2ForwardWorkOperatorReplay.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
@@ -1090,17 +1113,6 @@
         "Foundation",
         "IMV2Core",
         "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2GroupEventWakeApplication.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts",
-        "Synchronization"
       ]
     },
     {
@@ -1151,6 +1163,18 @@
         "IMV2Core",
         "IMV2ServerContracts"
       ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2IndexedDeadlines.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": []
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2IndexedFIFO.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": []
     },
     {
       "migrationNote": "candidate target; verify before physical move",
@@ -1231,7 +1255,7 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2MessageEditService.swift",
+      "source": "IMV2ServerApplication/V2MessageEditOutcomes.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
@@ -1241,7 +1265,7 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2MessageReactionService.swift",
+      "source": "IMV2ServerApplication/V2MessageReactionOutcomes.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
@@ -1251,7 +1275,7 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2MessageWithdrawalService.swift",
+      "source": "IMV2ServerApplication/V2MessageWithdrawalOutcomes.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
@@ -1280,21 +1304,28 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2OwnerValidatedMessageMutationStores.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/V2PasswordLoginRateLimitPolicy.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
         "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2PhysicalDatabaseWorkAdmissions.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2PolicyAuthorizationLifecycle.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation"
       ]
     },
     {
@@ -1319,16 +1350,6 @@
     {
       "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/V2ProfileUpdateService.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2ProfileViewService.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
@@ -1367,16 +1388,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2ReadReceiptService.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/V2RealtimeFanoutDispatcher.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
@@ -1392,10 +1403,39 @@
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
+        "HashTreeCollections",
         "IMV2ActorContracts",
         "IMV2ServerContracts",
         "Synchronization"
       ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2RealtimeJournalFanout.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "HashTreeCollections",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2RealtimeJournalPublisher.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2RealtimeKeyQueue.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": []
     },
     {
       "migrationNote": "candidate target; verify before physical move",
@@ -1412,6 +1452,7 @@
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
+        "HashTreeCollections",
         "IMV2ActorContracts",
         "IMV2ServerContracts"
       ]
@@ -1430,6 +1471,14 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2RecoverySchedulingMetrics.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerApplication/V2RoomActorMetrics.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
@@ -1439,22 +1488,14 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2RoomLiveEventMaterialization.swift",
+      "source": "IMV2ServerApplication/V2RoomDeliverySessionHost.swift",
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerApplication/V2RoomMembershipDirectoryService.swift",
-      "proposedTarget": "IMV2ServerApplication",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerContracts"
+        "Logging",
+        "Synchronization"
       ]
     },
     {
@@ -1463,6 +1504,49 @@
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
+        "IMV2Core",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2RoomRecoveryPressureMetrics.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "IMV2ActorContracts",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2RoomSubscriptionDeliveryPump.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2RoomSubscriptionOwner.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2RoomSubscriptionRelay.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Crypto",
+        "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerContracts"
       ]
@@ -1512,8 +1596,19 @@
       "proposedTarget": "IMV2ServerApplication",
       "imports": [
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2ServerContracts",
         "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerApplication/V2SendPathTraceLogging.swift",
+      "proposedTarget": "IMV2ServerApplication",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "Logging"
       ]
     },
     {
@@ -1697,9 +1792,16 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2CallbackBox.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": []
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerContracts/V2CommittedMessageBatchObserving.swift",
       "proposedTarget": "IMV2ServerContracts",
       "imports": [
+        "IMV2ActorContracts",
         "IMV2Core"
       ]
     },
@@ -1755,6 +1857,14 @@
     {
       "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerContracts/V2DeviceRevocationPort.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": [
+        "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2DeviceRoomProgress.swift",
       "proposedTarget": "IMV2ServerContracts",
       "imports": [
         "IMV2Core"
@@ -1882,6 +1992,15 @@
       "proposedTarget": "IMV2ServerContracts",
       "imports": [
         "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2GrantedRoomLogPull.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts"
       ]
     },
     {
@@ -2133,11 +2252,29 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2RealtimeChangeJournalContracts.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerContracts/V2RealtimeInterestPorts.swift",
       "proposedTarget": "IMV2ServerContracts",
       "imports": [
         "Foundation",
         "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2RealtimeJournalUserSnapshotContracts.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts"
       ]
     },
     {
@@ -2172,6 +2309,15 @@
       "proposedTarget": "IMV2ServerContracts",
       "imports": [
         "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2RoomCommittedFactsBatch.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": [
+        "IMV2ActorContracts",
+        "IMV2Core"
       ]
     },
     {
@@ -2229,6 +2375,14 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2RoomRecoveryBatchPressureSnapshot.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": [
+        "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerContracts/V2RoomRecoveryReading.swift",
       "proposedTarget": "IMV2ServerContracts",
       "imports": [
@@ -2244,6 +2398,24 @@
         "IMV2Core"
       ],
       "migrationNote": "extracted capability/value declarations"
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2RoomSubscriptionOwnerFailureMetrics.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": [
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2RoomSubscriptionSourceContracts.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core"
+      ]
     },
     {
       "source": "IMV2ServerContracts/V2RuntimeComponentSnapshots.swift",
@@ -2279,14 +2451,6 @@
       ]
     },
     {
-      "source": "IMV2ServerContracts/V2SendMessageBatchMetricsSnapshot.swift",
-      "migrationNote": "candidate target; verify before physical move",
-      "proposedTarget": "IMV2ServerContracts",
-      "imports": [
-        "Foundation"
-      ]
-    },
-    {
       "source": "IMV2ServerContracts/V2SendMessageContracts.swift",
       "proposedTarget": "IMV2ServerContracts",
       "imports": [
@@ -2302,6 +2466,12 @@
       "imports": [
         "Foundation"
       ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerContracts/V2SendOperationSchedulingConfiguration.swift",
+      "proposedTarget": "IMV2ServerContracts",
+      "imports": []
     },
     {
       "source": "IMV2ServerContracts/V2SyncContracts.swift",
@@ -2366,24 +2536,15 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerGateway/Gateway/V2AccountRoomChangeBuffer.swift",
-      "proposedTarget": "IMV2ServerGateway",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerGateway/Gateway/V2AccountRoomChangeService.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerApplication",
-        "IMV2ServerContracts"
+        "IMV2ServerContracts",
+        "Logging"
       ]
     },
     {
@@ -2399,13 +2560,28 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerGateway/Gateway/V2AccountRoomMembershipChange.swift",
+      "source": "IMV2ServerGateway/Gateway/V2AccountRoomNotification.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2AuthorPresentationInterests+Protobuf.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
         "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
+        "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2AuthorPresentationLatestVisibleAuthors.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core"
       ]
     },
     {
@@ -2416,6 +2592,24 @@
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2AuthorPresentationReceipt+Protobuf.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2AuthorPresentationStart+Protobuf.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core"
       ]
     },
     {
@@ -2431,13 +2625,33 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerGateway/Gateway/V2ForegroundGroupEventHints.swift",
+      "source": "IMV2ServerGateway/Gateway/V2GatewayJournalAuthorityIngress.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
-        "IMV2ServerApplication",
         "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2GatewayJournalBaselineProof.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "IMV2ActorContracts",
+        "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2GatewayJournalProjectionReceiver.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
         "Synchronization"
       ]
     },
@@ -2456,6 +2670,51 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2GatewayRoomSubscriptionAuthority.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2GatewayRoomSubscriptionCoordinator.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2GatewayRoomSubscriptionHeadWorker.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2GatewayRoomSubscriptionIngress.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerGateway/Gateway/V2GroupEventPageEncoder.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
@@ -2464,6 +2723,55 @@
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2ProfilePresentationKey+Protobuf.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2RealtimeJournalSharedProjection.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2RoomDeliverySessionGate.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "IMV2ActorContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2RoomSubscriptionDeliveryFingerprint.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Crypto",
+        "Foundation",
+        "IMV2ActorContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/Gateway/V2RoomSubscriptionSocketGate.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "Synchronization"
       ]
     },
     {
@@ -2503,6 +2811,44 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2ConnectionDirectory.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2ConnectionLeaseController.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2ConnectionRenewalDeadlines.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2ConnectionSubscriptionState.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerGateway/V2DeviceConnectionRegistry.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
@@ -2521,6 +2867,7 @@
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Compression",
         "IMV2Core",
         "IMV2ServerApplication",
@@ -2553,6 +2900,15 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2GatewayCoverageDiagnostics.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerGateway/V2GatewayDomainCommandHandler.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
@@ -2565,11 +2921,74 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2GatewayHeartbeatDiagnostics.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "NIOCore",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2GatewayInboundFrame.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "NIOCore"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2GatewayJournalInterestIndex.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2GatewayLifecycleSupervisor.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerGateway/V2GatewayMessageSendBudget.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
         "IMV2ServerApplication",
-        "IMV2ServerContracts"
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2GatewayOutboundFrame.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "NIOCore",
+        "NIOFoundationCompat",
+        "SwiftProtobuf"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2GatewayRecoveryOutbound.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "Synchronization"
       ]
     },
     {
@@ -2624,7 +3043,27 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2PresenceObservationExecutor.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerGateway/V2PresencePublicationGatewayHandler.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2PresenceRefreshCoordinator.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
         "Foundation",
@@ -2648,6 +3087,65 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2RealtimeRecoveryContext.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2RealtimeRecoveryCoordinator.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2RecoveryInterestReleaseExecutor.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2RecoveryInterestTicket.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2RecoveryOrderedStore.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": []
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2RecoverySchedulingTelemetry.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerGateway/V2RoomLatestVisibleCommandService.swift",
       "proposedTarget": "IMV2ServerGateway",
       "imports": [
@@ -2667,6 +3165,22 @@
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2RoomSubscriptionHeadDeliveryMetrics+Prometheus.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerGateway/V2RoomSubscriptionHeadDeliveryMetrics.swift",
+      "proposedTarget": "IMV2ServerGateway",
+      "imports": [
+        "Synchronization"
       ]
     },
     {
@@ -3285,6 +3799,19 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerHTTP/V2VaporRoomResourceDirectoryRoutes.swift",
+      "proposedTarget": "IMV2ServerHTTP",
+      "imports": [
+        "Foundation",
+        "HTTPTypes",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "Vapor"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerHTTP/V2VaporSocialOperationRoutes.swift",
       "proposedTarget": "IMV2ServerHTTP",
       "imports": [
@@ -3311,24 +3838,12 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/Forwarding/PostgresV2ForwardPersistence.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/PostgresV2AccountPreferenceOperationStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
@@ -3373,24 +3888,12 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2DirectAuthorizationIntentStore.swift",
+      "source": "IMV2ServerInfrastructure/PostgresV2DeviceRoomProgressStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
         "Foundation",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2DirectAuthorizationReceiptStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2ServerApplication",
+        "IMV2Core",
         "IMV2ServerContracts",
         "SQLKit"
       ]
@@ -3619,19 +4122,6 @@
     {
       "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/PostgresV2GroupEventLogStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2GroupEventWakeStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
@@ -3879,19 +4369,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2MessageEditStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/PostgresV2MessageModerationOperationStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -3970,19 +4447,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2MessageReactionStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -3994,20 +4458,8 @@
         "IMV2ServerContracts",
         "NIOCore",
         "PostgresNIO",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2MessageWithdrawalStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
+        "SQLKit",
+        "Synchronization"
       ]
     },
     {
@@ -4021,6 +4473,104 @@
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2PolicyAuthorizationJournal.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2PolicyCommittedEffectsPublisher.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2PolicyDeploymentPlacement.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Crypto",
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorCluster",
+        "IMV2ActorContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2PolicyFactsSnapshotReader.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication",
+        "NIOCore",
+        "SQLKit",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2PolicyMutationDispatcher.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Crypto",
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2PolicyOwner.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2PolicyOwnerDirectory.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2PolicyOwnerState.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication",
         "SQLKit"
       ]
     },
@@ -4041,19 +4591,6 @@
     {
       "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/PostgresV2ProfileUpdateStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2ProfileViewStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
@@ -4121,6 +4658,18 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2RealtimeChangeJournalStore.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/PostgresV2RealtimePartitionLeaseStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -4146,16 +4695,13 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2RoomActivationStore.swift",
+      "source": "IMV2ServerInfrastructure/PostgresV2RemotePolicyOwners.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
-        "FluentKit",
         "Foundation",
+        "IMV2ActorCluster",
         "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
+        "IMV2ServerApplication"
       ]
     },
     {
@@ -4212,6 +4758,45 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2RoomPolicyAuthorization.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2RoomPolicyAuthorizationDirectory.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "SQLKit",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2RoomPolicyAuthorizationRegistry.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/PostgresV2RoomReadWatermark.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -4242,6 +4827,22 @@
         "Crypto",
         "FluentKit",
         "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/PostgresV2RoomSubscriptionSource.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ActorRuntime",
+        "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
         "SQLKit"
@@ -4318,62 +4919,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2RoomWriteFastDirectAppend.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "NIOCore",
-        "PostgresNIO",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2RoomWriteHybridAppend.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "NIOCore",
-        "PostgresNIO",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2RoomWriteHybridConditionalAppend.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "NIOCore",
-        "PostgresNIO",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/PostgresV2RoomWriteHybridPreflight.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "NIOCore",
-        "PostgresNIO",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/PostgresV2RoomWriteMediaAcceptance.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -4409,6 +4954,7 @@
       "source": "IMV2ServerInfrastructure/PostgresV2RoomWriteScalarAcceptance.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
+        "Crypto",
         "FluentKit",
         "Foundation",
         "IMV2ActorContracts",
@@ -4504,6 +5050,7 @@
       "imports": [
         "FluentKit",
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
@@ -4627,10 +5174,17 @@
       "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceDelivery.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": []
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceMediaProbe.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "Crypto",
+        "Darwin",
         "Foundation",
-        "IMV2Core",
+        "Glibc",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
         "Synchronization"
@@ -4664,11 +5218,13 @@
       "source": "IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceTransformer.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
+        "Crypto",
         "Darwin",
         "Foundation",
         "Glibc",
         "IMV2ServerApplication",
-        "IMV2ServerContracts"
+        "IMV2ServerContracts",
+        "Synchronization"
       ]
     },
     {
@@ -4680,6 +5236,69 @@
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSClient.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "AsyncHTTPClient",
+        "Foundation",
+        "IMV2ServerApplication",
+        "NIOCore"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSConfiguration.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSObjectStorage.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Crypto",
+        "Foundation",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSSigner.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Crypto",
+        "Foundation",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSUploadTransport.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2AuthorProfileChangeReader.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "SQLKit"
       ]
     },
     {
@@ -4799,6 +5418,17 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Infrastructure/V2PublicProfileSnapshotCache.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceAvatarDelivery.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -4899,6 +5529,16 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceSpoolFile.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Crypto",
+        "Foundation",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceStorageReadiness.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -4923,6 +5563,40 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Resources/Infrastructure/V2SignedResourceDelivery.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Crypto",
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Room/Activation/V2ActorDurableFileStorage.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Darwin",
+        "Foundation",
+        "Glibc",
+        "IMV2ActorCluster",
+        "NIOPosix"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Room/Activation/V2ActorPostgresSessionIdentity.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/Room/Activation/V2OwnerAdmissionHandoffTrace.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -4933,40 +5607,22 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationLifecycleBatcher.swift",
+      "source": "IMV2ServerInfrastructure/Room/Activation/V2PlacementRaftFileStorage.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
-        "FluentKit",
         "Foundation",
-        "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerApplication"
+        "IMV2ActorCluster",
+        "NIOPosix"
       ]
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationLifecycleSQL.swift",
+      "source": "IMV2ServerInfrastructure/Room/Activation/V2PostgresHostSessionSettlement.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
         "Foundation",
         "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerContracts",
-        "SQLKit",
-        "Synchronization"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationRenewalBatcher.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerContracts",
         "SQLKit"
       ]
     },
@@ -4976,8 +5632,7 @@
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
-        "IMV2ActorContracts",
-        "SQLKit"
+        "IMV2ActorContracts"
       ]
     },
     {
@@ -5061,6 +5716,21 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Room/Administration/V2RoomPermissionCommit.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ActorRuntime",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/Room/Creation/V2PostgresRoomBootstrapExecutionPorts.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -5140,6 +5810,22 @@
         "FluentKit",
         "Foundation",
         "IMV2ActorContracts",
+        "IMV2ActorRuntime",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Room/MediaAuthorization/PostgresV2RoomResourceDirectory.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ActorRuntime",
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
@@ -5164,6 +5850,20 @@
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/Room/Queries/V2GroupEventPullBatchSQL.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
         "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerApplication",
@@ -5346,6 +6046,17 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2RoomForwardPairService.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "IMV2ActorCluster",
+        "IMV2ActorContracts",
+        "IMV2ActorRuntime",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2RoomRefForwardPorts.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -5411,18 +6122,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/RoomDomain/Messaging/V2ActorGrantedSendBatchAdapter.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/RoomDomain/Messaging/V2ActorSpecialAccountAuditMapper.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -5464,7 +6163,8 @@
         "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerApplication",
-        "IMV2ServerContracts"
+        "IMV2ServerContracts",
+        "Synchronization"
       ]
     },
     {
@@ -5508,54 +6208,6 @@
         "Foundation",
         "IMV2Core",
         "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteAuthorizationBatch.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteAuthorizationCoordinator.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteBatchRouteCache.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteBatchRouteResolver.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
       ]
     },
     {
@@ -5626,44 +6278,12 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteFastDirectEligibility.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteFastDirectPath.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteForwardInboxPath.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
         "Foundation",
         "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteHybridBatchPath.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
@@ -5685,6 +6305,7 @@
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
@@ -5721,6 +6342,7 @@
       "imports": [
         "FluentKit",
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
@@ -5738,6 +6360,26 @@
         "IMV2ServerApplication",
         "IMV2ServerContracts",
         "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2BoundedInsertionCache.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": []
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2ClaimedWorkBatch.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": []
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2ConnectionAcquisitionCancellation.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Synchronization"
       ]
     },
     {
@@ -5769,10 +6411,29 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2CurrentRoomPolicySnapshot.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2DatabaseEventLoopTaskExecutor.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "NIOCore"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2DatabaseLoanObservation.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "Foundation",
+        "IMV2ServerContracts",
         "Synchronization"
       ]
     },
@@ -5860,27 +6521,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2DirectAuthorizationBatchLocks.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2DirectAuthorizationCoordinator.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2DirectReadReceiptPolicy.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -5918,28 +6558,26 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift",
+      "source": "IMV2ServerInfrastructure/V2DirectRoomSendAcceptanceMemory.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
         "Foundation",
+        "IMV2ActorContracts",
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts",
-        "SQLKit"
+        "SQLKit",
+        "Synchronization"
       ]
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2DirectSendControlPolicyFence.swift",
+      "source": "IMV2ServerInfrastructure/V2DirectSendControlPolicy.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
-        "FluentKit",
         "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
+        "IMV2ServerApplication"
       ]
     },
     {
@@ -5960,6 +6598,30 @@
         "Foundation",
         "IMV2ActorContracts",
         "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2DurableOwnerCombinedWrite.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2DurableOwnerPreparedRead.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
         "IMV2ServerContracts",
         "SQLKit"
       ]
@@ -5971,19 +6633,6 @@
       "imports": [
         "Foundation",
         "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2DurableSendOperationPreparationCollector.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2ActorContracts",
-        "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts"
       ]
@@ -6060,6 +6709,18 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2ForwardRoomOwnerFence.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2GroupInvitationIdentityReader.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -6104,13 +6765,15 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2HybridGroupShardCreditSnapshotCache.swift",
+      "source": "IMV2ServerInfrastructure/V2IndependentRoomSQLDatabase.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
+        "Logging",
+        "NIOCore",
+        "PostgresKit",
+        "PostgresNIO",
+        "SQLKit"
       ]
     },
     {
@@ -6210,12 +6873,11 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2MessageOperationClosedError.swift",
+      "source": "IMV2ServerInfrastructure/V2MessageOperationLock.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "PostgresNIO"
+        "Foundation",
+        "SQLKit"
       ]
     },
     {
@@ -6226,6 +6888,14 @@
         "Foundation",
         "IMV2ActorContracts",
         "IMV2Core"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2MessageWriteConnectionGate.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Synchronization"
       ]
     },
     {
@@ -6242,14 +6912,57 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2NodePolicyStateCache.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2ObservedBorrowedDatabase.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
+        "IMV2ServerContracts",
         "Logging",
         "NIOCore",
         "PostgresNIO",
         "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2OwnerBatchBorrowControl.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": []
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2OwnerConnectionExecutor.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "Synchronization",
+        "_Concurrency"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2OwnerConnectionTimeline.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "Synchronization"
       ]
     },
     {
@@ -6264,65 +6977,9 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2OwnerValidatedForwardMessages.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2OwnerValidatedGroupCapabilitiesStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2OwnerValidatedModerationStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2OwnerValidatedReadReceiptStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2OwnerValidatedRoomDirectoryStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2OwnerValidatedRoomWriteStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
         "IMV2Core",
         "IMV2ServerApplication",
         "IMV2ServerContracts"
@@ -6395,6 +7052,16 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PersistenceConversions.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2PersistenceTimestamp+PostgresSQL.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -6410,8 +7077,144 @@
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "Foundation",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
         "NIOCore",
         "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PhysicalDatabaseLoanScope.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PhysicalDatabasePoolBorrower.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "NIOCore",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PhysicalSendDispatcher.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicyClusterClientBinding.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "IMV2ActorCluster",
+        "IMV2ServerApplication",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicyFactsSnapshot.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicyMaintenanceJournal.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicyMaintenanceWorker.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicyMutationService.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorCluster",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicyOwnershipService.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorCluster",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicySnapshotMemory.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication",
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicySnapshotPublisher.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicyStateBatchLocks.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ServerApplication",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PolicyStateRead.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2ServerApplication"
       ]
     },
     {
@@ -6446,6 +7249,57 @@
         "Foundation",
         "IMV2ServerApplication",
         "IMV2ServerContracts"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PostgresMessageEditPersistence.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PostgresMessageOperationReceipts.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PostgresMessageReactionPersistence.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2PostgresMessageWithdrawalPersistence.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
       ]
     },
     {
@@ -6512,6 +7366,19 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2ProfileSecurityInvalidationWorker.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2Core",
+        "IMV2ServerApplication",
+        "IMV2ServerContracts",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2PublicIdentityAccountStore.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -6539,16 +7406,6 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2ReadReceiptBatcher.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2ReadReceiptPreferencePropagationWorker.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -6562,16 +7419,34 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2RoomAdmissionCommandCreditPool.swift",
+      "source": "IMV2ServerInfrastructure/V2RealtimeJournalSchemaReadiness.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "FluentKit",
         "Foundation",
+        "SQLKit"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2RoomCommittedFactsFeed.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
         "IMV2ActorContracts",
         "IMV2Core",
-        "IMV2ServerApplication",
         "IMV2ServerContracts",
-        "SQLKit"
+        "Synchronization"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2RoomDeadlineTimer.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation",
+        "NIOCore",
+        "Synchronization"
       ]
     },
     {
@@ -6603,6 +7478,27 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2RoomPolicyAuthorizationService.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "FluentKit",
+        "Foundation",
+        "IMV2ActorCluster",
+        "IMV2ActorContracts",
+        "IMV2Core",
+        "IMV2ServerApplication"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
+      "source": "IMV2ServerInfrastructure/V2RoomReceiptBatchConfiguration.swift",
+      "proposedTarget": "IMV2ServerInfrastructure",
+      "imports": [
+        "Foundation"
+      ]
+    },
+    {
+      "migrationNote": "candidate target; verify before physical move",
       "source": "IMV2ServerInfrastructure/V2RoomRefMessagingGatewayHandling.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
@@ -6618,18 +7514,6 @@
       "imports": [
         "FluentKit",
         "Foundation",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2RoutedGroupEventWakeStore.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
         "IMV2ServerContracts"
       ]
     },
@@ -6659,13 +7543,10 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2RoutedUserSyncWakeStore.swift",
+      "source": "IMV2ServerInfrastructure/V2SchemaReadiness+ProfilePublication.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
+        "SQLKit"
       ]
     },
     {
@@ -6681,40 +7562,11 @@
     },
     {
       "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2SendMessageAdmissionBatcher.swift",
+      "source": "IMV2ServerInfrastructure/V2SendSuccessRecord.swift",
       "proposedTarget": "IMV2ServerInfrastructure",
       "imports": [
         "Foundation",
-        "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "Synchronization"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2ShardAdmissionCommandCreditPool.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts",
-        "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2ShardedSendMessageAdmissionBatcher.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2ActorContracts",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
+        "IMV2Core"
       ]
     },
     {

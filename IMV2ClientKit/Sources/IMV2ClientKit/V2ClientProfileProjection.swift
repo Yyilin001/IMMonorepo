@@ -1,9 +1,10 @@
 import Foundation
 import IMV2Core
 
-/// 资料失效通知。
+/// 资料安全失效通知。
 ///
-/// 它是持久化的投递元数据而非资料内容本身；仓储据此在同步事务提交后合并已授权的批量读取。
+/// 只承载隐藏、停用或删除的版本下限，不触发后台资料补查。
+/// 普通名称和头像变化由当前页面的作者资料订阅传递。
 struct V2ClientProfileInvalidation: Equatable, Sendable {
     /// 资料发生变化的用户。
     let userID: UserID
@@ -21,7 +22,7 @@ struct V2ClientProfileInvalidation: Equatable, Sendable {
         struct Wire: Decodable {
             let userID: String
             let minimumRevision: UInt64
-            let profileState: String?
+            let profileState: String
             enum CodingKeys: String, CodingKey {
                 case userID = "user_id"
                 case minimumRevision = "minimum_profile_revision"
@@ -31,7 +32,7 @@ struct V2ClientProfileInvalidation: Equatable, Sendable {
         guard record.projectionKind == "profile_invalidation",
               let wire = try? JSONDecoder().decode(Wire.self, from: record.payload),
               let revision = V2ProfileRevision(rawValue: wire.minimumRevision),
-              let state = V2ProfileState(rawValue: wire.profileState ?? V2ProfileState.active.rawValue)
+              let state = V2ProfileState(rawValue: wire.profileState), state != .active
         else { throw V2ClientProjectionError.invalidMessagePayload }
         do {
             userID = try .init(wire.userID)

@@ -102,14 +102,14 @@ struct V2ProjectionChangeNotifierTests {
         #expect((await contacts.next())?.generation == 1)
         let room = "00000000-0000-0000-0000-000000000220"
         let message = "00000000-0000-0000-0000-000000000001"
-        try await apply(local, sequence: 1, payload: [
+        try await applyRoomMessage(local, sequence: 1, payload: [
             "event_type": "message.accepted", "message_id": message, "room_id": room,
             "room_sequence": 1, "timeline_sequence": 1, "message_revision": 1,
             "sender_user_id": "00000000-0000-0000-0000-000000000222", "text": "hello",
             "mention_user_ids": [], "mentions_everyone": false, "server_created_at_ms": 1_750_000_000_000
         ])
         await clock.waitForSleeps(1)
-        try await apply(local, sequence: 2, payload: [
+        try await applyRoomMessage(local, sequence: 2, payload: [
             "event_type": "message.withdrawn", "message_id": message, "room_id": room, "message_revision": 2
         ])
         #expect((await conversations.next())?.generation == 2)
@@ -125,7 +125,7 @@ struct V2ProjectionChangeNotifierTests {
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-withdrawal-refresh-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
         let room = "00000000-0000-0000-0000-000000000220"
         let message = "00000000-0000-0000-0000-000000000001"
-        try await apply(local, sequence: 1, payload: [
+        try await applyRoomMessage(local, sequence: 1, payload: [
             "event_type": "message.accepted", "message_id": message, "room_id": room,
             "room_sequence": 1, "timeline_sequence": 1, "message_revision": 1,
             "sender_user_id": "00000000-0000-0000-0000-000000000222", "text": "private-before-withdrawal",
@@ -141,7 +141,7 @@ struct V2ProjectionChangeNotifierTests {
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { await store.observeProjectionChanges() }
             await source.waitForPause()
-            try await apply(local, sequence: 2, payload: [
+            try await applyRoomMessage(local, sequence: 2, payload: [
                 "event_type": "message.withdrawn", "message_id": message, "room_id": room, "message_revision": 2
             ])
             await source.waitForCancellation()
@@ -158,9 +158,11 @@ struct V2ProjectionChangeNotifierTests {
         try await local.close()
     }
 
-    private func apply(_ local: GRDBV2LocalSyncStore, sequence: UInt64, payload: [String: Any]) async throws {
-        let record = try V2ClientSyncRecord(sequence: sequence, sourceEventID: .init(UUID().uuidString), projectionKind: "message", payload: JSONSerialization.data(withJSONObject: payload))
-        _ = try await local.apply(.init(generation: 1, records: [record], nextSyncToken: .init("token-\(sequence)"), receipt: .init("receipt-\(sequence)"), hasMore: false, capabilityProfile: "base"))
+    private func applyRoomMessage(_ local: GRDBV2LocalSyncStore, sequence: UInt64, payload: [String: Any]) async throws {
+        let room = try RoomID(#require(payload["room_id"] as? String))
+        let record = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString), roomSequence: sequence,
+            projectionKind: "message", payload: JSONSerialization.data(withJSONObject: payload))
+        _ = try await local.applyGroupEventPage(.init(roomID: room, events: [record], nextRoomSequence: sequence, hasMore: false))
     }
 }
 

@@ -11,6 +11,107 @@ import Observation
 @MainActor
 @Suite("Profile avatar pixels and display authority", .timeLimit(.minutes(1)))
 struct V2ProfileAvatarPipelineTests {
+    @Test("cold avatar recovery keeps the name, refreshes missing or rejected capabilities and reuses warm bytes",
+          arguments: ["missing", "metadata", "rejected", "notFound", "transport", "unsigned"])
+    func coldAvatarRecovery(scenario: String) async throws {
+        let initialError: (any Error)?
+        switch scenario {
+        case "rejected": initialError = V2ClientMediaTransferError.authorizationDenied
+        case "notFound": initialError = V2HTTPFailure(kind: .httpStatus, service: "mediaProvider", statusCode: 404)
+        default: initialError = nil
+        }
+        let f = try await ProfilePipelineFixture(seedCache: false, initialByteError: initialError)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        if !["rejected", "notFound"].contains(scenario) {
+            await f.reader.withholdFirstDownloadPlan(failRefresh: scenario == "transport", omitAllPlans: scenario == "unsigned", omitFirstAvatar: scenario == "metadata")
+        }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let page = await pipeline.profiles.activate()
+        _ = try await pipeline.profiles.presentation(for: f.key, activation: page)
+        let initialDeadline = try #require(await pipeline.profiles.authorizationDeadline(for: f.key, activation: page))
+        let first = try #require(try await pipeline.snapshot(key: f.key, activation: page, pixels: 32))
+        #expect(first.name == "Original" && first.deadline > .now)
+        #expect(first.deadline <= (await pipeline.profiles.authorizationDeadline(for: f.key, activation: page) ?? initialDeadline))
+        #expect(await f.reader.calls == 2)
+        if ["transport", "unsigned"].contains(scenario) {
+            #expect(first.image == nil && first.avatarRetryAt != nil)
+            let immediate = try #require(try await pipeline.snapshot(key: f.key, activation: page, pixels: 32))
+            #expect(immediate.name == "Original" && immediate.image == nil)
+            #expect(await f.reader.calls == 2)
+            await f.reader.allowRefresh()
+            try await Task.sleep(for: .seconds(2.6))
+        } else { #expect(first.image != nil && first.avatarRetryAt == nil) }
+        let restored = try #require(try await pipeline.snapshot(key: f.key, activation: page, pixels: 32))
+        #expect(restored.image != nil && restored.name == "Original" && restored.avatarRetryAt == nil)
+        #expect(await f.reader.calls == (["transport", "unsigned"].contains(scenario) ? 3 : 2))
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("a renewed download grant can finish after the original metadata lease expires")
+    func renewedPixelsSurviveOriginalMetadataExpiry() async throws {
+        let f = try await ProfilePipelineFixture(seedCache: false)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        await f.reader.withholdFirstDownloadPlan(failRefresh: false)
+        await f.reader.shortenFirstLease(to: 0.15, refreshDelay: .milliseconds(300))
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let page = await pipeline.profiles.activate()
+        _ = try await pipeline.profiles.presentation(for: f.key, activation: page)
+        let original = try #require(await pipeline.profiles.authorizationDeadline(for: f.key, activation: page))
+        let snapshot = try #require(try await pipeline.snapshot(key: f.key, activation: page, pixels: 32))
+        #expect(original <= .now && snapshot.deadline > .now)
+        #expect(snapshot.image != nil && snapshot.name == "Original" && snapshot.avatarRetryAt == nil)
+        #expect(snapshot.deadline <= (await pipeline.profiles.avatarReadGrant(for: f.key, activation: page)?.deadline ?? original))
+        #expect(await f.reader.calls == 2)
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("old decoded pixels cannot borrow a new lease, while the renewed name remains displayable")
+    func oldDecodeDoesNotBorrowRenewal() async throws {
+        let f = try await ProfilePipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        await f.reader.shortenFirstLease(to: 0.5)
+        await f.reader.removeDownloadPlan()
+        let entered = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in
+            await gate.wait(entered.continuation)
+            return V2SendableImage(image: UIImage())
+        }
+        let pipeline = f.pipeline(thumbnails), page = await pipeline.profiles.activate()
+        let pending = Task {
+            defer { entered.continuation.finish() }
+            return try await pipeline.snapshot(key: f.key, activation: page, pixels: 32)
+        }
+        var starts = entered.stream.makeAsyncIterator()
+        guard await starts.next() != nil else {
+            let result = await pending.result
+            Issue.record("The decode did not start: \(String(describing: result)); reads=\(await f.reader.calls); grant=\(String(describing: await pipeline.profiles.avatarReadGrant(for: f.key, activation: page)?.deadline))")
+            await pipeline.close(); await thumbnails.close(); try await f.files.close()
+            return
+        }
+        let original = try #require(await pipeline.profiles.avatarReadGrant(for: f.key, activation: page))
+        let renewed = try #require(try await pipeline.profiles.refreshAvatarReadGrant(for: f.key, activation: page, replacing: original.avatar))
+        try await ContinuousClock().sleep(until: original.deadline + .milliseconds(10))
+        await gate.release()
+        let snapshot = try #require(try await pending.value)
+        #expect(snapshot.name == "Original" && snapshot.deadline > .now)
+        #expect(snapshot.image == nil && snapshot.avatarRetryAt != nil)
+        #expect(snapshot.deadline <= renewed.deadline)
+        await pipeline.close(); await thumbnails.close(); try await f.files.close(); entered.continuation.finish()
+    }
+
+    @Test("authorized metadata without a download URL renders an already cached avatar")
+    func cachedAvatarWithoutDownloadPlan() async throws {
+        let f = try await ProfilePipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        await f.reader.removeDownloadPlan()
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let activation = await pipeline.profiles.activate()
+        let snapshot = try #require(try await pipeline.snapshot(key: f.key, activation: activation, pixels: 64))
+        #expect(snapshot.image != nil && snapshot.name == "Original")
+        #expect(await pipeline.profiles.avatarReadGrant(for: f.key, activation: activation)?.avatar.plan == nil)
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
     @Test("opening own profile does not revoke the account page's unchanged avatar grant")
     func openingProfileRetainsAccountAvatarGrant() async throws {
         let f = try await ProfilePipelineFixture(relationship: true)
@@ -123,7 +224,7 @@ struct V2ProfileAvatarPipelineTests {
         await pipeline.close(); await thumbnails.close(); try await f.files.close(); entered.continuation.finish()
     }
 
-    @Test("nested list pages reuse signed-in authority and render cached names on reentry")
+    @Test("nested list pages reuse foreground authority and retire it across backgrounding")
     func nestedListReentry() async throws {
         let f = try await ProfilePipelineFixture(direct: true)
         defer { try? FileManager.default.removeItem(at: f.root) }
@@ -153,18 +254,20 @@ struct V2ProfileAvatarPipelineTests {
         probe.phase = .inactive
         try await waitForProfilePage { probe.observedPhase == .inactive }
         #expect(probe.displayedIdentityName == "Original")
-        probe.phase = .background
-        try await waitForProfilePage { probe.observedPhase == .background }
-        #expect(probe.displayedIdentityName == "Original")
-        #expect(original.activation == activation)
         #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.deadline == deadline)
+        probe.phase = .background
+        try await waitForProfilePage { probe.observedPhase == .background && original.activation == nil }
+        #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline) == nil)
         #expect(await f.reader.calls == 1)
         probe.phase = .active
-        try await waitForProfilePage { probe.observedPhase == .active }
+        try await waitForProfilePage {
+            probe.observedPhase == .active && original.activation != nil &&
+            original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.name == "Original"
+        }
         #expect(probe.displayedIdentityName == "Original")
-        #expect(original.activation == activation)
+        #expect(original.activation != activation)
         #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.name == "Original")
-        #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.deadline == deadline)
+        #expect(await f.reader.calls == 2)
         // Sharing must not turn a revoked value into a stale-while-revalidate name.
         await pipeline.profiles.invalidate([f.key])
         try await waitForProfilePage { original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline) == nil }
@@ -172,6 +275,30 @@ struct V2ProfileAvatarPipelineTests {
         #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline) == nil)
         await pipeline.close(); await thumbnails.close(); try await f.files.close()
     }
+    @Test("a retained offscreen page snapshot yields the account subscription budget to a newly visible page")
+    func offscreenSnapshotYieldsSubscriptionBudget() async throws {
+        let f = try await ProfilePipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let scope = V2AuthorPresentationPageScope(context: f.pageContext)
+        let running = Task { await scope.run(pipeline: pipeline) }
+        try await waitForProfilePage { scope.activation != nil }
+        let row = try await scope.retain(f.key, pipeline: pipeline)
+        #expect(try await scope.snapshot(key: f.key, activation: row.0, pipeline: pipeline, pixels: nil)?.name == "Original")
+        await pipeline.profiles.releaseVisibleInterest(row.1)
+        #expect(try await pipeline.profiles.visibleProfileKeys(for: [row.0]) == [f.key])
+        let other = await pipeline.profiles.activateVisiblePage()
+        for _ in 0..<128 {
+            let key = V2ProfileViewLookupKey(userID: .init(uuid: UUID()), context: .relationship)
+            _ = try await pipeline.profiles.retainVisibleInterest(for: key, activation: other)
+        }
+        #expect(try await pipeline.profiles.visibleProfileKeys(for: [row.0]).isEmpty)
+        #expect(try await pipeline.profiles.visibleProfileKeys(for: [other]).count == 128)
+        await pipeline.profiles.deactivate(other)
+        running.cancel(); await running.value
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
     @Test("recipient authorized alias takes precedence over nickname and clears to nickname")
     func aliasDisplay() async throws {
         let f = try await ProfilePipelineFixture()
@@ -512,7 +639,7 @@ private struct ProfilePipelineFixture {
     let pageContext: V2AuthorPresentationPageScope.Context
     let actor = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
     let reader: ProfilePipelineReader, files: V2ResourceMediaTestOwner
-    init(direct: Bool = false, relationship: Bool = false) async throws {
+    init(direct: Bool = false, relationship: Bool = false, seedCache: Bool = true, initialByteError: (any Error)? = nil) async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("profile-pipeline-\(UUID())")
         let png = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).pngData { context in
             UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
@@ -532,10 +659,13 @@ private struct ProfilePipelineFixture {
             plan: .init(mode: .httpGet, url: #require(URL(string: "https://delivery.invalid/avatar")),
                 expiresAt: now.addingTimeInterval(120), expectedByteCount: Int64(png.count), checksum: checksum))
         reader = .init(value: try .init(view: view, lease: lease), avatar: avatar)
-        files = try await makeResourceMediaTestDownloader(downloader: .init(targetResolver: NoProfileByteIO(), byteTransfer: ResourceMediaSeedBytes(png)), directory: root)
-        let seeded = try await files.avatar(avatar, home: .account(key.userID))
-        cachedFile = seeded.fileURL
-        await seeded.release()
+        files = try await makeResourceMediaTestDownloader(downloader: .init(targetResolver: NoProfileByteIO(),
+            byteTransfer: ProfilePipelineBytes(png, initialError: initialByteError)), directory: root)
+        if seedCache {
+            let seeded = try await files.avatar(avatar, home: .account(key.userID))
+            cachedFile = seeded.fileURL
+            await seeded.release()
+        } else { cachedFile = root.appendingPathComponent("not-seeded") }
     }
     func pipeline(_ thumbnails: V2LocalMediaThumbnailCache) -> V2AvatarPipeline {
         .init(profiles: .init(actorUserID: actor, deviceID: device, reader: reader),
@@ -545,10 +675,21 @@ private struct ProfilePipelineFixture {
 }
 private actor ProfilePipelineReader: V2ProfilePresentationReading {
     var value: V2AuthorizedProfilePresentation
-    let avatar: V2ResourceAvatarAccess
+    var avatar: V2ResourceAvatarAccess
+    func removeDownloadPlan() { avatar = avatar.withoutDownloadPlan() }
     var denied = false
     var offline = false
+    private var omitFirstPlan = false, omitAllPlans = false, omitFirstAvatar = false, failRefresh = false
+    func withholdFirstDownloadPlan(failRefresh: Bool, omitAllPlans: Bool = false, omitFirstAvatar: Bool = false) {
+        omitFirstPlan = true; self.failRefresh = failRefresh; self.omitAllPlans = omitAllPlans; self.omitFirstAvatar = omitFirstAvatar
+    }
+    func allowRefresh() { failRefresh = false; omitAllPlans = false }
     func setOffline() { offline = true }
+    private var firstLifetime: TimeInterval?
+    private var refreshDelay: Duration = .zero
+    func shortenFirstLease(to seconds: TimeInterval, refreshDelay: Duration = .zero) {
+        firstLifetime = seconds; self.refreshDelay = refreshDelay
+    }
     var calls = 0
     init(value: V2AuthorizedProfilePresentation, avatar: V2ResourceAvatarAccess) { self.value = value; self.avatar = avatar }
     func deny() { denied = true }
@@ -573,12 +714,36 @@ private actor ProfilePipelineReader: V2ProfilePresentationReading {
             observedAt: Date(), validUntil: Date().addingTimeInterval(299))
         value = try .init(view: view, lease: lease, groupMember: previous.groupMember, contactAlias: previous.contactAlias)
     }
-    func readPresentations(_ keys: [V2ProfileViewLookupKey]) throws -> V2ProfilePresentationBatch {
+    func readPresentations(_ keys: [V2ProfileViewLookupKey]) async throws -> V2ProfilePresentationBatch {
         calls += 1
+        if calls > 1 && refreshDelay > .zero { try await Task.sleep(for: refreshDelay) }
         if offline { throw URLError(.notConnectedToInternet) }
+        if calls > 1 && failRefresh { throw URLError(.cannotConnectToHost) }
         let key = value.lease.key
-        return .init(presentations: denied ? [:] : [key: value], unavailable: denied ? Set(keys) : [],
-                     serverNow: Date(), avatars: denied ? [:] : [key: avatar])
+        var response = value
+        if let firstLifetime {
+            let lease = value.lease, now = Date()
+            response = try .init(view: value.view, lease: .init(actorUserID: lease.actorUserID, deviceID: lease.deviceID,
+                key: key, profileRevision: lease.profileRevision, visibilityRevision: lease.visibilityRevision,
+                contextRevision: lease.contextRevision, authorityVersion: lease.authorityVersion,
+                observedAt: now, validUntil: now.addingTimeInterval(calls == 1 ? firstLifetime : 300)),
+                groupMember: value.groupMember, contactAlias: value.contactAlias)
+        }
+        return .init(presentations: denied ? [:] : [key: response],
+            denials: denied ? Dictionary(uniqueKeysWithValues: keys.map { ($0, value.lease.authorityVersion) }) : [:],
+                     serverNow: Date(), avatars: denied || (omitFirstAvatar && calls == 1) ? [:] : [key: (omitFirstPlan && calls == 1) || omitAllPlans ? avatar.withoutDownloadPlan() : avatar])
+    }
+}
+private actor ProfilePipelineBytes: V2ClientMediaByteTransfer {
+    private var payload: Data?
+    private var initialError: (any Error)?
+    init(_ payload: Data, initialError: (any Error)?) { self.payload = payload; self.initialError = initialError }
+    func upload(fileURL: URL, target: V2ClientMediaTransferTarget) throws { throw CancellationError() }
+    func download(target: V2ClientMediaTransferTarget, destinationURL: URL) throws {
+        if let error = initialError { initialError = nil; throw error }
+        guard let payload else { throw CancellationError() }
+        self.payload = nil
+        try payload.write(to: destinationURL)
     }
 }
 private actor ProfileDecodeGate {
@@ -606,5 +771,45 @@ private struct LocalProfileFirstPaintHost: View {
         if probe.visible {
             V2AuthorizedPublicHandleView(key: key) { identity in probe.identities.append(identity?.displayName) }
         } else { Text("Other page") }
+    }
+}
+
+
+extension V2ResourceAvatarAccess {
+    init(mediaID: MediaID, variantID: ResourceVariantID, version: Int64,
+         checksum: V2ResourceChecksum, plan: V2ResourceTransferPlan) throws {
+        try self.init(mediaID: mediaID, variantID: variantID, version: version,
+            checksum: checksum, byteCount: plan.expectedByteCount, plan: plan)
+    }
+}
+
+extension V2PresentationAuthorityVersion {
+    static func fixture(_ key: V2ProfileViewLookupKey, contextRevision: UInt64 = 0, controlSequence: UInt64 = 0,
+                        permissionRevision: UInt64 = 0) -> Self {
+        let room: RoomID?
+        switch key.context {
+        case .relationship: room = nil
+        case .directConversation: room = try! RoomID("fixture-direct-room")
+        case .room(let value), .groupJoinReview(let value): room = value
+        }
+        return try! .init(controlSequence: controlSequence, roomID: room,
+            membershipRevision: room == nil ? 0 : contextRevision, permissionRevision: permissionRevision)
+    }
+}
+extension V2PresentationAccessLease {
+    init(actorUserID: UserID, deviceID: DeviceID, key: V2ProfileViewLookupKey,
+         profileRevision: V2ProfileRevision, visibilityRevision: V2ProfileRevision,
+         contextRevision: UInt64, observedAt: Date, validUntil: Date) throws {
+        try self.init(actorUserID: actorUserID, deviceID: deviceID, key: key,
+            profileRevision: profileRevision, visibilityRevision: visibilityRevision, contextRevision: key.context == .relationship ? 0 : contextRevision,
+            authorityVersion: .fixture(key, contextRevision: contextRevision), observedAt: observedAt, validUntil: validUntil)
+    }
+}
+
+extension V2ProfilePresentationBatch {
+    init(presentations: [V2ProfileViewLookupKey: V2AuthorizedProfilePresentation], unavailable: Set<V2ProfileViewLookupKey>,
+         serverNow: Date, avatars: [V2ProfileViewLookupKey: V2ResourceAvatarAccess] = [:], retryable: Set<V2ProfileViewLookupKey> = []) {
+        self.init(presentations: presentations, denials: Dictionary(uniqueKeysWithValues: unavailable.map { ($0, .fixture($0)) }),
+            serverNow: serverNow, avatars: avatars, retryable: retryable)
     }
 }

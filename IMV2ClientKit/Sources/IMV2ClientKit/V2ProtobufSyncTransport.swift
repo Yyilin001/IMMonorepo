@@ -931,25 +931,14 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     ///
     /// 此处不要求返回高水位大于提交水位，也不自动执行补拉或续订。
     public func subscribeToGroupEvents(roomID: RoomID, afterRoomSequence: UInt64) async throws -> V2ClientGroupEventSubscription {
-        try await subscribeToGroupEvents(roomID: roomID, afterRoomSequence: afterRoomSequence, authorPresentationView: nil)
-    }
-
-    /// The view must come from this authenticated connection before subscribing.
-    public func subscribeToGroupEvents(roomID: RoomID, afterRoomSequence: UInt64,
-                                       authorPresentationView: V2AuthorPresentationView?) async throws -> V2ClientGroupEventSubscription {
-        guard authorPresentationView.map({ $0.roomID == roomID && $0.renewBy > .now }) ?? true else {
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
         var request = IMV2Envelope()
         request.groupEventSubscribe = .init()
         request.groupEventSubscribe.roomID = roomID.rawValue
         request.groupEventSubscribe.afterRoomSequence = afterRoomSequence
-        request.groupEventSubscribe.authorPresentationViewID = authorPresentationView?.viewID.uuidString ?? ""
         let response = try await requestEnvelope(request)
         guard case .groupEventSubscribed(let subscribed)? = response.body,
               subscribed.roomID == roomID.rawValue,
-              subscribed.highWatermark <= UInt64(Int64.max),
-              subscribed.authorPresentationViewID == request.groupEventSubscribe.authorPresentationViewID
+              subscribed.highWatermark <= UInt64(Int64.max)
         else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
@@ -957,18 +946,58 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         return try .init(roomID: roomID, highWatermark: subscribed.highWatermark)
     }
 
+    public func startAuthorPresentation(_ view: V2AuthorPresentationView) async throws {
+        guard view.renewBy > .now else { throw V2RealtimeTransportError.unexpectedResponse }
+        var request = IMV2Envelope()
+        request.authorPresentationStart.streamID = view.streamID.uuidString
+        request.authorPresentationStart.viewID = view.viewID.uuidString
+        request.authorPresentationStart.messageRoomIds = view.messageRoomIDs.map(\.rawValue)
+        let response = try await requestEnvelope(request)
+        guard case .authorPresentationStarted(let started) = response.body, started == request.authorPresentationStart else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+    }
+
     /// Ends an exact disposable view, including one whose subscribe caller was
     /// cancelled. The server echoes all identities without touching room access.
     public func stopAuthorPresentation(_ view: V2AuthorPresentationView) async throws {
         var request = IMV2Envelope()
         request.authorPresentationEnd.streamID = view.streamID.uuidString
-        request.authorPresentationEnd.roomID = view.roomID.rawValue
         request.authorPresentationEnd.viewID = view.viewID.uuidString
         let response = try await requestEnvelope(request)
         guard case .authorPresentationEnded(let ended) = response.body,
               UUID(uuidString: ended.streamID) == view.streamID,
-              (try? RoomID(ended.roomID)) == view.roomID,
               UUID(uuidString: ended.viewID) == view.viewID else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+    }
+
+    public func acknowledgeAuthorPresentation(_ receipt: V2AuthorPresentationReceipt) async throws {
+        var request = IMV2Envelope()
+        request.authorPresentationReceipt.streamID = receipt.streamID.uuidString
+        request.authorPresentationReceipt.viewID = receipt.viewID.uuidString
+        request.authorPresentationReceipt.sequence = receipt.sequence
+        request.authorPresentationReceipt.keys = receipt.keys.map(IMV2ProfilePresentationKey.init)
+        request.authorPresentationReceipt.minimumRemainingMilliseconds = UInt32(receipt.minimumRemainingMilliseconds)
+        let response = try await requestEnvelope(request)
+        guard case .authorPresentationReceipted(let received) = response.body,
+              received == request.authorPresentationReceipt else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+    }
+
+    public func replaceAuthorPresentationInterests(_ interests: V2AuthorPresentationInterests) async throws {
+        var request = IMV2Envelope()
+        request.authorPresentationInterests.streamID = interests.streamID.uuidString
+        request.authorPresentationInterests.viewID = interests.viewID.uuidString
+        request.authorPresentationInterests.sequence = interests.sequence
+        request.authorPresentationInterests.keys = interests.keys.map(IMV2ProfilePresentationKey.init)
+        let response = try await requestEnvelope(request)
+        guard case .authorPresentationInterestsReceived(let received) = response.body,
+              received == request.authorPresentationInterests else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }

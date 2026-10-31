@@ -21,8 +21,8 @@ struct V2AuthorPresentationInbox: Sendable {
         receiver = .init(actorUserID: actorUserID, deviceID: deviceID)
     }
 
-    mutating func begin(roomID: RoomID) throws -> V2AuthorPresentationView {
-        let next = try receiver.beginView(streamID: streamID, roomID: roomID)
+    mutating func begin(messageRoomIDs: [RoomID]) throws -> V2AuthorPresentationView {
+        let next = try receiver.beginView(streamID: streamID, messageRoomIDs: messageRoomIDs)
         view = next; subscribed = false; clearQueue()
         return next
     }
@@ -34,17 +34,17 @@ struct V2AuthorPresentationInbox: Sendable {
 
     /// Capture the exact local view at request registration, before any socket
     /// suspension. Arbitrary callers cannot supply a nonce with no causal start.
-    func requestedView(_ request: IMV2GroupEventSubscribe) throws -> V2AuthorPresentationView {
-        guard let view, view.renewBy > .now, (try? RoomID(request.roomID)) == view.roomID,
-              UUID(uuidString: request.authorPresentationViewID) == view.viewID else {
+    func requestedView(_ request: IMV2AuthorPresentationStart) throws -> V2AuthorPresentationView {
+        guard let view, view.renewBy > .now, request.streamID == view.streamID.uuidString, request.messageRoomIds == view.messageRoomIDs.map(\.rawValue),
+              UUID(uuidString: request.viewID) == view.viewID else {
             throw V2TLSFrameConnectionError.unexpectedResponse
         }
         return view
     }
 
-    mutating func confirm(_ requested: V2AuthorPresentationView, response: IMV2GroupEventSubscribed) throws {
-        guard (try? RoomID(response.roomID)) == requested.roomID,
-              UUID(uuidString: response.authorPresentationViewID) == requested.viewID else {
+    mutating func confirm(_ requested: V2AuthorPresentationView, response: IMV2AuthorPresentationStart) throws {
+        guard response.streamID == requested.streamID.uuidString, response.messageRoomIds == requested.messageRoomIDs.map(\.rawValue),
+              UUID(uuidString: response.viewID) == requested.viewID else {
             throw V2TLSFrameConnectionError.unexpectedResponse
         }
         // An older response is correlated but cannot reactivate a departed page.
@@ -56,8 +56,8 @@ struct V2AuthorPresentationInbox: Sendable {
         let decoded = try V2AuthorPresentationDelta.decode(payload)
         guard decoded.streamID == streamID, decoded.actorUserID == actorUserID,
               decoded.deviceID == deviceID else { throw V2TLSFrameConnectionError.unexpectedResponse }
-        guard subscribed, let view, decoded.viewID == view.viewID, decoded.roomID == view.roomID,
-              let value = try receiver.receive(payload, for: view), !value.entries.isEmpty else { return }
+        guard subscribed, let view, decoded.viewID == view.viewID,
+              let value = try receiver.receive(decoded, for: view, at: .now), !value.entries.isEmpty else { return }
         while !queue.isEmpty && (queue.count >= Self.maximumFrames || queuedBytes + payload.count > Self.maximumBytes) {
             queuedBytes -= queue.removeFirst().bytes
         }
@@ -77,7 +77,7 @@ struct V2AuthorPresentationInbox: Sendable {
 /// Only an explicitly opted-in foreground owner consumes supplements. The owner
 /// renews the nonce before `renewBy` and ends it on privacy/lifecycle changes.
 public protocol V2AuthorPresentationSource: Sendable {
-    func beginAuthorPresentationView(roomID: RoomID) async throws -> V2AuthorPresentationView
+    func beginAuthorPresentationView(messageRoomIDs: [RoomID]) async throws -> V2AuthorPresentationView
     /// Clears local delivery immediately. The page owner separately drains the
     /// matching remote `stopAuthorPresentation` on its original connection.
     func endAuthorPresentationView(_ view: V2AuthorPresentationView) async
@@ -87,10 +87,11 @@ public protocol V2AuthorPresentationSource: Sendable {
 /// An optional supplement on a normally authorized room subscription. A nonce
 /// never creates room access by itself and does not change the durable cursor.
 public protocol V2ClientAuthorPresentationSubscriptionTransport: Sendable {
-    func subscribeToGroupEvents(roomID: RoomID, afterRoomSequence: UInt64,
-                                authorPresentationView: V2AuthorPresentationView?) async throws -> V2ClientGroupEventSubscription
+    func startAuthorPresentation(_ view: V2AuthorPresentationView) async throws
     /// Stops only this nonce on its original connection; preserves room events.
     func stopAuthorPresentation(_ view: V2AuthorPresentationView) async throws
+    func acknowledgeAuthorPresentation(_ receipt: V2AuthorPresentationReceipt) async throws
+    func replaceAuthorPresentationInterests(_ interests: V2AuthorPresentationInterests) async throws
 }
 
 extension V2ProtobufSyncTransport: V2ClientAuthorPresentationSubscriptionTransport {}

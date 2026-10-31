@@ -71,10 +71,14 @@ extension V2GatewayByteStream {
                 return await writer(marshalled)
             }
         } else { scoped = nil }
+        let authorWriter: (@Sendable (V2AuthorPresentationWrite) async -> V2AuthorPresentationWriteResult)?
+        if let writer = authorPresentationWriter {
+            authorWriter = { await writer($0) ? .enqueued : .discarded }
+        } else { authorWriter = nil }
         return attachNIOTransport(deviceRevocationHandler: deviceRevocationHandler,
             outboundWriter: outboundWriter, requiredNotificationWriter: requiredNotificationWriter,
             scopedNotificationWriter: scoped, requiredNotificationClose: requiredNotificationClose,
-            foregroundWriter: foregroundWriter, authorPresentationWriter: authorPresentationWriter,
+            foregroundWriter: foregroundWriter, authorPresentationWriter: authorWriter,
             roomSubscriptionSocketGate: gate)
     }
 }

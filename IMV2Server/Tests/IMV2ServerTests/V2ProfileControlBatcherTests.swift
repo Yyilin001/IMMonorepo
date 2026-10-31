@@ -8,6 +8,126 @@ import Testing
 
 @Suite(.serialized)
 struct V2ProfileControlBatcherTests {
+    @Test("an admitted caller can await a briefly occupied SQL slot beyond the merge window")
+    func queuedCallerUsesRemainingBudget() async throws {
+        let gate = ControlBatchGate()
+        let batcher = V2ProfileControlBatcher(configuration: .init(maximumKeys: 1,
+            maximumPendingKeys: 1, maximumInFlight: 1, delay: .zero)) { requests, _ in
+            await gate.hold()
+            return requests.map { .success(controlSnapshot($0)) }
+        }
+        let firstRequest = controlRequest(), queuedRequest = controlRequest()
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        let first = Task { try await batcher.read(firstRequest, deadline: deadline) }
+        var queued: Task<V2ProfileControlSnapshot, any Error>?
+        do {
+            try await controlEventually { await gate.arrivals == 1 }
+            let pending = Task { try await batcher.read(queuedRequest, deadline: deadline) }
+            queued = pending
+            try await controlEventually { await batcher.statistics().pendingKeys == 1 }
+            try await Task.sleep(for: .milliseconds(20))
+            await gate.release()
+            #expect(try await first.value.rows.first?.directShardID == firstRequest.actor.rawValue)
+            #expect(try await pending.value.rows.first?.directShardID == queuedRequest.actor.rawValue)
+            #expect(await gate.arrivals == 2)
+            #expect(await batcher.statistics().rejected == 0)
+            await batcher.close()
+        } catch {
+            first.cancel(); queued?.cancel(); await gate.release()
+            _ = await first.result; _ = await queued?.result; await batcher.close(); throw error
+        }
+    }
+
+    @Test("a queued caller's own cutoff still wins while the actual SQL owner remains charged")
+    func queuedCallerDeadline() async throws {
+        let gate = ControlBatchGate()
+        let batcher = V2ProfileControlBatcher(configuration: .init(maximumKeys: 1,
+            maximumPendingKeys: 1, maximumInFlight: 1, delay: .zero)) { requests, _ in
+            await gate.hold()
+            return requests.map { .success(controlSnapshot($0)) }
+        }
+        let first = Task { try await batcher.read(controlRequest(), deadline: .now + .seconds(2)) }
+        do {
+            try await controlEventually { await gate.arrivals == 1 }
+            await #expect(throws: V2ProfileControlBatchError.deadlineExceeded) {
+                _ = try await batcher.read(controlRequest(), deadline: .now + .milliseconds(20))
+            }
+            let state = await batcher.statistics()
+            #expect(state.pendingKeys == 0 && state.inFlightBatches == 1 && state.waiters == 1)
+            #expect(await gate.arrivals == 1)
+            await gate.release(); _ = try await first.value; await batcher.close()
+        } catch { first.cancel(); await gate.release(); _ = await first.result; await batcher.close(); throw error }
+    }
+
+    @Test("a shared query serves the live caller after an earlier caller expires")
+    func independentCoalescedDeadlines() async throws {
+        let earlyDeadline = ContinuousClock.now + .milliseconds(100), lateDeadline = ContinuousClock.now + .seconds(2)
+        let recorder = ControlBatchRecorder()
+        let batcher = V2ProfileControlBatcher(configuration: .init(maximumKeys: 2, delay: .milliseconds(5))) { requests, deadline in
+            await recorder.record(requests)
+            try await ContinuousClock().sleep(until: earlyDeadline + .milliseconds(30))
+            guard .now < deadline else { throw V2ProfileControlBatchError.deadlineExceeded }
+            return requests.map { .success(controlSnapshot($0)) }
+        }
+        let earlyRequest = controlRequest(), lateRequest = controlRequest()
+        let early = Task { try await batcher.read(earlyRequest, deadline: earlyDeadline) }
+        let late = Task { try await batcher.read(lateRequest, deadline: lateDeadline) }
+        do {
+            await #expect(throws: V2ProfileControlBatchError.deadlineExceeded) { _ = try await early.value }
+            let result = try await late.value
+            #expect(result.rows.first?.directShardID == lateRequest.actor.rawValue)
+            #expect(await recorder.requests.map(\.count) == [2])
+            #expect(await batcher.statistics().waiters == 0)
+            #expect(await batcher.statistics().inFlightBatches == 0)
+            await batcher.close()
+        } catch {
+            early.cancel(); late.cancel(); _ = await early.result; _ = await late.result
+            await batcher.close(); throw error
+        }
+    }
+
+    @Test("an already batched recipient read does not wait for another merge window")
+    func explicitPartialBatch() async throws {
+        let recorder = ControlBatchRecorder()
+        let batcher = V2ProfileControlBatcher(configuration: .init(delay: .milliseconds(5))) { requests, _ in
+            await recorder.record(requests)
+            return requests.map { .success(controlSnapshot($0)) }
+        }
+        do {
+            let requests = (0..<2).map { _ in controlRequest() }
+            let values = try await batcher.readMany(requests, deadline: .now + .seconds(5))
+            #expect(values.count == requests.count)
+            for (request, value) in zip(requests, values) {
+                #expect(try value.get().rows.first?.directShardID == request.actor.rawValue)
+            }
+            #expect(await recorder.requests.count == 1)
+            await batcher.close()
+        } catch { await batcher.close(); throw error }
+    }
+
+    @Test("an explicit recipient batch uses one SQL slot and demultiplexes per-device failures")
+    func explicitBatch() async throws {
+        let recorder = ControlBatchRecorder()
+        let batcher = V2ProfileControlBatcher(configuration: .init()) { requests, _ in
+            await recorder.record(requests)
+            return requests.enumerated().map { index, request in
+                index == 37 ? .failure(V2MediaStoreError.downloadNotAuthorized) : .success(controlSnapshot(request))
+            }
+        }
+        let requests = (0..<100).map { _ in controlRequest() }
+        do {
+            let values = try await batcher.readMany(requests, deadline: .now + .seconds(5))
+            #expect(values.count == 100)
+            for (index, value) in values.enumerated() {
+                if index == 37 { #expect(throws: V2MediaStoreError.downloadNotAuthorized) { _ = try value.get() } }
+                else { #expect(try value.get().rows.first?.directShardID == requests[index].actor.rawValue) }
+            }
+            #expect(await recorder.requests.count == 1)
+            #expect(await batcher.statistics().executedKeys == 100)
+            await batcher.close()
+        } catch { await batcher.close(); throw error }
+    }
+
     @Test("service shutdown also drains readers already past the SQL batch boundary")
     func serviceAdmissionDrain() async throws {
         let admission = V2ProfilePresentationAdmission(), probe = ControlCloseRecorder(), device = DeviceID(uuid: UUID())

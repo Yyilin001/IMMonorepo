@@ -13,7 +13,7 @@ import IMV2ServerInfrastructure
 /// 构造定时维护、撤销清理和可选推送处理器，不启动轮询。
 /// 两个撤销 Worker 的启动游标由组合根在监听器绑定前初始化。
 struct GatewayMaintenanceAssembly {
-    let directRoomProfilePropagationWorker: V2DirectRoomProfilePropagationWorker
+    let profileSecurityInvalidationWorker: V2ProfileSecurityInvalidationWorker
     let readReceiptPreferencePropagationWorker: V2ReadReceiptPreferencePropagationWorker
     let deviceRevocationWorker: V2DeviceRevocationWorker
     let revokedDeviceProjectionCleanupWorker: V2RevokedDeviceProjectionCleanupWorker
@@ -43,7 +43,7 @@ struct GatewayMaintenanceAssembly {
         let actorDirectory = actors.directory
         let callTimeout = roomServices.callTimeout
         let connectionRegistry = prepared.frontdoor.connectionRegistry
-        let directRoomProfilePropagationWorker = V2DirectRoomProfilePropagationWorker(
+        let profileSecurityInvalidationWorker = V2ProfileSecurityInvalidationWorker(
             database: maintenanceDatabase,
             projectionDelivery: maintenanceUserShardProjectionDelivery,
             liveNotifier: liveSyncNotifier
@@ -134,7 +134,7 @@ struct GatewayMaintenanceAssembly {
             )
         }
         return .init(
-            directRoomProfilePropagationWorker: directRoomProfilePropagationWorker,
+            profileSecurityInvalidationWorker: profileSecurityInvalidationWorker,
             readReceiptPreferencePropagationWorker: readReceiptPreferencePropagationWorker,
             deviceRevocationWorker: deviceRevocationWorker,
             revokedDeviceProjectionCleanupWorker: revokedDeviceProjectionCleanupWorker,

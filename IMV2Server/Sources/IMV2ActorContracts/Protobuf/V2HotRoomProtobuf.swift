@@ -72,7 +72,8 @@ extension Im_Actor_V1_HotLogPage {
 extension V2RoomRequest: V2ActorProtobufMessage {
     package var usesHotProtobuf: Bool {
         switch self {
-        case .messaging(.sendOperation), .roomSubscription, .roomLog: true
+        case .messaging(.sendOperation), .roomSubscription, .roomLog,
+             .mediaAuthorization(.profileVisibilityBatch), .mediaAuthorization(.profileVisibilityCohort): true
         default: false
         }
     }
@@ -84,6 +85,8 @@ extension V2RoomRequest: V2ActorProtobufMessage {
         case .roomLog(.pull(let value)): wire.logPull = .init(value)
         case .roomLog(.subscribe(let value)):
             var item = Im_Actor_V1_HotLogSubscribe(); item.roomID = value.roomID.rawValue; item.userID = value.actorUserID.rawValue; wire.logSubscribe = item
+        case .mediaAuthorization(.profileVisibilityBatch(let value)): wire.profileRead = .init(value)
+        case .mediaAuthorization(.profileVisibilityCohort(let value)): wire.profileCohort = .init(value)
         default: wire.coldValue = try V2ActorProtobuf.encodeValue(self)
         }
         return wire
@@ -99,6 +102,8 @@ extension Im_Actor_V1_HotRoomRequest {
         case .subscription(let value): return .roomSubscription(try value.model())
         case .logPull(let value): return .roomLog(.pull(try value.model()))
         case .logSubscribe(let value): try V2HotPB.check(value); return .roomLog(.subscribe(try .init(roomID: .init(value.roomID), actorUserID: .init(value.userID))))
+        case .profileRead(let value): return .mediaAuthorization(.profileVisibilityBatch(try value.model()))
+        case .profileCohort(let value): return .mediaAuthorization(.profileVisibilityCohort(try value.model()))
         case .coldValue(let bytes):
             let value = try V2ActorProtobuf.decodeValue(V2RoomRequest.self, from: bytes)
             guard !value.usesHotProtobuf else { throw V2HotPB.Invalid.value }; return value
@@ -108,7 +113,11 @@ extension Im_Actor_V1_HotRoomRequest {
 }
 extension V2RoomResponse: V2ActorProtobufMessage {
     package var usesHotProtobuf: Bool {
-        switch self { case .messaging(.sendOperation), .roomSubscription, .roomLog: true; default: false }
+        switch self {
+        case .messaging(.sendOperation), .roomSubscription, .roomLog,
+             .mediaAuthorization(.profilesVisible), .mediaAuthorization(.profilesVisibleCohort): true
+        default: false
+        }
     }
     package func hotWire() throws -> Im_Actor_V1_HotRoomResponse {
         var wire = Im_Actor_V1_HotRoomResponse()
@@ -119,6 +128,8 @@ extension V2RoomResponse: V2ActorProtobufMessage {
         case .roomLog(.subscription(let value)):
             var item = Im_Actor_V1_HotLogSubscription(); item.roomID = value.roomID.rawValue; item.highWatermark = value.highWatermark; item.membershipRevision = value.membershipRevision; wire.logSubscription = item
         case .roomLog(.failure(let value)): wire.logFailure = value.rawValue
+        case .mediaAuthorization(.profilesVisible(let value)): wire.profileSnapshot = .init(value)
+        case .mediaAuthorization(.profilesVisibleCohort(let values)): wire.profileSnapshots = .init(values)
         default: wire.coldValue = try V2ActorProtobuf.encodeValue(self)
         }
         return wire
@@ -135,6 +146,8 @@ extension Im_Actor_V1_HotRoomResponse {
         case .logPage(let value): return .roomLog(.page(try value.model()))
         case .logSubscription(let value): try V2HotPB.check(value); return .roomLog(.subscription(try .init(roomID: .init(value.roomID), highWatermark: value.highWatermark, membershipRevision: value.membershipRevision)))
         case .logFailure(let value): guard let reason = V2ActorRoomLogFailureWire(rawValue: value) else { throw V2HotPB.Invalid.value }; return .roomLog(.failure(reason))
+        case .profileSnapshot(let value): return .mediaAuthorization(.profilesVisible(try value.model()))
+        case .profileSnapshots(let value): return .mediaAuthorization(.profilesVisibleCohort(try value.model()))
         case .coldValue(let bytes): let value = try V2ActorProtobuf.decodeValue(V2RoomResponse.self, from: bytes); guard !value.usesHotProtobuf else { throw V2HotPB.Invalid.value }; return value
         default: throw V2HotPB.Invalid.value
         }

@@ -56,11 +56,11 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                         COUNT(*) FILTER (
                             WHERE state = 'pending'
                                OR (state = 'claimed' AND lease_expires_at <= snapshot_now.value)
-                        ) AS ready_direct_profile_updates,
+                        ) AS ready_profile_security_invalidations,
                         COUNT(*) FILTER (
                             WHERE state = 'claimed' AND lease_expires_at > snapshot_now.value
-                        ) AS leased_direct_profile_updates
-                    FROM im_v2.public_profile_update_outbox, snapshot_now
+                        ) AS leased_profile_security_invalidations
+                    FROM im_v2.profile_security_invalidation_outbox, snapshot_now
                     WHERE state <> 'completed'
                 ),
                 read_receipt_preference_metrics AS (
@@ -264,8 +264,8 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         }
         return .init(
             isAvailable: true,
-            readyDirectProfileUpdates: v2MetricCount(row.readyDirectProfileUpdates),
-            leasedDirectProfileUpdates: v2MetricCount(row.leasedDirectProfileUpdates),
+            readyProfileSecurityInvalidations: v2MetricCount(row.readyProfileSecurityInvalidations),
+            leasedProfileSecurityInvalidations: v2MetricCount(row.leasedProfileSecurityInvalidations),
             readyReadReceiptPreferencePropagations: v2MetricCount(row.readyReadReceiptPreferencePropagations),
             leasedReadReceiptPreferencePropagations: v2MetricCount(row.leasedReadReceiptPreferencePropagations),
             scheduledReadReceiptPreferencePropagations: v2MetricCount(row.scheduledReadReceiptPreferencePropagations),
@@ -460,8 +460,8 @@ public enum V2DurableWorkMetricsError: Error, Equatable, Sendable {
 
 
 private struct DurableWorkMetricsRow: Decodable {
-    let readyDirectProfileUpdates: Int64
-    let leasedDirectProfileUpdates: Int64
+    let readyProfileSecurityInvalidations: Int64
+    let leasedProfileSecurityInvalidations: Int64
     let readyReadReceiptPreferencePropagations: Int64
     let leasedReadReceiptPreferencePropagations: Int64
     let scheduledReadReceiptPreferencePropagations: Int64
@@ -500,8 +500,8 @@ private struct DurableWorkMetricsRow: Decodable {
     let pendingRevokedDeviceProjectionCleanupEvents: Int64
 
     enum CodingKeys: String, CodingKey {
-        case readyDirectProfileUpdates = "ready_direct_profile_updates"
-        case leasedDirectProfileUpdates = "leased_direct_profile_updates"
+        case readyProfileSecurityInvalidations = "ready_profile_security_invalidations"
+        case leasedProfileSecurityInvalidations = "leased_profile_security_invalidations"
         case readyReadReceiptPreferencePropagations = "ready_read_receipt_preference_propagations"
         case leasedReadReceiptPreferencePropagations = "leased_read_receipt_preference_propagations"
         case scheduledReadReceiptPreferencePropagations = "scheduled_read_receipt_preference_propagations"

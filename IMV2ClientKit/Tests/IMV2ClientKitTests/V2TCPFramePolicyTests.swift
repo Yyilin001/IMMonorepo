@@ -35,5 +35,12 @@ struct V2TCPFramePolicyTests {
         #expect(typing.kind == .ordinary)
         #expect(!typing.isRetry)
         #expect(typing.orderingKey == nil)
+        var interest = IMV2AuthorPresentationInterests()
+        #expect(V2TCPFramePolicy.policy(for: .authorPresentationInterests(interest)) == .control)
+        interest.keys = [IMV2ProfilePresentationKey()]
+        let interestPolicy = V2TCPFramePolicy.policy(for: .authorPresentationInterests(interest))
+        #expect(interestPolicy == .read)
+        #expect(try interestPolicy.context(service: "realtime", scoped: recovery).kind == .ordinary)
+        #expect(V2TCPFramePolicy.policy(for: .authorPresentationInterestsReceived(interest)) == .serverOnly)
     }
 }

@@ -99,11 +99,7 @@ private actor DeadlineSocketServer {
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         listener = try NWListener(using: parameters)
         payload = try JSONSerialization.data(withJSONObject: [
-            "event_type": "message.accepted", "message_id": UUID().uuidString,
-            "room_id": UUID().uuidString, "room_sequence": 1, "message_revision": 1,
-            "sender_user_id": "deadline-user", "text": "deadline payload",
-            "mentioned_user_ids": [], "mentions_everyone": false,
-            "server_created_at_ms": 1_750_000_000_000,
+            "target_user_id": UUID().uuidString, "revision": 1,
         ])
     }
 
@@ -189,7 +185,7 @@ private actor DeadlineSocketServer {
             response.syncBatch.records = [.init()]
             response.syncBatch.records[0].userSyncSequence = 1
             response.syncBatch.records[0].sourceEventID = eventID
-            response.syncBatch.records[0].projectionKind = "message"
+            response.syncBatch.records[0].projectionKind = "contact_alias"
             response.syncBatch.records[0].payload = payload
         case .syncAck:
             current = .ack

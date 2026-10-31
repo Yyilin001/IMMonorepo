@@ -31,6 +31,9 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
     let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     let committedMessageObserver: (any V2CommittedMessageBatchObserving)?
     public let sendOperationMetrics = V2SendOperationBatchMetrics()
+    /// One fixed-cardinality recorder per physical owner, shared by its room
+    /// activations and resource copies; no room or recipient IDs are retained.
+    public let profileReadDiagnostics = V2ProfilePresentationReadDiagnostics()
     let durableSendSchedulingConfiguration: V2SendOperationSchedulingConfiguration
     fileprivate let durableOwner = V2RoomDurableOwnerHolder()
     fileprivate let subscriptionHost: V2RoomSubscriptionHost
@@ -385,7 +388,8 @@ private actor V2RoomServerActivation {
               zip(turn.items, turn.items.dropFirst()).allSatisfy({ pair in pair.0.ordinal < pair.1.ordinal }) else {
             return .rolledBack(.invalidRequest)
         }
-        // 资料读取只合并已逐请求准入的连续信封，不混入发送或其他屏障。
+        // Single-viewer and service-authorized cohort envelopes share only
+        // contiguous profile turns. Total target work and bytes remain bounded.
         let profileCounts = turn.items.compactMap { $0.request.profileVisibilityTargetCount }
         let isProfileTurn = profileCounts.count == turn.items.count
             && profileCounts.reduce(0, +) <= 100
@@ -414,16 +418,41 @@ private actor V2RoomServerActivation {
         do {
             let completion: V2RoomTransactionCompletion<[V2RoomResponse]> = try await V2RoomSQLDeadline.withDeadline(callDeadline) {
                 if isProfileTurn {
-                    let requests = turn.items.compactMap { item -> V2ActorProfileVisibilityBatchWire? in
-                        if case .mediaAuthorization(.profileVisibilityBatch(let request)) = item.request { return request }
-                        return nil
+                    resources.profileReadDiagnostics.recordDuration(.roomOwnerQueue, duration: turn.context.queueWaitDuration)
+                    let groups = turn.items.map { item -> [V2ActorProfileVisibilityBatchWire] in
+                        switch item.request {
+                        case .mediaAuthorization(.profileVisibilityBatch(let request)): [request]
+                        case .mediaAuthorization(.profileVisibilityCohort(let request)): request.requests
+                        default: []
+                        }
                     }
-                    let results = try await v2WithAdmittedRoomDatabaseWork(resources.databaseWorkAdmission,
-                        workClass: .interactiveRead, callerDeadline: callDeadline) {
-                        try await handlers.media.executeProfileVisibilityBatch(requests)
+                    let requests = groups.flatMap { $0 }
+                    let results = try await resources.profileReadDiagnostics.measure(.roomOwnerRead) {
+                        try await v2WithAdmittedRoomDatabaseWork(resources.databaseWorkAdmission,
+                            workClass: .interactiveRead, callerDeadline: callDeadline) {
+                            try await resources.profileReadDiagnostics.measure(.roomOwnerExecution) {
+                                try await handlers.media.executeProfileVisibilityBatch(requests)
+                            }
+                        }
                     }
-                    guard results.count == turn.items.count else { return .outcomeUnknown }
-                    return .committed(results.map(V2RoomResponse.mediaAuthorization))
+                    guard results.count == requests.count else { return .outcomeUnknown }
+                    var offset = 0
+                    var responses: [V2RoomResponse] = []
+                    for (item, group) in zip(turn.items, groups) {
+                        let values = results[offset..<(offset + group.count)]
+                        offset += group.count
+                        if case .mediaAuthorization(.profileVisibilityCohort) = item.request {
+                            let snapshots = values.compactMap { result -> V2ActorProfileVisibilityBatchSnapshotWire? in
+                                if case .profilesVisible(let value) = result { return value }; return nil
+                            }
+                            guard snapshots.count == group.count else { return .outcomeUnknown }
+                            responses.append(.mediaAuthorization(.profilesVisibleCohort(snapshots)))
+                        } else {
+                            guard group.count == 1, let value = values.first else { return .outcomeUnknown }
+                            responses.append(.mediaAuthorization(value))
+                        }
+                    }
+                    return .committed(responses)
                 }
                 if isOperationSendTurn {
                     let commands = turn.items.compactMap { item -> V2MessageSendOperationCommand? in

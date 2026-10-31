@@ -45,7 +45,9 @@ public struct V2ActorSignedPacket: Codable, Equatable, Sendable {
 }
 
 public struct V2ActorSessionHello: Codable, Equatable, Sendable {
-    public static let protocolVersion = 1
+    // Version 2 adds service-authorized, bounded multi-viewer profile reads.
+    // Hosts and callers move together; version 1 sessions are not accepted.
+    public static let protocolVersion = 2
     public let version: Int
     public let serviceID: V2ActorServiceID
     public let callerIncarnation: UUID

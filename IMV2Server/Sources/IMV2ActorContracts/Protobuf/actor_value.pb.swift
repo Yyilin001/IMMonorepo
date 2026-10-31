@@ -1978,6 +1978,137 @@ package nonisolated struct Im_Actor_V1_HotLogSubscription: Sendable {
   package init() {}
 }
 
+package nonisolated struct Im_Actor_V1_HotProfileRead: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var roomID: String = String()
+
+  package var actorID: String = String()
+
+  package var roomKind: String = String()
+
+  package var targetIds: [String] = []
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_HotProfileCohort: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var roomID: String = String()
+
+  package var requests: [Im_Actor_V1_HotProfileRead] = []
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_HotGroupMember: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var roomID: String = String()
+
+  package var userID: String = String()
+
+  package var nickname: String {
+    get {_nickname ?? String()}
+    set {_nickname = newValue}
+  }
+  /// Returns true if `nickname` has been explicitly set.
+  package var hasNickname: Bool {self._nickname != nil}
+  /// Clears the value of `nickname`. Subsequent reads from it will return its default value.
+  package mutating func clearNickname() {self._nickname = nil}
+
+  package var revision: UInt64 = 0
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _nickname: String? = nil
+}
+
+package nonisolated struct Im_Actor_V1_HotProfileSnapshot: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var request: Im_Actor_V1_HotProfileRead {
+    get {_request ?? Im_Actor_V1_HotProfileRead()}
+    set {_request = newValue}
+  }
+  /// Returns true if `request` has been explicitly set.
+  package var hasRequest: Bool {self._request != nil}
+  /// Clears the value of `request`. Subsequent reads from it will return its default value.
+  package mutating func clearRequest() {self._request = nil}
+
+  package var activation: Im_Actor_V1_HotActivation {
+    get {_activation ?? Im_Actor_V1_HotActivation()}
+    set {_activation = newValue}
+  }
+  /// Returns true if `activation` has been explicitly set.
+  package var hasActivation: Bool {self._activation != nil}
+  /// Clears the value of `activation`. Subsequent reads from it will return its default value.
+  package mutating func clearActivation() {self._activation = nil}
+
+  package var membershipRevision: Int64 = 0
+
+  package var permissionRevision: Int64 = 0
+
+  package var visibleTargetIds: [String] = []
+
+  package var groupMembers: [Im_Actor_V1_HotGroupMember] = []
+
+  /// Preserve Foundation's exact Date representation without epoch conversion rounding.
+  package var observedAtReferenceSeconds: Double {
+    get {_observedAtReferenceSeconds ?? 0}
+    set {_observedAtReferenceSeconds = newValue}
+  }
+  /// Returns true if `observedAtReferenceSeconds` has been explicitly set.
+  package var hasObservedAtReferenceSeconds: Bool {self._observedAtReferenceSeconds != nil}
+  /// Clears the value of `observedAtReferenceSeconds`. Subsequent reads from it will return its default value.
+  package mutating func clearObservedAtReferenceSeconds() {self._observedAtReferenceSeconds = nil}
+
+  package var expiresAtReferenceSeconds: Double {
+    get {_expiresAtReferenceSeconds ?? 0}
+    set {_expiresAtReferenceSeconds = newValue}
+  }
+  /// Returns true if `expiresAtReferenceSeconds` has been explicitly set.
+  package var hasExpiresAtReferenceSeconds: Bool {self._expiresAtReferenceSeconds != nil}
+  /// Clears the value of `expiresAtReferenceSeconds`. Subsequent reads from it will return its default value.
+  package mutating func clearExpiresAtReferenceSeconds() {self._expiresAtReferenceSeconds = nil}
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _request: Im_Actor_V1_HotProfileRead? = nil
+  fileprivate var _activation: Im_Actor_V1_HotActivation? = nil
+  fileprivate var _observedAtReferenceSeconds: Double? = nil
+  fileprivate var _expiresAtReferenceSeconds: Double? = nil
+}
+
+package nonisolated struct Im_Actor_V1_HotProfileSnapshots: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var snapshots: [Im_Actor_V1_HotProfileSnapshot] = []
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
 package nonisolated struct Im_Actor_V1_HotRoomRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2017,6 +2148,22 @@ package nonisolated struct Im_Actor_V1_HotRoomRequest: Sendable {
     set {operation = .logSubscribe(newValue)}
   }
 
+  package var profileRead: Im_Actor_V1_HotProfileRead {
+    get {
+      if case .profileRead(let v)? = operation {return v}
+      return Im_Actor_V1_HotProfileRead()
+    }
+    set {operation = .profileRead(newValue)}
+  }
+
+  package var profileCohort: Im_Actor_V1_HotProfileCohort {
+    get {
+      if case .profileCohort(let v)? = operation {return v}
+      return Im_Actor_V1_HotProfileCohort()
+    }
+    set {operation = .profileCohort(newValue)}
+  }
+
   package var coldValue: Data {
     get {
       if case .coldValue(let v)? = operation {return v}
@@ -2032,6 +2179,8 @@ package nonisolated struct Im_Actor_V1_HotRoomRequest: Sendable {
     case subscription(Im_Actor_V1_HotSubscriptionCommand)
     case logPull(Im_Actor_V1_HotLogPull)
     case logSubscribe(Im_Actor_V1_HotLogSubscribe)
+    case profileRead(Im_Actor_V1_HotProfileRead)
+    case profileCohort(Im_Actor_V1_HotProfileCohort)
     case coldValue(Data)
 
   }
@@ -2086,6 +2235,22 @@ package nonisolated struct Im_Actor_V1_HotRoomResponse: Sendable {
     set {result = .logFailure(newValue)}
   }
 
+  package var profileSnapshot: Im_Actor_V1_HotProfileSnapshot {
+    get {
+      if case .profileSnapshot(let v)? = result {return v}
+      return Im_Actor_V1_HotProfileSnapshot()
+    }
+    set {result = .profileSnapshot(newValue)}
+  }
+
+  package var profileSnapshots: Im_Actor_V1_HotProfileSnapshots {
+    get {
+      if case .profileSnapshots(let v)? = result {return v}
+      return Im_Actor_V1_HotProfileSnapshots()
+    }
+    set {result = .profileSnapshots(newValue)}
+  }
+
   package var coldValue: Data {
     get {
       if case .coldValue(let v)? = result {return v}
@@ -2102,6 +2267,8 @@ package nonisolated struct Im_Actor_V1_HotRoomResponse: Sendable {
     case logPage(Im_Actor_V1_HotLogPage)
     case logSubscription(Im_Actor_V1_HotLogSubscription)
     case logFailure(String)
+    case profileSnapshot(Im_Actor_V1_HotProfileSnapshot)
+    case profileSnapshots(Im_Actor_V1_HotProfileSnapshots)
     case coldValue(Data)
 
   }
@@ -7433,9 +7600,237 @@ nonisolated extension Im_Actor_V1_HotLogSubscription: SwiftProtobuf.Message, Swi
   }
 }
 
+nonisolated extension Im_Actor_V1_HotProfileRead: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".HotProfileRead"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}actor_id\0\u{3}room_kind\0\u{3}target_ids\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.actorID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.roomKind) }()
+      case 4: try { try decoder.decodeRepeatedStringField(value: &self.targetIds) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.roomID.isEmpty {
+      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
+    }
+    if !self.actorID.isEmpty {
+      try visitor.visitSingularStringField(value: self.actorID, fieldNumber: 2)
+    }
+    if !self.roomKind.isEmpty {
+      try visitor.visitSingularStringField(value: self.roomKind, fieldNumber: 3)
+    }
+    if !self.targetIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.targetIds, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_HotProfileRead, rhs: Im_Actor_V1_HotProfileRead) -> Bool {
+    if lhs.roomID != rhs.roomID {return false}
+    if lhs.actorID != rhs.actorID {return false}
+    if lhs.roomKind != rhs.roomKind {return false}
+    if lhs.targetIds != rhs.targetIds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_HotProfileCohort: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".HotProfileCohort"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{1}requests\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
+      case 2: try { try decoder.decodeRepeatedMessageField(value: &self.requests) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.roomID.isEmpty {
+      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
+    }
+    if !self.requests.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.requests, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_HotProfileCohort, rhs: Im_Actor_V1_HotProfileCohort) -> Bool {
+    if lhs.roomID != rhs.roomID {return false}
+    if lhs.requests != rhs.requests {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_HotGroupMember: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".HotGroupMember"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}user_id\0\u{1}nickname\0\u{1}revision\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.userID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self._nickname) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.roomID.isEmpty {
+      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
+    }
+    if !self.userID.isEmpty {
+      try visitor.visitSingularStringField(value: self.userID, fieldNumber: 2)
+    }
+    try { if let v = self._nickname {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 3)
+    } }()
+    if self.revision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.revision, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_HotGroupMember, rhs: Im_Actor_V1_HotGroupMember) -> Bool {
+    if lhs.roomID != rhs.roomID {return false}
+    if lhs.userID != rhs.userID {return false}
+    if lhs._nickname != rhs._nickname {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_HotProfileSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".HotProfileSnapshot"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}request\0\u{1}activation\0\u{3}membership_revision\0\u{3}permission_revision\0\u{3}visible_target_ids\0\u{3}group_members\0\u{3}observed_at_reference_seconds\0\u{3}expires_at_reference_seconds\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._request) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._activation) }()
+      case 3: try { try decoder.decodeSingularSInt64Field(value: &self.membershipRevision) }()
+      case 4: try { try decoder.decodeSingularSInt64Field(value: &self.permissionRevision) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.visibleTargetIds) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.groupMembers) }()
+      case 7: try { try decoder.decodeSingularDoubleField(value: &self._observedAtReferenceSeconds) }()
+      case 8: try { try decoder.decodeSingularDoubleField(value: &self._expiresAtReferenceSeconds) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._request {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._activation {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if self.membershipRevision != 0 {
+      try visitor.visitSingularSInt64Field(value: self.membershipRevision, fieldNumber: 3)
+    }
+    if self.permissionRevision != 0 {
+      try visitor.visitSingularSInt64Field(value: self.permissionRevision, fieldNumber: 4)
+    }
+    if !self.visibleTargetIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.visibleTargetIds, fieldNumber: 5)
+    }
+    if !self.groupMembers.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.groupMembers, fieldNumber: 6)
+    }
+    try { if let v = self._observedAtReferenceSeconds {
+      try visitor.visitSingularDoubleField(value: v, fieldNumber: 7)
+    } }()
+    try { if let v = self._expiresAtReferenceSeconds {
+      try visitor.visitSingularDoubleField(value: v, fieldNumber: 8)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_HotProfileSnapshot, rhs: Im_Actor_V1_HotProfileSnapshot) -> Bool {
+    if lhs._request != rhs._request {return false}
+    if lhs._activation != rhs._activation {return false}
+    if lhs.membershipRevision != rhs.membershipRevision {return false}
+    if lhs.permissionRevision != rhs.permissionRevision {return false}
+    if lhs.visibleTargetIds != rhs.visibleTargetIds {return false}
+    if lhs.groupMembers != rhs.groupMembers {return false}
+    if lhs._observedAtReferenceSeconds != rhs._observedAtReferenceSeconds {return false}
+    if lhs._expiresAtReferenceSeconds != rhs._expiresAtReferenceSeconds {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_HotProfileSnapshots: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".HotProfileSnapshots"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}snapshots\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.snapshots) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.snapshots.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.snapshots, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_HotProfileSnapshots, rhs: Im_Actor_V1_HotProfileSnapshots) -> Bool {
+    if lhs.snapshots != rhs.snapshots {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Im_Actor_V1_HotRoomRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRoomRequest"
-  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}send\0\u{1}subscription\0\u{3}log_pull\0\u{3}log_subscribe\0\u{4}`\u{1}cold_value\0")
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}send\0\u{1}subscription\0\u{3}log_pull\0\u{3}log_subscribe\0\u{3}profile_read\0\u{3}profile_cohort\0\u{4}^\u{1}cold_value\0")
 
   package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7495,6 +7890,32 @@ nonisolated extension Im_Actor_V1_HotRoomRequest: SwiftProtobuf.Message, SwiftPr
           self.operation = .logSubscribe(v)
         }
       }()
+      case 5: try {
+        var v: Im_Actor_V1_HotProfileRead?
+        var hadOneofValue = false
+        if let current = self.operation {
+          hadOneofValue = true
+          if case .profileRead(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.operation = .profileRead(v)
+        }
+      }()
+      case 6: try {
+        var v: Im_Actor_V1_HotProfileCohort?
+        var hadOneofValue = false
+        if let current = self.operation {
+          hadOneofValue = true
+          if case .profileCohort(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.operation = .profileCohort(v)
+        }
+      }()
       case 100: try {
         var v: Data?
         try decoder.decodeSingularBytesField(value: &v)
@@ -7530,6 +7951,14 @@ nonisolated extension Im_Actor_V1_HotRoomRequest: SwiftProtobuf.Message, SwiftPr
       guard case .logSubscribe(let v)? = self.operation else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
     }()
+    case .profileRead?: try {
+      guard case .profileRead(let v)? = self.operation else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    }()
+    case .profileCohort?: try {
+      guard case .profileCohort(let v)? = self.operation else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    }()
     case .coldValue?: try {
       guard case .coldValue(let v)? = self.operation else { preconditionFailure() }
       try visitor.visitSingularBytesField(value: v, fieldNumber: 100)
@@ -7548,7 +7977,7 @@ nonisolated extension Im_Actor_V1_HotRoomRequest: SwiftProtobuf.Message, SwiftPr
 
 nonisolated extension Im_Actor_V1_HotRoomResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRoomResponse"
-  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}send\0\u{1}subscription\0\u{3}log_page\0\u{3}log_subscription\0\u{3}log_failure\0\u{4}_\u{1}cold_value\0")
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}send\0\u{1}subscription\0\u{3}log_page\0\u{3}log_subscription\0\u{3}log_failure\0\u{3}profile_snapshot\0\u{3}profile_snapshots\0\u{4}]\u{1}cold_value\0")
 
   package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7616,6 +8045,32 @@ nonisolated extension Im_Actor_V1_HotRoomResponse: SwiftProtobuf.Message, SwiftP
           self.result = .logFailure(v)
         }
       }()
+      case 6: try {
+        var v: Im_Actor_V1_HotProfileSnapshot?
+        var hadOneofValue = false
+        if let current = self.result {
+          hadOneofValue = true
+          if case .profileSnapshot(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.result = .profileSnapshot(v)
+        }
+      }()
+      case 7: try {
+        var v: Im_Actor_V1_HotProfileSnapshots?
+        var hadOneofValue = false
+        if let current = self.result {
+          hadOneofValue = true
+          if case .profileSnapshots(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.result = .profileSnapshots(v)
+        }
+      }()
       case 100: try {
         var v: Data?
         try decoder.decodeSingularBytesField(value: &v)
@@ -7654,6 +8109,14 @@ nonisolated extension Im_Actor_V1_HotRoomResponse: SwiftProtobuf.Message, SwiftP
     case .logFailure?: try {
       guard case .logFailure(let v)? = self.result else { preconditionFailure() }
       try visitor.visitSingularStringField(value: v, fieldNumber: 5)
+    }()
+    case .profileSnapshot?: try {
+      guard case .profileSnapshot(let v)? = self.result else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    }()
+    case .profileSnapshots?: try {
+      guard case .profileSnapshots(let v)? = self.result else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
     }()
     case .coldValue?: try {
       guard case .coldValue(let v)? = self.result else { preconditionFailure() }

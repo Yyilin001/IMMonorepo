@@ -21,13 +21,6 @@ public struct V2LocalProfileDisplay: Codable, Equatable, Sendable {
         member = presentation.groupMember; observedAt = presentation.lease.observedAtUnixMilliseconds
     }
 
-    init?(profile: V2ProfileView) {
-        guard profile.state == .active, let identity = profile.publicIdentity else { return nil }
-        key = .init(userID: profile.userID, context: .directConversation); self.identity = identity
-        profileRevision = profile.revision; visibilityRevision = profile.visibilityRevision
-        contextRevision = 0; alias = nil; member = nil; observedAt = 0
-    }
-
     func supersedes(_ previous: Self) -> Bool {
         profileRevision >= previous.profileRevision && visibilityRevision >= previous.visibilityRevision
             && contextRevision >= previous.contextRevision && observedAt >= previous.observedAt

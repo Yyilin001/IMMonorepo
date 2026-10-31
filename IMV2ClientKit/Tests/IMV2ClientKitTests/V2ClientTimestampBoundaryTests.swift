@@ -45,17 +45,17 @@ struct V2ClientTimestampBoundaryTests {
         let url = directory.appending(path: "client.sqlite")
         let binding = V2LocalInstallationBinding(value: UUID())
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let record = try V2ClientSyncRecord(
-            sequence: 1, sourceEventID: EventID(uuid: UUID()), projectionKind: "moderation",
+        let room = RoomID(uuid: UUID())
+        let event = try V2ClientGroupEvent(
+            sourceEventID: EventID(uuid: UUID()), roomSequence: 1, projectionKind: "moderation",
             payload: try JSONSerialization.data(withJSONObject: [
-                "event_type": "member.muted", "room_id": UUID().uuidString,
+                "event_type": "member.muted", "room_id": room.rawValue,
                 "room_sequence": 1, "actor_user_id": UUID().uuidString,
                 "target_user_id": UUID().uuidString, "mute_until_ms": Int64.max,
                 "server_created_at_ms": 1_750_000_000_000
             ])
         )
-        _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("token"),
-            receipt: .init("receipt"), hasMore: false, capabilityProfile: "base"))
+        _ = try await store.applyGroupEventPage(.init(roomID: room, events: [event], nextRoomSequence: 1, hasMore: false))
         let first = try #require(await store.moderationActions().first)
         #expect(first.muteUntil == Date(timeIntervalSince1970: Double(Int64.max) / 1_000))
         try await store.close()

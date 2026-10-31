@@ -12,6 +12,58 @@ import Testing
 
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
 struct V2ProfileControlBatchPostgresTests {
+    @Test("a block/unblock cycle preserves its durable revision even when current visible facts return to their initial values")
+    func authorityABAFence() async throws {
+        try await withFixture(count: 1) { f in
+            let reader = PostgresV2ProfileControlReader(database: f.database), identity = f.identities[0]
+            let input = V2ProfileControlRequest(keys: [.init(userID: f.target, context: .relationship)],
+                actor: .init(uuid: identity.user), device: .init(uuid: identity.device))
+            let before = try await reader.read([input], deadline: .now + .seconds(5))[0].get()
+            try await f.database.transaction { transaction in
+                let tx = try #require(transaction as? any SQLDatabase)
+                try await tx.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: identity.user),\(bind: f.target.uuidValue!),clock_timestamp())").run()
+                try await tx.raw("INSERT INTO im_v2.social_block_revisions(actor_user_id,target_user_id,revision) VALUES(\(bind: identity.user),\(bind: f.target.uuidValue!),1)").run()
+            }
+            try await f.database.transaction { transaction in
+                let tx = try #require(transaction as? any SQLDatabase)
+                try await tx.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id=\(bind: identity.user) AND blocked_user_id=\(bind: f.target.uuidValue!)").run()
+                try await tx.raw("UPDATE im_v2.social_block_revisions SET revision=2 WHERE actor_user_id=\(bind: identity.user) AND target_user_id=\(bind: f.target.uuidValue!)").run()
+            }
+            let after = try await reader.read([input], deadline: .now + .seconds(5))[0].get()
+            #expect(before.rows[0].view == after.rows[0].view && before.rows[0].relationshipAllowed == after.rows[0].relationshipAllowed)
+            #expect(!before.rows[0].sameAuthorizationFacts(as: after.rows[0]))
+            #expect(after.rows[0].outgoingBlockRevision == 2 && after.rows[0].incomingBlockRevision == 0)
+            #expect(after.controlSequence >= before.controlSequence + 2)
+            #expect(await reader.profiles.originBatches == 1)
+            await reader.profiles.close()
+        }
+    }
+
+    @Test("warm shared content follows revision changes while device and block decisions remain fresh")
+    func immutableContentAndFreshAuthorization() async throws {
+        try await withFixture(count: 2) { f in
+            let reader = PostgresV2ProfileControlReader(database: f.database)
+            let inputs = f.identities.map { identity in
+                V2ProfileControlRequest(keys: [.init(userID: f.target, context: .relationship)],
+                    actor: .init(uuid: identity.user), device: .init(uuid: identity.device))
+            }
+            _ = try await reader.read(inputs, deadline: .now + .seconds(5))
+            _ = try await reader.read(inputs, deadline: .now + .seconds(5))
+            #expect(await reader.profiles.originBatches == 1)
+            try await f.sql.raw("UPDATE im_v2.public_user_profiles SET display_name='Changed',revision=revision+1 WHERE user_id=\(bind:f.target.uuidValue!)").run()
+            let changed = try await reader.read(inputs, deadline: .now + .seconds(5))
+            #expect(try changed[0].get().rows.first?.view?.publicIdentity?.displayName == "Changed")
+            #expect(await reader.profiles.originBatches == 2)
+            try await f.sql.raw("UPDATE im_v2.auth_devices SET revoked_at=clock_timestamp() WHERE device_id=\(bind:f.identities[0].device)").run()
+            try await f.sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind:f.target.uuidValue!),\(bind:f.identities[1].user),clock_timestamp())").run()
+            let denied = try await reader.read(inputs, deadline: .now + .seconds(5))
+            #expect(throws: V2MediaStoreError.downloadNotAuthorized) { _ = try denied[0].get() }
+            #expect(try denied[1].get().rows.first?.view == nil)
+            #expect(await reader.profiles.originBatches == 2)
+            await reader.profiles.close()
+        }
+    }
+
     @Test("one SQL batch checks 100 viewers independently, including device mismatch and bidirectional blocks")
     func independentAuthorities() async throws {
         try await withFixture(count: 100) { f in

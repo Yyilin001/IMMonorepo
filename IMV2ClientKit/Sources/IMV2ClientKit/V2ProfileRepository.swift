@@ -114,25 +114,6 @@ public actor V2ProfileRepository {
         return changedUserIDs
     }
 
-    /// 刷新待处理的资料失效通知。
-    ///
-    /// 私聊资料的失效通过持久化个人同步日志投递，因此隐含私聊房间的授权上下文。
-    ///
-    /// - Parameter limit: 本次最多处理的失效条数，默认取查询键上限。
-    /// - Returns: 本次发生变化的用户集合。
-    /// - Throws: 与 ``hydrate(_:)`` 相同的错误。
-    @discardableResult
-    public func refreshPendingInvalidations(limit: Int = V2ProfileViewLookupLimits.maximumKeys) async throws -> Set<UserID> {
-        guard (1...V2ProfileViewLookupLimits.maximumKeys).contains(limit) else { throw V2ProfileViewClientError.invalidRequest }
-        return try await operations.run { [self, store] in
-            let invalidations = try await store.pendingProfileInvalidations(limit: limit)
-            try Task.checkCancellation()
-            return try await hydrateAdmitted(invalidations.map {
-                .init(userID: $0.userID, context: .directConversation)
-            })
-        }
-    }
-
     /// 结合本地内容解析检索/路由线索，不授予界面展示权限。
     ///
     /// - Parameters:

@@ -626,8 +626,8 @@ for metric in \
   'im_v2_user_state_event_backlog{state="leased"}' \
   'im_v2_user_state_event_backlog{state="scheduled"}' \
   'im_v2_user_state_event_backlog{state="paused"}' \
-  'im_v2_direct_profile_update_backlog{state="ready"}' \
-  'im_v2_direct_profile_update_backlog{state="leased"}' \
+  'im_v2_profile_security_invalidation_backlog{state="ready"}' \
+  'im_v2_profile_security_invalidation_backlog{state="leased"}' \
   'im_v2_read_receipt_preference_propagation_backlog{state="ready"}' \
   'im_v2_read_receipt_preference_propagation_backlog{state="leased"}' \
   'im_v2_read_receipt_preference_propagation_backlog{state="scheduled"}' \

@@ -242,7 +242,8 @@ struct V2LiveResourceAuthorTests {
             let directRoom = try await resourceOpenDirect(fixture,account:author,target:viewer.userID)
             let directView = try await viewerConnection.beginAuthorPresentationView(roomID: directRoom.roomID)
             _ = try await viewerTransport.subscribeToGroupEvents(roomID: directRoom.roomID,
-                afterRoomSequence: 0, authorPresentationView: directView)
+                afterRoomSequence: 0)
+            try await viewerTransport.startAuthorPresentation(directView)
             let directSent = try await resourceSend(fixture, client: .init(transport: authorTransport, connection: authorConnection), account:author,roomID: directRoom.roomID,
                 clientMessageID: .init(uuid: UUID()), text: "A direct author with an avatar", media: [], mentions: [])
             print("Live resource stage: awaiting direct availability hint.")
@@ -295,7 +296,8 @@ struct V2LiveResourceAuthorTests {
             try await viewerTransport.stopAuthorPresentation(directView)
             print("Live resource: direct-message TLS supplement authorized for its viewer, device and room without a profile pull.")
             let liveView = try await viewerConnection.beginAuthorPresentationView(roomID: room)
-            _ = try await viewerTransport.subscribeToGroupEvents(roomID: room, afterRoomSequence: 1, authorPresentationView: liveView)
+            _ = try await viewerTransport.subscribeToGroupEvents(roomID: room, afterRoomSequence: 1)
+            try await viewerTransport.startAuthorPresentation(liveView)
             let sent = try await resourceSend(fixture, client: .init(transport: authorTransport, connection: authorConnection), account:author,roomID: room, clientMessageID: .init(uuid: UUID()),
                 text: "An author with a new avatar", media: [], mentions: [])
             print("Live resource stage: awaiting group availability hint.")
@@ -322,7 +324,8 @@ struct V2LiveResourceAuthorTests {
             // A new nonce starts after the only message was broadcast. Its
             // supplement can therefore originate only in the subsequent pull.
             let view = try await viewerConnection.beginAuthorPresentationView(roomID: room)
-            _ = try await viewerTransport.subscribeToGroupEvents(roomID: room, afterRoomSequence: 2, authorPresentationView: view)
+            _ = try await viewerTransport.subscribeToGroupEvents(roomID: room, afterRoomSequence: 2)
+            try await viewerTransport.startAuthorPresentation(view)
             let page = try await viewerTransport.pullGroupEvents(roomID: room, afterRoomSequence: 0, pageSize: 20)
             #expect(page.events.count == 2)
             #expect(page.nextRoomSequence == 2)
@@ -367,7 +370,8 @@ struct V2LiveResourceAuthorTests {
             let binding = try await repository.bindAuthorView(view, activation: activation)
             try await repository.ingest(received, binding: binding)
             #expect(await repository.cachedPresentation(for: key, activation: activation)?.groupMember?.revision.rawValue == 1)
-            let target = try V2ClientMediaTransferTarget(downloadPlan: avatar.plan)
+            let plan = try #require(avatar.plan)
+            let target = try V2ClientMediaTransferTarget(downloadPlan: plan)
             let backgroundGrant = try #require(target.backgroundDownloadAuthorization)
             #expect(backgroundGrant.checksum == target.checksum && backgroundGrant.expectedByteCount == target.expectedByteCount)
             #expect(try V2BackgroundDownloadRequest.make(target: target).httpMethod == "GET")
@@ -378,7 +382,7 @@ struct V2LiveResourceAuthorTests {
             // A second byte request uses the same immutable bytes. Capability
             // checking must still run before an already populated shared cache.
             try await transfer.download(target: target, destinationURL: directory.appendingPathComponent("warm.png"))
-            var invalid = try #require(URLComponents(url: avatar.plan.url, resolvingAgainstBaseURL: false))
+            var invalid = try #require(URLComponents(url: plan.url, resolvingAgainstBaseURL: false))
             invalid.queryItems = [.init(name: "cap", value: "invalid-capability")]
             let (_, response) = try await fixture.http.data(from: try #require(invalid.url))
             #expect((response as? HTTPURLResponse)?.statusCode == 404)
@@ -465,7 +469,7 @@ struct V2LiveResourceAuthorTests {
             let revoked = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: view) }
             try #require(revoked.entries.count == 1)
             guard case .unavailable(let unavailable, _) = revoked.entries[0] else { throw ResourceLiveFailure.revocation }
-            #expect(unavailable == key)
+            #expect(unavailable.key == key)
             try await repository.ingest(revoked, binding: binding)
             #expect(await repository.cachedSnapshot(for: key, activation: activation) == nil)
             let hidden = try await readReviewPage(profiles, keys: [key])
@@ -1056,7 +1060,7 @@ extension V2LiveResourceAuthorTests {
             if let avatar = visible.avatar {
                 let output = directory.appendingPathComponent("downloaded.png")
                 try await V2URLSessionMediaByteTransfer(session: fixture.http).download(
-                    target: .init(downloadPlan: avatar.plan), destinationURL: output)
+                    target: .init(downloadPlan: try #require(avatar.plan)), destinationURL: output)
                 try checkAvatar(at: output)
             } else { #expect(mutation == .remove) }
             before = try await ownerViews.readGroupAvatar(roomID: room)

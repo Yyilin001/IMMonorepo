@@ -1330,12 +1330,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             guard case .accepted = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "propagation sequence")) else { throw CancellationError() }
             let operation = UUID()
-            let outbox = path == "profile" ? "public_profile_update_outbox" : "read_receipt_preference_propagation_outbox"
+            let outbox = path == "profile" ? "profile_security_invalidation_outbox" : "read_receipt_preference_propagation_outbox"
             let key = path == "profile" ? "source_event_id" : "operation_id"
             if path == "profile" {
                 let directory = V2PostgresPublicIdentityDirectory(database: database,
                     policy: try .init(maximumQueries: 10, window: 60), makeUUID: { operation }, now: { now })
                 _ = try await directory.updateDisplayName(for: senderID, displayName: "Sequence profile")
+                try await seedProfileSecurityInvalidation(on: sql, event: operation, user: senderUUID, now: now)
             } else {
                 _ = try await V2PostgresAccountPreferencePersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
                     .executePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: operation)), value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: now)
@@ -1413,15 +1414,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return
             }
             let recipient = path == "receipt-actor" ? senderUUID : memberTwoUUID
-            let needed: Int64 = path == "profile" ? 2 : 1
+            let needed: Int64 = 1
             try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: recipient), \(bind: Int64.max - needed + 1)) ON CONFLICT (user_id) DO UPDATE SET next_sequence = EXCLUDED.next_sequence").run()
             let before = try await crossStoreClockState(on: sql)
             func run(at date: Date, fails: Bool) async throws {
                 if path == "profile" {
-                    let worker = V2DirectRoomProfilePropagationWorker(database: database,
+                    let worker = V2ProfileSecurityInvalidationWorker(database: database,
                         projectionDelivery: SuccessfulProjectionDelivery(), leaseDuration: 1, now: { date })
                     if fails {
-                        await #expect(throws: V2DirectRoomProfilePropagationError.corruptPersistenceState) { try await worker.runOnce(limit: 1) }
+                        await #expect(throws: V2ProfileSecurityInvalidationError.corruptPersistenceState) { try await worker.runOnce(limit: 1) }
                     } else {
                         #expect(try await worker.runOnce(limit: 1) == .init(claimedUpdateCount: 1, projectedRecipientCount: 1, completedUpdateCount: 1))
                     }
@@ -1443,7 +1444,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.user_sync_sequences SET next_sequence = \(bind: Int64.max - needed) WHERE user_id = \(bind: recipient)").run()
             try await run(at: now.addingTimeInterval(4), fails: false)
             let event = path == "profile" ? operation : receiptTombstoneSourceEventID(operationID: operation, roomID: try #require(room.roomID.uuidValue))
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_projection_effects WHERE source_event_id = \(bind: event)").first(decoding: CountRow.self)?.value == 2)
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_projection_effects WHERE source_event_id = \(bind: event)").first(decoding: CountRow.self)?.value == 1)
             #expect(try await sql.raw("SELECT next_sequence AS value FROM im_v2.user_sync_sequences WHERE user_id = \(bind: recipient)").first(decoding: CountRow.self)?.value == Int64.max)
             let committed = try await crossStoreClockState(on: sql)
             // Revisit the completed page at the exhausted counter. Durable
@@ -1501,9 +1502,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let directory = V2PostgresPublicIdentityDirectory(database: database,
                         policy: try .init(maximumQueries: 10, window: 60), makeUUID: { operation }, now: { now })
                     _ = try await directory.updateDisplayName(for: senderID, displayName: "Clock profile \(index)")
+                try await seedProfileSecurityInvalidation(on: sql, event: operation, user: senderUUID, now: now)
                     event = operation
-                    outbox = "public_profile_update_outbox"
-                    try await sql.raw("UPDATE im_v2.public_profile_update_outbox SET profile_updated_at = \(bind: timestamp) WHERE source_event_id = \(bind: operation)").run()
+                    outbox = "profile_security_invalidation_outbox"
+                    try await sql.raw("UPDATE im_v2.profile_security_invalidation_outbox SET profile_updated_at = \(bind: timestamp) WHERE source_event_id = \(bind: operation)").run()
                 } else {
                     _ = try await preferences.executePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: UUID())), value: .readReceipt(allowsDirectReadReceipts: true, allowsGroupReadReceipts: true), now: now)
                     _ = try await preferences.executePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: operation)), value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: now)
@@ -1518,7 +1520,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         try await sql.raw("UPDATE im_v2.\(unsafeRaw: outbox) SET state = 'pending', completed_at = NULL, enumeration_checkpoint = NULL WHERE \(unsafeRaw: key) = \(bind: operation)").run()
                     }
                     if path == "profile" {
-                        let worker = V2DirectRoomProfilePropagationWorker(database: database,
+                        let worker = V2ProfileSecurityInvalidationWorker(database: database,
                             projectionDelivery: SuccessfulProjectionDelivery(), now: { now })
                         #expect(try await worker.runOnce(limit: 1) == .init(claimedUpdateCount: 1, projectedRecipientCount: 1, completedUpdateCount: 1))
                     } else {
@@ -1544,14 +1546,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let projectionSQL = path == "profile" ? sql : userSQL
                     var current: [String] = []
                     for table in ["user_sync_log", "user_projection_effects"] {
-                        #expect(try await projectionSQL.raw("SELECT COUNT(*) = 2 AND bool_and(created_at = \(bind: timestamp)) AS exists FROM im_v2.\(unsafeRaw: table) WHERE source_event_id = \(bind: event)").first(decoding: ExistsRow.self)?.exists == true)
+                        #expect(try await projectionSQL.raw("SELECT COUNT(*) = \(bind: path == "profile" ? 1 : 2) AND bool_and(created_at = \(bind: timestamp)) AS exists FROM im_v2.\(unsafeRaw: table) WHERE source_event_id = \(bind: event)").first(decoding: ExistsRow.self)?.exists == true)
                         guard let rows = try await projectionSQL.raw("SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id, projection_kind)::text AS value FROM im_v2.\(unsafeRaw: table) r WHERE source_event_id = \(bind: event)").first(decoding: StringValueRow.self) else { throw CancellationError() }
                         current.append(rows.value)
                     }
                     if let original { #expect(current == original) } else { original = current }
-                    let column = path == "profile" ? "updated_at_ms" : "recorded_at_ms"
-                    let kind = path == "profile" ? "direct_room_profile" : "direct_read_receipt"
-                    #expect(try await projectionSQL.raw("SELECT bool_and((payload->>\(bind: column))::bigint = \(bind: try v2GatewayMilliseconds(timestamp.date))) AS exists FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event) AND projection_kind = \(bind: kind)").first(decoding: ExistsRow.self)?.exists == true)
+                    if path == "profile" {
+                        #expect(try await projectionSQL.raw("SELECT COUNT(*) = 1 AND bool_and(payload->>'profile_state' = 'hidden') AS exists FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event) AND projection_kind = 'profile_invalidation'").first(decoding: ExistsRow.self)?.exists == true)
+                    } else {
+                        #expect(try await projectionSQL.raw("SELECT bool_and((payload->>'recorded_at_ms')::bigint = \(bind: try v2GatewayMilliseconds(timestamp.date))) AS exists FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event) AND projection_kind = 'direct_read_receipt'").first(decoding: ExistsRow.self)?.exists == true)
+                    }
                 }
             }
         }
@@ -1575,7 +1579,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let event = UUID()
             let clock = TestSequenceClock([base.addingTimeInterval(1)])
             let directory = V2PostgresPublicIdentityDirectory(database: database, policy: try .init(maximumQueries: 10, window: 60), makeUUID: { event }, now: { clock.now() })
-            func worker(lifetime: TimeInterval = 30) -> V2DirectRoomProfilePropagationWorker {
+            func worker(lifetime: TimeInterval = 30) -> V2ProfileSecurityInvalidationWorker {
                 .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), leaseDuration: lifetime, now: { clock.now() })
             }
             func snapshot() async throws -> String {
@@ -1583,7 +1587,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return try #require(try await sql.raw("""
                     SELECT jsonb_build_object(
                         'profiles', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id) FROM im_v2.public_user_profiles r),
-                        'outbox', (SELECT jsonb_agg(to_jsonb(r) ORDER BY source_event_id) FROM im_v2.public_profile_update_outbox r),
+                        'outbox', (SELECT jsonb_agg(to_jsonb(r) ORDER BY source_event_id) FROM im_v2.profile_security_invalidation_outbox r),
                         'sequences', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id) FROM im_v2.user_sync_sequences r),
                         'logs', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id, user_sync_sequence) FROM im_v2.user_sync_log r),
                         'effects', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id, source_event_id, projection_kind) FROM im_v2.user_projection_effects r)
@@ -1600,34 +1604,35 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             clock.set([base.addingTimeInterval(1)])
             #expect(try await directory.updateDisplayName(for: senderID, displayName: "new profile").displayName == "new profile")
+                try await seedProfileSecurityInvalidation(on: sql, event: event, user: senderUUID, now: base.addingTimeInterval(1))
             let pending = try await snapshot()
             for limit in [Int.min, -1, 0, Int.max] {
-                await #expect(throws: V2DirectRoomProfilePropagationError.invalidLimit) { try await worker().runOnce(limit: limit) }
+                await #expect(throws: V2ProfileSecurityInvalidationError.invalidLimit) { try await worker().runOnce(limit: limit) }
             }
             for seconds in badSeconds {
                 clock.set([Date(timeIntervalSince1970: seconds)])
-                await #expect(throws: V2DirectRoomProfilePropagationError.corruptPersistenceState) { try await worker().runOnce(limit: 2) }
+                await #expect(throws: V2ProfileSecurityInvalidationError.corruptPersistenceState) { try await worker().runOnce(limit: 2) }
                 #expect(try await snapshot() == pending)
             }
             clock.set([Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)])
-            await #expect(throws: V2DirectRoomProfilePropagationError.corruptPersistenceState) { try await worker().runOnce(limit: 2) }
+            await #expect(throws: V2ProfileSecurityInvalidationError.corruptPersistenceState) { try await worker().runOnce(limit: 2) }
             clock.set([base])
             for lifetime in [Double.infinity, .greatestFiniteMagnitude, .leastNonzeroMagnitude, 0.0000001] {
-                await #expect(throws: V2DirectRoomProfilePropagationError.corruptPersistenceState) { try await worker(lifetime: lifetime).runOnce(limit: 2) }
+                await #expect(throws: V2ProfileSecurityInvalidationError.corruptPersistenceState) { try await worker(lifetime: lifetime).runOnce(limit: 2) }
             }
             #expect(try await snapshot() == pending)
 
             for (index, seconds) in badSeconds.enumerated() {
                 let claimTime = base.addingTimeInterval(2 + Double(index) * 40)
                 clock.set([claimTime, Date(timeIntervalSince1970: seconds)])
-                await #expect(throws: V2DirectRoomProfilePropagationError.corruptPersistenceState) { try await worker().runOnce(limit: hasTargets ? 2 : 1) }
+                await #expect(throws: V2ProfileSecurityInvalidationError.corruptPersistenceState) { try await worker().runOnce(limit: hasTargets ? 2 : 1) }
                 #expect(try await sql.raw("""
                     SELECT state = 'claimed' AND retry_count = \(bind: index)
                         AND enumeration_checkpoint IS NULL AND completed_at IS NULL
                         AND claim_token IS NOT NULL AND lease_expires_at = \(bind: claimTime.addingTimeInterval(30)) AS exists
-                    FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: event)
+                    FROM im_v2.profile_security_invalidation_outbox WHERE source_event_id = \(bind: event)
                     """).first(decoding: ExistsRow.self)?.exists == true)
-                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event)").first(decoding: CountRow.self)?.value == (hasTargets ? 4 : 0))
+                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event)").first(decoding: CountRow.self)?.value == (hasTargets ? 2 : 0))
             }
             let resumedAt = base.addingTimeInterval(400)
             clock.set([resumedAt, Date(timeIntervalSince1970: .nan)])
@@ -1635,17 +1640,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 // A partial-page checkpoint has no timestamp to bind. Its
                 // progress remains valid even if that unused sample fails.
                 #expect(try await worker().runOnce(limit: 1) == .init(claimedUpdateCount: 1, projectedRecipientCount: 1, completedUpdateCount: 0))
-                #expect(try await count("im_v2.public_profile_update_outbox WHERE state = 'pending' AND enumeration_checkpoint IS NOT NULL", on: sql) == 1)
+                #expect(try await count("im_v2.profile_security_invalidation_outbox WHERE state = 'pending' AND enumeration_checkpoint IS NOT NULL", on: sql) == 1)
             }
             clock.set([resumedAt.addingTimeInterval(1)])
             #expect(try await worker().runOnce(limit: 1) == .init(claimedUpdateCount: 1, projectedRecipientCount: hasTargets ? 1 : 0, completedUpdateCount: 1))
             #expect(try await worker().runOnce(limit: 1).claimedUpdateCount == 0)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event)").first(decoding: CountRow.self)?.value == (hasTargets ? 4 : 0))
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_projection_effects WHERE source_event_id = \(bind: event)").first(decoding: CountRow.self)?.value == (hasTargets ? 4 : 0))
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: event)").first(decoding: CountRow.self)?.value == (hasTargets ? 2 : 0))
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_projection_effects WHERE source_event_id = \(bind: event)").first(decoding: CountRow.self)?.value == (hasTargets ? 2 : 0))
             #expect(try await sql.raw("""
                 SELECT state = 'completed' AND claim_token IS NULL AND lease_expires_at IS NULL
                     AND completed_at = \(bind: resumedAt.addingTimeInterval(1)) AS exists
-                FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: event)
+                FROM im_v2.profile_security_invalidation_outbox WHERE source_event_id = \(bind: event)
                 """).first(decoding: ExistsRow.self)?.exists == true)
             if !hasTargets {
                 // No direct recipients must not allow an unlimited number of
@@ -1653,12 +1658,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 for peer in [memberTwoUUID, memberThreeUUID] {
                     let other = V2PostgresPublicIdentityDirectory(database: database, policy: try .init(maximumQueries: 10, window: 60), now: { resumedAt })
                     _ = try await other.updateDisplayName(for: .init(uuid: peer), displayName: "empty graph")
+                try await seedProfileSecurityInvalidation(on: sql, event: UUID(), user: peer, now: resumedAt)
                 }
-                #expect(try await count("im_v2.public_profile_update_outbox WHERE state = 'pending'", on: sql) == 2)
+                #expect(try await count("im_v2.profile_security_invalidation_outbox WHERE state = 'pending'", on: sql) == 2)
                 #expect(try await worker().runOnce(limit: 1) == .init(claimedUpdateCount: 1, projectedRecipientCount: 0, completedUpdateCount: 1))
-                #expect(try await count("im_v2.public_profile_update_outbox WHERE state = 'pending'", on: sql) == 1)
+                #expect(try await count("im_v2.profile_security_invalidation_outbox WHERE state = 'pending'", on: sql) == 1)
                 #expect(try await worker().runOnce(limit: 1) == .init(claimedUpdateCount: 1, projectedRecipientCount: 0, completedUpdateCount: 1))
-                #expect(try await count("im_v2.public_profile_update_outbox WHERE state = 'pending'", on: sql) == 0)
+                #expect(try await count("im_v2.profile_security_invalidation_outbox WHERE state = 'pending'", on: sql) == 0)
             }
         }
     }

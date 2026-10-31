@@ -37,10 +37,16 @@ public struct V2ResourceAvatarDelivery:Sendable {
             guard let expiresAt=requests[mediaID] else { continue }
             let reference=try JSONDecoder().decode(V2StoredObjectReference.self,from:Data(row.reference.utf8))
             let facts=try V2StoredObjectFacts(reference:reference,byteCount:row.byteCount,sha256:row.sha256)
-            let plan=try await delivery.issue(.init(facts:facts,expiresAt:expiresAt))
-            try plan.validateDownload(facts:facts,expiresAt:expiresAt)
+            let plan: V2ResourceTransferPlan?
+            do {
+                let issued = try await delivery.issue(.init(facts: facts, expiresAt: expiresAt))
+                try issued.validateDownload(facts: facts, expiresAt: expiresAt)
+                plan = issued
+            } catch is CancellationError { throw CancellationError() }
+            catch { plan = nil } // Valid content survives a transient signing failure.
+            try Task.checkCancellation()
             result[mediaID]=try .init(mediaID:mediaID,variantID:.init(uuid:row.variantID),version:Int64(row.recipeVersion),
-                checksum:.init(value:row.sha256.map { String(format:"%02x",$0) }.joined()),plan:plan)
+                checksum:.init(value:row.sha256.map { String(format:"%02x",$0) }.joined()),byteCount:row.byteCount,plan:plan)
         }
         return result
     }

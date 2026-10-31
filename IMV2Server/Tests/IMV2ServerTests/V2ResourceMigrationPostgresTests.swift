@@ -42,7 +42,8 @@ struct V2ResourceMigrationPostgresTests {
                 let after = try await avatars.authorizedAvatar(mediaID: f.media, database: f.database, expiresAt: Date().addingTimeInterval(60))
                 #expect(before.variantID == after.variantID && before.checksum == after.checksum)
                 for (access, reference) in [(before, f.old), (after, switched.destination.reference)] {
-                    let token = try #require(URLComponents(url: access.plan.url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "cap" })?.value)
+                    let plan = try #require(access.plan)
+                    let token = try #require(URLComponents(url: plan.url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "cap" })?.value)
                     #expect(try await delivery.bytes(placementID: reference.placementID, capability: token) == f.bytes)
                 }
             }

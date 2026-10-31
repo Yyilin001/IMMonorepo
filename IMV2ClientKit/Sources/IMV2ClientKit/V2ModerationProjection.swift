@@ -1,7 +1,7 @@
 import Foundation
 import IMV2Core
 
-/// 通过用户同步收到的不可变、隐私安全的审核事实。
+/// 通过房间日志收到的不可变、隐私安全的审核事实。
 ///
 /// 它只携带标识与一个有界动作：举报文本与审计原因保留在受保护的服务端审计存储中。
 public struct V2ClientModerationProjection: Equatable, Sendable {

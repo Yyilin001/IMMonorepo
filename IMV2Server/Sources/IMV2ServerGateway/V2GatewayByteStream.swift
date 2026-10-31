@@ -410,8 +410,8 @@ public actor V2GatewayByteStream {
     private let authorPresentationDispatcher: V2AuthorPresentationDispatcher?
     private let authorPresentationIngress: V2AuthorPresentationIngress?
     private let authorPresentationTransport = V2AuthorPresentationTransport()
-    private var authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)?
-    private var authorPresentationView: (roomID: RoomID, viewID: UUID)?
+    private var authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> V2AuthorPresentationWriteResult)?
+    private var authorPresentationView: (messageRoomIDs: Set<RoomID>, viewID: UUID)?
     private var authorPresentationRegistered = false
     private var authorPresentationWriting = false
     // 传输确认本地通道关闭前，撤销工作器不能推进持久化游标。
@@ -700,6 +700,14 @@ public actor V2GatewayByteStream {
                     )
                 }
                 await endAuthorPresentationSubscription(inbound: exchange.request, response: exchange.responseEnvelope)
+                if case .authorPresentationInterests(let interests) = exchange.request.body,
+                   case .authorPresentationInterestsReceived = exchange.responseEnvelope.body {
+                    await authorPresentationDispatcher?.replaceVisibleInterests(connectionID: connectionID, interests: try interests.domain())
+                }
+                if case .authorPresentationReceipt(let receipt) = exchange.request.body,
+                   case .authorPresentationReceipted = exchange.responseEnvelope.body {
+                    await authorPresentationDispatcher?.acknowledge(connectionID: connectionID, receipt: try receipt.domain())
+                }
                 try exchange.wireResponse.validate(limits: frameLimits)
                 var wireResponse = exchange.wireResponse
                 wireResponse.heartbeatProbe = heartbeatProbe
@@ -820,7 +828,7 @@ public actor V2GatewayByteStream {
         scopedNotificationWriter: (@Sendable (V2GatewayScopedNotificationWrite) async -> Bool)? = nil,
         requiredNotificationClose: (@Sendable () async -> Void)? = nil,
         foregroundWriter: V2NIOGatewayForegroundWriter? = nil,
-        authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil,
+        authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> V2AuthorPresentationWriteResult)? = nil,
         roomSubscriptionSocketGate: V2RoomSubscriptionSocketGate? = nil,
         diagnosticPeerPort: Int? = nil
     ) -> Bool {
@@ -1746,7 +1754,7 @@ public actor V2GatewayByteStream {
             do {
                 _ = try await authorPresentationDispatcher.register(connectionID: connectionID, identity: identity,
                     streamID: streamID, send: { [weak self] bytes, deadline in
-                        await self?.sendAuthorPresentation(bytes, deadline: deadline) ?? false
+                        await self?.sendAuthorPresentation(bytes, deadline: deadline) ?? .discarded
                     })
                 authorRegistered = true
             } catch V2ResourceProviderError.throttled {
@@ -1760,6 +1768,7 @@ public actor V2GatewayByteStream {
                 throw V2GatewaySessionError.unsupportedCommand
             }
             authorPresentationRegistered = authorRegistered
+            await session.setAuthorPresentationRegistrationAvailable(authorRegistered)
         }
         foregroundTransport.activate(
             protocolVersion: contract.protocolVersion,
@@ -1796,21 +1805,17 @@ public actor V2GatewayByteStream {
     /// Start resource work only after the subscription response crosses the
     /// transport write boundary, so a delta cannot overtake its nonce echo.
     private func activateAuthorPresentationSubscription(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
-        guard case .groupEventSubscribe(let request) = inbound.body,
-              case .groupEventSubscribed(let subscribed) = response.body else { return }
-        guard !transportClosed, registeredIdentity != nil else { throw V2GatewaySessionError.unsupportedCommand }
-        let roomID = try RoomID(request.roomID)
-        guard !subscribed.authorPresentationViewID.isEmpty,
-              let viewID = UUID(uuidString: subscribed.authorPresentationViewID), authorPresentationRegistered else {
-            // A separate room's ordinary subscription does not end the selected
-            // foreground author page. A same-room ordinary subscribe does.
-            if authorPresentationView?.roomID == roomID { await clearAuthorPresentationView() }
-            return
+        guard case .authorPresentationStart(let request) = inbound.body,
+              case .authorPresentationStarted(let started) = response.body else { return }
+        guard authorPresentationRegistered else { return }
+        guard request == started, !transportClosed, registeredIdentity != nil else {
+            throw V2GatewaySessionError.unsupportedCommand
         }
-        let activated = await authorPresentationDispatcher?.activateView(connectionID: connectionID, roomID: roomID, viewID: viewID) ?? false
+        let start = try request.domain()
+        let activated = await authorPresentationDispatcher?.activateView(connectionID: connectionID, start: start) ?? false
         guard activated, registeredIdentity != nil, !transportClosed else { throw V2GatewaySessionError.unsupportedCommand }
-        authorPresentationView = (roomID, viewID)
-        authorPresentationTransport.activate(viewID: viewID, roomID: roomID)
+        authorPresentationView = (Set(start.messageRoomIDs), start.viewID)
+        authorPresentationTransport.activate(viewID: start.viewID, messageRoomIDs: Set(start.messageRoomIDs))
     }
 
     /// Called only after the registry selected this recipient using the body
@@ -1821,18 +1826,27 @@ public actor V2GatewayByteStream {
     }
 
     private func offerPageAuthors(_ exchange: V2GatewaySessionExchange,
-                                 capturedView: (roomID: RoomID, viewID: UUID)?) {
+                                 capturedView: (messageRoomIDs: Set<RoomID>, viewID: UUID)?) {
         guard !Task.isCancelled, !transportClosed, authorPresentationRegistered,
               let ingress = authorPresentationIngress, let view = capturedView,
-              authorPresentationTransport.selectedView(in: view.roomID) == view.viewID,
-              case .groupEventPull(let pull) = exchange.request.body,
-              (try? RoomID(pull.roomID)) == view.roomID,
-              case .groupEventPage(let page) = exchange.responseEnvelope.body,
-              (try? RoomID(page.roomID)) == view.roomID,
-              let sample = exchange.authorSample, sample.roomID == view.roomID,
-              let hints = V2AuthorPresentationHints(page: sample) else { return }
-        ingress.submit(connectionID: connectionID, roomID: view.roomID,
-                       viewID: view.viewID, authors: hints.authors)
+              !view.messageRoomIDs.isEmpty else { return }
+        switch (exchange.request.body, exchange.responseEnvelope.body) {
+        case (.groupEventPull(let pull), .groupEventPage(let page)):
+            guard let room = try? RoomID(pull.roomID), view.messageRoomIDs.contains(room),
+                  authorPresentationTransport.selectedView(in: room) == view.viewID,
+                  (try? RoomID(page.roomID)) == room,
+                  let sample = exchange.authorSample, sample.roomID == room,
+                  let hints = V2AuthorPresentationHints(page: sample) else { return }
+            ingress.submit(connectionID: connectionID, roomID: room,
+                           viewID: view.viewID, authors: hints.authors)
+        case (.roomLatestVisibleBatch(let request), .roomLatestVisibleBatchResult(let response)):
+            guard let authors = V2AuthorPresentationLatestVisibleAuthors(request: request, response: response,
+                selectedRooms: view.messageRoomIDs) else { return }
+            for (room, user) in authors.values where authorPresentationTransport.selectedView(in: room) == view.viewID {
+                ingress.submit(connectionID: connectionID, roomID: room, viewID: view.viewID, authors: [user])
+            }
+        default: break
+        }
     }
 
     private func clearAuthorPresentationView() async {
@@ -1847,39 +1861,33 @@ public actor V2GatewayByteStream {
         guard case .authorPresentationEnd(let request) = inbound.body,
               case .authorPresentationEnded = response.body,
               let view = authorPresentationView,
-              (try? RoomID(request.roomID)) == view.roomID,
               UUID(uuidString: request.viewID) == view.viewID else { return }
         await clearAuthorPresentationView()
     }
 
     /// Called by the bounded dispatcher, never by the message/ACK writer.
-    private func sendAuthorPresentation(_ payload: Data, deadline: ContinuousClock.Instant) async -> Bool {
+    private func sendAuthorPresentation(_ payload: Data, deadline: ContinuousClock.Instant) async -> V2AuthorPresentationWriteResult {
         guard !authorPresentationWriting, !Task.isCancelled, .now < deadline,
               let identity = registeredIdentity, let view = authorPresentationView,
-              let writer = authorPresentationWriter, !transportClosed else { return false }
+              let writer = authorPresentationWriter, !transportClosed else { return .discarded }
         authorPresentationWriting = true
         defer { authorPresentationWriting = false }
         do {
-            guard let frame = try await session.authorPresentationFrame(payload),
+            guard let frame = try await session.authorPresentationFrame(payload, viewID: view.viewID),
                   let sessionIsLive = await session.authorPresentationSessionCheck(),
                   registeredIdentity == identity, authorPresentationView?.viewID == view.viewID,
-                  !transportClosed, !Task.isCancelled else { return false }
+                  !transportClosed, !Task.isCancelled else { return .discarded }
             let bytes = try V2FrameCodec.encode(frame, limits: frameLimits)
-            let delta = try V2AuthorPresentationDelta.decode(payload)
-            guard delta.roomID == view.roomID, delta.viewID == view.viewID,
-                  let write = authorPresentationTransport.prepare(bytes: bytes, viewID: view.viewID,
+            guard let write = authorPresentationTransport.prepare(bytes: bytes, viewID: view.viewID,
                     deadline: deadline, sessionIsLive: { [weak self] in
                         self?.connectionAllowsDispatch() == true && sessionIsLive()
-                    }) else { return false }
+                    }) else { return .discarded }
             return await withTaskCancellationHandler(operation: { await writer(write) }, onCancel: { write.cancel() })
-        } catch { return false }
+        } catch { return .discarded }
     }
 
     private func updateAcknowledgedConnectionControls(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
         switch inbound.body {
-        case .groupEventUnsubscribe(let request):
-            guard case .acknowledged? = response.body else { return }
-            if authorPresentationView?.roomID == (try? RoomID(request.roomID)) { await clearAuthorPresentationView() }
         case .subscribePresence(let request):
             guard case .presenceSubscribed(let subscribed)? = response.body,
                   let roomID = try? RoomID(request.roomID),

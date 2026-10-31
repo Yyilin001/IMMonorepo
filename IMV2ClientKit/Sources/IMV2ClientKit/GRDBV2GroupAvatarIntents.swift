@@ -205,7 +205,7 @@ extension GRDBV2LocalSyncStore {
         return try databasePool.write { db in
             let value = try Self.requireGroupAvatarIntent(id, db: db)
             guard value.stage == .preparing || value.stage == .submitted else { throw V2GroupAvatarIntentError.conflict }
-            guard value.retryAt <= now,
+            guard value.retryAt.timeIntervalSince1970 <= time,
                   try Double.fetchOne(db, sql: "SELECT claim_until FROM v2_group_avatar_intents WHERE operation_id=?", arguments: [id.rawValue]).map({ $0 <= time }) ?? true
             else { throw V2GroupAvatarIntentError.busy }
             if !value.submissionStarted, let jobID = value.uploadJobID {

@@ -641,10 +641,12 @@ struct V2ActorAuthenticationTests {
         await failure(.wrongRecipient) {
             _ = try fixture.auth.openSession(fixture.client.sign(wrong, maximumBytes: 10_000))
         }
-        let future = V2ActorSessionHello(version: 2, serviceID: fixture.client.serviceID,
-                                         callerIncarnation: UUID(), recipient: fixture.token.host, handshakeID: UUID())
-        await failure(.unsupportedVersion) {
-            _ = try fixture.auth.openSession(fixture.client.sign(future, maximumBytes: 10_000))
+        for version in [1, V2ActorSessionHello.protocolVersion + 1] {
+            let unsupported = V2ActorSessionHello(version: version, serviceID: fixture.client.serviceID,
+                callerIncarnation: UUID(), recipient: fixture.token.host, handshakeID: UUID())
+            await failure(.unsupportedVersion) {
+                _ = try fixture.auth.openSession(fixture.client.sign(unsupported, maximumBytes: 10_000))
+            }
         }
         await failure(.oversized) {
             _ = try fixture.auth.accept(.init(signerID: fixture.client.serviceID,
@@ -746,7 +748,7 @@ struct V2ActorAuthenticationTests {
         let fixture = try Fixture(limits: .init(sessionLifetimeMilliseconds: 1_000), clock: clock)
         let grant = try await fixture.open()
         let call = try fixture.call(grant: grant)
-        func changed(version: Int = 1, recipient: V2ActorHostIdentity? = nil,
+        func changed(version: Int = V2ActorSessionHello.protocolVersion, recipient: V2ActorHostIdentity? = nil,
                      trace: UUID? = nil, caller: UUID? = nil) -> V2ActorAuthenticatedCall {
             .init(version: version, serviceID: call.serviceID, callerIncarnation: caller ?? call.callerIncarnation,
                 recipient: recipient ?? call.recipient, sessionID: call.sessionID, sequence: call.sequence,
@@ -754,7 +756,7 @@ struct V2ActorAuthenticationTests {
                 principal: call.principal, request: call.request)
         }
         await failure(.unsupportedVersion) {
-            _ = try fixture.auth.accept(fixture.client.sign(changed(version: 2),
+            _ = try fixture.auth.accept(fixture.client.sign(changed(version: 1),
                 maximumBytes: 65_536))
         }
         await failure(.wrongRecipient) {
@@ -821,6 +823,41 @@ struct V2ActorAuthenticationTests {
     private func failure(_ expected: V2ActorAuthenticationError, _ action: () async throws -> Void) async {
         do { try await action(); Issue.record("untrusted call unexpectedly passed") }
         catch { #expect(error as? V2ActorAuthenticationError == expected) }
+    }
+
+    @Test("profile cohorts require both service capabilities on signed and local paths",
+          arguments: ["both", "user", "coordination", "unrelated"], [false, true])
+    func profileCohortAuthority(permission: String, local: Bool) async throws {
+        let permissions: Set<V2ActorServicePermission> = permission == "both" ? [.userRoomCalls, .roomCoordination]
+            : permission == "user" ? [.userRoomCalls] : permission == "coordination" ? [.roomCoordination] : [.roomMaintenance]
+        let fixture = try Fixture(clientPermissions: permissions), generation = UUID()
+        let hello = try fixture.client.sign(fixture.hello(), maximumBytes: 10_000)
+        let (grant, capability) = try fixture.auth.openLocalSession(hello, generation: generation)
+        func accept(_ request: V2RoomRequest, principal: V2ActorCallPrincipal, sequence: UInt64) throws {
+            let call = try fixture.call(grant: grant, sequence: sequence, principal: principal, request: request)
+            if local { _ = try fixture.auth.acceptLocal(V2ActorLocalPayload(call), capability: capability, generation: generation) }
+            else { _ = try fixture.auth.accept(fixture.client.sign(call, maximumBytes: 65_536)) }
+        }
+        let request = V2ActorProfileVisibilityBatchWire(roomID: fixture.token.roomID, actorUserID: fixture.user,
+            roomKind: .memberRoom, targetUserIDs: [.init(uuid: UUID())])
+        let valid = V2RoomRequest.mediaAuthorization(.profileVisibilityCohort(.init(roomID: fixture.token.roomID,
+            requests: [request, .init(roomID: request.roomID, actorUserID: .init(uuid: UUID()),
+                roomKind: .memberRoom, targetUserIDs: request.targetUserIDs)])))
+        await failure(.forbidden) { try accept(valid, principal: .user(fixture.user), sequence: 1) }
+        if permission == "both" {
+            try accept(valid, principal: .service, sequence: 2)
+            let malformed: [[V2ActorProfileVisibilityBatchWire]] = [[], Array(repeating: request, count: 101),
+                [.init(roomID: .init(uuid: UUID()), actorUserID: fixture.user, roomKind: .group, targetUserIDs: request.targetUserIDs)],
+                [.init(roomID: request.roomID, actorUserID: try .init("bad"), roomKind: .group, targetUserIDs: request.targetUserIDs)],
+                [.init(roomID: request.roomID, actorUserID: fixture.user, roomKind: .group,
+                    targetUserIDs: request.targetUserIDs + request.targetUserIDs)]]
+            for (index, inputs) in malformed.enumerated() {
+                await failure(.invalidRequest) {
+                    try accept(.mediaAuthorization(.profileVisibilityCohort(.init(roomID: request.roomID, requests: inputs))),
+                        principal: .service, sequence: UInt64(index + 3))
+                }
+            }
+        } else { await failure(.forbidden) { try accept(valid, principal: .service, sequence: 2) } }
     }
 
     private struct Fixture: Sendable {

@@ -6,7 +6,7 @@ import Testing
 
 @Suite("Shared authorized profile projection refresh", .timeLimit(.minutes(1)))
 struct V2ProfileProjectionReaderTests {
-    @Test("100 direct invalidations respect the eight-context and shared two-flight limits")
+    @Test("100 explicit direct requests respect the eight-context and shared two-flight limits")
     func boundedDirectRefresh() async throws {
         let actor = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
         let keys = (0..<100).map { _ in V2ProfileViewLookupKey(userID: .init(uuid: UUID()), context: .directConversation) }
@@ -16,7 +16,7 @@ struct V2ProfileProjectionReaderTests {
             .init(userID: $0.userID, minimumRevision: .init(rawValue: 1)!)
         })
         let repository = V2ProfileRepository(store: store, reader: V2ProfileProjectionReader(presentations: presentations))
-        #expect(try await repository.refreshPendingInvalidations() == Set(keys.map(\.userID)))
+        #expect(try await repository.hydrate(keys) == Set(keys.map(\.userID)))
         let batches = await remote.batches
         #expect(batches.count >= 13)
         #expect(batches.allSatisfy { $0.count <= 8 })
@@ -94,7 +94,7 @@ struct V2ProfileProjectionReaderTests {
         await gate.cancelled()
         #expect(!finished.withLock { $0 })
         await #expect(throws: CancellationError.self) { try await repository.profileView(userID: key.userID) }
-        await #expect(throws: CancellationError.self) { try await repository.refreshPendingInvalidations() }
+        await #expect(throws: CancellationError.self) { try await repository.hydrate([key]) }
         await gate.release()
         await closing.value
         await #expect(throws: CancellationError.self) { try await hydrate.value }
@@ -138,7 +138,6 @@ struct V2ProfileProjectionReaderTests {
             await #expect(throws: V2ProfileViewClientError.invalidRequest) { try await reader.readProfileViews(keys) }
         }
         await #expect(throws: V2ProfileViewClientError.invalidRequest) { try await repository.hydrate([key, key]) }
-        await #expect(throws: V2ProfileViewClientError.invalidRequest) { try await repository.refreshPendingInvalidations(limit: 101) }
         #expect(await remote.batches.isEmpty)
         #expect(await store.writes == 0)
         await repository.close(); await presentations.close()

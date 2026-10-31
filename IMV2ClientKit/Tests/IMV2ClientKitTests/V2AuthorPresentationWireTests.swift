@@ -7,6 +7,57 @@ import Testing
 
 @Suite("Author supplements on the authenticated connection", .timeLimit(.minutes(1)))
 struct V2AuthorPresentationWireTests {
+    @Test("visible interests replace the complete set and cannot escape the current page")
+    func interestsRoundTrip() async throws {
+        let peer = AuthorWirePeer(), connection = try connection(peer)
+        let session = try await login(connection, peer: peer)
+        let view = try await connection.beginAuthorPresentationView(roomID: peer.room)
+        let subscribing = Task { try await connection.request(subscribe(view, requestID: 3)) }
+        await peer.waitForSubscription(3)
+        try await peer.replySubscription(3, includeDelta: false)
+        _ = try await subscribing.value
+        let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: session.protocolVersion)
+        let interest = try V2AuthorPresentationInterests(streamID: view.streamID, viewID: view.viewID, sequence: 1,
+            keys: [.init(userID: peer.author, context: .room(peer.room)), .init(userID: peer.author, context: .relationship)])
+        try await transport.replaceAuthorPresentationInterests(interest)
+        let clearing = try V2AuthorPresentationInterests(streamID: view.streamID, viewID: view.viewID,
+            roomID: view.roomID, sequence: 2, userIDs: [])
+        try await transport.replaceAuthorPresentationInterests(clearing)
+        #expect(await peer.interests.map { $0.keys.map(\.userID) } == [[peer.author.rawValue, peer.author.rawValue], []])
+        await connection.endAuthorPresentationView(view)
+        await #expect(throws: V2TLSFrameConnectionError.unexpectedResponse) {
+            try await transport.replaceAuthorPresentationInterests(interest)
+        }
+        #expect(await peer.interests.count == 2)
+        await connection.disconnect()
+    }
+    @Test("retained-entry receipt round trips on its exact live connection and page")
+    func receiptRoundTrip() async throws {
+        let peer = AuthorWirePeer(), connection = try connection(peer)
+        let session = try await login(connection, peer: peer)
+        let view = try await connection.beginAuthorPresentationView(roomID: peer.room)
+        let subscribeTask = Task { try await connection.request(subscribe(view, requestID: 3)) }
+        await peer.waitForSubscription(3)
+        try await peer.replySubscription(3, includeDelta: false)
+        _ = try await subscribeTask.value
+        let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: session.protocolVersion)
+        let receipt = try V2AuthorPresentationReceipt(streamID: view.streamID, viewID: view.viewID, sequence: 7,
+            keys: [.init(userID: peer.author, context: .room(peer.room)), .init(userID: peer.author, context: .relationship)],
+            minimumRemainingMilliseconds: 120_000)
+        try await transport.acknowledgeAuthorPresentation(receipt)
+        #expect(await peer.receipts.count == 1)
+        #expect(await peer.receipts.first?.sequence == 7)
+        #expect(await peer.receipts.first?.keys.map(\.userID) == [peer.author.rawValue, peer.author.rawValue])
+        #expect(await peer.receipts.first?.hasMinimumRemainingMilliseconds == true)
+        #expect(await peer.receipts.first?.minimumRemainingMilliseconds == 120_000)
+        await connection.endAuthorPresentationView(view)
+        await #expect(throws: V2TLSFrameConnectionError.unexpectedResponse) {
+            try await transport.acknowledgeAuthorPresentation(receipt)
+        }
+        #expect(await peer.receipts.count == 1)
+        await connection.disconnect()
+    }
+
     @Test("a pulled attachment page and its coalesced author delta keep independent cursors and consumers")
     func pulledPageAndDelta() async throws {
         let peer = AuthorWirePeer(supplementOnPull: true), connection = try connection(peer)
@@ -27,7 +78,7 @@ struct V2AuthorPresentationWireTests {
         #expect(fields["authorPresentationDelta"] == nil)
         #expect(delta.view == view && delta.entries.count == 1)
         guard case .unavailable(let key, _) = delta.entries.first else { throw V2RealtimeTransportError.unexpectedResponse }
-        #expect(key.userID == peer.author && key.context == .room(peer.room))
+        #expect(key.key.userID == peer.author && key.key.context == .room(peer.room))
         await connection.endAuthorPresentationView(view)
         await connection.disconnect()
     }
@@ -42,7 +93,7 @@ struct V2AuthorPresentationWireTests {
         let firstSession = try await login(connection, peer: old)
         let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: firstSession.protocolVersion)
         let view = try await connection.beginAuthorPresentationView(roomID: old.room)
-        let subscribe = Task { try await transport.subscribeToGroupEvents(roomID: old.room, afterRoomSequence: 7, authorPresentationView: view) }
+        let subscribe = Task { try await transport.startAuthorPresentation(view) }
         try await wireWait { await old.authorSendStarted }
         subscribe.cancel(); _ = await subscribe.result
         await connection.endAuthorPresentationView(view)
@@ -72,7 +123,7 @@ struct V2AuthorPresentationWireTests {
         let session = try await login(connection, peer: peer)
         let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: session.protocolVersion)
         let view = try await connection.beginAuthorPresentationView(roomID: peer.room)
-        let pending = Task { try await transport.subscribeToGroupEvents(roomID: peer.room, afterRoomSequence: 7, authorPresentationView: view) }
+        let pending = Task { try await transport.startAuthorPresentation(view) }
         try await wireWait { await peer.authorSendStarted }
         pending.cancel(); _ = await pending.result
         await connection.endAuthorPresentationView(view)
@@ -91,7 +142,7 @@ struct V2AuthorPresentationWireTests {
         await connection.disconnect()
     }
 
-    @Test("stop rejects a response that does not echo the same stream, room and nonce", arguments: [0, 1, 2])
+    @Test("stop rejects a response that does not echo the same stream and nonce", arguments: [0, 1])
     func invalidStopEcho(field: Int) async throws {
         let peer = AuthorWirePeer(stopMismatch: field), connection = try connection(peer)
         let session = try await login(connection, peer: peer)
@@ -153,24 +204,28 @@ struct V2AuthorPresentationWireTests {
             groupEvents: connection, activityEvents: connection, isAuthorized: { _ in true }, roomCursor: { _ in 7 })
         let profiles = V2ProfilePresentationRepository(actorUserID: peer.user, deviceID: peer.device, reader: WireProfileReader())
         let pages = V2AuthorPresentationPageCoordinator(rooms: rooms, source: connection,
-            subscriptions: transport, profiles: profiles, roomCursor: { _ in 7 })
+            subscriptions: transport, profiles: profiles)
         let other = try await rooms.acquire(roomID: peer.room, channels: [.roomEvents])
         let activation = await profiles.activate(), key = V2ProfileViewLookupKey(userID: peer.author, context: .room(peer.room))
         let demand = Task { try await profiles.presentation(for: key, activation: activation) }
         while await profiles.diagnostics().waitingConsumers != 1 { try await Task.sleep(for: .milliseconds(1)) }
         let connectionID = try #require(session.connectionID)
         let runtime = Task { try await rooms.run(connectionID: connectionID) }
-        let page = Task { try await pages.run(roomID: peer.room, activation: activation) }
+        let page = Task { try await pages.run(messageRoomID: peer.room, activation: activation) }
         await peer.waitForSubscription(1)
-        #expect(await peer.subscriptions[1]?.authorPresentationViewID == "")
-        try await peer.replySubscription(1, includeDelta: false)
         await peer.waitForSubscription(2)
-        #expect(await peer.subscriptions[2]?.authorPresentationViewID.isEmpty == false)
-        try await peer.replySubscription(2)
+        let authorRequest = try #require(await peer.subscriptions.first {
+            if case .authorPresentationStart = $0.value.body { true } else { false }
+        })
+        let roomRequest = try #require(await peer.subscriptions.first {
+            if case .groupEventSubscribe = $0.value.body { true } else { false }
+        })
+        try await peer.replySubscription(authorRequest.key)
+        try await peer.replySubscription(roomRequest.key, includeDelta: false)
         #expect(try await demand.value == nil)
         page.cancel(); _ = await page.result
         #expect(await peer.stops.count == 1)
-        #expect(await peer.stops.first?.viewID == peer.subscriptions[2]?.authorPresentationViewID)
+        #expect(await peer.stops.first?.viewID == authorRequest.value.authorPresentationStart.viewID)
         #expect(await peer.unsubscribes == 0)
         await rooms.release(roomID: peer.room, consumerID: other.id)
         runtime.cancel(); _ = await runtime.result
@@ -185,7 +240,7 @@ struct V2AuthorPresentationWireTests {
         await connection.disconnect()
     }
 
-    @Test("ordinary subscriptions only end an author view for the same room")
+    @Test("ordinary room subscriptions preserve an independent author view")
     func independentRooms() async throws {
         let peer = AuthorWirePeer(), connection = try connection(peer)
         _ = try await login(connection, peer: peer)
@@ -203,14 +258,8 @@ struct V2AuthorPresentationWireTests {
             await peer.waitForSubscription(requestID)
             try await peer.replySubscription(requestID, includeDelta: false)
             _ = try await ordinary.value
-            if index == 0 {
-                try await peer.pushPayload(payload(peer: peer, view: view.viewID))
-                #expect(try await connection.nextAuthorPresentationDelta(for: view).view == view)
-            } else {
-                await #expect(throws: V2ProfilePresentationError.inactive) {
-                    _ = try await connection.nextAuthorPresentationDelta(for: view)
-                }
-            }
+            try await peer.pushPayload(payload(peer: peer, view: view.viewID, sequence: UInt64(index + 1)))
+            #expect(try await connection.nextAuthorPresentationDelta(for: view).view == view)
         }
         await connection.disconnect()
     }
@@ -241,13 +290,42 @@ struct V2AuthorPresentationWireTests {
         await connection.disconnect()
     }
 
+    @Test("a list-only inbox accepts full contexts and rejects a mismatched start echo")
+    func listViewAndStartBinding() throws {
+        let peer = AuthorWirePeer()
+        var inbox = V2AuthorPresentationInbox(streamID: peer.streamID, actorUserID: peer.user, deviceID: peer.device)
+        let view = try inbox.begin(messageRoomIDs: [])
+        var start = IMV2AuthorPresentationStart(); start.streamID = view.streamID.uuidString; start.viewID = view.viewID.uuidString
+        #expect(try inbox.requestedView(start) == view)
+        for field in 0..<3 {
+            var invalid = start
+            if field == 0 { invalid.streamID = UUID().uuidString }
+            if field == 1 { invalid.viewID = UUID().uuidString }
+            if field == 2 { invalid.messageRoomIds = [peer.room.rawValue] }
+            #expect(throws: V2TLSFrameConnectionError.unexpectedResponse) { try inbox.confirm(view, response: invalid) }
+        }
+        try inbox.confirm(view, response: start)
+        let keys: [V2ProfileViewLookupKey] = [.init(userID: peer.author, context: .room(peer.room)),
+            .init(userID: peer.author, context: .relationship), .init(userID: peer.author, context: .groupJoinReview(peer.room))]
+        let delta = try V2AuthorPresentationDelta(streamID: view.streamID, viewID: view.viewID, sequence: 1,
+            actorUserID: peer.user, deviceID: peer.device, serverViewAgeMilliseconds: 0,
+            batch: .init(serverNowUnixMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000), results: keys.map { .unavailable($0) }))
+        try inbox.accept(delta.encoded())
+        let next = try inbox.next(for: view)
+        let received = try #require(next)
+        let actual = received.entries.compactMap { entry -> V2ProfileViewLookupKey? in
+            if case .unavailable(let denial, _) = entry { return denial.key }; return nil
+        }
+        #expect(actual == keys)
+    }
+
     @Test("disposable inbox bounds both frames and raw bytes and clears on page change")
     func inboxBudgets() throws {
         let peer = AuthorWirePeer()
         var inbox = V2AuthorPresentationInbox(streamID: peer.streamID, actorUserID: peer.user, deviceID: peer.device)
-        let view = try inbox.begin(roomID: peer.room)
-        var response = IMV2GroupEventSubscribed(); response.roomID = peer.room.rawValue
-        response.authorPresentationViewID = view.viewID.uuidString
+        let view = try inbox.begin(messageRoomIDs: [peer.room])
+        var response = IMV2AuthorPresentationStart(); response.messageRoomIds = [peer.room.rawValue]
+        response.streamID = view.streamID.uuidString; response.viewID = view.viewID.uuidString
         try inbox.confirm(view, response: response)
         for sequence in 1...50 {
             let raw = try payload(peer: peer, view: view.viewID, sequence: UInt64(sequence))
@@ -260,7 +338,7 @@ struct V2AuthorPresentationWireTests {
         while try inbox.next(for: view) != nil { count += 1 }
         #expect(count == 2)
         try inbox.accept(payload(peer: peer, view: view.viewID, sequence: 51))
-        let next = try inbox.begin(roomID: peer.room)
+        let next = try inbox.begin(messageRoomIDs: [peer.room])
         #expect(inbox.queuedBytes == 0)
         #expect(try inbox.next(for: next) == nil)
     }
@@ -279,8 +357,9 @@ private func limits() throws -> V2FrameLimits {
 }
 private func subscribe(_ view: V2AuthorPresentationView, requestID: UInt64) throws -> V2Frame {
     var envelope = IMV2Envelope(); envelope.requestID = requestID; envelope.protocolVersion = IMV2ProtocolVersion.current
-    envelope.groupEventSubscribe.roomID = view.roomID.rawValue
-    envelope.groupEventSubscribe.authorPresentationViewID = view.viewID.uuidString
+    envelope.authorPresentationStart.messageRoomIds = view.messageRoomIDs.map(\.rawValue)
+    envelope.authorPresentationStart.streamID = view.streamID.uuidString
+    envelope.authorPresentationStart.viewID = view.viewID.uuidString
     return try V2ProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current))
 }
 private func payload(peer: AuthorWirePeer, view: UUID, sequence: UInt64 = 1) throws -> Data {
@@ -304,8 +383,10 @@ private actor AuthorWirePeer {
     let streamID = UUID(), user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
     let room = RoomID(uuid: UUID()), author = UserID(uuid: UUID())
     let select: Bool, mismatch: Bool
-    var subscriptions: [UInt64: IMV2GroupEventSubscribe] = [:]
+    var subscriptions: [UInt64: IMV2Envelope] = [:]
     var stops: [IMV2AuthorPresentationEnd] = []
+    var receipts: [IMV2AuthorPresentationReceipt] = []
+    var interests: [IMV2AuthorPresentationInterests] = []
     var events: [String] = [], unsubscribes = 0
     var holdAuthorSend: Bool, authorSendStarted = false
     var authorSendWaiter: CheckedContinuation<Void, Never>?
@@ -334,21 +415,29 @@ private actor AuthorWirePeer {
             response.authenticated.authorPresentationStreamID = select ? (mismatch ? UUID().uuidString : streamID.uuidString) : ""
         case .presencePublicationControl(let control):
             response.presencePublicationControlled.mode = control.mode
-        case .groupEventSubscribe(let subscribe):
-            if !subscribe.authorPresentationViewID.isEmpty {
-                authorSendStarted = true
-                if holdAuthorSend { await withCheckedContinuation { authorSendWaiter = $0 } }
-            }
+        case .authorPresentationStart:
+            authorSendStarted = true
+            if holdAuthorSend { await withCheckedContinuation { authorSendWaiter = $0 } }
             events.append("subscribe")
-            subscriptions[request.requestID] = subscribe
+            subscriptions[request.requestID] = request
             for observer in observers where observer.0 == request.requestID { observer.1.resume() }
             observers.removeAll { $0.0 == request.requestID }; return
+        case .groupEventSubscribe:
+            events.append("subscribe")
+            subscriptions[request.requestID] = request
+            for observer in observers where observer.0 == request.requestID { observer.1.resume() }
+            observers.removeAll { $0.0 == request.requestID }; return
+        case .authorPresentationReceipt(let receipt):
+            receipts.append(receipt)
+            response.authorPresentationReceipted = receipt
+        case .authorPresentationInterests(let value):
+            interests.append(value)
+            response.authorPresentationInterestsReceived = value
         case .authorPresentationEnd(let end):
             events.append("end")
             stops.append(end)
             response.authorPresentationEnded.streamID = stopMismatch == 0 ? UUID().uuidString : end.streamID
-            response.authorPresentationEnded.roomID = stopMismatch == 1 ? UUID().uuidString : end.roomID
-            response.authorPresentationEnded.viewID = stopMismatch == 2 ? UUID().uuidString : end.viewID
+            response.authorPresentationEnded.viewID = stopMismatch == 1 ? UUID().uuidString : end.viewID
         case .groupEventUnsubscribe:
             unsubscribes += 1; response.acknowledged = .init()
         case .groupEventPull(let pull) where supplementOnPull:
@@ -360,10 +449,10 @@ private actor AuthorWirePeer {
                 "room_id": pull.roomID, "room_sequence": event.roomSequence, "sender_user_id": author.rawValue,
                 "media_ids": [UUID().uuidString]])
             response.groupEventPage.events = [event]
-            let subscribed = try #require(subscriptions.values.first { !$0.authorPresentationViewID.isEmpty })
+            let subscribed = try #require(subscriptions.values.first { if case .authorPresentationStart = $0.body { true } else { false } })
             var delta = IMV2Envelope(); delta.protocolVersion = IMV2ProtocolVersion.current
             delta.authorPresentationDelta.payload = try payload(peer: self,
-                view: #require(UUID(uuidString: subscribed.authorPresentationViewID)))
+                view: #require(UUID(uuidString: subscribed.authorPresentationStart.viewID)))
             var bytes = try encode(response); bytes.append(try encode(delta)); push(bytes); return
         default: response.acknowledged = .init()
         }
@@ -376,12 +465,12 @@ private actor AuthorWirePeer {
     func replySubscription(_ id: UInt64, includeDelta: Bool = true) throws {
         let request = try #require(subscriptions[id])
         var response = IMV2Envelope(); response.requestID = id; response.protocolVersion = IMV2ProtocolVersion.current
-        response.groupEventSubscribed.roomID = request.roomID
-        response.groupEventSubscribed.authorPresentationViewID = request.authorPresentationViewID
+        if case .authorPresentationStart(let start) = request.body { response.authorPresentationStarted = start }
+        else { response.groupEventSubscribed.roomID = request.groupEventSubscribe.roomID }
         var bytes = try encode(response)
         if includeDelta {
             var delta = IMV2Envelope(); delta.protocolVersion = IMV2ProtocolVersion.current
-            delta.authorPresentationDelta.payload = try payload(peer: self, view: #require(UUID(uuidString: request.authorPresentationViewID)))
+            delta.authorPresentationDelta.payload = try payload(peer: self, view: #require(UUID(uuidString: request.authorPresentationStart.viewID)))
             bytes.append(try encode(delta))
         }
         push(bytes)

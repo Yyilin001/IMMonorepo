@@ -74,6 +74,9 @@
 | 静态房间归属与跨库持久发送授权 | [当前归属与发送授权合同](room-owner-migration-contract.md)；在线迁移章节仅供追溯 | B27、B04、B11、D07 |
 | 房间逻辑寻址、激活、事务资格与回收 | [房间 Virtual Actor 合同](room-virtual-actor-contract.md) | B27 |
 | 消息发送、成功结果与恢复 | [当前发送合同](message-send-contract.md) | B27 |
+| 作者资料的接收确认、页面绑定与写入竞态 | [作者资料接收确认合同](author-presentation-receipt-contract.md) | B03、B04 |
+| 作者资料共享内容、批量权限与任务生命周期 | [作者资料批量读取合同](author-presentation-read-contract.md) | B03、B04 |
+| 页面集合替换、滚动合并、连接隔离与反向索引 | [可见作者集合合同](author-presentation-interest-contract.md) | B03、B04 |
 | 编辑、撤回、reaction 的接受事实与房间恢复 | [消息变更与房间日志](message-mutation-delivery-authority-contract.md) | B03、B06、D07 |
 | 消息变更的历史可见性与扫描游标 | [读取与游标合同](message-mutation-read-contract.md) | B03 |
 | 编辑的完整替换与版本缺口 | [可授权完整编辑与版本缺口](message-edit-replacement-contract.md) | B03、B06 |

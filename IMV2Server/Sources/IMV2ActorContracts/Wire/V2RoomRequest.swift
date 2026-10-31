@@ -106,15 +106,13 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
     }
 
     /// 仅描述可合并的输入形状，不授予成员或资料读取权限。
-    /// 每个信封仍声明自己的 actor，由入站认证逐项验证。
+    /// 单人信封绑定用户 principal；多观察者信封要求独立服务能力，仍按总目标数计费。
     public var profileVisibilityTargetCount: Int? {
-        guard case .mediaAuthorization(.profileVisibilityBatch(let request)) = self,
-              request.roomID.uuidValue != nil, request.actorUserID.uuidValue != nil,
-              (1...100).contains(request.targetUserIDs.count) else { return nil }
-        let targets = request.targetUserIDs.compactMap(\.uuidValue)
-        guard targets.count == request.targetUserIDs.count,
-              Set(targets).count == targets.count else { return nil }
-        return targets.count
+        switch self {
+        case .mediaAuthorization(.profileVisibilityBatch(let request)): request.validatedTargetCount
+        case .mediaAuthorization(.profileVisibilityCohort(let request)): request.validatedTargetCount
+        default: nil
+        }
     }
 }
 

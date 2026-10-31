@@ -20,6 +20,7 @@ public enum V2RoomMediaAuthorizationQuery: Codable, Equatable, Sendable {
     case messageVisibility(V2ActorMessageMediaVisibilityWire)
     case resourceUpload(V2ActorResourceUploadAuthorizationWire)
     case profileVisibilityBatch(V2ActorProfileVisibilityBatchWire)
+    case profileVisibilityCohort(V2ActorProfileVisibilityCohortWire)
     case groupAvatar(V2ActorGroupAvatarVisibilityWire)
     case resourceDirectory(V2ActorRoomResourceDirectoryWire)
 
@@ -28,15 +29,17 @@ public enum V2RoomMediaAuthorizationQuery: Codable, Equatable, Sendable {
         case .messageVisibility(let value): value.roomID
         case .resourceUpload(let value): value.roomID
         case .profileVisibilityBatch(let value): value.roomID
+        case .profileVisibilityCohort(let value): value.roomID
         case .groupAvatar(let value): value.roomID
         case .resourceDirectory(let value): value.roomID
         }
     }
-    public var actorUserID: UserID {
+    public var actorUserID: UserID? {
         switch self {
         case .messageVisibility(let value): value.actorUserID
         case .resourceUpload(let value): value.actorUserID
         case .profileVisibilityBatch(let value): value.actorUserID
+        case .profileVisibilityCohort: nil
         case .groupAvatar(let value): value.actorUserID
         case .resourceDirectory(let value): value.actorUserID
         }
@@ -69,6 +72,7 @@ public enum V2RoomMediaAuthorizationResult: Codable, Equatable, Sendable {
     case visible(V2ActorMessageMediaVisibilitySnapshotWire)
     case resourceUploadAllowed(V2ActorResourceUploadAuthorizationSnapshotWire)
     case profilesVisible(V2ActorProfileVisibilityBatchSnapshotWire)
+    case profilesVisibleCohort([V2ActorProfileVisibilityBatchSnapshotWire])
     case groupAvatarVisible(V2ActorGroupAvatarVisibilitySnapshotWire)
     case notVisible
     case resourceDirectory(V2ActorRoomResourceDirectoryPageWire)
@@ -116,6 +120,35 @@ public struct V2ActorProfileVisibilityBatchWire: Codable, Equatable, Sendable {
     public init(roomID: RoomID, actorUserID: UserID, roomKind: RoomKind, targetUserIDs: [UserID]) {
         self.roomID = roomID; self.actorUserID = actorUserID; self.roomKind = roomKind
         self.targetUserIDs = targetUserIDs
+    }
+
+    /// Shape and work cost only; the room owner still authorizes this viewer.
+    public var validatedTargetCount: Int? {
+        guard roomID.uuidValue != nil, actorUserID.uuidValue != nil,
+              (1...100).contains(targetUserIDs.count) else { return nil }
+        let targets = targetUserIDs.compactMap(\.uuidValue)
+        guard targets.count == targetUserIDs.count, Set(targets).count == targets.count else { return nil }
+        return targets.count
+    }
+}
+
+/// One service-authorized room invocation with independent viewer identities.
+/// Both the number of viewers and their combined target work are bounded.
+public struct V2ActorProfileVisibilityCohortWire: Codable, Equatable, Sendable {
+    public let roomID: RoomID
+    public let requests: [V2ActorProfileVisibilityBatchWire]
+    public init(roomID: RoomID, requests: [V2ActorProfileVisibilityBatchWire]) {
+        self.roomID = roomID; self.requests = requests
+    }
+    public var validatedTargetCount: Int? {
+        guard roomID.uuidValue != nil, (1...100).contains(requests.count) else { return nil }
+        var total = 0
+        for request in requests {
+            guard request.roomID == roomID, let count = request.validatedTargetCount,
+                  count <= 100 - total else { return nil }
+            total += count
+        }
+        return total
     }
 }
 

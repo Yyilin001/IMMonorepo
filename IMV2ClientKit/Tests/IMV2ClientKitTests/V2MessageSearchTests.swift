@@ -16,9 +16,9 @@ struct V2MessageSearchTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
         let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID()), sender = UserID(uuid: UUID())
         do {
-            try await apply(store, records: [acceptedRecord(sequence: 1, sourceEvent: UUID().uuidString,
+            try await applyRoomEvents(store, records: [acceptedRoomEvent(sourceEvent: UUID().uuidString,
                 roomID: room, senderID: sender, messageID: message, roomSequence: 1,
-                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)], token: "storage")
+                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)])
             try await store.rebuildMessageSearchIndex()
             let primary = await store.databasePool
             let pool = location.hasPrefix("document-") ? await store.messageSearchDatabasePool : primary
@@ -89,20 +89,19 @@ struct V2MessageSearchTests {
         let payload = Data("""
             {"event_type":"message.accepted","message_id":"\(message.rawValue)","room_id":"\(room.rawValue)","room_sequence":\(sequence),"message_revision":1,"sender_user_id":"\(sender.rawValue)","text":"boundary search","server_created_at_ms":1750000000000}
             """.utf8)
-        let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(uuid: UUID()), projectionKind: "message", payload: payload)
+        let envelopeSequence = (1...UInt64(Int64.max)).contains(sequence) ? sequence : 1
+        let record = try V2ClientSyncRecord(sequence: envelopeSequence, sourceEventID: .init(uuid: UUID()), projectionKind: "message", payload: payload)
         do {
             if sequence == 0 || sequence > UInt64(Int64.max) {
-                if sequence == 0 {
-                    await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await apply(store, records: [record], token: "bounds") }
-                } else {
-                    await #expect(throws: V2ClientSyncError.storageRangeExceeded) { try await apply(store, records: [record], token: "bounds") }
-                }
+                // The bounded envelope deliberately cannot endorse this source
+                // position. Reject its payload before it can reach SQLite.
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await applyRoomEvents(store, records: [record]) }
                 #expect(try await store.cursor() == nil)
                 #expect(try await store.events().isEmpty)
                 try await store.rebuildMessageSearchIndex()
                 #expect(try await store.searchMessages(.init(query: "boundary", scope: .allMessages)).hits.isEmpty)
             } else {
-                try await apply(store, records: [record], token: "bounds")
+                try await applyRoomEvents(store, records: [record])
                 try await store.rebuildMessageSearchIndex()
                 for scope: V2MessageSearchScope in [.room(room), .allMessages, .sender(sender)] {
                     let result = try await store.searchMessages(.init(query: "boundary", scope: scope))
@@ -125,9 +124,9 @@ struct V2MessageSearchTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
         let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID()), sender = UserID(uuid: UUID())
         do {
-            try await apply(store, records: [acceptedRecord(sequence: 1, sourceEvent: UUID().uuidString,
+            try await applyRoomEvents(store, records: [acceptedRoomEvent(sourceEvent: UUID().uuidString,
                 roomID: room, senderID: sender, messageID: message, roomSequence: 1,
-                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)], token: "corrupt-index")
+                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)])
             try await store.rebuildMessageSearchIndex()
             let pool = await store.messageSearchDatabasePool
             try await pool.write { db in
@@ -160,9 +159,9 @@ struct V2MessageSearchTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
         let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID()), sender = UserID(uuid: UUID())
         do {
-            try await apply(store, records: [acceptedRecord(sequence: 1, sourceEvent: UUID().uuidString,
+            try await applyRoomEvents(store, records: [acceptedRoomEvent(sourceEvent: UUID().uuidString,
                 roomID: room, senderID: sender, messageID: message, roomSequence: 1,
-                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)], token: "generation-index")
+                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)])
             try await store.rebuildMessageSearchIndex()
             let pool = await store.databasePool
             let original = try await pool.read { try GRDBV2LocalSyncStore.messageSearchIndexGeneration(db: $0) }
@@ -238,14 +237,13 @@ struct V2MessageSearchTests {
         let second = try MessageID("00000000-0000-0000-0000-000000000a12")
         let third = try MessageID("00000000-0000-0000-0000-000000000a13")
 
-        try await apply(
+        try await applyRoomEvents(
             store,
             records: [
-                acceptedRecord(sequence: 1, sourceEvent: "00000000-0000-0000-0000-000000000a21", roomID: roomA, senderID: senderA, messageID: first, roomSequence: 1, text: "你好啊", createdAtMilliseconds: 1_750_000_000_000),
-                acceptedRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000a22", roomID: roomA, senderID: senderA, messageID: second, roomSequence: 2, text: "再说你好啊", createdAtMilliseconds: 1_750_000_001_000),
-                acceptedRecord(sequence: 3, sourceEvent: "00000000-0000-0000-0000-000000000a23", roomID: roomB, senderID: senderB, messageID: third, roomSequence: 1, text: "你好吗", createdAtMilliseconds: 1_750_000_002_000)
-            ],
-            token: "search-token-1"
+                acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000a21", roomID: roomA, senderID: senderA, messageID: first, roomSequence: 1, text: "你好啊", createdAtMilliseconds: 1_750_000_000_000),
+                acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000a22", roomID: roomA, senderID: senderA, messageID: second, roomSequence: 2, text: "再说你好啊", createdAtMilliseconds: 1_750_000_001_000),
+                acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000a23", roomID: roomB, senderID: senderB, messageID: third, roomSequence: 1, text: "你好吗", createdAtMilliseconds: 1_750_000_002_000)
+            ]
         )
         #expect(try await store.messageSearchIndexState() == .building)
         try await store.rebuildMessageSearchIndex()
@@ -284,14 +282,14 @@ struct V2MessageSearchTests {
         let roomID = try RoomID("00000000-0000-0000-0000-000000000b01")
         let senderID = try UserID("00000000-0000-0000-0000-000000000b02")
         let messageID = try MessageID("00000000-0000-0000-0000-000000000b03")
-        try await apply(store, records: [
-            acceptedRecord(sequence: 1, sourceEvent: "00000000-0000-0000-0000-000000000b11", roomID: roomID, senderID: senderID, messageID: messageID, roomSequence: 1, text: "旧文本", createdAtMilliseconds: 1_750_000_000_000)
-        ], token: "search-token-2")
+        try await applyRoomEvents(store, records: [
+            acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000b11", roomID: roomID, senderID: senderID, messageID: messageID, roomSequence: 1, text: "旧文本", createdAtMilliseconds: 1_750_000_000_000)
+        ])
         try await store.rebuildMessageSearchIndex()
 
-        try await apply(store, records: [
+        try await applyRoomEvents(store, records: [
             editedRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000b12", roomID: roomID, messageID: messageID, revision: 2, text: "新文本")
-        ], token: "search-token-3")
+        ])
         #expect(try await store.messageSearchIndexProgress().isCatchingUp)
         // The old document may still be physically present in V2Search, but
         // revision validation against V2.sqlite must hide it immediately.
@@ -300,9 +298,9 @@ struct V2MessageSearchTests {
         #expect(try await store.searchMessages(.init(query: "旧文", scope: .room(roomID))).hits.isEmpty)
         #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.map(\.messageID) == [messageID])
 
-        try await apply(store, records: [
+        try await applyRoomEvents(store, records: [
             tombstoneRecord(sequence: 3, sourceEvent: "00000000-0000-0000-0000-000000000b13", roomID: roomID, messageID: messageID, revision: 3)
-        ], token: "search-token-4")
+        ])
         _ = try await store.processPendingMessageSearchIndexJobs()
         #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
         let persistedMessages = try await store.messages(in: roomID)
@@ -322,10 +320,10 @@ struct V2MessageSearchTests {
         let fileSender = try UserID("00000000-0000-0000-0000-000000000d03")
         let imageMessage = try MessageID("00000000-0000-0000-0000-000000000d11")
         let fileMessage = try MessageID("00000000-0000-0000-0000-000000000d12")
-        try await apply(store, records: [
-            mediaRecord(sequence: 1, sourceEvent: "00000000-0000-0000-0000-000000000d21", roomID: roomID, senderID: imageSender, messageID: imageMessage, roomSequence: 1, mediaID: "00000000-0000-0000-0000-000000000d31", kind: "image"),
-            mediaRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000d22", roomID: roomID, senderID: fileSender, messageID: fileMessage, roomSequence: 2, mediaID: "00000000-0000-0000-0000-000000000d32", kind: "file")
-        ], token: "search-token-media")
+        try await applyRoomEvents(store, records: [
+            mediaRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000d21", roomID: roomID, senderID: imageSender, messageID: imageMessage, roomSequence: 1, mediaID: "00000000-0000-0000-0000-000000000d31", kind: "image"),
+            mediaRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000d22", roomID: roomID, senderID: fileSender, messageID: fileMessage, roomSequence: 2, mediaID: "00000000-0000-0000-0000-000000000d32", kind: "file")
+        ])
         try await store.rebuildMessageSearchIndex()
 
         let images = try await store.searchMessages(.init(query: "", scope: .room(roomID), contentFilter: .image))
@@ -334,52 +332,37 @@ struct V2MessageSearchTests {
         #expect(senderFiles.hits.map(\.messageID) == [fileMessage])
     }
 
-    @Test("snapshot commit atomically replaces the FTS projection")
+    @Test("personal snapshot rebuilds search from retained room-log messages and removes absent rooms")
     func snapshotCommitReplacesTheSearchIndex() async throws {
         let store = try makeStore()
         let oldRoomID = try RoomID("00000000-0000-0000-0000-000000000c01")
         let oldSenderID = try UserID("00000000-0000-0000-0000-000000000c02")
         let oldMessageID = try MessageID("00000000-0000-0000-0000-000000000c03")
-        try await apply(store, records: [
-            acceptedRecord(sequence: 1, sourceEvent: "00000000-0000-0000-0000-000000000c04", roomID: oldRoomID, senderID: oldSenderID, messageID: oldMessageID, roomSequence: 1, text: "快照前文本", createdAtMilliseconds: 1_750_000_000_000)
-        ], token: "search-token-snapshot-1")
+        try await applyRoomEvents(store, records: [
+            acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000c04", roomID: oldRoomID, senderID: oldSenderID, messageID: oldMessageID, roomSequence: 1, text: "快照前文本", createdAtMilliseconds: 1_750_000_000_000)
+        ])
         try await store.rebuildMessageSearchIndex()
 
         let snapshotRoomID = try RoomID("00000000-0000-0000-0000-000000000c11")
         let snapshotSenderID = try UserID("00000000-0000-0000-0000-000000000c12")
         let snapshotMessageID = try MessageID("00000000-0000-0000-0000-000000000c13")
-        let payload = try JSONSerialization.data(withJSONObject: [
-            "event_type": "message.accepted",
-            "message_id": snapshotMessageID.rawValue,
-            "room_id": snapshotRoomID.rawValue,
-            "room_sequence": 7,
-            "timeline_sequence": 7,
-            "message_revision": 1,
-            "sender_user_id": snapshotSenderID.rawValue,
-            "text": "快照后文本",
-            "media_ids": [],
-            "media_presentations": [],
-            "mention_user_ids": [],
-            "mentions_everyone": false,
-            "entities": [],
-            "server_created_at_ms": 1_750_000_100_000,
-            "is_withdrawn": false,
-            "reactions": [],
-        ], options: [.sortedKeys])
-        let reset = try V2ClientResetRequired(
-            snapshotID: .init("message-search-snapshot"),
-            generation: 2,
-            baseSequence: 1,
-            expiresAt: .distantFuture
-        )
-        let page = try V2SnapshotProjectionV3Page(items: [
-            .init(
-                key: .init(projectionKind: "message", entityKey: snapshotMessageID.rawValue),
-                sourceEventID: .init("00000000-0000-0000-0000-000000000c14"),
-                sequence: 1,
-                payload: payload
-            )
+        try await applyRoomEvents(store, records: [
+            acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000c14", roomID: snapshotRoomID,
+                senderID: snapshotSenderID, messageID: snapshotMessageID, roomSequence: 7,
+                text: "保留房间文本", createdAtMilliseconds: 1_750_000_100_000)
         ])
+        try await store.rebuildMessageSearchIndex()
+        #expect(try await store.searchMessages(.init(query: "文本", scope: .allMessages)).hits.count == 2)
+        let reset = try V2ClientResetRequired(snapshotID: .init("message-search-snapshot"), generation: 2,
+            baseSequence: 1, expiresAt: .distantFuture)
+        let page = try V2SnapshotProjectionV3Page(items: [.init(
+            key: .init(projectionKind: "room", entityKey: snapshotRoomID.rawValue),
+            sourceEventID: .init(uuid: UUID()), sequence: 1,
+            payload: JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed", "room_id": snapshotRoomID.rawValue, "title": "Search",
+                "owner_user_id": snapshotSenderID.rawValue, "target_user_id": snapshotSenderID.rawValue,
+                "action": "add", "membership_revision": 1, "capacity_class": "standard",
+                "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_000_000]))])
         let encodedPage = try V2SnapshotProjectionV3Codec.encode(page)
         let pageDigest = V2SnapshotV3Digest.page(encodedPage)
         let initialDigest = V2SnapshotV3Digest.initial(baseSequence: 1, capabilityProfile: "base")
@@ -412,13 +395,14 @@ struct V2MessageSearchTests {
             payload: encodedPage
         ), for: manifest)
         try await store.prepareSnapshotActivation(manifest)
+        #expect(try await store.searchMessages(.init(query: "快照前", scope: .allMessages)).hits.map(\.messageID) == [oldMessageID])
         try await store.activateAcknowledgedSnapshot(manifest)
 
         #expect(try await store.messageSearchIndexState() == .building)
         try await store.rebuildMessageSearchIndex()
         #expect(try await store.messageSearchIndexState() == .ready)
         #expect(try await store.searchMessages(.init(query: "快照前", scope: .allMessages)).hits.isEmpty)
-        #expect(try await store.searchMessages(.init(query: "快照后", scope: .room(snapshotRoomID))).hits.map(\.messageID) == [snapshotMessageID])
+        #expect(try await store.searchMessages(.init(query: "保留房间", scope: .room(snapshotRoomID))).hits.map(\.messageID) == [snapshotMessageID])
     }
 
     @Test("an unacknowledged search job survives restart and replaces stale text")
@@ -429,13 +413,13 @@ struct V2MessageSearchTests {
         let senderID = try UserID("00000000-0000-0000-0000-000000000e02")
         let messageID = try MessageID("00000000-0000-0000-0000-000000000e03")
         let first = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        try await apply(first, records: [
-            acceptedRecord(sequence: 1, sourceEvent: "00000000-0000-0000-0000-000000000e11", roomID: roomID, senderID: senderID, messageID: messageID, roomSequence: 1, text: "初始文本", createdAtMilliseconds: 1_750_000_000_000)
-        ], token: "search-restart-1")
+        try await applyRoomEvents(first, records: [
+            acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000e11", roomID: roomID, senderID: senderID, messageID: messageID, roomSequence: 1, text: "初始文本", createdAtMilliseconds: 1_750_000_000_000)
+        ])
         try await first.rebuildMessageSearchIndex()
-        try await apply(first, records: [
+        try await applyRoomEvents(first, records: [
             editedRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000e12", roomID: roomID, messageID: messageID, revision: 2, text: "恢复后的文本")
-        ], token: "search-restart-2")
+        ])
 
         let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         #expect(try await restarted.messageSearchIndexProgress().isCatchingUp)
@@ -451,20 +435,20 @@ struct V2MessageSearchTests {
         )
     }
 
-    private func apply(_ store: GRDBV2LocalSyncStore, records: [V2ClientSyncRecord], token: String) async throws {
-        _ = try await store.apply(.init(
-            generation: 1,
-            records: records,
-            nextSyncToken: try .init(token),
-            receipt: try .init("receipt-" + token),
-            hasMore: false,
-            capabilityProfile: "base"
-        ))
+    private func applyRoomEvents(_ store: GRDBV2LocalSyncStore, records: [V2ClientSyncRecord]) async throws {
+        struct Scope: Decodable { let room_id: String }
+        for record in records {
+            let room = try RoomID(JSONDecoder().decode(Scope.self, from: record.payload).room_id)
+            let event = try V2ClientGroupEvent(sourceEventID: record.sourceEventID, roomSequence: record.sequence,
+                projectionKind: record.projectionKind, payload: record.payload)
+            _ = try await store.applyGroupEventPage(.init(roomID: room, events: [event],
+                nextRoomSequence: record.sequence, hasMore: false))
+        }
     }
 
-    private func acceptedRecord(sequence: UInt64, sourceEvent: String, roomID: RoomID, senderID: UserID, messageID: MessageID, roomSequence: UInt64, text: String, createdAtMilliseconds: Int64) throws -> V2ClientSyncRecord {
+    private func acceptedRoomEvent(sourceEvent: String, roomID: RoomID, senderID: UserID, messageID: MessageID, roomSequence: UInt64, text: String, createdAtMilliseconds: Int64) throws -> V2ClientSyncRecord {
         try .init(
-            sequence: sequence,
+            sequence: roomSequence,
             sourceEventID: .init(sourceEvent),
             projectionKind: "message",
             payload: try JSONSerialization.data(withJSONObject: [
@@ -487,6 +471,7 @@ struct V2MessageSearchTests {
             projectionKind: "message",
             payload: try JSONSerialization.data(withJSONObject: [
                 "event_type": "message.edited",
+                "room_sequence": sequence,
                 "room_id": roomID.rawValue,
                 "message_id": messageID.rawValue,
                 "message_revision": revision,
@@ -495,9 +480,9 @@ struct V2MessageSearchTests {
         )
     }
 
-    private func mediaRecord(sequence: UInt64, sourceEvent: String, roomID: RoomID, senderID: UserID, messageID: MessageID, roomSequence: UInt64, mediaID: String, kind: String) throws -> V2ClientSyncRecord {
+    private func mediaRoomEvent(sourceEvent: String, roomID: RoomID, senderID: UserID, messageID: MessageID, roomSequence: UInt64, mediaID: String, kind: String) throws -> V2ClientSyncRecord {
         try .init(
-            sequence: sequence,
+            sequence: roomSequence,
             sourceEventID: .init(sourceEvent),
             projectionKind: "message",
             payload: try JSONSerialization.data(withJSONObject: [
@@ -510,7 +495,7 @@ struct V2MessageSearchTests {
                 "text": "",
                 "media_ids": [mediaID],
                 "media_presentations": [try resourcePresentationWireFixture(room: roomID.rawValue, media: mediaID, contentType: kind == "image" ? "image/jpeg" : "application/octet-stream", bytes: 1).merging(["kind": kind], uniquingKeysWith: { _, new in new })],
-                "server_created_at_ms": Int64(1_750_000_000_000 + Int64(sequence))
+                "server_created_at_ms": Int64(1_750_000_000_000 + Int64(roomSequence))
             ])
         )
     }
@@ -522,6 +507,7 @@ struct V2MessageSearchTests {
             projectionKind: "message",
             payload: try JSONSerialization.data(withJSONObject: [
                 "event_type": "message.withdrawn",
+                "room_sequence": sequence,
                 "room_id": roomID.rawValue,
                 "message_id": messageID.rawValue,
                 "message_revision": revision

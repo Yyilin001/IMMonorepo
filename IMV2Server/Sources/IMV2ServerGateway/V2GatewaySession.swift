@@ -212,6 +212,7 @@ public actor V2GatewaySession {
     private let maximumMessageSendPayloadBytes: Int
     private var negotiatedMessageSendOperations = false
     private var authorPresentationStreamID: UUID?
+    private var authorPresentationRegistrationAvailable = false
 
     /// 创建尚未握手的 Gateway 会话，不在初始化时执行认证或网络操作。
     ///
@@ -514,10 +515,10 @@ public actor V2GatewaySession {
 
     /// Encode an optional supplement independently of shared message frames.
     /// The transport still checks its generation/view/deadline at actual enqueue.
-    func authorPresentationFrame(_ payload: Data) throws -> V2Frame? {
+    func authorPresentationFrame(_ payload: Data, viewID: UUID) throws -> V2Frame? {
         guard let connection = currentAuthenticatedConnection(), let streamID = authorPresentationStreamID else { return nil }
         let delta = try V2AuthorPresentationDelta.decode(payload)
-        guard delta.streamID == streamID, delta.actorUserID == connection.identity.userID,
+        guard delta.viewID == viewID, delta.streamID == streamID, delta.actorUserID == connection.identity.userID,
               delta.deviceID == connection.identity.deviceID else { throw V2GatewaySessionError.unsupportedCommand }
         var envelope = IMV2Envelope()
         envelope.protocolVersion = UInt32(connection.version)
@@ -591,7 +592,9 @@ public actor V2GatewaySession {
             state.close()
             throw V2GatewaySessionError.sessionExpired
         }
-        guard frame.command != .authorPresentationDelta, frame.command != .authorPresentationEnded else {
+        guard frame.command != .authorPresentationDelta, frame.command != .authorPresentationEnded,
+              frame.command != .authorPresentationReceipted, frame.command != .authorPresentationInterestsReceived,
+              frame.command != .authorPresentationStarted else {
             throw V2GatewaySessionError.unsupportedCommand
         }
         if frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
@@ -602,13 +605,23 @@ public actor V2GatewaySession {
         }
         if case .authorPresentationEnd(let request) = envelope.body {
             guard let streamID = authorPresentationStreamID, UUID(uuidString: request.streamID) == streamID,
-                  UUID(uuidString: request.roomID) != nil, UUID(uuidString: request.viewID) != nil else {
+                  UUID(uuidString: request.viewID) != nil else {
                 throw V2GatewaySessionError.unsupportedCommand
             }
         }
-        if case .groupEventSubscribe(let request) = envelope.body, !request.authorPresentationViewID.isEmpty {
-            guard authorPresentationStreamID != nil, UUID(uuidString: request.authorPresentationViewID) != nil,
-                  UUID(uuidString: request.roomID) != nil else { throw V2GatewaySessionError.unsupportedCommand }
+        if case .authorPresentationReceipt(let request) = envelope.body {
+            guard let streamID = authorPresentationStreamID,
+                  UUID(uuidString: request.streamID) == streamID else { throw V2GatewaySessionError.unsupportedCommand }
+            _ = try request.domain()
+        }
+        if case .authorPresentationInterests(let request) = envelope.body {
+            guard let streamID = authorPresentationStreamID,
+                  UUID(uuidString: request.streamID) == streamID else { throw V2GatewaySessionError.unsupportedCommand }
+            _ = try request.domain()
+        }
+        if case .authorPresentationStart(let request) = envelope.body {
+            let start = try request.domain()
+            guard start.streamID == authorPresentationStreamID else { throw V2GatewaySessionError.unsupportedCommand }
         }
         try state.receiveAuthenticatedRequest(frame.header)
         return (version, identity, clock)
@@ -669,12 +682,20 @@ public actor V2GatewaySession {
             var response: IMV2Envelope
             var preparedFrame: V2Frame?
             var authorSample: V2AuthorPresentationPageSample?
-            if case .authorPresentationEnd(let request) = envelope.body {
+            if case .authorPresentationInterests(let request) = envelope.body, request.keys.isEmpty {
+                // Removing interest is connection-local cleanup. New interests
+                // below consume admission because they may trigger a read.
+                response = IMV2Envelope()
+                response.authorPresentationInterestsReceived = request
+            } else if case .authorPresentationReceipt(let request) = envelope.body {
+                // Bounded connection-local bookkeeping, no domain/database work.
+                response = IMV2Envelope()
+                response.authorPresentationReceipted = request
+            } else if case .authorPresentationEnd(let request) = envelope.body {
                 // Cleanup consumes normal frame/request budgets but needs no
                 // domain I/O or rate-limit token after access has been revoked.
                 response = IMV2Envelope()
                 response.authorPresentationEnded.streamID = request.streamID
-                response.authorPresentationEnded.roomID = request.roomID
                 response.authorPresentationEnded.viewID = request.viewID
             } else if !(await commandAdmission.admit(
                 identity: identity,
@@ -686,6 +707,18 @@ public actor V2GatewaySession {
                 response.error.code = "RATE_LIMITED"
                 response.error.retryable = true
                 response.error.retryAfterSeconds = 1
+            } else if case .authorPresentationStart(let request) = envelope.body {
+                response = IMV2Envelope()
+                if authorPresentationRegistrationAvailable {
+                    response.authorPresentationStarted = request
+                } else {
+                    response.error.code = "AUTHOR_PRESENTATION_UNAVAILABLE"
+                    response.error.retryable = true
+                    response.error.retryAfterSeconds = 1
+                }
+            } else if case .authorPresentationInterests(let request) = envelope.body {
+                response = IMV2Envelope()
+                response.authorPresentationInterestsReceived = request
             } else if case .groupEventPull(let request) = envelope.body,
                       let preparedGroupEventPageCache,
                       let preparedHandler = handler as? any V2PreparedGroupEventCommandHandling {
@@ -750,12 +783,11 @@ public actor V2GatewaySession {
         var response = value
         var authorSample = initialAuthorSample
         if case .groupEventSubscribe(let request) = envelope.body,
-           case .groupEventSubscribed(var subscribed) = response.body {
+           case .groupEventSubscribed(let subscribed) = response.body {
             guard let requestedRoom = try? RoomID(request.roomID),
                   let subscribedRoom = try? RoomID(subscribed.roomID), requestedRoom == subscribedRoom else {
                 throw V2GatewaySessionError.unsupportedCommand
             }
-            subscribed.authorPresentationViewID = request.authorPresentationViewID
             response.groupEventSubscribed = subscribed
         }
         response.requestID = envelope.requestID
@@ -815,6 +847,8 @@ public actor V2GatewaySession {
             return 0
         case .getGroupRolePolicyBaseline:
             return 2
+        case .authorPresentationInterests(let request):
+            return min(8, max(1, (request.keys.count + 15) / 16))
         case .listRoomMembers(let request):
             return min(8, max(1, 1 + Int(request.pageSize) / 100))
         case .groupEventPull(let request):
@@ -845,7 +879,13 @@ public actor V2GatewaySession {
     }
 
     /// 撤销本连接的设备会话并清除缓存的会话到期时间。
-    public func revokeDevice() { terminalGate.invalidate(); state.revokeDevice(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil }
+    /// The optional dispatcher may reject registration under its own capacity
+    /// limit. Report this without rejecting authentication or message traffic.
+    func setAuthorPresentationRegistrationAvailable(_ available: Bool) {
+        authorPresentationRegistrationAvailable = available
+    }
+
+    public func revokeDevice() { terminalGate.invalidate(); state.revokeDevice(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil; authorPresentationRegistrationAvailable = false }
     /// 终止本连接状态并清除会话期限；socket 资源由外层连接所有者关闭。
-    public func close() { terminalGate.invalidate(); state.close(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil }
+    public func close() { terminalGate.invalidate(); state.close(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil; authorPresentationRegistrationAvailable = false }
 }

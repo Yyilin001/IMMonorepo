@@ -20,10 +20,10 @@ struct V2AuthorPresentationRuntimeTests {
                 await trace.enter("close")
             })
         let connection = UUID(), view = UUID(), room = RoomID(uuid: UUID())
-        _ = try await runtime.dispatcher.register(connectionID: connection,
+        _ = try await runtime.dispatcher.registerFixture(connectionID: connection,
             identity: .init(userID: UserID(uuid: UUID()), deviceID: DeviceID(uuid: UUID()), capabilityProfile: "base"),
             send: { _, _ in await trace.enter("write"); return false })
-        #expect(await runtime.dispatcher.activateView(connectionID: connection, roomID: room, viewID: view))
+        #expect(await runtime.dispatcher.activateRoomFixture(connectionID: connection, roomID: room, viewID: view))
         #expect(runtime.ingress.submit(connectionID: connection, roomID: room, viewID: view, authors: [UserID(uuid: UUID())]))
         try await wait { await trace.waiting == heldPhase }
         let first = Task { await runtime.close(); await completed.finish() }

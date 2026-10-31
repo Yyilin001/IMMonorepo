@@ -211,7 +211,9 @@ public actor V2DeviceConnectionRegistry {
         roomSubscriptionHeadWorker.withLock { $0 = worker }
         let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, maximumRooms: maximumRooms,
             offerEvent: { [weak self] event, permits in self?.submitRoomSubscriptionEvent(event, permits: permits) },
-            offerHead: { [weak worker] room, head in _ = worker?.offer(roomID: room, highWatermark: head) })
+            offerHead: { [weak worker] room, head in _ = worker?.offer(roomID: room, highWatermark: head) },
+            observePresentationEvent: { [weak self] event in self?.submitRoomPresentationEvent(event) },
+            invalidatePresentations: { [weak self] room in self?.authorPresentationIngress?.submitRoomReset(room) })
         worker.start()
         return ingress
     }
@@ -346,6 +348,14 @@ public actor V2DeviceConnectionRegistry {
                 compressionThresholdBytes: foregroundCompressionThresholdBytes,
                 maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio) else { return }
         submitRoomSubscriptionFrame(prepared, permits: backgroundPermits, authority: authority)
+    }
+    private nonisolated func submitRoomPresentationEvent(_ event: V2RealtimeRoomEvent) {
+        guard let authorPresentationIngress else { return }
+        if let change = V2AuthorGroupNicknameChange(event: event.localEvent) {
+            authorPresentationIngress.submitNicknameChange(change)
+        } else if let change = V2AuthorRoomPermissionChange(event: event.localEvent) {
+            authorPresentationIngress.submitRoomReset(change.roomID)
+        }
     }
     private nonisolated func submitRoomSubscriptionEvent(_ event: V2RealtimeRoomEvent,
         permits: [V2GatewayRoomSubscriptionAuthority.Permit]) {

@@ -6,7 +6,7 @@ import IMV2Core
 public struct V2AuthorPresentationView: Equatable, Sendable {
     public let streamID: UUID
     public let viewID: UUID
-    public let roomID: RoomID
+    public let messageRoomIDs: [RoomID]
     public let renewBy: ContinuousClock.Instant
     let started: ContinuousClock.Instant
 }
@@ -16,12 +16,13 @@ public struct V2AuthorPresentationView: Equatable, Sendable {
 public enum V2ReceivedAuthorPresentationEntry: Sendable {
     case presentation(V2AuthorizedProfilePresentation, avatar: V2ResourceAvatarAccess?,
                       presentationDeadline: ContinuousClock.Instant, avatarDeadline: ContinuousClock.Instant?)
-    case unavailable(V2ProfileViewLookupKey, until: ContinuousClock.Instant)
+    case unavailable(V2PresentationDenial, until: ContinuousClock.Instant)
     case retryable(V2ProfileViewLookupKey, notBefore: ContinuousClock.Instant)
 }
 
 public struct V2ReceivedAuthorPresentationDelta: Sendable {
     public let view: V2AuthorPresentationView
+    public let sequence: UInt64
     public let entries: [V2ReceivedAuthorPresentationEntry]
 }
 
@@ -40,8 +41,8 @@ struct V2AuthorPresentationReceivingState: Sendable {
         self.actorUserID = actorUserID; self.deviceID = deviceID
     }
 
-    mutating func beginView(streamID: UUID, roomID: RoomID) throws -> V2AuthorPresentationView {
-        try beginView(streamID: streamID, roomID: roomID, at: .now)
+    mutating func beginView(streamID: UUID, messageRoomIDs: [RoomID]) throws -> V2AuthorPresentationView {
+        try beginView(streamID: streamID, messageRoomIDs: messageRoomIDs, at: .now)
     }
 
     mutating func endView(_ view: V2AuthorPresentationView) {
@@ -55,10 +56,10 @@ struct V2AuthorPresentationReceivingState: Sendable {
         try receive(bytes, for: view, at: .now)
     }
 
-    mutating func beginView(streamID: UUID, roomID: RoomID, at instant: ContinuousClock.Instant) throws -> V2AuthorPresentationView {
+    mutating func beginView(streamID: UUID, messageRoomIDs: [RoomID], at instant: ContinuousClock.Instant) throws -> V2AuthorPresentationView {
         guard !closed else { throw V2ProfilePresentationError.inactive }
-        guard roomID.uuidValue != nil else { throw V2ProfilePresentationError.invalidResponse }
-        let view = V2AuthorPresentationView(streamID: streamID, viewID: UUID(), roomID: roomID,
+        _ = try V2AuthorPresentationStart(streamID: streamID, viewID: UUID(), messageRoomIDs: messageRoomIDs)
+        let view = V2AuthorPresentationView(streamID: streamID, viewID: UUID(), messageRoomIDs: messageRoomIDs,
             renewBy: instant + .milliseconds(V2AuthorPresentationDelta.maximumViewAgeMilliseconds), started: instant)
         current = view; lastSequence = 0
         return view
@@ -68,30 +69,41 @@ struct V2AuthorPresentationReceivingState: Sendable {
                  at instant: ContinuousClock.Instant) throws -> V2ReceivedAuthorPresentationDelta? {
         guard current == view, instant >= view.started, instant < view.renewBy else { return nil }
         let delta = try V2AuthorPresentationDelta.decode(bytes)
-        guard delta.streamID == view.streamID, delta.viewID == view.viewID, delta.roomID == view.roomID,
+        return try receive(delta, for: view, at: instant)
+    }
+
+    // The inbox has already bounded and decoded the payload to check its
+    // connection identity. Reuse that immutable validated value; all local
+    // view, recipient, ordering and monotonic lease checks still happen here.
+    mutating func receive(_ delta: V2AuthorPresentationDelta, for view: V2AuthorPresentationView,
+                          at instant: ContinuousClock.Instant) throws -> V2ReceivedAuthorPresentationDelta? {
+        guard current == view, instant >= view.started, instant < view.renewBy else { return nil }
+        guard delta.streamID == view.streamID, delta.viewID == view.viewID,
               delta.actorUserID == actorUserID, delta.deviceID == deviceID else {
             throw V2ProfilePresentationError.invalidResponse
         }
         guard delta.sequence > lastSequence else { return nil }
-        // The server cannot know this random view nonce until after the local
-        // subscription starts. Its authority reads for this view occur later.
-        // Subtract the ENTIRE time since that causal boundary, including server
-        // queues and network stalls. An unsolicited server timestamp alone
-        // cannot tell us how long a pushed frame spent in flight.
+        // The server's nonce acceptance occurs after our local start. Its
+        // elapsed monotonic duration removes already elapsed server time, but
+        // leaves initial outbound delay, queues after preparation and inbound
+        // delay in the deduction. No synchronized wall clocks are required.
         let age = view.started.duration(to: instant)
+        let serverAge = Duration.milliseconds(delta.serverViewAgeMilliseconds)
+        guard serverAge <= age else { throw V2ProfilePresentationError.invalidResponse }
+        let transit = age - serverAge
         var entries: [V2ReceivedAuthorPresentationEntry] = []
         for result in delta.batch.results {
             switch result {
             case .presentation(let value, let avatar):
                 guard let presentationDeadline = deadline(value.lease.validUntilUnixMilliseconds,
-                    serverNow: delta.batch.serverNowUnixMilliseconds, age: age, at: instant) else { continue }
-                let avatarDeadline = avatar.flatMap { deadline($0.plan.expiresAtUnixMilliseconds,
-                    serverNow: delta.batch.serverNowUnixMilliseconds, age: age, at: instant) }
-                entries.append(.presentation(value, avatar: avatarDeadline == nil ? nil : avatar,
+                    serverNow: delta.batch.serverNowUnixMilliseconds, age: transit, at: instant) else { continue }
+                let avatarDeadline = avatar?.plan.flatMap { deadline($0.expiresAtUnixMilliseconds,
+                    serverNow: delta.batch.serverNowUnixMilliseconds, age: transit, at: instant) }
+                entries.append(.presentation(value, avatar: avatarDeadline == nil ? avatar?.withoutDownloadPlan() : avatar,
                     presentationDeadline: presentationDeadline, avatarDeadline: avatarDeadline))
-            case .unavailable(let key):
+            case .unavailable(let denial):
                 let remaining = Duration.seconds(30) - age
-                if remaining > .zero { entries.append(.unavailable(key, until: instant + remaining)) }
+                if remaining > .zero { entries.append(.unavailable(denial, until: instant + remaining)) }
             case .retryable(let key):
                 guard let delay = delta.retryAfterMilliseconds else { throw V2ProfilePresentationError.invalidResponse }
                 // Traffic backoff may be longer than necessary; unlike a lease,
@@ -100,7 +112,7 @@ struct V2AuthorPresentationReceivingState: Sendable {
             }
         }
         lastSequence = delta.sequence
-        return .init(view: view, entries: entries)
+        return .init(view: view, sequence: delta.sequence, entries: entries)
     }
 
     private func deadline(_ expires: Int64, serverNow: Int64, age: Duration,
@@ -119,16 +131,16 @@ public actor V2AuthorPresentationReceiver {
     public init(actorUserID: UserID, deviceID: DeviceID) {
         state = .init(actorUserID: actorUserID, deviceID: deviceID)
     }
-    public func beginView(streamID: UUID, roomID: RoomID) throws -> V2AuthorPresentationView {
-        try state.beginView(streamID: streamID, roomID: roomID)
+    public func beginView(streamID: UUID, messageRoomIDs: [RoomID]) throws -> V2AuthorPresentationView {
+        try state.beginView(streamID: streamID, messageRoomIDs: messageRoomIDs)
     }
     public func endView(_ view: V2AuthorPresentationView) { state.endView(view) }
     public func close() { state.close() }
     public func receive(_ bytes: Data, for view: V2AuthorPresentationView) throws -> V2ReceivedAuthorPresentationDelta? {
         try state.receive(bytes, for: view)
     }
-    func beginView(streamID: UUID, roomID: RoomID, at instant: ContinuousClock.Instant) throws -> V2AuthorPresentationView {
-        try state.beginView(streamID: streamID, roomID: roomID, at: instant)
+    func beginView(streamID: UUID, messageRoomIDs: [RoomID], at instant: ContinuousClock.Instant) throws -> V2AuthorPresentationView {
+        try state.beginView(streamID: streamID, messageRoomIDs: messageRoomIDs, at: instant)
     }
     func receive(_ bytes: Data, for view: V2AuthorPresentationView,
                  at instant: ContinuousClock.Instant) throws -> V2ReceivedAuthorPresentationDelta? {

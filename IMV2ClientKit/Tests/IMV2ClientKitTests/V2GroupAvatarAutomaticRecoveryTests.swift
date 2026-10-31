@@ -21,7 +21,12 @@ struct V2GroupAvatarAutomaticRecoveryTests {
         if committed, case .committed(let receipt) = try f.response(command).outcome { result = .committed(receipt) }
         else { result = .closed }
         let client = AutomaticAvatarClient(actor: f.actor, device: f.device, result: result)
-        let instant = f.now.addingTimeInterval(156)
+        // Foundation stores Date relative to 2001; the journal stores Unix
+        // seconds. Exercise a value whose Unix round trip rounds upward so a
+        // due database row is not rejected by a second Date-domain comparison.
+        let instant = Date(timeIntervalSinceReferenceDate:
+            floor(f.now.timeIntervalSinceReferenceDate + 156).nextUp.nextUp.nextUp)
+        #expect(Date(timeIntervalSince1970: instant.timeIntervalSince1970) > instant)
         let engine = V2GroupAvatarIntentEngine(actorUserID: f.actor, store: reopened, transfers: transfers,
             submissions: client, recovery: client, now: { instant })
         try await engine.recoverOnce()

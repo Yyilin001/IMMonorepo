@@ -4,8 +4,8 @@ import IMV2Core
 
 /// 本地公告变更效果。
 ///
-/// 公告修订负责为自身取值排序；历史载荷可能合理地缺少来源房间序号，
-/// 接收端游标无法补上该字段。
+/// 公告修订负责为自身取值排序；来源位置由房间日志外层提供，
+/// 正文重复携带序号时必须与外层一致。
 struct V2LocalAnnouncementEffect {
     /// 来源事件标识。
     let sourceEventID: EventID
@@ -17,8 +17,8 @@ struct V2LocalAnnouncementEffect {
     let body: String
     /// 服务端事件时间戳（毫秒）。
     let updatedAtMilliseconds: Int64
-    /// 来源房间序号；历史载荷可能缺失。
-    let roomSequence: Int64?
+    /// 已验证的来源房间序号。
+    let roomSequence: Int64
     /// 由房间、修订、正文、更新时间与发起者计算的规范摘要。
     let digest: Data
 
@@ -55,7 +55,9 @@ struct V2LocalAnnouncementEffect {
             revision = wire.revision
             body = wire.body
             updatedAtMilliseconds = wire.server_created_at_ms
-            roomSequence = wire.room_sequence
+            guard let sequence = wire.room_sequence ?? expectedRoomSequence.flatMap(Int64.init(exactly:)), sequence > 0
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            roomSequence = sequence
             struct Canonical: Encodable {
                 let version = 1
                 let room: String; let revision: Int64; let body: String

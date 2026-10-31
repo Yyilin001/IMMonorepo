@@ -20,7 +20,7 @@ extension GRDBV2LocalSyncStore {
             return (work,try JSONDecoder().decode(V2MessageSendOperationCommand.self,from:row["command"]))
         }
     }
-    /// Applies the matching accepted body through the real sync importer;
+    /// Applies the matching accepted body through the room-log importer;
     /// never writes the projection-observed GC gate directly.
     func observeResourceSendFixtureProjection(_ id: ClientMessageID,
         accepted: V2MessageOperationAcceptance, mediaPresentations: [V2MediaPresentation] = []) throws {
@@ -41,9 +41,7 @@ extension GRDBV2LocalSyncStore {
             return try resourcePresentationWireFixture(room: command.roomID.rawValue, media: presentation.mediaID.rawValue,
                 contentType: presentation.contentType, bytes: presentation.byteCount, descriptor: descriptor)
         }
-        let cursor = try cursor()
-        let sequence = (cursor?.appliedSequence ?? 0) + 1
-        let record = try V2ClientSyncRecord(sequence: sequence, sourceEventID: .init(uuid: UUID()), projectionKind: "message",
+        let event = try V2ClientGroupEvent(sourceEventID: .init(uuid: UUID()), roomSequence: accepted.roomSequence, projectionKind: "message",
             payload: JSONSerialization.data(withJSONObject: ["event_type": "message.accepted",
                 "message_id": accepted.messageID.rawValue, "room_id": command.roomID.rawValue,
                 "room_sequence": accepted.roomSequence, "message_revision": 1,
@@ -51,9 +49,8 @@ extension GRDBV2LocalSyncStore {
                 "media_ids": command.media.map { $0.mediaID.rawValue },
                 "media_presentations": presentationWire,
                 "server_created_at_ms": 1750000000000]))
-        _ = try apply(.init(generation: cursor?.generation ?? 1, records: [record],
-            nextSyncToken: .init("fixture-projection-\(sequence)"), receipt: .init("fixture-projection-\(sequence)"),
-            hasMore: false, capabilityProfile: "base"))
+        _ = try applyGroupEventPage(.init(roomID: command.roomID, events: [event],
+            nextRoomSequence: accepted.roomSequence, hasMore: false))
     }
 
     func claimResourceSendForRecovery(_ id:ClientMessageID,now:Date) throws {

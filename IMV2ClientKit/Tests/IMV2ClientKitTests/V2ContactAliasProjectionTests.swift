@@ -53,10 +53,13 @@ struct V2ContactAliasProjectionTests {
         try await store.close()
     }
     @Test func intentRetriesNeverInvalidateUnrelatedPresentations() {
-        for table in ["v2_operation_work", "v2_operation_dependencies", "v2_profile_intents", "v2_own_profile_snapshot",
+        for table in ["v2_operation_work", "v2_operation_dependencies", "v2_own_profile_snapshot",
                       "v2_personal_preference_intents", "v2_personal_preference_confirmed", "v2_name_operations", "v2_name_confirmed"] {
             #expect(V2ProjectionTransactionObserver.change(table: table, kind: .update).scopes.isEmpty)
         }
+        let profileIntent = V2ProjectionTransactionObserver.change(table: "v2_profile_intents", kind: .update)
+        #expect(profileIntent.scopes == .resources)
+        #expect(!profileIntent.requiresImmediateRefresh)
     }
     @Test(arguments: ["zero", "fraction", "boolean", "name", "credential", "user"])
     func malformedFactsCannotAdvanceCursor(kind: String) async throws {

@@ -27,7 +27,7 @@ public struct V2ActorRoomMediaAuthorizationPort: Sendable {
             }
             return snapshot
         case .notVisible: return nil
-        case .resourceUploadAllowed, .profilesVisible, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        case .resourceUploadAllowed, .profilesVisible, .profilesVisibleCohort, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
     }
 
@@ -45,35 +45,62 @@ public struct V2ActorRoomMediaAuthorizationPort: Sendable {
             else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             return snapshot
         case .notVisible: return nil
-        case .visible, .profilesVisible, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        case .visible, .profilesVisible, .profilesVisibleCohort, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
     }
 
     public func captureProfiles(_ request: V2ActorProfileVisibilityBatchWire,
                                 deadline: ContinuousClock.Instant) async throws -> V2ActorProfileVisibilityBatchSnapshotWire? {
-        guard !request.targetUserIDs.isEmpty, request.targetUserIDs.count <= 100,
-              Set(request.targetUserIDs).count == request.targetUserIDs.count
+        guard request.validatedTargetCount != nil
         else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         switch try await query(.profileVisibilityBatch(request), deadline) {
         case .profilesVisible(let snapshot):
-            guard snapshot.request == request, snapshot.activation.roomID == request.roomID,
-                  snapshot.membershipRevision >= 0, snapshot.permissionRevision >= 0,
-                  Set(snapshot.visibleTargetUserIDs).count == snapshot.visibleTargetUserIDs.count,
-                  Set(snapshot.visibleTargetUserIDs).isSubset(of: Set(request.targetUserIDs)),
-                  snapshot.groupMembers.count <= snapshot.visibleTargetUserIDs.count,
-                  Set(snapshot.groupMembers.map(\.userID)).count == snapshot.groupMembers.count,
-                  snapshot.groupMembers.allSatisfy({ member in
-                      (request.roomKind == .group || request.roomKind == .memberRoom) && member.roomID == request.roomID
-                        && snapshot.visibleTargetUserIDs.contains(member.userID) && (try? member.domain()) != nil
-                  }),
-                  snapshot.observedAt.timeIntervalSince1970.isFinite,
-                  snapshot.activationExpiresAt.timeIntervalSince1970.isFinite,
-                  snapshot.activationExpiresAt > snapshot.observedAt
-            else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+            try Self.validate(snapshot, for: request)
             return snapshot
         case .notVisible: return nil
-        case .visible, .resourceUploadAllowed, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        case .visible, .resourceUploadAllowed, .profilesVisibleCohort, .groupAvatarVisible, .resourceDirectory: throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
+    }
+
+    /// A cohort has one room snapshot but never one shared viewer permission.
+    /// Even denied viewers must return their exact request and versioned empty proof.
+    public func captureProfiles(_ request: V2ActorProfileVisibilityCohortWire,
+                                deadline: ContinuousClock.Instant) async throws -> [V2ActorProfileVisibilityBatchSnapshotWire] {
+        guard request.validatedTargetCount != nil else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        guard case .profilesVisibleCohort(let snapshots) = try await query(.profileVisibilityCohort(request), deadline),
+              snapshots.count == request.requests.count, let first = snapshots.first,
+              try V2ActorProtobuf.encode(V2RoomResponse.mediaAuthorization(.profilesVisibleCohort(snapshots))).count <= 256 * 1_024 else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        for (input, snapshot) in zip(request.requests, snapshots) {
+            try Self.validate(snapshot, for: input)
+            guard snapshot.activation == first.activation,
+                  snapshot.membershipRevision == first.membershipRevision,
+                  snapshot.permissionRevision == first.permissionRevision,
+                  snapshot.observedAt == first.observedAt,
+                  snapshot.activationExpiresAt == first.activationExpiresAt else {
+                throw V2RoomCallFailure.notAccepted(.invalidRequest)
+            }
+        }
+        return snapshots
+    }
+
+    private static func validate(_ snapshot: V2ActorProfileVisibilityBatchSnapshotWire,
+                                 for request: V2ActorProfileVisibilityBatchWire) throws {
+        guard snapshot.request == request, snapshot.activation.roomID == request.roomID,
+              snapshot.membershipRevision >= 0, snapshot.permissionRevision >= 0,
+              Set(snapshot.visibleTargetUserIDs).count == snapshot.visibleTargetUserIDs.count,
+              Set(snapshot.visibleTargetUserIDs).isSubset(of: Set(request.targetUserIDs)),
+              snapshot.groupMembers.count <= snapshot.visibleTargetUserIDs.count,
+              Set(snapshot.groupMembers.map(\.userID)).count == snapshot.groupMembers.count,
+              snapshot.groupMembers.allSatisfy({ member in
+                  (request.roomKind == .group || request.roomKind == .memberRoom) && member.roomID == request.roomID
+                    && snapshot.visibleTargetUserIDs.contains(member.userID) && (try? member.domain()) != nil
+              }),
+              snapshot.observedAt.timeIntervalSince1970.isFinite,
+              snapshot.activationExpiresAt.timeIntervalSince1970.isFinite,
+              snapshot.activationExpiresAt > snapshot.observedAt
+        else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
     }
 
     public func captureGroupAvatar(_ request: V2ActorGroupAvatarVisibilityWire,
@@ -93,7 +120,7 @@ public struct V2ActorRoomMediaAuthorizationPort: Sendable {
             else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             return snapshot
         case .notVisible: return nil
-        case .visible, .resourceUploadAllowed, .profilesVisible, .resourceDirectory:
+        case .visible, .resourceUploadAllowed, .profilesVisible, .profilesVisibleCohort, .resourceDirectory:
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
     }

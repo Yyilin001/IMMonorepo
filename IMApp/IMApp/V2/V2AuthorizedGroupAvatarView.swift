@@ -68,7 +68,7 @@ struct V2AuthorizedGroupAvatarView: View {
             subscription = try await .init(activation: activation, updates: pipeline.groups.invalidations(for: activation))
         }
         catch { return }
-        var failures = 0
+        var failures = 0, avatarRetries = V2AvatarRetrySchedule()
         while !Task.isCancelled && failures < 5 {
             guard phase == .active else { break }
             do {
@@ -76,7 +76,12 @@ struct V2AuthorizedGroupAvatarView: View {
                 try Task.checkCancellation()
                 guard generation == pipeline.generation, activeRefresh == refresh else { break }
                 snapshotGeneration = generation; snapshotRefresh = activeRefresh; snapshot = value; failures = 0
+                if let retry = avatarRetries.next(retryAt: value.avatarRetryAt, deadline: value.deadline), retry < value.deadline {
+                    try await ContinuousClock().sleep(until: retry)
+                    continue
+                }
                 try await ContinuousClock().sleep(until: value.deadline)
+                avatarRetries = .init()
                 snapshot = nil
             } catch is CancellationError { break }
             catch V2GroupAvatarPresentationError.inactive { snapshot = nil; break }

@@ -22,6 +22,7 @@ import os
 import plistlib
 from pathlib import Path
 import re
+import resource
 import shutil
 import signal
 import socket
@@ -34,6 +35,7 @@ import threading
 import time
 import uuid
 import zlib
+from v2_live_author_capacity import AuthorCapacityFixture
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'IMV2/scripts'))
@@ -52,6 +54,37 @@ def free_port():
     with socket.socket() as connection:
         connection.bind(('127.0.0.1', 0))
         return connection.getsockname()[1]
+
+
+class FixtureHTTPUpstream:
+    """One sequential keep-alive connection owned by one downstream handler.
+
+    Per-request reconnects exhaust local ephemeral ports during the byte phase.
+    Failed requests are never replayed: a POST may already have committed.
+    """
+    def __init__(self, port):
+        self.port = port
+        self.connection = None
+
+    def request(self, method, path, body, headers, timeout=20):
+        if self.connection is None:
+            self.connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=timeout)
+        connection = self.connection
+        connection.timeout = timeout
+        if connection.sock is not None:
+            connection.sock.settimeout(timeout)
+        try:
+            connection.request(method, path, body, headers)
+            response = connection.getresponse()
+            return response.status, response.getheaders(), response.read()
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
 
 
 def wait_listener(process, port):
@@ -92,7 +125,7 @@ def stop(process):
             # Reaping the owned leader can race Darwin's final group teardown.
             if not members or all(state.startswith('Z') for state in members):
                 return False
-            raise
+            return True
 
     def signal_group(value):
         try:
@@ -100,8 +133,11 @@ def stop(process):
         except ProcessLookupError:
             pass
         except PermissionError:
-            if group_exists():
-                raise
+            # An exiting Darwin group may still be visible while signals are
+            # already refused. Keep the bounded drain obligation: only an
+            # independently observed absence can complete cleanup. A group
+            # that remains alive still fails after TERM/KILL drain budgets.
+            pass
 
     def drain(seconds):
         deadline = time.monotonic() + seconds
@@ -224,9 +260,21 @@ class SlowUploadGate:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='new evidence directory')
+    parser.add_argument('--configuration', choices=('debug', 'release'), default='debug',
+                        help='Swift build configuration for the owned services and native ClientKit test')
     parser.add_argument('--slow-resource', action='store_true', help='one opt-in slow signed-byte upload with concurrent typed control and TLS cursor progress')
     parser.add_argument('--extended-acceptance', action='store_true', help='also run typed message and group operation acceptance against the owned stack')
     parser.add_argument('--nickname-directory-only', action='store_true', help='real multi-page nickname reads with two independently issued devices')
+    parser.add_argument('--author-capacity', type=int, metavar='PARTICIPANTS', help='2..10000 real TLS/ClientKit participants with PostgreSQL query counters')
+    parser.add_argument('--author-client-processes', type=int, default=1, help='independent ClientKit processes sharing the same capacity room (1..32)')
+    parser.add_argument('--author-gateway-processes', type=int, default=1,
+                        help='independent Gateway/Actor processes in one capacity cluster (1..4)')
+    parser.add_argument('--author-renewal-seconds', type=int, default=0,
+                        help='hold every capacity presentation across grant renewal (35..120 seconds, 0 disables)')
+    parser.add_argument('--author-avatar-replacement', action='store_true',
+                        help='replace the author avatar without another message and verify every capacity recipient')
+    parser.add_argument('--author-faults', action='store_true',
+                        help='combine a bounded profile database lock with one real slow TLS connection per process')
     parser.add_argument('--oss', action='store_true', help='use a private OSS bucket with runtime credentials for the owned resource stack')
     parser.add_argument('--oss-test-parent', type=oss_validation_parent, default='validation/',
                         help='authorized parent for a fresh validation/native-UUID namespace, e.g. ecs-test/validation/')
@@ -236,6 +284,24 @@ def main():
     parser.add_argument('--app-ui-simulator', help='explicit dedicated simulator for the real two-account photo UI closure')
     parser.add_argument('--app-ui-derived-data', type=Path, help='owned Xcode build directory for that UI closure')
     args = parser.parse_args()
+    if not 1 <= args.author_client_processes <= min(32, args.author_capacity or 1):
+        parser.error('--author-client-processes requires capacity mode and cannot exceed participants or 32')
+    if not 1 <= args.author_gateway_processes <= min(4, args.author_client_processes) or (args.author_gateway_processes > 1 and not args.author_capacity):
+        parser.error('--author-gateway-processes requires capacity mode and cannot exceed client processes or 4')
+    if args.author_renewal_seconds != 0 and (not args.author_capacity or not 35 <= args.author_renewal_seconds <= 120):
+        parser.error('--author-renewal-seconds requires capacity mode and 35..120 seconds')
+    if args.author_avatar_replacement and not args.author_capacity:
+        parser.error('--author-avatar-replacement requires capacity mode')
+    if args.author_faults and (not args.author_capacity or args.author_capacity < args.author_client_processes * 2
+                              or args.author_renewal_seconds):
+        parser.error('--author-faults requires two participants per process and a separate run without renewal')
+    if args.author_capacity is not None:
+        if not 2 <= args.author_capacity <= 10000 or any((args.slow_resource, args.extended_acceptance,
+                args.nickname_directory_only, args.resource_center, args.oss)):
+            parser.error('--author-capacity requires 2..10000 participants and a separate local scenario')
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        desired = max(soft, 65536 if hard == resource.RLIM_INFINITY else min(65536, hard))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
     if args.oss_test_parent != 'validation/' and not args.oss:
         parser.error('--oss-test-parent requires --oss')
     if bool(args.app_xctestrun) != bool(args.app_simulator) or (args.app_xctestrun and not args.resource_center):
@@ -274,9 +340,9 @@ def main():
         if args.extended_acceptance:
             products.append('IMV2OperatorServerApp')
         for product in products:
-            subprocess.run(['swift', 'build', '--disable-automatic-resolution', '--jobs', '4', '--product', product],
+            subprocess.run(['swift', 'build', '--configuration', args.configuration, '--disable-automatic-resolution', '--jobs', '4', '--product', product],
                            cwd=ROOT / 'IMV2Server', env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
-    binary = Path(subprocess.check_output(['swift', 'build', '--show-bin-path'], cwd=ROOT / 'IMV2Server',
+    binary = Path(subprocess.check_output(['swift', 'build', '--configuration', args.configuration, '--show-bin-path'], cwd=ROOT / 'IMV2Server',
                                          env=environment, text=True).strip())
     print('Current native Account, Gateway and image worker built.', flush=True)
     processes, logs = [], []
@@ -287,6 +353,9 @@ def main():
         private = Path(directory)
         private.chmod(0o700)
         database_port, account_port, gateway_port, metrics_port = [free_port() for _ in range(4)]
+        gateway_names = ['gateway'] + [f'gateway-{index}' for index in range(1, args.author_gateway_processes)]
+        gateway_ports = [gateway_port] + [free_port() for _ in gateway_names[1:]]
+        metrics_ports = [metrics_port] + [free_port() for _ in gateway_names[1:]]
         operator_port = free_port() if args.extended_acceptance else None
         database_args = ['-h', '127.0.0.1', '-p', str(database_port), '-U', 'postgres']
         started_postgres, proxy, proxy_thread = False, None, None
@@ -297,9 +366,9 @@ def main():
             def run(command):
                 subprocess.run(command, env=environment, stdout=setup, stderr=subprocess.STDOUT, check=True)
 
-            def sql(statement):
+            def sql(statement, timeout=None):
                 return subprocess.check_output(['psql', '-X', *database_args, '-d', 'im_live_resources',
-                    '-v', 'ON_ERROR_STOP=1', '-tA', '-c', statement], env=environment, text=True).strip()
+                    '-v', 'ON_ERROR_STOP=1', '-tA', '-f', '-'], input=statement, env=environment, text=True, timeout=timeout).strip()
 
             def launch(name, config, executable=None):
                 log = (output / (name + '.log')).open('w'); logs.append(log)
@@ -314,16 +383,21 @@ def main():
             try:
                 run(['initdb', '-D', str(private / 'pg'), '-U', 'postgres', '--auth=trust', '--no-locale'])
                 run(['pg_ctl', '-D', str(private / 'pg'), '-l', str(output / 'postgres.log'),
-                     '-o', f'-h 127.0.0.1 -p {database_port} -k {private} -c max_connections=160', '-w', 'start'])
+                     '-o', f'-h 127.0.0.1 -p {database_port} -k {private} -c max_connections={160 + 64 * (len(gateway_names) - 1)}'
+                     + (' -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all' if args.author_capacity else ''), '-w', 'start'])
                 started_postgres = True
                 run(['createdb', *database_args, 'im_live_resources'])
+                if args.author_capacity:
+                    sql('CREATE EXTENSION pg_stat_statements;')
                 run(['psql', '-X', *database_args, '-d', 'im_live_resources', '-v', 'ON_ERROR_STOP=1',
                      '-f', str(ROOT / 'IMV2/sql/schema.sql')])
                 run(['psql', '-X', *database_args, '-d', 'im_live_resources', '-v', 'ON_ERROR_STOP=1',
                      '-f', str(ROOT / 'IMV2/sql/realtime-change-journal.sql')])
                 run([sys.executable, str(ROOT / 'IMV2/scripts/prepare_v2_room_actor_configuration.py'),
-                     '--output-dir', str(private / 'actors'), '--host', f'gateway=localhost:{free_port()}',
-                     '--caller', f'account=localhost:{free_port()}', '--shards', 'rooms-primary']
+                     '--output-dir', str(private / 'actors')]
+                     + [argument for name in gateway_names for argument in ('--host', f'{name}=localhost:{free_port()}')]
+                     + ['--caller', f'account=localhost:{free_port()}', '--shards', 'rooms-primary']
+                     + (['--caller', f'operator=localhost:{free_port()}'] if args.extended_acceptance else [])
                      + voter_arguments([free_port() for _ in range(3)]))
                 placement_processes = []
                 start_controls(binary=binary / 'IMV2PlacementControlApp', actors=private / 'actors',
@@ -339,11 +413,25 @@ def main():
                      'ACCOUNT_ASSERTION_HMAC_KEY', 'GROUP_INVITE_TOKEN_HMAC_KEY', 'LOCAL_MEDIA_SIGNING_KEY',
                      'OPERATOR_REPLAY_BEARER_TOKEN', 'OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN')}
                 fixture_token = base64.b64encode(os.urandom(32)).decode()
+                capacity = AuthorCapacityFixture(args.author_capacity, sql,
+                    secrets['IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64'], counts, counts_lock,
+                    args.author_client_processes, args.author_renewal_seconds, args.author_avatar_replacement,
+                    args.author_faults) if args.author_capacity else None
                 if args.extended_acceptance:
                     sql("INSERT INTO im_v2.shard_admission_pools (room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('rooms-primary','standard',gen_random_uuid(),1,now()+interval '1 hour',1000) ON CONFLICT DO NOTHING")
 
                 class Proxy(http.server.BaseHTTPRequestHandler):
                     protocol_version = 'HTTP/1.1'
+
+                    def setup(self):
+                        super().setup()
+                        self.upstream = FixtureHTTPUpstream(account_port)
+
+                    def finish(self):
+                        try:
+                            self.upstream.close()
+                        finally:
+                            super().finish()
 
                     def log_message(self, *_):
                         pass  # Signed object capabilities must not enter access logs.
@@ -389,6 +477,29 @@ def main():
                         if slow_gate is not None and self.command == 'PUT' and re.fullmatch(r'/v2/local-media/upload/[0-9a-fA-F-]{36}', path):
                             self._slow_claimed = slow_gate.claim(self.connection)
                         body = slow_gate.read(self, length) if self._slow_claimed else self.rfile.read(length)
+                        if path.startswith('/__fixture__/author-capacity/'):
+                            if capacity is None or self.headers.get('X-Resource-Fixture') != fixture_token:
+                                self.send_error(403); return
+                            if path.endswith('/seed') and self.command == 'POST':
+                                value = capacity.seed(json.loads(body))
+                            elif path.endswith('/assignment') and self.command == 'POST':
+                                value = capacity.assignment(json.loads(body))
+                            elif path.endswith('/barrier') and self.command == 'POST':
+                                value = capacity.barrier(json.loads(body))
+                            elif path.endswith('/message') and self.command in ('GET', 'POST'):
+                                value = capacity.message(json.loads(body) if body else None)
+                            elif path.endswith('/avatar') and self.command in ('GET', 'POST'):
+                                value = capacity.avatar(json.loads(body) if body else None)
+                            elif path.endswith('/fault') and self.command in ('GET', 'POST'):
+                                value = capacity.fault(json.loads(body) if body else None)
+                            elif path.endswith('/statistics') and self.command == 'GET':
+                                value = capacity.statistics()
+                            else:
+                                self.send_error(404); return
+                            payload = json.dumps(value).encode()
+                            self.send_response(200); self.send_header('Content-Type', 'application/json')
+                            self.send_header('Content-Length', str(len(payload))); self.end_headers()
+                            self.wfile.write(payload); return
                         if self.path == '/__fixture__/disable-account' and self.command == 'POST':
                             if operator_port is None or self.headers.get('X-Resource-Fixture') != fixture_token:
                                 self.send_error(403); return
@@ -463,33 +574,51 @@ def main():
                         headers = {key: value for key, value in self.headers.items() if key.lower() not in excluded}
                         headers['X-IM-V2-Account-Edge-Authorization'] = secrets['IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64']
                         headers['X-IM-V2-Account-Client-Address'] = '127.0.0.1'
-                        upstream = http.client.HTTPConnection('127.0.0.1', account_port, timeout=5 if self._slow_claimed else 20)
+                        byte_started = capacity.byte_request_started() if capacity and path.startswith('/v2/resource-bytes/') else None
                         try:
-                            upstream.request(self.command, self.path, body, headers)
-                            response = upstream.getresponse(); payload = response.read()
+                            status, response_headers, payload = self.upstream.request(self.command, self.path, body,
+                                headers, timeout=5 if self._slow_claimed else 20)
                             path = self.path.split('?')[0]
                             if path.startswith('/v2/resource-bytes/'): path = '/v2/resource-bytes/:placement'
                             if path.startswith('/v2/local-media/upload/'): path = '/v2/local-media/upload/:media'
                             if path.startswith('/v2/profile-presentations/groups/') and path.rsplit('/', 1)[-1] in ('nickname', 'nicknames'):
                                 path = '/v2/profile-presentations/groups/:room/' + path.rsplit('/', 1)[-1]
-                            with counts_lock: counts[(self.command, path, response.status)] += 1
-                            self.send_response(response.status)
-                            for key, value in response.getheaders():
+                            with counts_lock: counts[(self.command, path, status)] += 1
+                            self.send_response(status)
+                            for key, value in response_headers:
                                 if key.lower() not in {'transfer-encoding', 'connection', 'content-length'}:
                                     self.send_header(key, value)
                             self.send_header('Content-Length', str(len(payload))); self.end_headers()
                             self.wfile.write(payload)
-                            self._slow_success = 200 <= response.status < 300
+                            self._slow_success = 200 <= status < 300
                         finally:
-                            upstream.close()
+                            if byte_started is not None:
+                                capacity.byte_request_finished(byte_started)
 
                     do_GET = do_POST = do_PUT = dispatch
 
                 tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); tls.minimum_version = ssl.TLSVersion.TLSv1_3
                 tls.load_cert_chain(str(certificate), str(key))
-                proxy = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
+                class ConcurrentTLSFixtureServer(http.server.ThreadingHTTPServer):
+                    # A wrapped listening socket performs each handshake inside
+                    # accept(), serializing all clients before worker dispatch.
+                    # Keep the listener raw and authenticate each accepted TLS
+                    # socket in its request worker instead.
+                    request_queue_size = 128
+
+                    def process_request_thread(self, request, client_address):
+                        try:
+                            request.settimeout(10)
+                            secured = tls.wrap_socket(request, server_side=True)
+                            secured.settimeout(20)
+                        except OSError:
+                            request.close()
+                            with counts_lock: counts[('TLS', '/__fixture__/handshake', 0)] += 1
+                            return
+                        super().process_request_thread(secured, client_address)
+
+                proxy = ConcurrentTLSFixtureServer(('127.0.0.1', 0), Proxy)
                 proxy.daemon_threads = True
-                proxy.socket = tls.wrap_socket(proxy.socket, server_side=True)
                 proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
                 proxy_thread.start()
                 base_url = f'https://localhost:{proxy.server_port}'
@@ -519,16 +648,24 @@ def main():
                         config_key = 'IM_V2_OSS_' + suffix
                         if os.environ.get(config_key): shared[config_key] = os.environ[config_key]
                     (output / 'oss-fixture.json').write_text(json.dumps(dict(bucket=bucket, region=region, prefix=prefix)) + '\n')
-                gateway = compose_defaults('gateway'); gateway.update(shared)
-                if args.oss:
-                    for config_key in list(gateway):
-                        if config_key.startswith('IM_V2_LOCAL_MEDIA_'): gateway.pop(config_key)
-                gateway.update(IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(private / 'actors/gateway/configuration.json'),
-                    IM_V2_AUTHOR_PRESENTATIONS_ENABLED='true', IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED='true',
-                    IM_V2_TLS_HOST='127.0.0.1', IM_V2_TLS_PORT=str(gateway_port),
-                    IM_V2_TLS_CERTIFICATE_CHAIN_PATH=str(certificate), IM_V2_TLS_PRIVATE_KEY_PATH=str(key),
-                    IM_V2_METRICS_HOST='127.0.0.1', IM_V2_METRICS_PORT=str(metrics_port), IM_V2_GATEWAY_NODE_ID='gateway')
-                wait_listener(launch('IMV2ServerApp', gateway), gateway_port)
+                gateways = []
+                for index, name in enumerate(gateway_names):
+                    gateway = compose_defaults('gateway'); gateway.update(shared)
+                    if args.oss:
+                        for config_key in list(gateway):
+                            if config_key.startswith('IM_V2_LOCAL_MEDIA_'): gateway.pop(config_key)
+                    node = private / 'actors' / name
+                    gateway.update(IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(node / 'configuration.json'),
+                        IM_V2_AUTHOR_PRESENTATIONS_ENABLED='true', IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED='true',
+                        IM_V2_TLS_HOST='127.0.0.1', IM_V2_TLS_PORT=str(gateway_ports[index]),
+                        IM_V2_TLS_CERTIFICATE_CHAIN_PATH=str(node / 'tls.pem'), IM_V2_TLS_PRIVATE_KEY_PATH=str(node / 'tls.key'),
+                        IM_V2_METRICS_HOST='127.0.0.1', IM_V2_METRICS_PORT=str(metrics_ports[index]), IM_V2_GATEWAY_NODE_ID=name)
+                    process_name = 'IMV2ServerApp' if index == 0 else 'IMV2ServerApp-' + str(index)
+                    gateways.append(launch(process_name, gateway, binary / 'IMV2ServerApp'))
+                # Launch every voter before waiting: a node may need its peers
+                # to qualify before completing application startup.
+                for process, port in zip(gateways, gateway_ports):
+                    wait_listener(process, port)
                 account = compose_defaults('account'); account.update(shared)
                 if args.oss:
                     for config_key in list(account):
@@ -538,8 +675,8 @@ def main():
                 wait_listener(launch('IMV2AccountServerApp', account), account_port)
                 if args.extended_acceptance:
                     operator = compose_defaults('operator'); operator.update(shared)
-                    operator.pop('IMV2_ROOM_ACTOR_CONFIGURATION_FILE', None)
-                    operator.update(IM_V2_OPERATOR_REPLAY_LISTEN_HOST='127.0.0.1', IM_V2_OPERATOR_REPLAY_LISTEN_PORT=str(operator_port))
+                    operator.update(IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(private / 'actors/operator/configuration.json'),
+                        IM_V2_OPERATOR_REPLAY_LISTEN_HOST='127.0.0.1', IM_V2_OPERATOR_REPLAY_LISTEN_PORT=str(operator_port))
                     wait_listener(launch('IMV2OperatorServerApp', operator), operator_port)
                 print('Owned PostgreSQL, separate Actor nodes, HTTPS resources and TLS Gateway ready.', flush=True)
                 test_env = dict(environment, IMV2_LIVE_RESOURCE_GATEWAY_PORT=str(gateway_port),
@@ -551,6 +688,11 @@ def main():
                     test_env['IMV2_LIVE_EXTENDED_ACCEPTANCE'] = '1'
                 if args.nickname_directory_only:
                     test_env['IMV2_LIVE_NICKNAME_DIRECTORY'] = '1'
+                if args.author_capacity:
+                    test_env['IMV2_LIVE_AUTHOR_CAPACITY'] = str(args.author_capacity)
+                    test_env['IMV2_LIVE_AUTHOR_RENEWAL_SECONDS'] = str(args.author_renewal_seconds)
+                    test_env['IMV2_LIVE_AUTHOR_AVATAR_REPLACEMENT'] = '1' if args.author_avatar_replacement else '0'
+                    test_env['IMV2_LIVE_AUTHOR_FAULTS'] = '1' if args.author_faults else '0'
                 if args.resource_center:
                     test_env['IMV2_LIVE_RESOURCE_CENTER'] = '1'
                 test_filter = 'V2LiveResourceAuthorTests/slowResourceUploadKeepsControlAndCursorProgress' if args.slow_resource else 'V2LiveResourceAuthorTests'
@@ -558,17 +700,24 @@ def main():
                     test_filter = 'V2LiveResourceAuthorTests/largeNicknameDirectoryIndependentDeviceReads'
                 if args.resource_center:
                     test_filter = 'V2LiveResourceAuthorTests/(resourceLifecycle|groupAvatarAcceptance)'
-                with (output / 'client.log').open('w') as log:
-                    test = subprocess.Popen(['swift', 'test', '--disable-automatic-resolution', '--no-parallel',
-                        '--jobs', '4', '--filter', test_filter], cwd=ROOT / 'IMV2ClientKit', env=test_env,
-                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-                    test._owned_process_group = test.pid
-                    try:
-                        result = test.wait(timeout=600 if args.extended_acceptance else 240)
-                    finally:
-                        stop(test)
+                if args.author_capacity:
+                    test_filter = 'V2LiveAuthorCapacityTests'
+                if capacity:
+                    result = capacity.run_clients(ROOT, output, test_env, stop, metrics_ports, gateway_ports, args.configuration)
+                else:
+                    with (output / 'client.log').open('w') as log:
+                        test = subprocess.Popen(['swift', 'test', '--configuration', args.configuration, '--disable-automatic-resolution', '--no-parallel',
+                            '--jobs', '4', '--filter', test_filter], cwd=ROOT / 'IMV2ClientKit', env=test_env,
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                        test._owned_process_group = test.pid
+                        try:
+                            result = test.wait(timeout=600 if args.extended_acceptance else 240)
+                        finally:
+                            stop(test)
                 text = (output / 'client.log').read_text()
-                if args.slow_resource:
+                if args.author_capacity:
+                    passed = len(re.findall(r'Test .*realClientKitAuthorFanout.* passed', text)) == args.author_client_processes
+                elif args.slow_resource:
                     passed = 'slowResourceUploadKeepsControlAndCursorProgress' in text and bool(re.search(r'Test .*slowResourceUploadKeepsControlAndCursorProgress.* passed', text))
                     state = slow_gate.snapshot()
                     passed = passed and state['hits'] == state['completed'] == 1 and state['expired'] == state['active'] == 0 and state['released'] and state['bodyBytesRead'] > 16384
@@ -683,6 +832,13 @@ def main():
                     app_ui_passed = app_ui_result == 0 and photo_ui_passed and file_ui_passed
                     passed = passed and app_ui_passed
                 summary = {'clientExitCode': result, 'requiredTestPassed': passed,
+                    'authorCapacityParticipants': args.author_capacity,
+                    'authorCapacityClientProcesses': args.author_client_processes if capacity else None,
+                    'authorCapacityGatewayProcesses': args.author_gateway_processes if capacity else None,
+                    'authorCapacityRenewalSeconds': args.author_renewal_seconds if capacity else None,
+                    'authorCapacityAvatarReplacement': args.author_avatar_replacement if capacity else None,
+                    'swiftBuildConfiguration': args.configuration,
+                    'authorCapacitySQL': capacity.statistics() if capacity else None,
                     'resourceCenterGate': args.resource_center, 'groupAvatarPassed': group_avatar_passed,
                     'appClientExitCode': app_result, 'appResourcePassed': app_passed,
                     'appUIClientExitCode': app_ui_result, 'appUIResourcePassed': app_ui_passed,

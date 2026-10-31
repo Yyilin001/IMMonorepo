@@ -142,14 +142,10 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                     else { throw V2ProfileUpdateError.corruptPersistenceState }
                     try await sql.raw("UPDATE im_v2.media_objects SET expires_at=GREATEST(expires_at,\(bind:retireAfter)) WHERE media_id=\(bind:previousAvatarID)").run()
                 }
-                guard let identity = result.publicIdentity else {
-                    throw V2ProfileUpdateError.corruptPersistenceState
-                }
                 try await sql.raw("""
                     INSERT INTO im_v2.public_profile_update_outbox
-                    (source_event_id, source_user_id, public_handle, display_name, account_kind, profile_state, revision, profile_updated_at, created_at)
-                    VALUES (\(bind: makeUUID()), \(bind: actorID), \(bind: identity.handle.rawValue),
-                            \(bind: identity.displayName), \(bind: identity.accountKind.rawValue), 'active', \(bind: result.revision.signedValue), \(bind: changedAt), \(bind: changedAt))
+                        (source_event_id, source_user_id, revision, created_at)
+                    VALUES (\(bind: makeUUID()), \(bind: actorID), \(bind: result.revision.signedValue), \(bind: changedAt))
                     """).run()
             } else {
                 result = current

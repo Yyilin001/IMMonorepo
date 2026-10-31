@@ -5,6 +5,126 @@ import Testing
 
 @Suite("Profile HTTP and author delta ownership", .timeLimit(.minutes(1)))
 struct V2ProfilePresentationIngestTests {
+    @Test("avatar renewal shares bounded HTTP work without dropping valid display authority",
+          arguments: ["success", "transport", "denied", "invalidate", "deactivate", "unauthorized", "close"])
+    func avatarRenewal(scenario: String) async throws {
+        let f = Fixture(), page = await f.repository.activate(), media = MediaID(uuid: UUID())
+        let checksum = try V2ResourceChecksum(value: String(repeating: "a", count: 64))
+        let avatar = try V2ResourceAvatarAccess(mediaID: media, variantID: .init(uuid: UUID()), version: 1,
+            checksum: checksum, byteCount: 1,
+            plan: .init(mode: .httpGet, url: #require(URL(string: "https://objects.invalid/renewed")),
+                expiresAt: f.date.addingTimeInterval(60), expectedByteCount: 1, checksum: checksum))
+        let value = try f.value(key: f.key, revision: 1, media: media)
+        let first = Task { try await f.repository.presentation(for: f.key, activation: page) }
+        try await f.reader.waitForCalls(1)
+        await f.reader.release(0, with: .success(.init(presentations: [f.key: value], denials: [:], serverNow: f.date,
+            avatars: [f.key: avatar.withoutDownloadPlan()])))
+        _ = try await first.value
+        let original = try #require(await f.repository.avatarReadGrant(for: f.key, activation: page))
+        let a = Task { try await f.repository.refreshAvatarReadGrant(for: f.key, activation: page, replacing: original.avatar) }
+        let b = Task { try await f.repository.refreshAvatarReadGrant(for: f.key, activation: page, replacing: original.avatar) }
+        try await wait { await f.repository.diagnostics().waitingConsumers == 2 }
+        try await f.reader.waitForCalls(2)
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: page) == value)
+        try await original.requireValid()
+        if scenario == "invalidate" { await f.repository.invalidate([f.key]) }
+        if scenario == "deactivate" { await f.repository.deactivate(page) }
+        var closing: Task<Void, Never>?
+        if scenario == "close" {
+            closing = Task { await f.repository.close() }
+            try await wait { await f.repository.diagnostics().activations == 0 }
+        }
+        let response: Result<V2ProfilePresentationBatch, Error>
+        switch scenario {
+        case "transport": response = .failure(URLError(.notConnectedToInternet))
+        case "unauthorized": response = .failure(V2ClientMediaTransferError.authorizationUnavailable)
+        case "denied": response = .success(.init(presentations: [:], denials: [f.key: value.lease.authorityVersion], serverNow: f.date))
+        default: response = .success(.init(presentations: [f.key: value], denials: [:], serverNow: f.date, avatars: [f.key: avatar]))
+        }
+        await f.reader.release(1, with: response)
+        for task in [a, b] {
+            switch await task.result {
+            case .success(let renewed):
+                if scenario == "success" { #expect(renewed?.avatar.plan != nil) }
+                else { #expect(scenario == "denied" && renewed == nil) }
+            case .failure: #expect(!["success", "denied"].contains(scenario))
+            }
+        }
+        if scenario == "transport" {
+            try await original.requireValid()
+            #expect(await f.repository.cachedPresentation(for: f.key, activation: page) == value)
+            await #expect(throws: (any Error).self) {
+                _ = try await f.repository.refreshAvatarReadGrant(for: f.key, activation: page, replacing: original.avatar)
+            }
+        } else if scenario != "success" {
+            await #expect(throws: (any Error).self) { try await original.requireValid() }
+        } else {
+            let reused = try await f.repository.refreshAvatarReadGrant(for: f.key, activation: page, replacing: original.avatar)
+            #expect(reused?.avatar.plan != nil)
+        }
+        #expect(await f.reader.calls == 2)
+        await closing?.value
+        await f.repository.close()
+    }
+
+    @Test("only an installed visible denial receives an application receipt")
+    func installedDenialReceipt() async throws {
+        let f = Fixture(), page = await f.repository.activateVisiblePage()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: page)
+        let staged = try await f.repository.ingest(.init(view: view, sequence: 1,
+            entries: [.unavailable(f.key, until: .now + .seconds(30))]), binding: binding)
+        #expect(staged == nil)
+        _ = try await f.repository.retainVisibleInterest(for: f.key, activation: page)
+        let installed = try await f.repository.ingest(.init(view: view, sequence: 2,
+            entries: [.unavailable(f.key, until: .now + .seconds(30))]), binding: binding)
+        #expect(installed?.sequence == 2 && installed?.userIDs == [f.author])
+        let expired = try await f.repository.ingest(.init(view: view, sequence: 3,
+            entries: [.unavailable(f.key, until: .now - .seconds(1))]), binding: binding)
+        #expect(expired == nil)
+        #expect(await f.reader.calls == 0)
+        await f.repository.close()
+    }
+
+    @Test("receipts include only retained visible entries and exclude staged or obsolete data")
+    func retainedEntriesOnly() async throws {
+        let f = Fixture(), page = await f.repository.activateVisiblePage()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: page)
+        let staged = try await f.repository.ingest(f.received(view: view, revision: 1), binding: binding)
+        #expect(staged == nil)
+        _ = try await f.repository.retainVisibleInterest(for: f.key, activation: page)
+        let retained = try await f.repository.ingest(f.received(view: view, revision: 2, sequence: 2), binding: binding)
+        #expect(retained?.sequence == 2 && retained?.userIDs == [f.author])
+        #expect((1...120_000).contains(try #require(retained?.minimumRemainingMilliseconds)))
+        let obsolete = try await f.repository.ingest(f.received(view: view, revision: 1, sequence: 3), binding: binding)
+        #expect(obsolete == nil)
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: page)?.view.revision.rawValue == 2)
+        await f.repository.close()
+    }
+
+    @Test("a maximum-duration fresh lease is accepted after the page's timing anchor")
+    func maximumLeaseAfterViewStarted() async throws {
+        let f = Fixture(), page = await f.repository.activateVisiblePage()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: page)
+        _ = try await f.repository.retainVisibleInterest(for: f.key, activation: page)
+        let original = try f.value(key: f.key, revision: 1)
+        let lease = try V2PresentationAccessLease(actorUserID: f.actor, deviceID: f.device, key: f.key,
+            profileRevision: original.view.revision, visibilityRevision: original.view.visibilityRevision,
+            contextRevision: original.lease.contextRevision, authorityVersion: original.lease.authorityVersion,
+            observedAt: f.date, validUntil: f.date.addingTimeInterval(300))
+        let delta = try V2AuthorPresentationDelta(streamID: view.streamID, viewID: view.viewID, sequence: 1,
+            actorUserID: f.actor, deviceID: f.device, roomID: f.room, serverViewAgeMilliseconds: 1,
+            batch: .init(serverNowUnixMilliseconds: 2_000_000_000_000,
+                results: [.presentation(.init(view: original.view, lease: lease), avatar: nil)]))
+        try await Task.sleep(for: .milliseconds(5))
+        let received = try #require(await f.receiver.receive(delta.encoded(), for: view))
+        #expect(try await f.repository.ingest(received, binding: binding) != nil)
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: page) != nil)
+        await f.repository.close()
+    }
+
     @Test("alias durable floor fences cached and late HTTP without comparing public profile revision", arguments: [false, true])
     func durableAliasFloor(lazy: Bool) async throws {
         let floors = NicknameFloors(), f = Fixture(aliasRevisions: { await floors.read($0) })
@@ -242,27 +362,131 @@ struct V2ProfilePresentationIngestTests {
         await f.repository.close()
     }
 
-    @Test("late explicit denial hides pushed access and the old nonce cannot resurrect it")
-    func denialFencesNonce() async throws {
+    @Test("a newer HTTP denial fences old author data and a newer grant restores the same page")
+    func denialFencesVersion() async throws {
         let f = Fixture(), activation = await f.repository.activate()
-        let updates = try await f.repository.invalidations(for: activation)
         let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
         let binding = try await f.repository.bindAuthorView(view, activation: activation)
+        let first = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 2, controlSequence: 1)
+        let denied = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 2, controlSequence: 2)
+        let restored = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 2, controlSequence: 3)
         let waiting = Task { try await f.repository.presentation(for: f.key, activation: activation) }
         try await f.reader.waitForCalls(1)
-        try await f.repository.ingest(f.received(view: view, revision: 2), binding: binding)
+        try await f.repository.ingest(f.received(view: view, revision: 2, authority: first), binding: binding)
         _ = try await waiting.value
-        let notification = Task { for await _ in updates { return true }; return false }
-        await f.reader.release(0, with: .success(.init(presentations: [:], unavailable: [f.key], serverNow: f.date)))
-        #expect(await notification.value)
+        await f.reader.release(0, with: .success(.init(presentations: [:], denials: [f.key: denied], serverNow: f.date)))
+        try await wait { await f.repository.diagnostics().inFlight == 0 }
         #expect(await f.repository.cachedPresentation(for: f.key, activation: activation) == nil)
-        try await f.repository.ingest(f.received(view: view, revision: 3, sequence: 2), binding: binding)
+        try await f.repository.ingest(f.received(view: view, revision: 3, sequence: 2, authority: first), binding: binding)
         #expect(await f.repository.cachedPresentation(for: f.key, activation: activation) == nil)
-        let fresh = try await f.receiver.beginView(streamID: view.streamID, roomID: f.room)
-        let replacement = try await f.repository.bindAuthorView(fresh, activation: activation)
-        try await f.repository.ingest(f.received(view: fresh, revision: 3), binding: replacement)
-        await f.repository.unbindAuthorView(binding)
+        let receipt = try await f.repository.ingest(f.received(view: view, revision: 3, sequence: 3, authority: restored), binding: binding)
+        #expect(receipt?.sequence == 3)
         #expect(await f.repository.cachedPresentation(for: f.key, activation: activation)?.view.revision.rawValue == 3)
+        #expect(await f.reader.calls == 1)
+        await f.repository.close()
+    }
+
+    @Test("an older overlapping HTTP denial cannot revoke a newer installed author grant")
+    func staleHTTPDenial() async throws {
+        let f = Fixture(), page = await f.repository.activate()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: page)
+        let waiting = Task { try await f.repository.presentation(for: f.key, activation: page) }
+        try await f.reader.waitForCalls(1)
+        let version = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 2, controlSequence: 3)
+        try await f.repository.ingest(f.received(view: view, revision: 2, authority: version), binding: binding)
+        _ = try await waiting.value
+        await f.reader.release(0, with: .success(.init(presentations: [:], denials: [f.key: .fixture(f.key, contextRevision: 1, controlSequence: 2)], serverNow: f.date)))
+        try await wait { await f.repository.diagnostics().inFlight == 0 }
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: page)?.lease.authorityVersion == version)
+        await f.repository.close()
+    }
+
+    @Test("a stale HTTP denial completes its own waiting page without borrowing another page's grant")
+    func staleDenialCompletesDemand() async throws {
+        let f = Fixture(), first = await f.repository.activate()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: first)
+        let waiting = Task { try await f.repository.presentation(for: f.key, activation: first) }
+        try await f.reader.waitForCalls(1)
+        let version = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 2, controlSequence: 3)
+        try await f.repository.ingest(f.received(view: view, revision: 2, authority: version), binding: binding)
+        _ = try await waiting.value
+        await f.reader.release(0, with: .failure(CancellationError()))
+        try await wait { await f.repository.diagnostics().inFlight == 0 }
+        let second = await f.repository.activate()
+        let pending = Task { try await f.repository.presentation(for: f.key, activation: second) }
+        try await f.reader.waitForCalls(2)
+        await f.reader.release(1, with: .success(.init(presentations: [:], denials: [f.key: .fixture(f.key, contextRevision: 1, controlSequence: 2)], serverNow: f.date)))
+        await #expect(throws: V2ProfilePresentationError.staleResponse) { _ = try await pending.value }
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: second) == nil)
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: first)?.lease.authorityVersion == version)
+        #expect(await f.repository.diagnostics().waitingConsumers == 0)
+        await f.repository.close()
+    }
+
+    @Test("an older staged value cannot hide another page's newer grant from a late denial")
+    func candidateDoesNotHideGrantedFloor() async throws {
+        let f = Fixture(), first = await f.repository.activateVisiblePage()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: first)
+        try await f.repository.ingest(f.received(view: view, revision: 1,
+            authority: .fixture(f.key, contextRevision: 1, controlSequence: 1)), binding: binding)
+        #expect(await f.repository.diagnostics().bufferedAuthorEntries == 1)
+        let second = await f.repository.activate()
+        let pending = Task { try await f.repository.presentation(for: f.key, activation: second) }
+        try await f.reader.waitForCalls(1)
+        let version = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 1, controlSequence: 3)
+        let value = try f.value(key: f.key, revision: 1, authority: version)
+        await f.reader.release(0, with: .success(.init(presentations: [f.key: value], denials: [:], serverNow: f.date)))
+        #expect(try await pending.value?.lease.authorityVersion == version)
+        try await f.repository.ingest(f.denied(view: view, sequence: 2,
+            version: .fixture(f.key, contextRevision: 1, controlSequence: 2)), binding: binding)
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: second)?.lease.authorityVersion == version)
+        #expect(await f.repository.diagnostics().authorityDenials == 0)
+        await f.repository.close()
+    }
+
+    @Test("concurrent control and room denials preserve both floors; content changes cannot bypass them")
+    func incomparableDenials() async throws {
+        let f = Fixture(), page = await f.repository.activateVisiblePage()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: page)
+        _ = try await f.repository.retainVisibleInterest(for: f.key, activation: page)
+        try await f.repository.ingest(f.received(view: view, revision: 1,
+            authority: .fixture(f.key, contextRevision: 1, controlSequence: 1)), binding: binding)
+        try await f.repository.ingest(f.denied(view: view, sequence: 2,
+            version: .fixture(f.key, contextRevision: 1, controlSequence: 2)), binding: binding)
+        try await f.repository.ingest(f.denied(view: view, sequence: 3,
+            version: .fixture(f.key, contextRevision: 2, controlSequence: 1)), binding: binding)
+        // Newer control with older room, or exactly the combined denial floor,
+        // cannot revive display, even with a newer public profile revision.
+        for (index, version) in [V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 1, controlSequence: 3),
+                                .fixture(f.key, contextRevision: 2, controlSequence: 2)].enumerated() {
+            let receipt = try await f.repository.ingest(f.received(view: view, revision: 5, sequence: UInt64(index + 4), authority: version), binding: binding)
+            #expect(receipt == nil)
+            #expect(await f.repository.cachedPresentation(for: f.key, activation: page) == nil)
+        }
+        let version = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 3, controlSequence: 2)
+        try await f.repository.ingest(f.received(view: view, revision: 1, sequence: 6, authority: version), binding: binding)
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: page)?.lease.authorityVersion == version)
+        #expect(await f.reader.calls == 0)
+        await f.repository.close()
+    }
+
+    @Test("a room permission-only revision restores a staged denial without changing public content or membership")
+    func permissionOnlyRecovery() async throws {
+        let f = Fixture(), page = await f.repository.activateVisiblePage()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: page)
+        let denied = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 5, controlSequence: 10, permissionRevision: 2)
+        try await f.repository.ingest(f.denied(view: view, sequence: 1, version: denied), binding: binding)
+        let next = V2PresentationAuthorityVersion.fixture(f.key, contextRevision: 5, controlSequence: 10, permissionRevision: 3)
+        try await f.repository.ingest(f.received(view: view, revision: 1, sequence: 2, authority: next), binding: binding)
+        _ = try await f.repository.retainVisibleInterest(for: f.key, activation: page)
+        #expect(try await f.repository.presentation(for: f.key, activation: page)?.lease.authorityVersion == next)
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: page)?.lease.authorityVersion == next)
+        #expect(await f.reader.calls == 0)
         await f.repository.close()
     }
 
@@ -322,10 +546,14 @@ struct V2ProfilePresentationIngestTests {
         let value = try f.value(key: f.key, revision: 1, media: media)
         await f.reader.release(0, with: .success(.init(presentations: [f.key: value], unavailable: [], serverNow: f.date, avatars: [f.key: avatar])))
         _ = try await pending.value
-        #expect(await f.repository.avatarAccess(for: f.key, activation: activation) != nil)
+        let grant = try #require(await f.repository.avatarReadGrant(for: f.key, activation: activation))
         try await Task.sleep(for: .milliseconds(230))
-        #expect(await f.repository.avatarAccess(for: f.key, activation: activation) == nil)
+        #expect(await f.repository.avatarReadGrant(for: f.key, activation: activation)?.avatar.plan == nil)
+        #expect(await f.repository.avatarReadGrant(for: f.key, activation: activation)?.avatar.mediaID == media)
         #expect(await f.repository.cachedPresentation(for: f.key, activation: activation) != nil)
+        try await grant.requireValid()
+        await f.repository.invalidate([f.key])
+        await #expect(throws: V2ResourceStorageError.unavailable) { try await grant.requireValid() }
         await f.repository.close()
     }
 
@@ -443,13 +671,16 @@ private struct Fixture: Sendable {
         receiver = .init(actorUserID: actor, deviceID: device)
     }
     func value(key: V2ProfileViewLookupKey, revision: UInt64, actor override: UserID? = nil, media: MediaID? = nil,
-               groupMember: V2GroupMemberPresentation? = nil, contactAlias: V2ContactAlias? = nil, state: V2ProfileState = .active) throws -> V2AuthorizedProfilePresentation {
+               groupMember: V2GroupMemberPresentation? = nil, contactAlias: V2ContactAlias? = nil, state: V2ProfileState = .active,
+               authority: V2PresentationAuthorityVersion? = nil) throws -> V2AuthorizedProfilePresentation {
         let rev = try #require(V2ProfileRevision(rawValue: revision))
         let view = try V2ProfileView(userID: key.userID,
             publicIdentity: state == .active ? .init(userID: key.userID, handle: .init("author"), displayName: "Name \(revision)", accountKind: .regular) : nil,
             avatar: state == .active ? media.map { .init(mediaID: $0) } : nil, state: state, revision: rev, visibilityRevision: rev)
+        let version = authority ?? .fixture(key, contextRevision: revision)
         let lease = try V2PresentationAccessLease(actorUserID: override ?? actor, deviceID: device, key: key,
-            profileRevision: rev, visibilityRevision: rev, contextRevision: revision, observedAt: date, validUntil: date.addingTimeInterval(120))
+            profileRevision: rev, visibilityRevision: rev, contextRevision: version.membershipRevision,
+            authorityVersion: version, observedAt: date, validUntil: date.addingTimeInterval(120))
         return try .init(view: view, lease: lease, groupMember: groupMember, contactAlias: contactAlias)
     }
     func batch(revision: UInt64, keys: [V2ProfileViewLookupKey]? = nil) throws -> V2ProfilePresentationBatch {
@@ -466,11 +697,18 @@ private struct Fixture: Sendable {
     func aliasBatch(_ revision: UInt64, name: String? = "Private name") throws -> V2ProfilePresentationBatch {
         .init(presentations: [key: try value(key: key, revision: 1, contactAlias: alias(revision, name: name))], unavailable: [], serverNow: date)
     }
-    func received(view: V2AuthorPresentationView, revision: UInt64, sequence: UInt64 = 1,
-                  groupMember: V2GroupMemberPresentation? = nil, contactAlias: V2ContactAlias? = nil, state: V2ProfileState = .active) async throws -> V2ReceivedAuthorPresentationDelta {
+    func denied(view: V2AuthorPresentationView, sequence: UInt64, version: V2PresentationAuthorityVersion) async throws -> V2ReceivedAuthorPresentationDelta {
         let delta = try V2AuthorPresentationDelta(streamID: view.streamID, viewID: view.viewID, sequence: sequence,
             actorUserID: actor, deviceID: device, roomID: room,
-            batch: .init(serverNowUnixMilliseconds: 2_000_000_000_000, results: [.presentation(value(key: key, revision: revision, groupMember: groupMember, contactAlias: contactAlias, state: state), avatar: nil)]))
+            batch: .init(serverNowUnixMilliseconds: 2_000_000_000_000, results: [.unavailable(.init(key: key, authorityVersion: version))]))
+        return try #require(await receiver.receive(delta.encoded(), for: view))
+    }
+    func received(view: V2AuthorPresentationView, revision: UInt64, sequence: UInt64 = 1,
+                  groupMember: V2GroupMemberPresentation? = nil, contactAlias: V2ContactAlias? = nil, state: V2ProfileState = .active,
+                  authority: V2PresentationAuthorityVersion? = nil) async throws -> V2ReceivedAuthorPresentationDelta {
+        let delta = try V2AuthorPresentationDelta(streamID: view.streamID, viewID: view.viewID, sequence: sequence,
+            actorUserID: actor, deviceID: device, roomID: room,
+            batch: .init(serverNowUnixMilliseconds: 2_000_000_000_000, results: [.presentation(value(key: key, revision: revision, groupMember: groupMember, contactAlias: contactAlias, state: state, authority: authority), avatar: nil)]))
         return try #require(await receiver.receive(delta.encoded(), for: view))
     }
 }

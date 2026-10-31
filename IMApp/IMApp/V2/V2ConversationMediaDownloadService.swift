@@ -195,10 +195,13 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         return .init(file)
     }
 
-    func avatar(_ access: V2ResourceAvatarAccess, home: V2ResourceHome) async throws -> V2ConversationMediaFileLease {
+    func avatar(_ authorization: V2AvatarReadGrant) async throws -> V2ConversationMediaFileLease {
         try requireOpen()
-        let file = try await cache.avatar(access, home: home)
-        let use = try await file.borrowFile()
+        let use: V2ResourceFileLease
+        do {
+            let file = try await cache.avatar(authorization)
+            use = try await file.borrowFile()
+        } catch V2ResourceStorageError.closed { throw CancellationError() }
         do { try requireOpen() }
         catch { await use.release(); throw error }
         // The current borrow URL can differ from the handle's earlier cache

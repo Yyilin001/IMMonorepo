@@ -35,10 +35,10 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     /// 瞬时失败不再进入暂停，因此"暂停行数为零"不能证明投递正在推进；持续重试但永不
     /// 成功的工作只能由该年龄发现。
     public let oldestUnfinishedUserStateEventAgeSeconds: Int
-    /// 待处理的私聊资料更新数量。
-    public let readyDirectProfileUpdates: Int
-    /// 已被认领的私聊资料更新数量。
-    public let leasedDirectProfileUpdates: Int
+    /// 待处理的资料安全失效数量。
+    public let readyProfileSecurityInvalidations: Int
+    /// 已被认领的资料安全失效数量。
+    public let leasedProfileSecurityInvalidations: Int
     /// 待处理的已读回执偏好传播数量。
     public let readyReadReceiptPreferencePropagations: Int
     /// 已被认领的已读回执偏好传播数量。
@@ -138,8 +138,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         scheduledUserStateEventRows: Int = 0,
         pausedUserStateEventRows: Int = 0,
         oldestUnfinishedUserStateEventAgeSeconds: Int = 0,
-        readyDirectProfileUpdates: Int = 0,
-        leasedDirectProfileUpdates: Int = 0,
+        readyProfileSecurityInvalidations: Int = 0,
+        leasedProfileSecurityInvalidations: Int = 0,
         readyReadReceiptPreferencePropagations: Int = 0,
         leasedReadReceiptPreferencePropagations: Int = 0,
         scheduledReadReceiptPreferencePropagations: Int = 0,
@@ -187,8 +187,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.leasedUserStateEventRows = max(0, leasedUserStateEventRows)
         self.scheduledUserStateEventRows = max(0, scheduledUserStateEventRows)
         self.pausedUserStateEventRows = max(0, pausedUserStateEventRows)
-        self.readyDirectProfileUpdates = max(0, readyDirectProfileUpdates)
-        self.leasedDirectProfileUpdates = max(0, leasedDirectProfileUpdates)
+        self.readyProfileSecurityInvalidations = max(0, readyProfileSecurityInvalidations)
+        self.leasedProfileSecurityInvalidations = max(0, leasedProfileSecurityInvalidations)
         self.readyReadReceiptPreferencePropagations = max(0, readyReadReceiptPreferencePropagations)
         self.leasedReadReceiptPreferencePropagations = max(0, leasedReadReceiptPreferencePropagations)
         self.scheduledReadReceiptPreferencePropagations = max(0, scheduledReadReceiptPreferencePropagations)

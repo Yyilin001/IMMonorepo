@@ -110,6 +110,12 @@ message Envelope {
     AuthorPresentationEnd author_presentation_end = 122;
     AuthorPresentationEnded author_presentation_ended = 123;
     PersonalPreferenceReceipt personal_preference_receipt = 124;
+    AuthorPresentationReceipt author_presentation_receipt = 133;
+    AuthorPresentationReceipt author_presentation_receipted = 134;
+    AuthorPresentationInterests author_presentation_interests = 135;
+    AuthorPresentationInterests author_presentation_interests_received = 136;
+    AuthorPresentationStart author_presentation_start = 137;
+    AuthorPresentationStart author_presentation_started = 138;
   }
 }
 
@@ -787,8 +793,8 @@ message GroupEventPage {
 message GroupEventSubscribe {
   string room_id = 1;
   uint64 after_room_sequence = 2;
-  // Fresh client nonce; omit when author supplements are not negotiated.
-  string author_presentation_view_id = 3;
+  // Retired author-view nonce; author presentation now starts independently.
+  reserved 3;
 }
 
 message GroupEventSubscribed {
@@ -800,25 +806,57 @@ message GroupEventSubscribed {
   // value; otherwise the server sends a metadata wake and the client pulls
   // the durable room log.
   uint64 membership_revision = 3;
-  // Echo only after the normal room authorization succeeds.
-  string author_presentation_view_id = 4;
+  // Retired author-view echo.
+  reserved 4;
 }
 
 // request_id = 0; JSON follows the validated IMV2Core contract (at most 32 KiB).
 // The complete uncompressed envelope/frame has its own transport budget.
 message AuthorPresentationDelta { bytes payload = 1; }
 
-// Connection-local cleanup only. It does not unsubscribe room events or read
-// room authority. An old view cannot end its replacement on the same stream.
+// Full lookup identity. False booleans and absent contexts are invalid.
+message ProfilePresentationKey {
+  string user_id = 1;
+  oneof context {
+    bool relationship = 2;
+    bool direct_conversation = 3;
+    string room_id = 4;
+    string group_join_review_room_id = 5;
+  }
+}
+
+// Independent connection-local start. It grants no profile or room authority.
+message AuthorPresentationStart {
+  string stream_id = 1;
+  string view_id = 2;
+  repeated string message_room_ids = 3;
+}
+
+// Confirms only retained keys from one delta, never intervening sequences.
+message AuthorPresentationReceipt {
+  string stream_id = 1;
+  string view_id = 2;
+  uint64 sequence = 3;
+  repeated ProfilePresentationKey keys = 4;
+  optional uint32 minimum_remaining_milliseconds = 5;
+}
+
+// Complete replacement for this connection view; at most 128 full keys.
+message AuthorPresentationInterests {
+  string stream_id = 1;
+  string view_id = 2;
+  uint64 sequence = 3;
+  repeated ProfilePresentationKey keys = 4;
+}
+
+// Connection-local cleanup, independent of room event subscriptions.
 message AuthorPresentationEnd {
   string stream_id = 1;
-  string room_id = 2;
-  string view_id = 3;
+  string view_id = 2;
 }
 message AuthorPresentationEnded {
   string stream_id = 1;
-  string room_id = 2;
-  string view_id = 3;
+  string view_id = 2;
 }
 
 message GroupEventUnsubscribe {

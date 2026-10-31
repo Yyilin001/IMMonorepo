@@ -155,12 +155,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // than this test's fixed room-event clock.
             let metricsLeaseExpiry = Date().addingTimeInterval(60)
             try await sql.raw("""
-                INSERT INTO im_v2.public_profile_update_outbox
-                    (source_event_id, source_user_id, public_handle, display_name, revision, profile_updated_at,
+                INSERT INTO im_v2.profile_security_invalidation_outbox
+                    (source_event_id, source_user_id, profile_state, revision, profile_updated_at,
                      state, claim_token, lease_expires_at, created_at)
-                VALUES (\(bind: readyProfileUpdateID), \(bind: senderUUID), 'sender012', '发送者', 1, \(bind: now),
+                VALUES (\(bind: readyProfileUpdateID), \(bind: senderUUID), 'hidden', 1, \(bind: now),
                         'pending', NULL, NULL, \(bind: now)),
-                       (\(bind: leasedProfileUpdateID), \(bind: senderUUID), 'sender012', '发送者', 1, \(bind: now),
+                       (\(bind: leasedProfileUpdateID), \(bind: senderUUID), 'hidden', 1, \(bind: now),
                         'claimed', \(bind: profileLeaseToken), \(bind: metricsLeaseExpiry), \(bind: now))
                 """).run()
 
@@ -168,8 +168,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(snapshot.isAvailable)
             #expect(snapshot.readyUserStateEventRows == 0)
             #expect(snapshot.leasedUserStateEventRows == 0)
-            #expect(snapshot.readyDirectProfileUpdates == 1)
-            #expect(snapshot.leasedDirectProfileUpdates == 1)
+            #expect(snapshot.readyProfileSecurityInvalidations == 1)
+            #expect(snapshot.leasedProfileSecurityInvalidations == 1)
             #expect(snapshot.readyContentReviews == 1)
             #expect(snapshot.leasedContentReviews == 0)
             #expect(snapshot.scheduledContentReviews == 0)
@@ -822,7 +822,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(disabledProfile.revision == 2)
             #expect(disabledProfile.visibilityRevision == 2)
             #expect(disabledProfile.avatarCleared)
-            let profileInvalidation = try #require(try await sql.raw("SELECT profile_state, revision FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: command.operationID)").first(decoding: DisabledProfileOutboxAssertionRow.self))
+            let profileInvalidation = try #require(try await sql.raw("SELECT profile_state, revision FROM im_v2.profile_security_invalidation_outbox WHERE source_event_id = \(bind: command.operationID)").first(decoding: DisabledProfileOutboxAssertionRow.self))
             #expect(profileInvalidation.profileState == "suspended")
             #expect(profileInvalidation.revision == 2)
             let publicDirectory = V2PostgresPublicIdentityDirectory(
@@ -1955,7 +1955,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             _ = try await social.executeSocialFixture(actorUserID: senderID, targetUserID: .init(memberTwoUUID.uuidString),
                 operation: .relationship(.init("00000000-0000-0000-0000-000000000f13")), action: .relationship(.request), now: Date())
 
-            // Account-owned profile changes use a separate outbox, but must
+            // Account-owned security invalidations use a separate outbox, but must
             // use the same current-owner delivery as the direct/social
             // control records. The changed profile belongs to member two; its
             // only direct recipient is the currently forwarding sender.
@@ -1967,22 +1967,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             _ = try await directory.updateDisplayName(
                 for: try .init(memberTwoUUID.uuidString), displayName: "成员二新版"
             )
-            let profileWorker = V2DirectRoomProfilePropagationWorker(
+            try await seedProfileSecurityInvalidation(on: sql, event: profileEventID, user: memberTwoUUID, now: now.addingTimeInterval(3))
+            let profileWorker = V2ProfileSecurityInvalidationWorker(
                 database: resources.database(.psql), projectionDelivery: shadow, now: { now.addingTimeInterval(4) }
             )
             #expect(try await profileWorker.runOnce(limit: 1).projectedRecipientCount == 1)
 
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 4)
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 5)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: sql) == 3)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 4)
             let targetRows = try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind
                 FROM im_v2.user_sync_log WHERE user_id = \(bind: senderUUID)
                 ORDER BY user_sync_sequence
                 """).all(decoding: SyncKindRow.self)
-            #expect(targetRows.map(\.sequence) == [1, 2, 3, 4, 5])
+            #expect(targetRows.map(\.sequence) == [1, 2, 3, 4])
             #expect(targetRows.map(\.kind) == [
                 "direct_room_profile", "stranger_message_permission", "relationship",
-                "direct_room_profile", "profile_invalidation",
+                "profile_invalidation",
             ])
             let existingShadowSources = try await sql.raw("""
                 SELECT source_event_id, projection_kind
@@ -2006,17 +2007,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // must not allocate another target sequence.
             #expect(try await scopedCount(
                 "im_v2", "user_sync_log", user: senderUUID, on: secondarySQL
-            ) == 5)
-            let forwardedProfile = try #require(try await secondarySQL.raw("""
-                SELECT user_id, payload->>'room_id' AS room_id, payload->>'display_name' AS display_name,
-                       (payload->>'revision')::bigint AS revision
-                FROM im_v2.user_sync_log
-                WHERE user_id = \(bind: senderUUID) AND source_event_id = \(bind: profileEventID)
-                  AND projection_kind = 'direct_room_profile'
-                """).first(decoding: ProfilePropagationProjectionRow.self))
-            #expect(forwardedProfile.displayName == "成员二新版")
-            #expect(forwardedProfile.revision == 2)
-            #expect(UUID(uuidString: forwardedProfile.roomID)?.uuidString == forwardedProfile.roomID)
+            ) == targetRows.count)
+            #expect(try await secondarySQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: senderUUID) AND source_event_id = \(bind: profileEventID) AND projection_kind = 'direct_room_profile'").first(decoding: CountRow.self)?.value == 0)
+            #expect(try await secondarySQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: senderUUID) AND source_event_id = \(bind: profileEventID) AND projection_kind = 'profile_invalidation' AND payload->>'profile_state' = 'hidden'").first(decoding: CountRow.self)?.value == 1)
 
             // A target-owned personal effect consumes the next sequence.
             _ = try await PostgresV2UserProjectionStore(database: resources.database(secondaryID), schema: "im_v2")
@@ -2025,17 +2018,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             _ = try await preferences.executePreferenceFixture(owner: senderID,
                 operation: .strangerMessagePreference(.init("00000000-0000-0000-0000-000000000f15")),
                 value: .strangerMessage(.allow), now: Date())
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 7)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 6)
             let latestRecord = try #require(try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind FROM im_v2.user_sync_log
                 WHERE user_id = \(bind: senderUUID) ORDER BY user_sync_sequence DESC LIMIT 1
                 """).first(decoding: SyncKindRow.self))
-            #expect(latestRecord.sequence == 7)
+            #expect(latestRecord.sequence == 6)
             #expect(latestRecord.kind == "stranger_message_permission")
             // Replaying the room event uses its persisted
             // receipt and cannot allocate another sequence on the current owner.
             #expect(try await eventProjector.project(openingLease.event) == 1)
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 7)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 6)
             #expect((try await router.routes(for: [senderID])).first?.bucket == "users-target")
 
             }

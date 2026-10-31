@@ -207,8 +207,18 @@ message HotLogSubscribe { string room_id = 1; string user_id = 2; }
 message HotLogEntry { string event_id = 1; uint64 sequence = 2; string projection_kind = 3; bytes payload = 4; }
 message HotLogPage { string room_id = 1; repeated HotLogEntry events = 2; uint64 next_sequence = 3; bool has_more = 4; uint64 trimmed_through = 5; }
 message HotLogSubscription { string room_id = 1; uint64 high_watermark = 2; uint64 membership_revision = 3; }
-message HotRoomRequest { oneof operation { HotSend send = 1; HotSubscriptionCommand subscription = 2; HotLogPull log_pull = 3; HotLogSubscribe log_subscribe = 4; bytes cold_value = 100; } }
-message HotRoomResponse { oneof result { HotSendResult send = 1; HotSubscriptionResult subscription = 2; HotLogPage log_page = 3; HotLogSubscription log_subscription = 4; string log_failure = 5; bytes cold_value = 100; } }
+message HotProfileRead { string room_id = 1; string actor_id = 2; string room_kind = 3; repeated string target_ids = 4; }
+message HotProfileCohort { string room_id = 1; repeated HotProfileRead requests = 2; }
+message HotGroupMember { string room_id = 1; string user_id = 2; optional string nickname = 3; uint64 revision = 4; }
+message HotProfileSnapshot {
+  HotProfileRead request = 1; HotActivation activation = 2; sint64 membership_revision = 3; sint64 permission_revision = 4;
+  repeated string visible_target_ids = 5; repeated HotGroupMember group_members = 6;
+  // Preserve Foundation's exact Date representation without epoch conversion rounding.
+  optional double observed_at_reference_seconds = 7; optional double expires_at_reference_seconds = 8;
+}
+message HotProfileSnapshots { repeated HotProfileSnapshot snapshots = 1; }
+message HotRoomRequest { oneof operation { HotSend send = 1; HotSubscriptionCommand subscription = 2; HotLogPull log_pull = 3; HotLogSubscribe log_subscribe = 4; HotProfileRead profile_read = 5; HotProfileCohort profile_cohort = 6; bytes cold_value = 100; } }
+message HotRoomResponse { oneof result { HotSendResult send = 1; HotSubscriptionResult subscription = 2; HotLogPage log_page = 3; HotLogSubscription log_subscription = 4; string log_failure = 5; HotProfileSnapshot profile_snapshot = 6; HotProfileSnapshots profile_snapshots = 7; bytes cold_value = 100; } }
 message HotInvoke { HotActivation token = 1; HotRoomRequest request = 2; }
 message HotReady { HotActivation token = 1; bytes physical_reference = 2; }
 message HotRPCRequest { oneof operation { HotInvoke invoke = 1; HotActivation lookup = 2; bytes cold_value = 100; } }

@@ -192,7 +192,11 @@ public actor V2GroupAvatarIntentEngine {
         let value = try await requireIntent(id)
         if [.committed, .cancelled, .closed, .needsAttention].contains(value.stage) { return value }
         if value.recoveryAction != nil && recovery == nil { throw V2GroupAvatarIntentError.recoveryUnavailable }
-        guard value.retryAt <= now() else { throw V2GroupAvatarIntentError.busy }
+        // Match the journal's Unix-seconds comparison: a Foundation Date
+        // round trip can otherwise move an exactly due retry fractionally ahead.
+        guard value.retryAt.timeIntervalSince1970 <= now().timeIntervalSince1970 else {
+            throw V2GroupAvatarIntentError.busy
+        }
         if !value.submissionStarted, let jobID = value.importJobID {
             guard let job = try await store.resourceImport(id: jobID) else { throw V2GroupAvatarIntentError.invalidRecord }
             if job.status?.state != .ready || job.cancellationRequested {

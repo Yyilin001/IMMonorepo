@@ -9,6 +9,40 @@ private let watermarkTestInstallationBinding = V2LocalInstallationBinding(
 )
 
 struct V2RoomReadWatermarkTests {
+    @Test("personal snapshots retain own read state without carrying room content", arguments: [false, true])
+    func snapshotOwnReadWatermark(lowercasePayload: Bool) async throws {
+        let (store, directory) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let room = RoomID(uuid: UUID())
+        do {
+            let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2,
+                baseSequence: 10, expiresAt: .distantFuture)
+            let item = try V2SnapshotProjectionItem(
+                key: .init(projectionKind: "own_read_watermark", entityKey: room.rawValue.lowercased()),
+                sourceEventID: .init(uuid: UUID()), sequence: 3,
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": lowercasePayload ? room.rawValue.lowercased() : room.rawValue.uppercased(),
+                    "read_through_room_sequence": 42, "recorded_at_ms": 1_750_000_000_000]))
+            let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
+            try await store.beginReset(reset)
+            try await store.beginSnapshotImport(fixture.manifest,
+                initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+            try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+            #expect(try await store.roomReadWatermark(roomID: room) == nil)
+            try await store.prepareSnapshotActivation(fixture.manifest)
+            try await store.activateAcknowledgedSnapshot(fixture.manifest)
+            #expect(try await store.roomReadWatermark(roomID: room) == 42)
+            #expect(try await store.messages(in: room).isEmpty)
+            #expect(try await store.groupEventCursor(roomID: room) == 0)
+            #expect(try await store.cursor()?.appliedSequence == 10)
+            try await store.close()
+            let reopened = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"),
+                installationBinding: watermarkTestInstallationBinding)
+            #expect(try await reopened.roomReadWatermark(roomID: room) == 42)
+            try await reopened.close()
+        } catch { try? await store.close(); throw error }
+    }
+
     @Test("an own-read-watermark projection advances the local read line", arguments: [Int64(-1), Int64(1750000000000)])
     func ownReadWatermarkAdvancesLocalState(milliseconds: Int64) async throws {
         let (store, directory) = try makeStore()

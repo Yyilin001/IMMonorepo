@@ -21,7 +21,7 @@ struct V2ResourceImagePresentationTests {
         #expect(V2NetworkWorkPolicy.acceptedResultPollDelay(attempt: 0) == 2)
     }
 
-    @Test func addingDimensionsKeepsExistingAccountSelections() async throws {
+    @Test func unsupportedResourceSchemaPreservesSelectionsOnRejectedReopen() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -33,19 +33,21 @@ struct V2ResourceImagePresentationTests {
         let asset = try await files.importOriginal(data: Data([1, 2, 3]), id: .init(), displayName: .init("existing.jpg"),
             contentType: .init("image/jpeg"), purpose: .personalAvatar, maximumBytes: 1024, maximumSelections: 4)
         await files.close(); try await store.close()
-        // Reconstruct exactly the immediately preceding on-device schema.
-        let previous = try DatabaseQueue(path: url.path)
-        try await previous.write { db in
-            try db.execute(sql: "ALTER TABLE v2_resource_local_assets DROP COLUMN pixel_height")
-            try db.execute(sql: "ALTER TABLE v2_resource_local_assets DROP COLUMN pixel_width")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier='resourceLocalImageDimensions'")
+        let changed = try DatabaseQueue(path: url.path)
+        try await changed.write { db in
+            try db.execute(sql: "ALTER TABLE v2_resource_local_assets ADD COLUMN unsupported_field INTEGER")
         }
-        try previous.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: user)
-        let restored = try #require(await reopened.resourceFileJournal().localAsset(asset.id))
-        #expect(restored.id == asset.id && restored.checksum == asset.checksum && restored.selectionActive)
-        #expect(restored.imageDimensions == nil)
-        try await reopened.close()
+        try changed.close()
+        #expect(throws: V2ClientLocalStorageError.unsupportedResourceSchema) {
+            _ = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: user)
+        }
+        let inspection = try DatabaseQueue(path: url.path)
+        defer { try? inspection.close() }
+        let retained = try await inspection.read { db in
+            (try String.fetchOne(db, sql: "SELECT checksum FROM v2_resource_local_assets"),
+             try Int.fetchOne(db, sql: "SELECT selection_active FROM v2_resource_local_assets"))
+        }
+        #expect(retained.0 == asset.checksum.value && retained.1 == 1)
     }
 
     @Test func dimensionsSurviveReopenAndFrozenSendSnapshot() async throws {
@@ -62,6 +64,15 @@ struct V2ResourceImagePresentationTests {
         let asset = try await files.importOriginal(data: Data([1, 2, 3]), id: .init(), displayName: .init("photo.jpg"),
             contentType: .init("image/jpeg"), purpose: .messageDraft(room), imageDimensions: dimensions,
             maximumBytes: 1024, maximumSelections: 4)
+        let malformedDimensions: [(Int?, Int?)] = [(nil, 1), (1, nil), (0, 1), (1, 0), (16_385, 1), (10_000, 10_000)]
+        try await store.databasePool.write { db in
+            for (width, height) in malformedDimensions {
+                #expect(throws: DatabaseError.self) {
+                    try db.execute(sql: "UPDATE v2_resource_local_assets SET pixel_width=?,pixel_height=?",
+                        arguments: [width, height])
+                }
+            }
+        }
         let job = UUID()
         let request = try V2ResourceUploadRequest(operationID: .init(uuid: job), mediaID: .init(uuid: job),
             usage: .messageAttachment(room), contentType: asset.contentType.value, byteCount: asset.byteCount,

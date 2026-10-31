@@ -404,7 +404,7 @@ struct V2MessageSendWorkTests {
         try await f.store.close()
     }
 
-    @Test(arguments: ["receiptFirst", "projectionFirst", "preparedSnapshot"])
+    @Test(arguments: ["receiptFirst", "projectionFirst", "preparedSnapshot", "projectionBeforeSnapshot"])
     func acceptedPresentationConvergesWithoutResurrection(_ order: String) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
         let intent = try f.intent("awaiting actual projection")
@@ -415,20 +415,25 @@ struct V2MessageSendWorkTests {
         let message = MessageID(uuid: UUID())
         let receipt = try V2MessageSendOperationReceipt(identity: command.identity, fingerprint: command.fingerprint,
             outcome: .accepted(.init(messageID: message, roomSequence: 2)), resolvedAtMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000))
-        let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(uuid: UUID()), projectionKind: "message",
+        let event = try V2ClientGroupEvent(sourceEventID: .init(uuid: UUID()), roomSequence: 2, projectionKind: "message",
             payload: JSONSerialization.data(withJSONObject: ["event_type": "message.accepted", "message_id": message.rawValue,
                 "room_id": f.room.rawValue, "room_sequence": 2, "message_revision": 1, "sender_user_id": f.account.rawValue,
                 "text": intent.text, "server_created_at_ms": 1750000000000]))
         func applyLive() async throws {
-            _ = try await f.store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("accepted"),
-                receipt: .init("accepted"), hasMore: false, capabilityProfile: "base"))
+            _ = try await f.store.applyGroupEventPage(.init(roomID: f.room, events: [event], nextRoomSequence: 2, hasMore: false))
         }
-        if order == "projectionFirst" { try await applyLive() }
+        let projectedFirst = order == "projectionFirst" || order == "projectionBeforeSnapshot"
+        if projectedFirst { try await applyLive() }
         var snapshot: SnapshotFixture?
-        if order == "preparedSnapshot" {
+        if order == "preparedSnapshot" || order == "projectionBeforeSnapshot" {
             let reset = try V2ClientResetRequired(snapshotID: .init("accepted-snapshot"), generation: 2, baseSequence: 1, expiresAt: .distantFuture)
-            let page = try V2SnapshotProjectionV3Page(items: [.init(key: .init(projectionKind: "message", entityKey: message.rawValue),
-                sourceEventID: record.sourceEventID, sequence: 1, payload: record.payload)])
+            let membership = try JSONSerialization.data(withJSONObject: [
+                "event_type": "membership_changed", "room_id": f.room.rawValue, "title": "Send recovery",
+                "owner_user_id": f.account.rawValue, "target_user_id": f.account.rawValue, "action": "add",
+                "membership_revision": 1, "capacity_class": "standard", "created_at_ms": 1_750_000_000_000,
+                "server_created_at_ms": 1_750_000_000_000])
+            let page = try V2SnapshotProjectionV3Page(items: [.init(key: .init(projectionKind: "room", entityKey: f.room.rawValue),
+                sourceEventID: .init(uuid: UUID()), sequence: 1, payload: membership)])
             let value = try makeSnapshotFixture(reset: reset, pages: [page])
             try await f.store.beginReset(reset)
             try await f.store.beginSnapshotImport(value.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 1, capabilityProfile: "base"))
@@ -437,7 +442,7 @@ struct V2MessageSendWorkTests {
             snapshot = value
         }
         try await f.store.completeMessageSend(command, receipt: receipt)
-        if order != "projectionFirst" {
+        if !projectedFirst {
             let pending = try await f.store.submittedSendIntents(in: f.room)
             #expect(pending.count == 1 && pending.first?.status == .acceptedAwaitingProjection)
             await #expect(throws: V2ResourceJournalError.conflict) { try await f.store.replaceProvenUnsentSendIntent(intent.id) }
@@ -446,9 +451,16 @@ struct V2MessageSendWorkTests {
                 try await f.store.databasePool.write { try GRDBV2LocalSyncStore.requireOperationCapacity(adding: 1, limits: .init(maximumActiveCount: 1), db: $0) }
             }
             #expect(try await f.store.pruneCompletedOperationHistory(now: Date().addingTimeInterval(8 * 86400)) == 0)
-            if let snapshot { try await f.store.activateAcknowledgedSnapshot(snapshot.manifest) }
-            else { try await applyLive() }
         }
+        if let snapshot {
+            try await f.store.activateAcknowledgedSnapshot(snapshot.manifest)
+            if !projectedFirst {
+                let pending = try await f.store.submittedSendIntents(in: f.room)
+                #expect(pending.count == 1 && pending.first?.status == .acceptedAwaitingProjection)
+                #expect(try await f.store.messages(in: f.room).isEmpty)
+            }
+        }
+        if !projectedFirst { try await applyLive() }
         // No page read was required to record the authoritative materialization.
         let observed = try await f.store.databasePool.read { try Int.fetchOne($0, sql: "SELECT accepted_projection_observed FROM v2_message_send_operations WHERE work_id=?", arguments: [work.id.uuidString]) }
         #expect(observed == 1)

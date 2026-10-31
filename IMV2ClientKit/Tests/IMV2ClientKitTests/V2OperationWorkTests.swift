@@ -473,7 +473,10 @@ struct V2OperationWorkTests {
                 state: .closed, receipt: "verified closure"), now: now)
         }], now: { now }, diagnostics: diagnostics)
         let task = Task { try await dispatcher.run() }
-        for _ in 0..<10_000 { if !diagnostics.snapshot().operationSteps.isEmpty { break }; await Task.yield() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while diagnostics.snapshot().operationSteps.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         await dispatcher.stopAndDrain(); try await task.value
         let metric = try #require(diagnostics.snapshot().operationSteps.last)
         #expect(metric.action == .reconcile && metric.attempt == 2 && metric.priority == .recovery)

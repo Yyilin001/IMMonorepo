@@ -21,7 +21,7 @@ if [[ "${IMV2_SCHEMA_BOOTSTRAP_NATIVE:-0}" == '1' ]]; then
   psql() { command psql -v ON_ERROR_STOP=1 -d "${bootstrap_db}" "$@"; }
   restore_psql() { command psql -v ON_ERROR_STOP=1 -d "${restore_db}" "$@"; }
   dump_schema() { command pg_dump --schema-only --schema=im_v2 --no-owner --no-privileges --no-comments -d "$1"; }
-  dump_topology() { command pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.control_housekeeping_cursor --table=im_v2.realtime_partition_leases --no-owner --no-privileges -d "$1"; }
+  dump_topology() { command pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.author_presentation_change_head --table=im_v2.control_housekeeping_cursor --table=im_v2.realtime_partition_leases --no-owner --no-privileges -d "$1"; }
   bootstrap_created=0
   restore_created=0
   cleanup() {
@@ -54,7 +54,7 @@ else
   psql() { "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2_test -d "${bootstrap_db}" "$@"; }
   restore_psql() { "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2_test -d "${restore_db}" "$@"; }
   dump_schema() { "${compose[@]}" exec -T postgres pg_dump --schema-only --schema=im_v2 --no-owner --no-privileges --no-comments -U im_v2_test -d "$1"; }
-  dump_topology() { "${compose[@]}" exec -T postgres pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.control_housekeeping_cursor --table=im_v2.realtime_partition_leases --no-owner --no-privileges -U im_v2_test -d "$1"; }
+  dump_topology() { "${compose[@]}" exec -T postgres pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.author_presentation_change_head --table=im_v2.control_housekeeping_cursor --table=im_v2.realtime_partition_leases --no-owner --no-privileges -U im_v2_test -d "$1"; }
   psql -c "CREATE DATABASE ${restore_db} TEMPLATE template0" >/dev/null
 fi
 scalar() {
@@ -94,17 +94,31 @@ assert_scalar() {
 # remote-device security metadata. Counts include views and application-only
 # triggers; retired ledgers must remain absent rather than be recreated.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '173'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '176'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '369'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '376'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '58'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '64'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '35'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '41'
 
 # A same-named trigger function is not enough: replacing its body must fail
 # readiness, as must a nullable ready-variant constraint or a weakened replay key.
 for drift in \
+  "ALTER TABLE im_v2.group_join_requests DISABLE TRIGGER group_join_review_authority;" \
+  'CREATE OR REPLACE FUNCTION im_v2.advance_group_join_review_authority() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$;' \
+  "DROP TABLE im_v2.author_presentation_control_changes;" \
+  "ALTER TABLE im_v2.user_contact_aliases DISABLE TRIGGER contact_alias_presentation_change;" \
+  "DROP TRIGGER relationship_presentation_change ON im_v2.social_relationship_revisions;" \
+  "ALTER TABLE im_v2.social_block_revisions DISABLE TRIGGER user_block_presentation_change;" \
+  "ALTER FUNCTION im_v2.append_author_presentation_control_change(text,uuid,uuid,bigint) IMMUTABLE;" \
+  "DROP INDEX im_v2.author_presentation_control_changes_cleanup_idx;" \
+  "DROP TABLE im_v2.author_presentation_change_head;" \
+  "ALTER TABLE im_v2.profile_security_invalidation_outbox DROP CONSTRAINT profile_security_invalidation_outbox_profile_state_check;" \
+  "ALTER TABLE im_v2.public_profile_update_outbox DISABLE TRIGGER public_profile_update_sequence;" \
+  "ALTER TABLE im_v2.public_profile_update_outbox ALTER COLUMN publication_sequence DROP NOT NULL;" \
+  "ALTER TABLE im_v2.public_profile_update_outbox DROP CONSTRAINT public_profile_update_outbox_publication_sequence_key;" \
+  'CREATE OR REPLACE FUNCTION im_v2.sequence_public_profile_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;' \
   "DROP TABLE im_v2.mention_push_wake_intents;" \
   "ALTER TABLE im_v2.push_wake_outbox ADD FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);" \
   "DROP INDEX im_v2.account_password_login_rate_limits_cleanup_idx;" \

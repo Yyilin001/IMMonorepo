@@ -30,15 +30,17 @@ public actor V2ResourceDownloadCache {
         let enqueuedAt: TimeInterval
         let continuation: AsyncStream<Void>.Continuation
     }
+    private enum ReadAuthority: Sendable { case message(Date), avatar(V2AvatarReadGrant) }
     private struct Grant {
         let mediaID: MediaID
         let fileID: V2LocalResourceFileID
         let checksum: V2ResourceChecksum
         let bytes: Int64
         let message: V2MediaMessageLocation?
-        let isAvatar: Bool
+        let authority: ReadAuthority
+        var isAvatar: Bool { if case .avatar = authority { true } else { false } }
+        var messageDeadline: Date? { if case .message(let deadline) = authority { deadline } else { nil } }
         var previewSize: V2MediaImagePreviewSize? = nil
-        let deadline: Date
         let generation: Data
         let family: String
         let identity: String
@@ -119,8 +121,8 @@ public actor V2ResourceDownloadCache {
         }
     }
 
-    public func avatar(_ access: V2ResourceAvatarAccess, home: V2ResourceHome) async throws -> V2ResourceCachedFile {
-        try await operations.run { try await self.performAvatar(access, home: home) }
+    public func avatar(_ authorization: V2AvatarReadGrant) async throws -> V2ResourceCachedFile {
+        try await operations.run { try await self.performAvatar(authorization) }
     }
 
     /// Authorizes the caller normally, but never starts a byte transfer or
@@ -144,7 +146,7 @@ public actor V2ResourceDownloadCache {
             let identity = "\(family):\(cached.target.checksum.value):\(cached.target.expectedByteCount)"
             self.identities[family] = identity
             let handle = try await self.handle(fileID: cached.fileID, mediaID: media.mediaID, message: message,
-                avatar: false, target: cached.target, generation: cached.generation, family: family, identity: identity)
+                target: cached.target, generation: cached.generation, family: family, identity: identity)
             await cached.lease.release()
             return handle
         } catch { await cached.lease.release(); throw error }
@@ -256,37 +258,34 @@ public actor V2ResourceDownloadCache {
                 }
                 try journal.completeResumedDownload(resuming, owner: foregroundOwner, fileID: fileID)
             }
-            let result = try await handle(fileID: fileID, mediaID: media.mediaID, message: message, avatar: false, target: target, generation: generation, family: family, identity: identity)
+            let result = try await handle(fileID: fileID, mediaID: media.mediaID, message: message, target: target, generation: generation, family: family, identity: identity)
             await use.lease.release()
             return result
         } catch { await use.lease.release(); throw error }
     }
 
-    private func performAvatar(_ access: V2ResourceAvatarAccess, home: V2ResourceHome) async throws -> V2ResourceCachedFile {
-        mediaUsers[access.mediaID, default: 0] += 1
-        defer { finishMedia(access.mediaID) }
-        let generation = try journal.currentAccessGeneration(), revision = revisions[access.mediaID]
+    private func performAvatar(_ authorization: V2AvatarReadGrant) async throws -> V2ResourceCachedFile {
+        let mediaID = authorization.avatar.mediaID
+        mediaUsers[mediaID, default: 0] += 1
+        defer { finishMedia(mediaID) }
+        let generation = try journal.currentAccessGeneration(), revision = revisions[mediaID]
         var ticket: UUID?
         defer { releaseCapacity(ticket) }
         while true {
-            try requireOpen()
-            // Unlike messages, an avatar arrives with an already authorized
-            // plan rather than a resolver. Never rebase it onto newer authority.
-            guard generation == (try journal.currentAccessGeneration()), revision == revisions[access.mediaID] else { throw V2ResourceStorageError.unavailable }
-            do { return try await performAvatarAttempt(access, home: home, ticket: ticket) }
+            try requireOpen(); try await authorization.requireValid()
+            guard generation == (try journal.currentAccessGeneration()), revision == revisions[mediaID] else { throw V2ResourceStorageError.unavailable }
+            do { return try await performAvatarAttempt(authorization, ticket: ticket) }
             catch let admission as AdmissionReady {
-                releaseCapacity(ticket)
-                ticket = admission.ticket
+                releaseCapacity(ticket); ticket = admission.ticket
             }
         }
     }
 
-    private func performAvatarAttempt(_ access: V2ResourceAvatarAccess, home: V2ResourceHome, ticket: UUID?) async throws -> V2ResourceCachedFile {
-        try requireOpen()
-        guard access.plan.expectedByteCount <= 2 * 1_024 * 1_024, access.plan.expiresAt > Date() else { throw V2ClientMediaTransferError.invalidTarget }
+    private func performAvatarAttempt(_ authorization: V2AvatarReadGrant, ticket: UUID?) async throws -> V2ResourceCachedFile {
+        try requireOpen(); try await authorization.requireValid()
+        let access = authorization.avatar
         let generation = try journal.currentAccessGeneration(), revision = revisions[access.mediaID]
-        let target = try restrictNetwork(V2ClientMediaTransferTarget(downloadPlan: access.plan), automatic: V2NetworkWorkScope.context?.priority == .background)
-        let homeColumns = GRDBV2LocalSyncStore.resourceHomeColumns(home)
+        let homeColumns = GRDBV2LocalSyncStore.resourceHomeColumns(authorization.home)
         let family = "avatar:\(homeColumns.kind):\(homeColumns.id):\(access.mediaID.rawValue):\(access.variantID.rawValue)"
         guard access.version >= avatarVersions[family, default: 0] else { throw V2ResourceStorageError.unavailable }
         avatarVersions[family] = access.version
@@ -294,18 +293,40 @@ public actor V2ResourceDownloadCache {
         identities[family] = identity
         identityUsers[family, default: 0] += 1
         defer { finishIdentity(family) }
-        let use = try await fetch(identity: identity, mediaID: access.mediaID, message: nil, target: target, ticket: ticket)
+        let use: DownloadUse
+        // A warm file needs current display authority, not a live object URL.
+        if let matching = try journal.matchingFile(checksum: access.checksum, byteCount: access.byteCount),
+           let lease = try? await files.borrowVerified(id: matching.id, checksum: access.checksum, bytes: access.byteCount) {
+            use = .init(fileID: matching.id, lease: lease)
+        } else {
+            let plan = try authorization.downloadPlan()
+            let target = try restrictNetwork(V2ClientMediaTransferTarget(downloadPlan: plan), automatic: V2NetworkWorkScope.context?.priority == .background)
+            use = try await fetch(identity: identity, mediaID: access.mediaID, message: nil, target: target, ticket: ticket)
+        }
         do {
             let fileID = use.fileID
-            try requireOpen()
-            guard generation == (try journal.currentAccessGeneration()), access.plan.expiresAt > Date(), revision == revisions[access.mediaID] else { throw V2ResourceStorageError.unavailable }
-            let variant = try V2ResourceVariantDescriptor(key: .init(resource: .init(home: home, mediaID: access.mediaID),
-                rendition: .derived(id: access.variantID, version: .init(access.version))), checksum: access.checksum, byteCount: target.expectedByteCount)
+            try requireOpen(); try await authorization.requireValid()
+            guard generation == (try journal.currentAccessGeneration()), revision == revisions[access.mediaID] else { throw V2ResourceStorageError.unavailable }
+            let variant = try V2ResourceVariantDescriptor(key: .init(resource: .init(home: authorization.home, mediaID: access.mediaID),
+                rendition: .derived(id: access.variantID, version: .init(access.version))), checksum: access.checksum, byteCount: access.byteCount)
             try await bind(identity: identity, family: family, mediaID: access.mediaID, fileID: fileID, variant: variant)
-            let result = try await handle(fileID: fileID, mediaID: access.mediaID, message: nil, avatar: true, target: target, generation: generation, family: family, identity: identity)
+            let result = try await avatarHandle(fileID: fileID, authorization: authorization, generation: generation, family: family, identity: identity)
             await use.lease.release()
             return result
         } catch { await use.lease.release(); throw error }
+    }
+
+    private func avatarHandle(fileID: V2LocalResourceFileID, authorization: V2AvatarReadGrant,
+                              generation: Data, family: String, identity: String) async throws -> V2ResourceCachedFile {
+        let avatar = authorization.avatar
+        guard grants.count < 256 else { throw V2ResourceStorageError.capacityExceeded }
+        let url = try await files.verifiedFile(id: fileID, checksum: avatar.checksum, bytes: avatar.byteCount)
+        try await authorization.requireValid(); try requireOpen()
+        guard generation == (try journal.currentAccessGeneration()), identities[family] == identity else { throw V2ResourceStorageError.unavailable }
+        let id = UUID()
+        grants[id] = .init(mediaID: avatar.mediaID, fileID: fileID, checksum: avatar.checksum, bytes: avatar.byteCount,
+            message: nil, authority: .avatar(authorization), generation: generation, family: family, identity: identity)
+        return .init(id: id, mediaID: avatar.mediaID, fileURL: url, owner: self)
     }
 
     /// Visible image rows request only the bounded server rendition. Original
@@ -324,7 +345,7 @@ public actor V2ResourceDownloadCache {
         let key = PreviewKey(message: message, mediaID: media.mediaID, size: size)
         guard let cached = previewAuthorizations[key] else { return nil }
         let grant = cached.grant
-        guard grant.deadline > Date(), grant.generation == (try journal.currentAccessGeneration()),
+        guard grant.messageDeadline.map({ $0 > Date() }) == true, grant.generation == (try journal.currentAccessGeneration()),
               identities[grant.family] == nil || identities[grant.family] == grant.identity else { return nil }
         guard grants.count < 256 else { return nil }
         identities[grant.family] = grant.identity
@@ -339,7 +360,7 @@ public actor V2ResourceDownloadCache {
         try requireOpen()
         try journal.requireMessageAccess(message, mediaID: media.mediaID)
         let key = PreviewKey(message: message, mediaID: media.mediaID, size: size)
-        if let grant = previewAuthorizations[key]?.grant, grant.deadline > Date(),
+        if let grant = previewAuthorizations[key]?.grant, grant.messageDeadline.map({ $0 > Date() }) == true,
            grant.generation == (try journal.currentAccessGeneration()),
            identities[grant.family] == nil || identities[grant.family] == grant.identity {
             let generation = grant.generation, revision = revisions[media.mediaID]
@@ -349,7 +370,7 @@ public actor V2ResourceDownloadCache {
                 try requireOpen()
                 try journal.requireMessageAccess(message, mediaID: media.mediaID)
                 guard generation == (try journal.currentAccessGeneration()), revision == revisions[media.mediaID],
-                      grant.deadline > Date(), identities[grant.family] == nil || identities[grant.family] == grant.identity
+                      grant.messageDeadline.map({ $0 > Date() }) == true, identities[grant.family] == nil || identities[grant.family] == grant.identity
                 else { throw V2ResourceStorageError.unavailable }
                 guard grants.count < 256 else { throw V2ResourceStorageError.capacityExceeded }
                 identities[grant.family] = grant.identity
@@ -379,7 +400,7 @@ public actor V2ResourceDownloadCache {
                     guard generation == (try journal.currentAccessGeneration()), revision == revisions[media.mediaID], target.expiresAt > Date()
                     else { throw V2ResourceStorageError.unavailable }
                     try await bind(identity: identity, family: family, mediaID: media.mediaID, fileID: use.fileID, variant: variant)
-                    let file = try await handle(fileID: use.fileID, mediaID: media.mediaID, message: message, avatar: false,
+                    let file = try await handle(fileID: use.fileID, mediaID: media.mediaID, message: message,
                         target: target, generation: generation, family: family, identity: identity, previewSize: size)
                     if let grant = grants[file.id] { rememberPreview(grant, fileURL: file.fileURL, key: key) }
                     await use.lease.release(); finishIdentity(family)
@@ -410,7 +431,7 @@ public actor V2ResourceDownloadCache {
         guard identities[family] == identity else { throw V2ResourceStorageError.unavailable }
     }
 
-    private func handle(fileID: V2LocalResourceFileID, mediaID: MediaID, message: V2MediaMessageLocation?, avatar: Bool,
+    private func handle(fileID: V2LocalResourceFileID, mediaID: MediaID, message: V2MediaMessageLocation?,
                         target: V2ClientMediaTransferTarget, generation: Data, family: String, identity: String, previewSize: V2MediaImagePreviewSize? = nil) async throws -> V2ResourceCachedFile {
         guard grants.count < 256 else { throw V2ResourceStorageError.capacityExceeded }
         let url = try await files.verifiedFile(id: fileID, checksum: target.checksum, bytes: target.expectedByteCount)
@@ -418,7 +439,7 @@ public actor V2ResourceDownloadCache {
         guard generation == (try journal.currentAccessGeneration()), identities[family] == identity else { throw V2ResourceStorageError.unavailable }
         let id = UUID()
         grants[id] = .init(mediaID: mediaID, fileID: fileID, checksum: target.checksum, bytes: target.expectedByteCount,
-            message: message, isAvatar: avatar, previewSize: previewSize, deadline: target.expiresAt, generation: generation, family: family, identity: identity)
+            message: message, authority: .message(target.expiresAt), previewSize: previewSize, generation: generation, family: family, identity: identity)
         return .init(id: id, mediaID: mediaID, fileURL: url, owner: self)
     }
 
@@ -647,8 +668,10 @@ public actor V2ResourceDownloadCache {
         try requireOpen()
         guard var grant = grants[id], identities[grant.family] == grant.identity else { throw V2ResourceStorageError.unavailable }
         if !grant.isAvatar { try journal.requireMessageAccess(grant.message, mediaID: grant.mediaID) }
-        if grant.generation != (try journal.currentAccessGeneration()) || grant.deadline <= Date() {
-            guard !grant.isAvatar else { throw V2ResourceStorageError.unavailable }
+        if case .avatar(let authorization) = grant.authority {
+            try await authorization.requireValid()
+            guard grant.generation == (try journal.currentAccessGeneration()) else { throw V2ResourceStorageError.unavailable }
+        } else if grant.generation != (try journal.currentAccessGeneration()) || grant.messageDeadline.map({ $0 <= Date() }) != false {
             let generation = try journal.currentAccessGeneration()
             let target: V2ClientMediaTransferTarget
             if let size = grant.previewSize, let message = grant.message {
@@ -659,13 +682,17 @@ public actor V2ResourceDownloadCache {
                   target.expectedByteCount == grant.bytes, target.expiresAt > Date() else { throw V2ResourceStorageError.unavailable }
             try journal.requireMessageAccess(grant.message, mediaID: grant.mediaID)
             grant = .init(mediaID: grant.mediaID, fileID: grant.fileID, checksum: grant.checksum, bytes: grant.bytes,
-                message: grant.message, isAvatar: false, previewSize: grant.previewSize, deadline: target.expiresAt, generation: generation, family: grant.family, identity: grant.identity)
+                message: grant.message, authority: .message(target.expiresAt), previewSize: grant.previewSize, generation: generation, family: grant.family, identity: grant.identity)
             grants[id] = grant
         }
         let lease = try await files.borrow(grant.fileID)
         do {
             try requireOpen()
             guard grants[id] != nil, identities[grant.family] == grant.identity, grant.generation == (try journal.currentAccessGeneration()) else { throw V2ResourceStorageError.unavailable }
+            if case .avatar(let authorization) = grant.authority { try await authorization.requireValid() }
+            try requireOpen()
+            guard grants[id] != nil, identities[grant.family] == grant.identity,
+                  grant.generation == (try journal.currentAccessGeneration()) else { throw V2ResourceStorageError.unavailable }
             return lease
         } catch { await lease.release(); throw error }
     }

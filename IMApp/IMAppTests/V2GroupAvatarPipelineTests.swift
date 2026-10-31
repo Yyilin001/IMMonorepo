@@ -8,9 +8,46 @@ import UIKit
 
 @MainActor
 struct V2GroupAvatarPipelineTests {
-    @Test("a cached image still requires new display authorization after suspension")
-    func cachedImageRequiresPermission() async throws {
-        let f = try await GroupPipelineFixture()
+    @Test("a cold group avatar obtains a fresh plan with its own bounded display deadline")
+    func coldAvatarRecovery() async throws {
+        let f = try await GroupPipelineFixture(seedCache: false)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        await f.reader.withholdFirstPlan()
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let page = try await pipeline.groups.activate(roomID: f.presentation.state.roomID)
+        _ = try await pipeline.groups.presentation(for: page)
+        let initialDeadline = try #require(try await pipeline.groups.authorizationDeadline(for: page))
+        let snapshot = try await pipeline.groupSnapshot(activation: page, pixels: 16)
+        #expect(snapshot.image?.image.cgImage?.width == 16 && snapshot.avatarRetryAt == nil)
+        #expect(snapshot.deadline <= (try await pipeline.groups.authorizationDeadline(for: page) ?? initialDeadline))
+        #expect(await f.reader.calls == 2)
+        let warm = try await pipeline.groupSnapshot(activation: page, pixels: 16)
+        #expect(warm.image != nil)
+        #expect(await f.reader.calls == 2)
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("a group avatar uses its renewed read grant when the initial lease expires during refresh")
+    func renewalPastInitialExpiry() async throws {
+        let f = try await GroupPipelineFixture(seedCache: false)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        await f.reader.withholdFirstPlan()
+        await f.reader.shortenFirstLease(to: 0.15, refreshDelay: .milliseconds(300))
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let page = try await pipeline.groups.activate(roomID: f.presentation.state.roomID)
+        _ = try await pipeline.groups.presentation(for: page)
+        let original = try #require(try await pipeline.groups.authorizationDeadline(for: page))
+        let snapshot = try await pipeline.groupSnapshot(activation: page, pixels: 16)
+        #expect(original <= .now && snapshot.deadline > .now)
+        #expect(snapshot.image != nil && snapshot.avatarRetryAt == nil)
+        #expect(snapshot.deadline <= (try await pipeline.groups.avatarReadGrant(for: page)?.deadline ?? original))
+        #expect(await f.reader.calls == 2)
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("cached group pixels work without a download URL and require new authority after suspension", arguments: [false, true])
+    func cachedImageRequiresPermission(includeDownloadPlan: Bool) async throws {
+        let f = try await GroupPipelineFixture(includeDownloadPlan: includeDownloadPlan)
         defer { try? FileManager.default.removeItem(at: f.root) }
         let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root])
         let pipeline = f.pipeline(thumbnails)
@@ -72,7 +109,7 @@ private struct GroupPipelineFixture {
     let presentation: V2GroupAvatarPresentation
     let reader: GroupPipelineReader
     let files: V2ResourceMediaTestOwner
-    init() async throws {
+    init(includeDownloadPlan: Bool = true, seedCache: Bool = true) async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("group-pipeline-\(UUID())")
         let png = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).pngData { context in
             UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
@@ -82,15 +119,19 @@ private struct GroupPipelineFixture {
         let now = Date()
         let plan = try V2ResourceTransferPlan(mode: .httpGet, url: #require(URL(string: "https://delivery.invalid/avatar")),
             expiresAt: now.addingTimeInterval(120), expectedByteCount: Int64(png.count), checksum: checksum)
+        let avatar = try V2ResourceAvatarAccess(mediaID: media, variantID: variant, version: 1, checksum: checksum,
+            byteCount: Int64(png.count), plan: plan)
         presentation = try .init(actorUserID: .init(uuid: UUID()), deviceID: .init(uuid: UUID()),
             state: .init(roomID: .init(uuid: UUID()), mediaID: media, revision: 1), membershipRevision: 1, resourceGeneration: 1,
-            canManage: false, avatar: .init(mediaID: media, variantID: variant, version: 1, checksum: checksum, plan: plan),
+            canManage: false, avatar: includeDownloadPlan ? avatar : avatar.withoutDownloadPlan(),
             observedAt: now, validUntil: now.addingTimeInterval(300), serverNow: now)
         reader = .init(value: presentation)
         files = try await makeResourceMediaTestDownloader(downloader: .init(targetResolver: NoGroupByteIO(), byteTransfer: ResourceMediaSeedBytes(png)), directory: root)
-        let seeded = try await files.avatar(try #require(presentation.avatar), home: .room(presentation.state.roomID))
-        cachedFile = seeded.fileURL
-        await seeded.release()
+        if seedCache {
+            let seeded = try await files.avatar(avatar, home: .room(presentation.state.roomID))
+            cachedFile = seeded.fileURL
+            await seeded.release()
+        } else { cachedFile = root.appendingPathComponent("not-seeded") }
     }
     func pipeline(_ thumbnails: V2LocalMediaThumbnailCache) -> V2AvatarPipeline {
         let groups = V2GroupAvatarPresentationRepository(actorUserID: presentation.actorUserID, deviceID: presentation.deviceID,
@@ -104,11 +145,27 @@ private struct GroupPipelineFixture {
 private actor GroupPipelineReader: V2GroupAvatarPresentationReading {
     let value: V2GroupAvatarPresentation
     var calls = 0, denied = false
+    private var omitFirstPlan = false
+    private var firstLifetime: TimeInterval?
+    private var refreshDelay: Duration = .zero
+    func shortenFirstLease(to seconds: TimeInterval, refreshDelay: Duration) {
+        firstLifetime = seconds; self.refreshDelay = refreshDelay
+    }
+    func withholdFirstPlan() { omitFirstPlan = true }
     init(value: V2GroupAvatarPresentation) { self.value = value }
     func deny() { denied = true }
-    func readGroupAvatar(roomID: RoomID) throws -> V2GroupAvatarPresentation {
+    func readGroupAvatar(roomID: RoomID) async throws -> V2GroupAvatarPresentation {
         calls += 1
+        if calls > 1 && refreshDelay > .zero { try await Task.sleep(for: refreshDelay) }
         if denied { throw V2GroupAvatarReadError.forbidden }
+        if (calls == 1 && omitFirstPlan) || firstLifetime != nil {
+            return try .init(actorUserID: value.actorUserID, deviceID: value.deviceID, state: value.state,
+                membershipRevision: value.membershipRevision, resourceGeneration: value.resourceGeneration,
+                canManage: value.canManage, avatar: calls == 1 && omitFirstPlan ? value.avatar?.withoutDownloadPlan() : value.avatar,
+                observedAt: firstLifetime == nil ? Date(timeIntervalSince1970: Double(value.observedAtUnixMilliseconds) / 1_000) : Date(),
+                validUntil: firstLifetime.map { Date().addingTimeInterval(calls == 1 ? $0 : 300) } ?? Date(timeIntervalSince1970: Double(value.validUntilUnixMilliseconds) / 1_000),
+                serverNow: firstLifetime == nil ? Date(timeIntervalSince1970: Double(value.serverNowUnixMilliseconds) / 1_000) : Date())
+        }
         return value
     }
 }

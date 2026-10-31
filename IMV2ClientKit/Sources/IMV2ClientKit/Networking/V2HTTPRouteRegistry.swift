@@ -102,6 +102,7 @@ public enum V2HTTPRouteRegistry {
         .init("POST", "/v2/forward-plans/submit", .submission),
         .init("POST", "/v2/forward-plans/operations/recover", .recovery),
         .init("GET", "/v2/resource-capabilities", .read),
+        .init("POST", "/v2/rooms/*/resources/query", .authorityRead, maximumResponseBytes: 524288),
         .init("POST", "/v2/resource-uploads", .submission, maximumResponseBytes: 524288),
         .init("POST", "/v2/resource-uploads/status", .recovery, maximumResponseBytes: 524288),
         .init("POST", "/v2/resource-uploads/targets", .authorityRead, maximumResponseBytes: 524288),

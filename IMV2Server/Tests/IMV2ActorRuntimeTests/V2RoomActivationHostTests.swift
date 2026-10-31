@@ -7,6 +7,37 @@ import Testing
 
 @Suite("Room activation host owns placement, restore and physical retirement")
 struct V2RoomActivationHostTests {
+    @Test("a short operation budget does not shorten the observed authorization window")
+    func pinSeparatesOperationAndAuthorizationBudgets() async throws {
+        let captured = Mutex<V2RoomActivationLifetime?>(nil)
+        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
+        let authorityLimit = ContinuousClock.now + .seconds(5)
+        _ = try #require(qualification.update(witnesses: ["b": authorityLimit], membershipRevision: 1))
+        let fixture = try Fixture(qualification: qualification,
+            restoreObserver: { context in captured.withLock { $0 = context.lifetime } })
+        await fixture.host.start()
+        do {
+            guard case .ready = try await fixture.activate().value else { throw TestFailure.restore }
+            let lifetime = try #require(captured.withLock { $0 })
+            let deadline = ContinuousClock.now + .milliseconds(500)
+            let bounds = try await lifetime.withPin(deadline: deadline) { $0 }
+            #expect(bounds.deadline == deadline)
+            #expect(bounds.authorizationValidUntil > deadline)
+            #expect(bounds.authorizationValidUntil <= authorityLimit)
+            let entered = Mutex(false), shortDeadline = ContinuousClock.now + .milliseconds(100)
+            await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) {
+                try await lifetime.withPin(deadline: shortDeadline) { _ in
+                    entered.withLock { $0 = true }
+                    try await Task.sleep(until: shortDeadline + .milliseconds(1), clock: .continuous)
+                }
+            }
+            #expect(entered.withLock { $0 })
+        } catch {
+            _ = await fixture.host.stop(deadline: .now + .seconds(2)); throw error
+        }
+        #expect((await fixture.host.stop(deadline: .now + .seconds(2))).completed)
+    }
+
     @Test("idle maintenance does not inspect rooms before their idle deadlines")
     func idleMaintenanceSkipsRecentRooms() async throws {
         let fixture = try Fixture(maximumActiveRooms: 32, waiters: 33, idleMilliseconds: 10_000)
@@ -91,8 +122,8 @@ struct V2RoomActivationHostTests {
         guard case .ready = try await fixture.activate().value else { throw TestFailure.restore }
         let lifetime = try #require(captured.withLock { $0 })
         let work = Task {
-            try await lifetime.withPin(deadline: .now + .seconds(2)) { validUntil in
-                #expect(validUntil > .now)
+            try await lifetime.withPin(deadline: .now + .seconds(2)) { bounds in
+                #expect(bounds.deadline > .now)
                 await gate.wait()
                 return 5
             }

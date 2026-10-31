@@ -135,7 +135,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     private let database: any Database
 
     // 供启动就绪检查与事务执行共用。
-    private static let categoryCount = 12
+    private static let categoryCount = 13
     static var housekeepingRotationPeriod: Int64 { Int64(categoryCount * idempotencyTables.count) }
 
     /// 组合数据库。
@@ -211,13 +211,22 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, media_id",
                 cutoff: cutoff, limit: budget.take()
             )
-            // 审核任务归房间所有；密码窗口由持有实际认证策略的 Account 进程清理。
-            // 保留此预算槽，避免既有低预算维护轮转偏移。
-            _ = budget.take()
+            // Publication logs expire independently of durable security delivery.
+            // Readers detect retention gaps and refresh their bounded visible set.
             count += try await deleteSimple(
-                sql: sql, table: "public_profile_update_outbox", identity: "source_event_id",
+                sql: sql, table: "author_presentation_control_changes", identity: "publication_sequence",
+                where: "created_at <= ", order: "created_at, publication_sequence",
+                cutoff: notificationCutoff, limit: budget.take()
+            )
+            count += try await deleteSimple(
+                sql: sql, table: "profile_security_invalidation_outbox", identity: "source_event_id",
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, source_event_id",
                 cutoff: cutoff, limit: budget.take()
+            )
+            count += try await deleteSimple(
+                sql: sql, table: "public_profile_update_outbox", identity: "publication_sequence",
+                where: "created_at <= ", order: "created_at, publication_sequence",
+                cutoff: notificationCutoff, limit: budget.take()
             )
             let readReceiptPropagationLimit = budget.take()
             count += try await sql.raw("""

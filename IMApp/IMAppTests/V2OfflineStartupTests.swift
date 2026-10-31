@@ -181,11 +181,11 @@ struct V2OfflineStartupTests {
         let scope = try #require(try await initialBootstrap.storageScope(for: local))
         let peer = try V2PublicIdentity(userID: .init(UUID().uuidString), handle: .init("offline_peer"), displayName: "Cached name requires lease", accountKind: .regular)
         try await local.cacheDirectRoomIdentity(roomID: room, publicIdentity: peer, roomCreatedAt: Date(timeIntervalSince1970: 1))
-        let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(UUID().uuidString), projectionKind: "message", payload: JSONSerialization.data(withJSONObject: [
+        let record = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString), roomSequence: 1, projectionKind: "message", payload: JSONSerialization.data(withJSONObject: [
             "event_type": "message.accepted", "message_id": UUID().uuidString, "room_id": room.rawValue, "room_sequence": 1, "message_revision": 1,
             "sender_user_id": user.rawValue, "text": "saved text", "server_created_at_ms": 1_750_000_000_000
         ]))
-        _ = try await local.apply(.init(generation: 1, records: [record], nextSyncToken: .init("seed"), receipt: .init("seed-receipt"), hasMore: false, capabilityProfile: "base"))
+        _ = try await local.applyGroupEventPage(.init(roomID: room, events: [record], nextRoomSequence: 1, hasMore: false))
         if denyRoom { try await local.markRoomEventUnauthorized(roomID: room) }
         try await initialBootstrap.closeLocalStore(local)
         await store.replace(expired)

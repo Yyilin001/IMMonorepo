@@ -660,10 +660,10 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         }
     }
 
-    public func beginAuthorPresentationView(roomID: RoomID) throws -> V2AuthorPresentationView {
+    public func beginAuthorPresentationView(messageRoomIDs: [RoomID]) throws -> V2AuthorPresentationView {
         try Task.checkCancellation()
         try requireAuthorPresentationConnection()
-        guard let view = try authorPresentationInbox?.begin(roomID: roomID) else { throw V2TLSFrameConnectionError.notConnected }
+        guard let view = try authorPresentationInbox?.begin(messageRoomIDs: messageRoomIDs) else { throw V2TLSFrameConnectionError.notConnected }
         authorPresentationWaiter?.resume(throwing: V2ProfilePresentationError.inactive)
         authorPresentationWaiter = nil
         return view
@@ -946,11 +946,27 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         let requestDeadline = V2SyncRequestScope.deadline
         if let requestDeadline, requestDeadline <= .now { throw V2TLSFrameConnectionError.requestTimedOut }
         let bytes = try V2FrameCodec.encode(frame, limits: limits)
+        if frame.command == .authorPresentationInterests {
+            let interests = try V2ProtobufFrameCodec.decode(frame).authorPresentationInterests
+            guard let view = authorPresentationInbox?.view, view.renewBy > .now,
+                  UUID(uuidString: interests.streamID) == view.streamID,
+                  UUID(uuidString: interests.viewID) == view.viewID else {
+                throw V2TLSFrameConnectionError.unexpectedResponse
+            }
+        }
+        if frame.command == .authorPresentationReceipt {
+            let receipt = try V2ProtobufFrameCodec.decode(frame).authorPresentationReceipt
+            guard let view = authorPresentationInbox?.view, view.renewBy > .now,
+                  UUID(uuidString: receipt.streamID) == view.streamID,
+                  UUID(uuidString: receipt.viewID) == view.viewID else {
+                throw V2TLSFrameConnectionError.unexpectedResponse
+            }
+        }
         if frame.command == .authorPresentationEnd {
             let ending = try V2ProtobufFrameCodec.decode(frame).authorPresentationEnd
             guard let inbox = authorPresentationInbox,
                   UUID(uuidString: ending.streamID) == inbox.streamID,
-                  UUID(uuidString: ending.viewID) != nil, UUID(uuidString: ending.roomID) != nil else {
+                  UUID(uuidString: ending.viewID) != nil else {
                 throw V2TLSFrameConnectionError.unexpectedResponse
             }
             // Cancellation can release the subscribe caller before its socket
@@ -959,27 +975,16 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             let sends = responseWaiters.values.filter {
                 $0.authorView?.viewID == UUID(uuidString: ending.viewID)
                     && $0.authorView?.streamID == inbox.streamID
-                    && $0.authorView?.roomID == (try? RoomID(ending.roomID))
             }.map(\.sendTask)
             for send in sends { await send.value }
             try requireGeneration(generation)
             try Task.checkCancellation()
         }
         var authorView: V2AuthorPresentationView?
-        if frame.command == .groupEventSubscribe {
+        if frame.command == .authorPresentationStart {
             let envelope = try V2ProtobufFrameCodec.decode(frame)
-            let request = envelope.groupEventSubscribe
-            if !request.authorPresentationViewID.isEmpty {
-                guard let inbox = authorPresentationInbox else { throw V2TLSFrameConnectionError.unexpectedResponse }
-                authorView = try inbox.requestedView(request)
-            } else if let current = authorPresentationInbox?.view,
-                      (try? RoomID(request.roomID)) == current.roomID {
-                endAuthorPresentationView(current)
-            }
-        } else if frame.command == .groupEventUnsubscribe,
-                  let current = authorPresentationInbox?.view {
-            let envelope = try V2ProtobufFrameCodec.decode(frame)
-            if (try? RoomID(envelope.groupEventUnsubscribe.roomID)) == current.roomID { endAuthorPresentationView(current) }
+            guard let inbox = authorPresentationInbox else { throw V2TLSFrameConnectionError.unexpectedResponse }
+            authorView = try inbox.requestedView(envelope.authorPresentationStart)
         }
         let id = UUID()
         var ownedSend: Task<Void, Never>?
@@ -1175,16 +1180,13 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         guard let waiter = responseWaiters[frame.requestID] else {
             throw V2TLSFrameConnectionError.unexpectedResponse
         }
-        if waiter.command == .groupEventSubscribe {
+        if waiter.command == .authorPresentationStart {
             let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)
             switch envelope.body {
-            case .groupEventSubscribed(let response):
-                if let view = waiter.authorView {
-                    // Install before a delta coalesced in this same socket read.
-                    if waiter.continuation != nil && !waiter.callerCancelled { try authorPresentationInbox?.confirm(view, response: response) }
-                } else if !response.authorPresentationViewID.isEmpty {
-                    throw V2TLSFrameConnectionError.unexpectedResponse
-                }
+            case .authorPresentationStarted(let response):
+                guard let view = waiter.authorView else { throw V2TLSFrameConnectionError.unexpectedResponse }
+                // Install before a delta coalesced in this same socket read.
+                if waiter.continuation != nil && !waiter.callerCancelled { try authorPresentationInbox?.confirm(view, response: response) }
             case .error:
                 if let view = waiter.authorView { endAuthorPresentationView(view) }
             default: throw V2TLSFrameConnectionError.unexpectedResponse
@@ -1511,7 +1513,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         throw V2TLSFrameConnectionError.notConnected
     }
 
-    public func beginAuthorPresentationView(roomID: RoomID) throws -> V2AuthorPresentationView { throw V2TLSFrameConnectionError.notConnected }
+    public func beginAuthorPresentationView(messageRoomIDs: [RoomID]) throws -> V2AuthorPresentationView { throw V2TLSFrameConnectionError.notConnected }
     public func endAuthorPresentationView(_ view: V2AuthorPresentationView) {}
     public func nextAuthorPresentationDelta(for view: V2AuthorPresentationView) throws -> V2ReceivedAuthorPresentationDelta { throw V2TLSFrameConnectionError.notConnected }
 

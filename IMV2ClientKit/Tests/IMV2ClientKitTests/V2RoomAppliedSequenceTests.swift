@@ -43,27 +43,26 @@ struct V2RoomAppliedSequenceTests {
         #expect(try await store.groupEventCursor(roomID: room) == 8)
     }
 
-    @Test("a reaction delivered on the personal stream counts by its source sequence")
-    func reactionOnThePersonalStreamAdvances() async throws {
+    @Test("a reaction-only room-log tail advances the applied room sequence")
+    func reactionOnTheRoomLogAdvances() async throws {
         let (store, directory) = try makeAppliedSequenceStore()
         defer { try? FileManager.default.removeItem(at: directory) }
         let room = try RoomID("00000000-0000-0000-0000-0000000004b0")
         let messageID = try MessageID("00000000-0000-0000-0000-0000000004b1")
 
-        // 标准扇出群没有持久化游标，reaction 仍带着来源房间序号到达，
-        // 因此这个投影能让已应用位置继续前进。
-        _ = try await store.apply(.init(
-            generation: 1,
-            records: [
-                try V2ClientSyncRecord(
-                    sequence: 1,
+        // Reactions share the room log with messages, including standard groups.
+        _ = try await store.applyGroupEventPage(roomPage(
+            room: room,
+            events: [
+                try V2ClientGroupEvent(
                     sourceEventID: .init("00000000-0000-0000-0000-0000000004b2"),
+                    roomSequence: 4,
                     projectionKind: "message",
                     payload: appliedSequenceMessagePayload(room: room, roomSequence: 4)
                 ),
-                try V2ClientSyncRecord(
-                    sequence: 2,
+                try V2ClientGroupEvent(
                     sourceEventID: .init("00000000-0000-0000-0000-0000000004b3"),
+                    roomSequence: 5,
                     projectionKind: "message_reaction",
                     payload: try JSONSerialization.data(withJSONObject: [
                         "event_type": "message.reaction_changed",
@@ -76,13 +75,12 @@ struct V2RoomAppliedSequenceTests {
                     ])
                 )
             ],
-            nextSyncToken: .init("applied-sequence-token"),
-            receipt: .init("applied-sequence-receipt"),
-            hasMore: false,
-            capabilityProfile: "base"
+            nextRoomSequence: 5
         ))
 
         #expect(try await store.roomAppliedRoomSequence(roomID: room) == 5)
+        #expect(try await store.groupEventCursor(roomID: room) == 5)
+        #expect(try await store.cursor() == nil)
     }
 
     @Test("a room with no local evidence has no applied sequence")

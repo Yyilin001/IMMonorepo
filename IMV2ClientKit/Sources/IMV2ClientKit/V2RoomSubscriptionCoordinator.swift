@@ -26,8 +26,6 @@ public struct V2RoomSubscriptionSnapshot: Equatable, Sendable {
     public let state: State
     /// 恢复流程标识。
     public let recoveryID: UUID?
-    /// 本地订阅/权限代次；即使中间 revoked 快照被合并，也不能复用旧作者 nonce。
-    public let authorPresentationGeneration: UUID?
     /// 房间事件可用性提示。
     public let wake: V2GroupEventAvailabilityHint?
     /// 固定安装基线；后续可用性提示不会抬高这个值。
@@ -70,7 +68,6 @@ public enum V2RoomSubscriptionError: Error, Equatable, Sendable {
 public actor V2RoomSubscriptionCoordinator {
     private struct Consumer {
         let channels: Set<V2RoomSubscriptionChannel>
-        let observesAuthorChanges: Bool
         let continuation: AsyncStream<V2RoomSubscriptionSnapshot>.Continuation
         var lastSnapshot: V2RoomSubscriptionSnapshot?
     }
@@ -80,7 +77,6 @@ public actor V2RoomSubscriptionCoordinator {
         var authorized = true
         var serverRevoked = false
         var recoveryID: UUID?
-        var authorPresentationGeneration = UUID()
         var baselineHead: UInt64?
         var appliedThrough: UInt64?
         var wake: V2GroupEventAvailabilityHint?
@@ -118,6 +114,8 @@ public actor V2RoomSubscriptionCoordinator {
     private let maximumConsumers: Int
     private var rooms: [RoomID: Room] = [:]
     private var runState: Run?
+    private var authorConnectionGeneration = UUID()
+    private var authorConnectionObservers: [UUID: AsyncStream<AuthorPresentationScope?>.Continuation] = [:]
     private var flight: (id: UUID, task: Task<Void, Error>)?
 
     /// 组合活动服务、订阅实现与容量上限。
@@ -181,14 +179,6 @@ public actor V2RoomSubscriptionCoordinator {
     /// - Throws: 通道为空时抛出 ``V2RoomSubscriptionError/emptyChannels``；
     ///   超出房间容量时抛出 ``V2RoomSubscriptionError/capacityExceeded``。
     public func acquire(roomID: RoomID, channels: Set<V2RoomSubscriptionChannel>) throws -> V2RoomSubscriptionLease {
-        try acquire(roomID: roomID, channels: channels, observesAuthorChanges: false)
-    }
-
-    func acquireAuthorPresentationRoom(roomID: RoomID) throws -> V2RoomSubscriptionLease {
-        try acquire(roomID: roomID, channels: [.roomEvents], observesAuthorChanges: true)
-    }
-
-    private func acquire(roomID: RoomID, channels: Set<V2RoomSubscriptionChannel>, observesAuthorChanges: Bool) throws -> V2RoomSubscriptionLease {
         guard !channels.isEmpty else { throw V2RoomSubscriptionError.emptyChannels }
         guard rooms[roomID] != nil || rooms.count < maximumRooms,
               rooms.values.reduce(0, { $0 + $1.consumers.count }) < maximumConsumers
@@ -196,7 +186,7 @@ public actor V2RoomSubscriptionCoordinator {
         let id = UUID()
         let stream = AsyncStream<V2RoomSubscriptionSnapshot>.makeStream(bufferingPolicy: .bufferingNewest(1))
         stream.continuation.onTermination = { [weak self] _ in Task { await self?.release(roomID: roomID, consumerID: id) } }
-        rooms[roomID, default: Room()].consumers[id] = .init(channels: channels, observesAuthorChanges: observesAuthorChanges, continuation: stream.continuation)
+        rooms[roomID, default: Room()].consumers[id] = .init(channels: channels, continuation: stream.continuation)
         publish(roomID)
         requestReconciliation()
         return .init(id: id, roomID: roomID, updates: stream.stream)
@@ -223,37 +213,39 @@ public actor V2RoomSubscriptionCoordinator {
     ///
     /// 会清除各房间的服务端吊销标记并请求一次协调，使订阅按新的授权重新建立。
     public func authorityDidChange() {
+        authorConnectionGeneration = UUID()
+        publishAuthorConnection()
         for roomID in rooms.keys {
             if rooms[roomID]?.serverRevoked == true { rooms[roomID]?.confirmed.remove(.roomEvents) }
             rooms[roomID]?.serverRevoked = false
-            rooms[roomID]?.authorPresentationGeneration = UUID()
-            publish(roomID, authorOnly: true)
+            publish(roomID)
         }
         requestReconciliation()
     }
 
-    /// Optional author work uses the same live room intent and connection as
-    /// ordinary synchronization, including membership revocation and reconnect.
+    /// Independent author views follow the authenticated connection and
+    /// authority generation, including membership revocation and reconnect.
     struct AuthorPresentationScope: Equatable, Sendable {
         let connectionID: UUID
         let generation: UUID
     }
-    func authorPresentationScope(roomID: RoomID, consumerID: UUID) -> AuthorPresentationScope? {
-        guard rooms[roomID]?.consumers[consumerID]?.channels.contains(.roomEvents) == true,
-              rooms[roomID]?.desired.contains(.roomEvents) == true,
-              rooms[roomID]?.confirmed.contains(.roomEvents) == true,
-              let generation = rooms[roomID]?.authorPresentationGeneration,
-              let connectionID = runState?.connectionID else { return nil }
-        return .init(connectionID: connectionID, generation: generation)
+    /// Lists observe the authenticated account connection without inventing a
+    /// room subscription. An interest still needs independent profile authority.
+    func currentAuthorConnectionScope() -> AuthorPresentationScope? {
+        runState.map { .init(connectionID: $0.connectionID, generation: authorConnectionGeneration) }
     }
-
-    func authorSubscriptionWasRejected(roomID: RoomID, consumerID: UUID, scope: AuthorPresentationScope) {
-        guard authorPresentationScope(roomID: roomID, consumerID: consumerID) == scope else { return }
-        rooms[roomID]?.serverRevoked = true
-        rooms[roomID]?.authorPresentationGeneration = UUID()
-        rooms[roomID]?.wake = nil; rooms[roomID]?.presence = nil; rooms[roomID]?.typing = [:]
-        publish(roomID)
-        requestReconciliation()
+    func authorConnectionChanges() throws -> AsyncStream<AuthorPresentationScope?> {
+        guard authorConnectionObservers.count < 8 else { throw V2ProfilePresentationError.overloaded }
+        let id = UUID(), pair = AsyncStream<AuthorPresentationScope?>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        authorConnectionObservers[id] = pair.continuation
+        pair.continuation.yield(currentAuthorConnectionScope())
+        pair.continuation.onTermination = { [weak self] _ in Task { await self?.removeAuthorConnectionObserver(id) } }
+        return pair.stream
+    }
+    private func removeAuthorConnectionObserver(_ id: UUID) { authorConnectionObservers.removeValue(forKey: id) }
+    private func publishAuthorConnection() {
+        let scope = currentAuthorConnectionScope()
+        for observer in authorConnectionObservers.values { observer.yield(scope) }
     }
 
     /// 设置正在输入状态。
@@ -311,6 +303,8 @@ public actor V2RoomSubscriptionCoordinator {
     private func runGeneration(id: UUID, connectionID: UUID) async throws {
         let wake = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         runState = .init(id: id, connectionID: connectionID, wake: wake.continuation)
+        authorConnectionGeneration = UUID()
+        publishAuthorConnection()
         resetConnectionFacts()
         let recovery = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         recoveryWake = recovery.continuation
@@ -320,7 +314,7 @@ public actor V2RoomSubscriptionCoordinator {
             recoveryWake = nil
             pendingAccountEvents.removeAll(); pendingAccountBytes = 0
             wake.continuation.finish()
-            if runState?.id == id { runState = nil; resetConnectionFacts() }
+            if runState?.id == id { runState = nil; publishAuthorConnection(); resetConnectionFacts() }
         }
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { try await self.reconcileLoop(wakes: wake.stream, id: id) }
@@ -359,7 +353,6 @@ public actor V2RoomSubscriptionCoordinator {
             rooms[roomID]?.authorized = true
             rooms[roomID]?.serverRevoked = false
             rooms[roomID]?.recoveryID = nil
-            rooms[roomID]?.authorPresentationGeneration = UUID()
             rooms[roomID]?.wake = nil
             rooms[roomID]?.baselineHead = nil
             rooms[roomID]?.appliedThrough = nil
@@ -392,8 +385,13 @@ public actor V2RoomSubscriptionCoordinator {
                 try checkRun(id)
                 if rooms[roomID]?.authorized != authorized {
                     rooms[roomID]?.authorized = authorized
-                    rooms[roomID]?.authorPresentationGeneration = UUID()
-                    publish(roomID, authorOnly: true)
+                    if !authorized {
+                        rooms[roomID]?.wake = nil
+                        rooms[roomID]?.presence = nil
+                        rooms[roomID]?.typing = [:]
+                    }
+                    authorConnectionGeneration = UUID()
+                    publishAuthorConnection()
                 }
                 for channel in [V2RoomSubscriptionChannel.presence, .typing, .roomEvents] {
                     try checkRun(id)
@@ -416,8 +414,11 @@ public actor V2RoomSubscriptionCoordinator {
             } catch is CancellationError { throw CancellationError() }
             catch let error as V2RealtimeTransportError {
                 if case .server(let code, _, _, _) = error, code == "FORBIDDEN" {
+                    if rooms[roomID]?.serverRevoked != true {
+                        authorConnectionGeneration = UUID()
+                        publishAuthorConnection()
+                    }
                     rooms[roomID]?.serverRevoked = true
-                    rooms[roomID]?.authorPresentationGeneration = UUID()
                     rooms[roomID]?.presence = nil
                     rooms[roomID]?.typing = [:]
                     rooms[roomID]?.wake = nil
@@ -444,7 +445,6 @@ public actor V2RoomSubscriptionCoordinator {
             rooms[roomID]?.baselineHead = subscription.highWatermark
             rooms[roomID]?.appliedThrough = cursor
             rooms[roomID]?.recoveryID = UUID()
-            rooms[roomID]?.authorPresentationGeneration = UUID()
         case .typing:
             try await activity.subscribeTyping(roomID: roomID)
         case .presence:
@@ -574,19 +574,17 @@ public actor V2RoomSubscriptionCoordinator {
         requestReconciliation()
     }
 
-    private func publish(_ roomID: RoomID, authorOnly: Bool = false) {
+    private func publish(_ roomID: RoomID) {
         let now = Date()
         let currentTyping = rooms[roomID]?.typing.filter { $0.value.expiresAt > now } ?? [:]
         rooms[roomID]?.typing = currentTyping
         guard let room = rooms[roomID] else { return }
         for (consumerID, consumer) in room.consumers {
-            if authorOnly && !consumer.observesAuthorChanges { continue }
             let state: V2RoomSubscriptionSnapshot.State = runState == nil ? .offline :
                 !room.authorized || room.serverRevoked ? .revoked : consumer.channels.isSubset(of: room.confirmed) ? .subscribed : .reconciling
             let snapshot = V2RoomSubscriptionSnapshot(
                 roomID: roomID, connectionID: runState?.connectionID, state: state,
                 recoveryID: consumer.channels.contains(.roomEvents) ? room.recoveryID : nil,
-                authorPresentationGeneration: consumer.observesAuthorChanges ? room.authorPresentationGeneration : nil,
                 wake: consumer.channels.contains(.roomEvents) ? room.wake : nil,
                 baselineHead: consumer.channels.contains(.roomEvents) ? room.baselineHead : nil,
                 appliedThrough: consumer.channels.contains(.roomEvents) ? room.appliedThrough : nil,

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Run current server tests against seven fresh, owned PostgreSQL databases.
+# Run current server tests against nine fresh, owned PostgreSQL databases.
 # Requires an existing local PostgreSQL server and a role allowed to CREATE DATABASE.
 set -Eeuo pipefail
 
 if [[ "${1:-}" == '--help' ]]; then
   cat <<'HELP'
 Usage: PGHOST=127.0.0.1 PGPORT=55439 PGUSER=im_v2_test bash scripts/test_v2_server_native_postgres.sh [swift test options]
-Creates unique primary, secondary, control, resource, resource-target, actor-cancellation and actor-overload
+Creates unique primary, secondary, control, resource, resource-target, actor-cancellation, actor-overload, actor-control and actor-owner
 databases, enables disposable PostgreSQL tests, then removes only these databases
 on exit. Additional options
 (e.g. --filter PostgresV2RoomRecoverySchemaTests) are passed to swift test.
@@ -37,7 +37,7 @@ cleanup() {
   exit "$result"
 }
 trap cleanup EXIT
-for suffix in primary secondary control resource resource_target actor_cancel actor_overload; do
+for suffix in primary secondary control resource resource_target actor_cancel actor_overload actor_control actor_owner; do
   database="${prefix}_${suffix}"
   createdb --template=template0 "$database"
   created+=("$database")
@@ -68,5 +68,8 @@ export IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE=1
 export IMV2_ACTOR_CANCEL_MAINT_DATABASE_URL="$(connection_url "${prefix}_actor_cancel")"
 export IMV2_ACTOR_HOST_OVERLOAD_DATABASE_IS_DISPOSABLE=1
 export IMV2_ACTOR_HOST_OVERLOAD_DATABASE_URL="$(connection_url "${prefix}_actor_overload")"
-printf 'Running server tests with seven owned disposable databases (%s).\n' "$prefix"
+export IMV2_ACTOR_D4_TEST_DATABASE_IS_DISPOSABLE=1
+export IMV2_ACTOR_D4_CONTROL_DATABASE_URL="$(connection_url "${prefix}_actor_control")"
+export IMV2_ACTOR_D4_OWNER_DATABASE_URL="$(connection_url "${prefix}_actor_owner")"
+printf 'Running server tests with nine owned disposable databases (%s).\n' "$prefix"
 swift test --disable-automatic-resolution --package-path "${root_dir}/IMV2Server" --jobs 4 --no-parallel "$@"

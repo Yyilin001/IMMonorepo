@@ -4,8 +4,7 @@ import IMV2Core
 
 /// 本地置顶消息变更效果。
 ///
-/// 置顶顺序来自来源房间日志；历史载荷则依赖经过校验的房间信封。
-/// 个人同步游标无法补上该字段。
+/// 置顶顺序来自房间日志外层；正文携带序号时必须与外层一致。
 struct V2LocalPinnedMessageEffect {
     /// 来源事件标识。
     let sourceEventID: EventID
@@ -17,8 +16,8 @@ struct V2LocalPinnedMessageEffect {
     let isPinned: Bool
     /// 服务端事件时间戳（毫秒）。
     let updatedAtMilliseconds: Int64
-    /// 来源房间序号；历史载荷可能缺失。
-    let roomSequence: Int64?
+    /// 已验证的来源房间序号。
+    let roomSequence: Int64
     /// 由房间、消息、置顶状态、更新时间与发起者计算的规范摘要。
     let digest: Data
 
@@ -62,7 +61,8 @@ struct V2LocalPinnedMessageEffect {
                 guard expectedRoomSequence > 0, let source = Int64(exactly: expectedRoomSequence) else { throw V2ClientProjectionError.invalidMessagePayload }
                 roomSequence = source
             } else {
-                roomSequence = wire.room_sequence
+                guard let sequence = wire.room_sequence else { throw V2ClientProjectionError.invalidMessagePayload }
+                roomSequence = sequence
             }
             struct Canonical: Encodable {
                 let version = 1

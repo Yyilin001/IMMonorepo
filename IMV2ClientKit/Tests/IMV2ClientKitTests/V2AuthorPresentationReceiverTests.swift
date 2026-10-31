@@ -18,6 +18,22 @@ struct V2AuthorPresentationReceiverTests {
         #expect(try await fixture.receiver.receive(expired, for: view, at: start + .seconds(22))?.entries.isEmpty == true)
     }
 
+    @Test("server elapsed time preserves a fresh short grant on an older page without forgiving transit delay")
+    func serverElapsedAnchor() async throws {
+        let fixture = Fixture(), start = ContinuousClock.now
+        let view = try await fixture.receiver.beginView(streamID: UUID(), roomID: fixture.room, at: start)
+        let bytes = try fixture.delta(view: view, displaySeconds: 5, serverAge: 18_000).encoded()
+        let value = try #require(await fixture.receiver.receive(bytes, for: view, at: start + .seconds(20)))
+        guard case .presentation(_, _, let deadline, _) = value.entries.first else { throw Failure.missingEntry }
+        #expect(deadline == start + .seconds(23))
+        let stalled = try fixture.delta(view: view, sequence: 2, displaySeconds: 5, serverAge: 18_000).encoded()
+        #expect(try await fixture.receiver.receive(stalled, for: view, at: start + .seconds(25))?.entries.isEmpty == true)
+        let impossible = try fixture.delta(view: view, sequence: 3, displaySeconds: 5, serverAge: 26_000).encoded()
+        await #expect(throws: V2ProfilePresentationError.invalidResponse) {
+            _ = try await fixture.receiver.receive(impossible, for: view, at: start + .seconds(25))
+        }
+    }
+
     @Test("same socket and room re-entry rejects the previous view nonce and stale cleanup")
     func pageReplacement() async throws {
         let fixture = Fixture(), stream = UUID(), start = ContinuousClock.now
@@ -107,7 +123,8 @@ struct V2AuthorPresentationReceiverTests {
         guard case .presentation(_, let receivedAvatar, let deadline, let avatarDeadline) = result.entries.first else {
             throw Failure.missingEntry
         }
-        #expect(receivedAvatar == nil && avatarDeadline == nil)
+        #expect(receivedAvatar?.hasSameContent(as: avatar) == true)
+        #expect(receivedAvatar?.plan == nil && avatarDeadline == nil)
         #expect(deadline == start + .seconds(120))
     }
 
@@ -120,7 +137,7 @@ struct V2AuthorPresentationReceiverTests {
             self.actor = actor; self.device = device; self.room = room
             receiver = .init(actorUserID: actor, deviceID: device)
         }
-        func delta(view: V2AuthorPresentationView, sequence: UInt64 = 1, displaySeconds: TimeInterval = 120) throws -> V2AuthorPresentationDelta {
+        func delta(view: V2AuthorPresentationView, sequence: UInt64 = 1, displaySeconds: TimeInterval = 120, serverAge: Int64 = 0) throws -> V2AuthorPresentationDelta {
             let now = Date(timeIntervalSince1970: 2_000_000_000), revision = try #require(V2ProfileRevision(rawValue: 1))
             let profile = try V2ProfileView(userID: author, publicIdentity: nil, avatar: nil, state: .hidden,
                 revision: revision, visibilityRevision: revision)
@@ -128,7 +145,7 @@ struct V2AuthorPresentationReceiverTests {
                 profileRevision: revision, visibilityRevision: revision, contextRevision: 3,
                 observedAt: now, validUntil: now.addingTimeInterval(displaySeconds))
             return try .init(streamID: view.streamID, viewID: view.viewID, sequence: sequence,
-                actorUserID: actor, deviceID: device, roomID: room,
+                actorUserID: actor, deviceID: device, roomID: room, serverViewAgeMilliseconds: serverAge,
                 batch: .init(serverNowUnixMilliseconds: 2_000_000_000_000,
                     results: [.presentation(.init(view: profile, lease: lease), avatar: nil)]))
         }

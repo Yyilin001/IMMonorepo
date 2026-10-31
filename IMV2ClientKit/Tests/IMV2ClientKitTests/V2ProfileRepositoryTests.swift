@@ -25,8 +25,8 @@ struct V2ProfileRepositoryTests {
         #expect(await store.batchApplicationCount() == 1)
     }
 
-    @Test("pending invalidations use a bounded direct context and resolve after persistence")
-    func refreshesInvalidations() async throws {
+    @Test("explicit direct demand resolves an invalidation only after accepted persistence")
+    func explicitDemandResolvesInvalidations() async throws {
         let userID: UserID = try .init("00000000-0000-0000-0000-000000000a73")
         let view = try profile(userID: userID, revision: 4)
         let store = ProfileProjectionStore(invalidations: [
@@ -35,7 +35,7 @@ struct V2ProfileRepositoryTests {
         let key = V2ProfileViewLookupKey(userID: userID, context: .directConversation)
         let repository = V2ProfileRepository(store: store, reader: ProfileViewReader(results: [.profile(key: key, view: view)]))
 
-        #expect(try await repository.refreshPendingInvalidations() == Set([userID]))
+        #expect(try await repository.hydrate([.init(userID: userID, context: .directConversation)]) == Set([userID]))
         let persisted = await store.profile(userID)
         #expect(persisted == view)
         let resolved = try await repository.resolve(userID: userID, surface: .directConversation)

@@ -222,6 +222,7 @@ public enum V2ClientSyncError: Error, Equatable, Sendable {
     case storageRangeExceeded
     /// 记录序列为零，或批次应用发现顺序不符合要求。
     case invalidRecordOrdering
+    case unexpectedPersonalProjection(String)
     /// 本地要求完整快照重建，当前增量批次不能满足该要求。
     case snapshotRebuildRequired
     /// 同步代际或同代水位关系不符合约束。

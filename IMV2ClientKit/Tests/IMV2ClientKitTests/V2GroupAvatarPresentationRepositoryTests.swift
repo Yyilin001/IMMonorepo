@@ -6,6 +6,86 @@ import Testing
 
 @Suite("Group avatar visible authorization", .timeLimit(.minutes(1)))
 struct V2GroupAvatarPresentationRepositoryTests {
+    @Test("a URL expiring between download and refresh cannot masquerade as a renewed plan")
+    func expiryDuringDownload() async throws {
+        let f = GroupPresentationFixture(), reader = GroupPresentationGate(), clock = GroupMonotonicClock()
+        let repo = f.repository(reader, now: { clock.now }), page = try await repo.activate(roomID: f.room)
+        let value = try f.value(avatar: true)
+        let first = Task { try await repo.presentation(for: page) }
+        try await reader.waitForCount(1); await reader.finish(0, .success(value)); _ = try await first.value
+        let original = try #require(try await repo.avatarReadGrant(for: page))
+        clock.advance(61)
+        #expect(try await repo.avatarReadGrant(for: page)?.avatar.plan == nil)
+        let refresh = Task { try await repo.refreshAvatarReadGrant(for: page, replacing: original.avatar) }
+        try await reader.waitForCount(2)
+        await reader.finish(1, .failure(URLError(.notConnectedToInternet)))
+        await #expect(throws: (any Error).self) { _ = try await refresh.value }
+        try await original.requireValid()
+        #expect(try await repo.cachedPresentation(for: page) == value)
+        await repo.close()
+    }
+
+    @Test("group avatar renewal coalesces, preserves display on transport errors and respects revocation",
+          arguments: ["success", "transport", "denied", "invalidate", "deactivate", "unauthorized", "close", "expired"])
+    func avatarRenewal(scenario: String) async throws {
+        let f = GroupPresentationFixture(), reader = GroupPresentationGate(), clock = GroupMonotonicClock()
+        let repo = f.repository(reader, now: { clock.now }), page = try await repo.activate(roomID: f.room)
+        let value = try f.value(avatar: true), avatar = try #require(value.avatar)
+        let metadata = try V2GroupAvatarPresentation(actorUserID: value.actorUserID, deviceID: value.deviceID,
+            state: value.state, membershipRevision: value.membershipRevision, resourceGeneration: value.resourceGeneration,
+            canManage: value.canManage, avatar: avatar.withoutDownloadPlan(),
+            observedAt: Date(timeIntervalSince1970: Double(value.observedAtUnixMilliseconds) / 1_000),
+            validUntil: Date(timeIntervalSince1970: Double(value.validUntilUnixMilliseconds) / 1_000),
+            serverNow: Date(timeIntervalSince1970: Double(value.serverNowUnixMilliseconds) / 1_000))
+        let first = Task { try await repo.presentation(for: page) }
+        try await reader.waitForCount(1); await reader.finish(0, .success(metadata)); _ = try await first.value
+        let original = try #require(try await repo.avatarReadGrant(for: page))
+        let a = Task { try await repo.refreshAvatarReadGrant(for: page, replacing: original.avatar) }
+        let b = Task { try await repo.refreshAvatarReadGrant(for: page, replacing: original.avatar) }
+        try await waitConsumers(2, repo); try await reader.waitForCount(2)
+        try await original.requireValid()
+        #expect(try await repo.cachedPresentation(for: page) == metadata)
+        if scenario == "invalidate" { await repo.invalidate(roomID: f.room) }
+        if scenario == "deactivate" { await repo.deactivate(page) }
+        if scenario == "expired" { clock.advance(301) }
+        var closing: Task<Void, Never>?
+        if scenario == "close" {
+            closing = Task { await repo.close() }
+            try await waitConsumers(0, repo)
+        }
+        let result: Result<V2GroupAvatarPresentation, Error>
+        switch scenario {
+        case "transport": result = .failure(URLError(.notConnectedToInternet))
+        case "denied": result = .failure(V2GroupAvatarReadError.forbidden)
+        case "unauthorized": result = .failure(V2ClientMediaTransferError.authorizationUnavailable)
+        default: result = .success(value)
+        }
+        await reader.finish(1, result)
+        for task in [a, b] {
+            switch await task.result {
+            case .success(let renewed): #expect(scenario == "success" && renewed?.avatar.plan != nil)
+            case .failure: #expect(scenario != "success")
+            }
+        }
+        if scenario == "transport" {
+            try await original.requireValid()
+            #expect(try await repo.cachedPresentation(for: page) == metadata)
+            await #expect(throws: (any Error).self) { _ = try await repo.refreshAvatarReadGrant(for: page, replacing: original.avatar) }
+            #expect(await reader.rooms.count == 2)
+            clock.advance(3)
+            let recovered = Task { try await repo.refreshAvatarReadGrant(for: page, replacing: original.avatar) }
+            try await reader.waitForCount(3); await reader.finish(2, .success(value))
+            #expect(try await recovered.value?.avatar.plan != nil)
+        } else if scenario != "success" {
+            await #expect(throws: (any Error).self) { try await original.requireValid() }
+        } else {
+            #expect(try await repo.refreshAvatarReadGrant(for: page, replacing: original.avatar)?.avatar.plan != nil)
+            #expect(await reader.rooms.count == 2)
+        }
+        await closing?.value
+        await repo.close()
+    }
+
     @Test("a new denial, version or known-stale reply immediately notifies already visible consumers", arguments: ["denied", "version", "stale"])
     func visibleInvalidation(kind: String) async throws {
         let f = GroupPresentationFixture(), reader = ImmediateGroupPresentationReader(.success(try f.value()))
@@ -165,13 +245,16 @@ struct V2GroupAvatarPresentationRepositoryTests {
         // The server wall clock deliberately differs from the local wall clock.
         await reader.finish(0, .success(try f.value(avatar: true, serverNow: Date(timeIntervalSince1970: 1_000))))
         _ = try await request.value
-        #expect(try await repo.avatarAccess(for: token) != nil)
+        let grant = try #require(try await repo.avatarReadGrant(for: token))
         clock.advance(41)
-        #expect(try await repo.avatarAccess(for: token) == nil)
+        #expect(try await repo.avatarReadGrant(for: token)?.avatar.plan == nil)
+        #expect(try await repo.avatarReadGrant(for: token) != nil)
         #expect(try await repo.cachedPresentation(for: token) != nil)
+        try await grant.requireValid()
         clock.advance(240)
         #expect(try await repo.cachedPresentation(for: token) == nil)
         #expect(try await repo.authorizationDeadline(for: token) == nil)
+        await #expect(throws: V2ResourceStorageError.unavailable) { try await grant.requireValid() }
         await repo.close()
     }
 

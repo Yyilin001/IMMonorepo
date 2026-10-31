@@ -291,8 +291,8 @@ struct V2PrometheusTelemetrySinkTests {
             scheduledUserStateEventRows: 3,
             pausedUserStateEventRows: 4,
             oldestUnfinishedUserStateEventAgeSeconds: 120,
-            readyDirectProfileUpdates: 15,
-            leasedDirectProfileUpdates: 16,
+            readyProfileSecurityInvalidations: 15,
+            leasedProfileSecurityInvalidations: 16,
             readyReadReceiptPreferencePropagations: 29,
             leasedReadReceiptPreferencePropagations: 30,
             scheduledReadReceiptPreferencePropagations: 31,
@@ -339,8 +339,8 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_user_state_event_backlog{state=\"scheduled\"} 3"))
         #expect(rendered.contains("im_v2_user_state_event_backlog{state=\"paused\"} 4"))
         #expect(rendered.contains("im_v2_user_state_event_oldest_unfinished_age_seconds 120"))
-        #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
-        #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
+        #expect(rendered.contains("im_v2_profile_security_invalidation_backlog{state=\"ready\"} 15"))
+        #expect(rendered.contains("im_v2_profile_security_invalidation_backlog{state=\"leased\"} 16"))
         #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"ready\"} 29"))
         #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"leased\"} 30"))
         #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"scheduled\"} 31"))

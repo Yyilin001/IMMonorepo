@@ -725,20 +725,21 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     }
 
     private func beginLifetimePin(token: V2RoomActivationToken, generation: UUID,
-                                  id: UUID, deadline: ContinuousClock.Instant) throws -> ContinuousClock.Instant {
+                                  id: UUID, deadline: ContinuousClock.Instant) throws -> V2RoomActivationLifetime.Bounds {
         try Task.checkCancellation()
         try validateLifetime(token: token, generation: generation)
         guard let entry = entries[token.roomID], let proof = liveQualification(), clock.now < deadline else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
-        // Public authorization TTL remains finite without per-room ownership
-        // expiry. It cannot outlive this scope or process qualification.
-        let validUntil = min(deadline, min(proof.validUntil, clock.now + .seconds(30)))
+        // An RPC/SQL work budget is not the lifetime of successfully observed
+        // authority. Keep the captured qualification bound for evidence, while
+        // retaining the earlier caller deadline for actual work and settlement.
+        let authorizationValidUntil = min(proof.validUntil, clock.now + .seconds(30))
         guard entry.lifetimePins.insert(id).inserted else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
         entry.inFlightCalls += 1
-        return validUntil
+        return .init(deadline: min(deadline, authorizationValidUntil), authorizationValidUntil: authorizationValidUntil)
     }
 
     private func finishLifetimePin(token: V2RoomActivationToken, generation: UUID, id: UUID) {

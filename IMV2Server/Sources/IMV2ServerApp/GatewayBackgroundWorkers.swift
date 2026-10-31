@@ -45,7 +45,7 @@ struct GatewayBackgroundWorkers {
         let personalEventGCWorkers: [PostgresV2UserStateEventGCWorker]
         let messageProjectionStateGCWorkers: [PostgresV2MessageProjectionStateGCWorker]
         let forwardBackgroundDatabases: [String: any Database]
-        let directRoomProfilePropagationWorker: V2DirectRoomProfilePropagationWorker
+        let profileSecurityInvalidationWorker: V2ProfileSecurityInvalidationWorker
         let readReceiptPreferencePropagationWorker: V2ReadReceiptPreferencePropagationWorker
         let deviceRevocationWorker: V2DeviceRevocationWorker
         let moderationAuditRetentionWorker: V2ModerationAuditRetentionWorker
@@ -101,7 +101,7 @@ struct GatewayBackgroundWorkers {
                 personalEventGCWorkers: ownerMaintenance.personalEventGCWorkers,
                 messageProjectionStateGCWorkers: ownerMaintenance.messageProjectionStateGCWorkers,
                 forwardBackgroundDatabases: forwardDelivery.backgroundDatabases,
-                directRoomProfilePropagationWorker: maintenance.directRoomProfilePropagationWorker,
+                profileSecurityInvalidationWorker: maintenance.profileSecurityInvalidationWorker,
                 readReceiptPreferencePropagationWorker: maintenance.readReceiptPreferencePropagationWorker,
                 deviceRevocationWorker: maintenance.deviceRevocationWorker,
                 moderationAuditRetentionWorker: maintenance.moderationAuditRetentionWorker,

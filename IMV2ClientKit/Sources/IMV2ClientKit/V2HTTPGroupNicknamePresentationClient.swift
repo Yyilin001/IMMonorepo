@@ -101,7 +101,7 @@ public struct V2HTTPGroupNicknamePresentationClient: Sendable {
                 if deadline > .now {
                     snapshots[value.view.userID] = .init(presentation: value, deadline: deadline, avatar: nil, avatarDeadline: nil)
                 } else { retryable.insert(value.view.userID) }
-            case .unavailable(let key): unavailable.insert(key.userID)
+            case .unavailable(let denial): unavailable.insert(denial.key.userID)
             case .retryable(let key): retryable.insert(key.userID)
             }
         }

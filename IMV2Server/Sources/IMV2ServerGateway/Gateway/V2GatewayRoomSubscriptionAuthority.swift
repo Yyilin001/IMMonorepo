@@ -189,8 +189,10 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
             }
         } }
     }
-    public func apply(_ delivery: V2RoomSubscriptionDelivery, authenticatedServiceID: String) async -> ApplyResult {
-        await room(delivery.fence.roomID)?.apply(delivery, serviceID: authenticatedServiceID) ?? .stale
+    public func apply(_ delivery: V2RoomSubscriptionDelivery, authenticatedServiceID: String,
+                      observeAccepted: @escaping @Sendable (V2RoomSubscriptionDelivery) -> Void = { _ in }) async -> ApplyResult {
+        await room(delivery.fence.roomID)?.apply(delivery, serviceID: authenticatedServiceID,
+            observeAccepted: observeAccepted) ?? .stale
     }
     public func capturePermits(roomID: RoomID) async -> [Permit] { await room(roomID)?.capture(detail: true) ?? [] }
     public func captureOnlinePermits(roomID: RoomID) async -> [Permit] { await room(roomID)?.capture(detail: false) ?? [] }
@@ -353,13 +355,18 @@ fileprivate actor V2RoomSubscriptionActor {
         await settle()
         return .init(snapshot: (permit, result.highWatermark))
     }
-    func apply(_ delivery: V2RoomSubscriptionDelivery, serviceID: String) async -> V2GatewayRoomSubscriptionAuthority.ApplyResult {
+    func apply(_ delivery: V2RoomSubscriptionDelivery, serviceID: String,
+               observeAccepted: @Sendable (V2RoomSubscriptionDelivery) -> Void) async -> V2GatewayRoomSubscriptionAuthority.ApplyResult {
         await enter(); defer { leave() }
-        var result = machine.apply(delivery, authenticatedServiceID: serviceID)
+        var accepted = false
+        var result = machine.apply(delivery, authenticatedServiceID: serviceID, didApply: { accepted = true })
         if delivery.payload.isAuthorizationControl { projectionDirty = true }
         if case .applied = result {} else { projectionDirty = true }
         if case .applied(let permits) = result { result = .applied(permits: bind(permits)) }
         await settle()
+        // Only a new accepted delivery produces side effects, after its socket
+        // projections settle and before releasing this room's ordered lane.
+        if accepted { observeAccepted(delivery) }
         return result
     }
     private func bind(_ permits: [V2GatewayRoomSubscriptionAuthority.Permit]) -> [V2GatewayRoomSubscriptionAuthority.Permit] {
@@ -661,7 +668,8 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         }
     }
 
-    func apply(_ delivery: V2RoomSubscriptionDelivery, authenticatedServiceID: String) -> ApplyResult {
+    func apply(_ delivery: V2RoomSubscriptionDelivery, authenticatedServiceID: String,
+               didApply: () -> Void = {}) -> ApplyResult {
         // Immutable validation and replay hashing do not need the state lock.
         do { try delivery.validate(maximumMembers: maximumMembersPerRoom) } catch { return .invalid }
         let digest = V2RoomSubscriptionDeliveryFingerprint.digest(delivery)
@@ -814,6 +822,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                 if delivery.authorizationSequence > 256 { room.authorization.history.removeValue(forKey: delivery.authorizationSequence - 256) }
             }
             if !delivery.payload.isAuthorizationControl { room.messages.deliverySequence = delivery.deliverySequence }
+            didApply()
             return .applied(permits: permits)
         }
     }

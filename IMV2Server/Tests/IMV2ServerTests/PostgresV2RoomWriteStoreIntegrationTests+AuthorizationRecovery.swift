@@ -91,7 +91,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let persisted = try #require(try await sql.raw("SELECT disabled_at AS value FROM im_v2.account_disables WHERE operation_id = \(bind: command.operationID)").first(decoding: RevocationClockDateRow.self)).value
             #expect(outcome == .disabled(disabledAt: persisted))
             #expect(persisted >= before && persisted <= Date())
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.account_disables d JOIN im_v2.public_profile_update_outbox o ON o.source_event_id=d.operation_id JOIN im_v2.public_user_profiles p ON p.user_id=d.user_id JOIN im_v2.user_direct_send_policy_versions v ON v.user_id=d.user_id WHERE d.operation_id=\(bind: command.operationID) AND o.profile_updated_at=d.disabled_at AND o.created_at=d.disabled_at AND p.updated_at=d.disabled_at AND v.updated_at=d.disabled_at").first(decoding: CountRow.self)?.value == 1)
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.account_disables d JOIN im_v2.public_profile_update_outbox o ON o.source_event_id=d.operation_id JOIN im_v2.public_user_profiles p ON p.user_id=d.user_id JOIN im_v2.user_direct_send_policy_versions v ON v.user_id=d.user_id WHERE d.operation_id=\(bind: command.operationID) AND o.created_at=d.disabled_at AND p.updated_at=d.disabled_at AND v.updated_at=d.disabled_at").first(decoding: CountRow.self)?.value == 1)
             let other = try V2AccountDisableCommand(userID: senderID, operationID: UUID(), reason: .userRequested)
             for _ in 0..<3 {
                 let retry = try V2PostgresAccountDisableService(operatorPrincipal: "timestamp-maintenance", policyOwners: owners)
@@ -100,6 +100,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             #expect(try await count("im_v2.account_disables", on: sql) == 1)
             #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == 1)
+            #expect(try await count("im_v2.profile_security_invalidation_outbox", on: sql) == 1)
             await owners.shutdown()
         }
     }
@@ -120,6 +121,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         'profiles', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id) FROM im_v2.public_user_profiles r),
                         'policy', (SELECT jsonb_agg(to_jsonb(r) ORDER BY user_id) FROM im_v2.user_direct_send_policy_versions r),
                         'updates', (SELECT jsonb_agg(to_jsonb(r) ORDER BY source_event_id) FROM im_v2.public_profile_update_outbox r),
+                        'security', (SELECT jsonb_agg(to_jsonb(r) ORDER BY source_event_id) FROM im_v2.profile_security_invalidation_outbox r),
+                        'head', (SELECT sequence FROM im_v2.author_presentation_change_head WHERE singleton),
                         'devices', (SELECT count(*) FROM im_v2.auth_devices),
                         'refresh', (SELECT count(*) FROM im_v2.device_refresh_sessions),
                         'access', (SELECT count(*) FROM im_v2.device_access_tokens),
@@ -131,10 +134,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // A downstream persistence failure also rolls back the disable
             // record and policy update before a retry commits exactly once.
             try await sql.raw("CREATE FUNCTION im_v2.fail_disable_profile_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test profile update failure'; END $$").run()
-            try await sql.raw("CREATE TRIGGER fail_disable_profile_update BEFORE INSERT ON im_v2.public_profile_update_outbox FOR EACH ROW EXECUTE FUNCTION im_v2.fail_disable_profile_update()").run()
-            await #expect(throws: (any Error).self) { _ = try await service.disable(command) }
-            #expect(try await snapshot() == initial)
-            try await sql.raw("DROP TRIGGER fail_disable_profile_update ON im_v2.public_profile_update_outbox").run()
+            for table in ["public_profile_update_outbox", "profile_security_invalidation_outbox"] {
+                try await sql.raw("CREATE TRIGGER fail_disable_profile_update BEFORE INSERT ON im_v2.\(unsafeRaw: table) FOR EACH ROW EXECUTE FUNCTION im_v2.fail_disable_profile_update()").run()
+                await #expect(throws: (any Error).self) { _ = try await service.disable(command) }
+                #expect(try await snapshot() == initial)
+                try await sql.raw("DROP TRIGGER fail_disable_profile_update ON im_v2.\(unsafeRaw: table)").run()
+            }
             try await sql.raw("DROP FUNCTION im_v2.fail_disable_profile_update()").run()
             let results = try await withThrowingTaskGroup(of: V2AccountDisableOutcome.self) { group in
                 for _ in 0..<8 { group.addTask { try await service.disable(command) } }
@@ -152,6 +157,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.account_disables", on: sql) == 1)
             #expect(try await count("im_v2.public_user_profiles WHERE state = 'suspended'", on: sql) == 1)
             #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == 1)
+            #expect(try await count("im_v2.profile_security_invalidation_outbox", on: sql) == 1)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.account_disables WHERE user_id = \(bind: senderUUID) AND disabled_at = \(bind: committedAt)").first(decoding: CountRow.self)?.value == 1)
             let committed = try await snapshot()
             for _ in 0..<3 {

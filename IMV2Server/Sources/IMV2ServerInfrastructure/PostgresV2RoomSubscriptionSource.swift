@@ -206,10 +206,10 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
         _ operation: @escaping @Sendable (any SQLDatabase) async throws -> Value
     ) async throws -> Value {
         let deadline = V2RoomSQLDeadline.boundedTransactionDeadline()
-        return try await lifetime.withPin(deadline: deadline) { validUntil in
+        return try await lifetime.withPin(deadline: deadline) { bounds in
             return try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
-                callerDeadline: validUntil) {
-                try await v2WithRoomSnapshotConnection(database: database, deadline: validUntil) { sql in
+                callerDeadline: bounds.deadline) {
+                try await v2WithRoomSnapshotConnection(database: database, deadline: bounds.deadline) { sql in
                     try await operation(sql)
                 }
             }

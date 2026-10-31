@@ -10,6 +10,54 @@ import Testing
 
 @Suite("Room Cluster bridge authenticates native distributed exchanges", .serialized)
 struct V2RoomClusterBridgeTests {
+    @Test("100 independent profile viewers cross real TCP in one authenticated invocation")
+    func profileCohortAcrossTCP() async throws {
+        let fixture = try await Fixture(coordinatorUserCalls: true, profileCohorts: true)
+        var settings = ClusterSystemSettings(name: "v2-profile-caller", host: "127.0.0.1",
+            port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remote = await ClusterSystem("v2-profile-caller", settings: settings)
+        let caller = V2RoomClusterClient(system: remote, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var failure: (any Error)?
+        do {
+            try await caller.register(.init(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: [fixture.owner.shardID],
+                availableRooms: 2, isHealthy: true))
+            guard case .ready(let token) = try await caller.activate(on: fixture.identity,
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(5)) else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            let target = UserID(uuid: UUID())
+            let requests = (0..<100).map { _ in V2ActorProfileVisibilityBatchWire(roomID: fixture.room,
+                actorUserID: .init(uuid: UUID()), roomKind: .memberRoom, targetUserIDs: [target]) }
+            let before = await caller.callMetricsSnapshot()
+            let response = try await caller.invoke(token,
+                request: .mediaAuthorization(.profileVisibilityCohort(.init(roomID: fixture.room, requests: requests))),
+                principal: .service, deadline: .now + .seconds(5))
+            guard case .mediaAuthorization(.profilesVisibleCohort(let proofs)) = response else {
+                throw V2ActorAuthenticationError.invalidRequest
+            }
+            #expect(proofs.map(\.request) == requests)
+            for (index, proof) in proofs.enumerated() {
+                #expect(proof.activation == token && proof.membershipRevision == 3)
+                #expect(proof.visibleTargetUserIDs == (index.isMultiple(of: 2) ? [target] : []))
+            }
+            let after = await caller.callMetricsSnapshot()
+            #expect(after.roomInvocations - before.roomInvocations == 1)
+            #expect(after.cachedLocalCalls == before.cachedLocalCalls)
+            #expect(await fixture.executionCount.snapshot() == 1)
+        } catch { failure = error }
+        #expect(await caller.quiesce(deadline: .now + .seconds(3)))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
+        await fixture.inbound.stop()
+        try await remote.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
     @Test("send failure diagnostics preserve authentication category without remote error text")
     func sendFailureDiagnostics() {
         #expect(V2RoomClusterPeer.sendFailureReason(V2ActorAuthenticationError.sessionExpired)
@@ -1299,6 +1347,7 @@ struct V2RoomClusterBridgeTests {
              maximumResolveAttempts: Int = 3,
              maximumActiveRooms: Int = 2, restoreGateRoom: RoomID? = nil,
              coordinatorUserCalls: Bool = false, recoveryBatchGate: RecoveryBatchGate? = nil,
+             profileCohorts: Bool = false,
              maximumActivationWaitersPerHost: Int = 2, maximumConcurrentReservations: Int = 1,
              ownerShardID: String = "allowed", nativePlacement: Bool = false, raft: Bool = false,
              watchChanges: Bool = true,
@@ -1345,7 +1394,10 @@ struct V2RoomClusterBridgeTests {
             }
             host = .init(
                 identity: identity, placement: placement, configuration: configuration,
-                budget: V2RoomCommandBudget(configuration: configuration), classify: { _ in .barrier },
+                budget: V2RoomCommandBudget(configuration: configuration), classify: {
+                    if let count = $0.profileVisibilityTargetCount { return .profileVisibility(targetCount: count) }
+                    return .barrier
+                },
                 factory: .init(recoveryBatch: { items in
                     if let recoveryBatchGate { await recoveryBatchGate.execute(items.count) }
                     return .committed(items.map { item in
@@ -1363,6 +1415,19 @@ struct V2RoomClusterBridgeTests {
                           execute: { turn in
                               if let executeGate { await executeGate.wait() }
                               await count.record()
+                              if profileCohorts {
+                                  let now = Date()
+                                  return .committed(turn.items.map { item in
+                                      guard case .mediaAuthorization(.profileVisibilityCohort(let request)) = item.request else {
+                                          return .recovery(.failure(.invalidRequest))
+                                      }
+                                      return .mediaAuthorization(.profilesVisibleCohort(request.requests.enumerated().map { index, input in
+                                          .init(request: input, activation: token, membershipRevision: 3,
+                                              visibleTargetUserIDs: index.isMultiple(of: 2) ? input.targetUserIDs : [],
+                                              observedAt: now, activationExpiresAt: now.addingTimeInterval(20), permissionRevision: 1)
+                                      }))
+                                  })
+                              }
                               return .committed(turn.items.map { _ in .recovery(.failure(.invalidRequest)) })
                           },
                           invalidateReservation: { _ in

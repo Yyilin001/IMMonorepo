@@ -35,6 +35,14 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
             return try await groupAvatar(request)
         case .profileVisibilityBatch(let request):
             return try await executeProfileVisibilityBatch([request])[0]
+        case .profileVisibilityCohort(let request):
+            guard request.validatedTargetCount != nil else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+            let results = try await executeProfileVisibilityBatch(request.requests)
+            let snapshots = results.compactMap { result -> V2ActorProfileVisibilityBatchSnapshotWire? in
+                if case .profilesVisible(let value) = result { return value }; return nil
+            }
+            guard snapshots.count == request.requests.count else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            return .profilesVisibleCohort(snapshots)
         case .resourceUpload(let request):
             return try await resourceUpload(request)
         case .messageVisibility(let request):
@@ -85,11 +93,21 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
     func ownedTransaction<Value: Sendable>(
         _ body: @escaping @Sendable (any Database, ContinuousClock.Instant) async throws -> Value
     ) async throws -> Value {
-        try await lifetime.withPin(deadline: V2RoomSQLDeadline.boundedTransactionDeadline()) { validUntil in
-            try await V2RoomSQLDeadline.withDeadline(validUntil) {
+        try await lifetime.withPin(deadline: V2RoomSQLDeadline.boundedTransactionDeadline()) { bounds in
+            try await V2RoomSQLDeadline.withDeadline(bounds.deadline) {
                 try await v2WithRoomScopedTransaction(database: database) { transaction in
-                    try await body(transaction, validUntil)
+                    try await body(transaction, bounds.authorizationValidUntil)
                 }
+            }
+        }
+    }
+
+    private func ownedSnapshot<Value: Sendable>(
+        _ body: @escaping @Sendable (any SQLDatabase, ContinuousClock.Instant) async throws -> Value
+    ) async throws -> Value {
+        try await lifetime.withPin(deadline: V2RoomSQLDeadline.boundedTransactionDeadline()) { bounds in
+            try await v2WithRoomSnapshotConnection(database: database, deadline: bounds.deadline) { sql in
+                try await body(sql, bounds.authorizationValidUntil)
             }
         }
     }
@@ -142,7 +160,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
         }
     }
 
-    /// Only the local activation factory supplies a cohort of individually admitted user envelopes.
+    /// The activation factory combines admitted scalar and service cohort envelopes.
     /// Each viewer and target is evaluated in the same statement snapshot; no authorization cache.
     func executeProfileVisibilityBatch(_ requests: [V2ActorProfileVisibilityBatchWire]) async throws -> [V2RoomMediaAuthorizationResult] {
         guard let room = token.roomID.uuidValue, (1...100).contains(requests.count),
@@ -159,16 +177,24 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
         let encoded = try JSONEncoder().encode(input)
         guard encoded.count <= 64 * 1_024 else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         let payload = String(decoding: encoded, as: UTF8.self)
-        return try await ownedTransaction { transaction, validUntil in
-            guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            try await v2SetRoomActivationSQLTimeouts(.default, sql: sql)
-            try await scope.require([room], sql: sql)
+        return try await ownedSnapshot { sql, validUntil in
+            // Owner, membership, permissions and nicknames belong to one
+            // committed statement snapshot. A read does not need the writer's
+            // row lock or separate transaction controls. The native pin still
+            // rejects publication after retirement; the physical loan retains
+            // its deadline and cancellation ownership through actual return.
+            // Keep membership work keyed by each requested viewer/target. A
+            // flattened join can hash-scan the whole room twice for every
+            // 100-target batch. Two qualifying incarnations are deliberately
+            // retained: duplicate active memberships must still fail the exact
+            // row-count check below instead of silently choosing one grant.
             let rows = try await sql.raw("""
                 WITH requested AS MATERIALIZED (
                     SELECT * FROM jsonb_to_recordset(\(bind: payload)::jsonb)
                     AS x(ordinal integer, "targetOrdinal" integer, actor uuid, kind text, target uuid)
                 )
                 SELECT x.ordinal, x."targetOrdinal" AS target_ordinal, x.target,
+                       room.room_shard_id, room.owner_epoch,
                        room.membership_revision, room.group_permission_revision, statement_timestamp() AS observed_at,
 
                        visibility.allowed AS actor_visible,
@@ -180,12 +206,20 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                        nickname.nickname, nickname.revision AS nickname_revision
                 FROM im_v2.rooms room
                 CROSS JOIN requested x
-                LEFT JOIN im_v2.room_memberships actor ON actor.room_id = room.room_id AND actor.user_id = x.actor
-                  AND actor.joined_revision <= room.membership_revision
-                  AND (actor.left_revision IS NULL OR actor.left_revision > room.membership_revision)
-                LEFT JOIN im_v2.room_memberships member ON member.room_id = room.room_id AND member.user_id = x.target
-                  AND member.joined_revision <= room.membership_revision
-                  AND (member.left_revision IS NULL OR member.left_revision > room.membership_revision)
+                LEFT JOIN LATERAL (
+                    SELECT a.user_id, a.role FROM im_v2.room_memberships a
+                    WHERE a.room_id=room.room_id AND a.user_id=x.actor
+                      AND a.joined_revision<=room.membership_revision
+                      AND (a.left_revision IS NULL OR a.left_revision>room.membership_revision)
+                    LIMIT 2
+                ) actor ON true
+                LEFT JOIN LATERAL (
+                    SELECT m.user_id FROM im_v2.room_memberships m
+                    WHERE m.room_id=room.room_id AND m.user_id=x.target
+                      AND m.joined_revision<=room.membership_revision
+                      AND (m.left_revision IS NULL OR m.left_revision>room.membership_revision)
+                    LIMIT 2
+                ) member ON true
                 LEFT JOIN im_v2.room_member_nicknames nickname ON nickname.room_id = room.room_id AND nickname.user_id = member.user_id
                   AND room.room_kind = 'group' AND x.kind IN ('group','memberRoom') AND actor.user_id IS NOT NULL
                 CROSS JOIN LATERAL (SELECT (actor.user_id IS NOT NULL AND CASE WHEN x.kind='groupJoinReview' THEN
@@ -201,6 +235,10 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                 WHERE room.room_id = \(bind: room)
                 ORDER BY x.ordinal, x."targetOrdinal"
                 """).all(decoding: V2ProfileRoomLookupRow.self)
+            guard !rows.isEmpty else { throw V2RoomActorStateError.roomNotFound }
+            guard rows.allSatisfy({ $0.shardID == token.owner.shardID && $0.ownerEpoch == token.owner.epoch }) else {
+                throw V2RoomActorStateError.ownerChanged
+            }
             guard rows.count == input.count, try JSONEncoder().encode(rows).count <= 256 * 1_024 else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -210,15 +248,24 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                       row.observedAt.timeIntervalSince1970.isFinite,
                       !row.targetVisible || row.actorVisible else { throw V2RoomWriteStoreError.corruptPersistenceState }
             }
+            guard let observation = rows.first,
+                  rows.allSatisfy({ $0.observedAt == observation.observedAt
+                      && $0.membershipRevision == observation.membershipRevision
+                      && $0.permissionRevision == observation.permissionRevision }) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            // Capture the common monotonic-to-wall-clock bound once. Per-viewer
+            // conversion would produce slightly different deadlines for one proof.
+            let expiry = try proofExpiry(observedAt: observation.observedAt, validUntil: validUntil)
             let grouped = Dictionary(grouping: rows, by: \.ordinal)
-            let results = try requests.enumerated().map { ordinal, request -> V2RoomMediaAuthorizationResult in
+            let snapshots = try requests.enumerated().map { ordinal, request -> V2ActorProfileVisibilityBatchSnapshotWire in
                 guard let values = grouped[ordinal], let facts = values.first,
                       values.count == request.targetUserIDs.count,
                       values.allSatisfy({ $0.actorVisible == facts.actorVisible
                           && $0.observedAt == facts.observedAt && $0.membershipRevision == facts.membershipRevision
                           && $0.permissionRevision == facts.permissionRevision }) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                guard facts.actorVisible else { return .notVisible }
-                let expiry = try proofExpiry(observedAt: facts.observedAt, validUntil: validUntil)
+                // An empty visible set still carries the authoritative room
+                // versions. Negative observations need the same ordering as grants.
                 let members = try values.compactMap { row -> V2ActorGroupMemberPresentationWire? in
                     guard let revision = row.nicknameRevision else {
                         guard row.nickname == nil else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -233,15 +280,18 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                     guard member.groupNickname == row.nickname else { throw V2RoomWriteStoreError.corruptPersistenceState }
                     return .init(member)
                 }
-                return .profilesVisible(.init(request: request, activation: token, membershipRevision: facts.membershipRevision,
+                return .init(request: request, activation: token, membershipRevision: facts.membershipRevision,
                     visibleTargetUserIDs: values.filter(\.targetVisible).map { UserID(uuid: $0.target) },
                     observedAt: facts.observedAt, activationExpiresAt: expiry, groupMembers: members,
-                    permissionRevision: facts.permissionRevision))
+                    permissionRevision: facts.permissionRevision)
             }
-            guard try JSONEncoder().encode(results).count <= 256 * 1_024 else {
+            // Bound the current fixed reply representation, including its
+            // envelope. JSON is only the SQL input/row boundary, not the RPC.
+            // Runtime retained-model accounting remains independently charged.
+            guard try V2ActorProtobuf.encode(V2RoomResponse.mediaAuthorization(.profilesVisibleCohort(snapshots))).count <= 256 * 1_024 else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            return results
+            return snapshots.map(V2RoomMediaAuthorizationResult.profilesVisible)
         }
     }
 
@@ -312,11 +362,13 @@ private struct V2ProfileRoomInput: Encodable {
 
 private struct V2ProfileRoomLookupRow: Codable {
     let ordinal: Int; let targetOrdinal: Int; let target: UUID
+    let shardID: String; let ownerEpoch: Int64
     let actorVisible: Bool; let targetVisible: Bool
     let membershipRevision: Int64; let permissionRevision: Int64; let observedAt: Date
     let nickname: String?; let nicknameRevision: Int64?
     enum CodingKeys: String, CodingKey {
         case ordinal, target, targetOrdinal = "target_ordinal", actorVisible = "actor_visible", targetVisible = "target_visible"
+        case shardID = "room_shard_id", ownerEpoch = "owner_epoch"
         case membershipRevision = "membership_revision", permissionRevision = "group_permission_revision", observedAt = "observed_at"
         case nickname, nicknameRevision = "nickname_revision"
     }

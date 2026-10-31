@@ -636,7 +636,17 @@ struct V2ConversationStoreTests {
             }
             return try .init(sequence: UInt64(n), sourceEventID: .init(String(format: "00000000-0000-0000-0004-%012d", n)), projectionKind: activity ? "timeline_activity" : "message", payload: JSONSerialization.data(withJSONObject: payload))
         }
-        _ = try await local.apply(.init(generation: 1, records: records, nextSyncToken: .init("location-token"), receipt: .init("location-receipt"), hasMore: false, capabilityProfile: "base"))
+        let activities = try records.filter { $0.projectionKind == "timeline_activity" }.enumerated().map { index, record in
+            try V2ClientSyncRecord(sequence: UInt64(index + 1), sourceEventID: record.sourceEventID,
+                projectionKind: record.projectionKind, payload: record.payload)
+        }
+        _ = try await local.apply(.init(generation: 1, records: activities, nextSyncToken: .init("location-token"),
+            receipt: .init("location-receipt"), hasMore: false, capabilityProfile: "base"))
+        let messages = try records.filter { $0.projectionKind == "message" }.map { record in
+            try V2ClientGroupEvent(sourceEventID: record.sourceEventID, roomSequence: record.sequence,
+                projectionKind: record.projectionKind, payload: record.payload)
+        }
+        _ = try await local.applyGroupEventPage(.init(roomID: room, events: messages, nextRoomSequence: 1_000, hasMore: false))
         let store = makeConversationDetailStore(dataSource: V2GRDBConversationDataSource(localStore: local, requestLatestVisible: { _ in }), sender: nil, userID: user.rawValue, roomID: room.rawValue)
         await store.refresh()
         await store.loadTimeline(containing: messageID(1))

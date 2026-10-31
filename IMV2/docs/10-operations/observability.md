@@ -41,6 +41,29 @@ scrape 只在锁内复制值快照，Prometheus 文本在锁外渲染。因此�
 必须与服务在同一 host/pod 网络命名空间；该 endpoint 带 `no-store` 响应头，
 绝不能挂到公开媒体边缘或 realtime TLS 端口。
 
+启用作者资料 Runtime 时，同一回环 listener 提供 `/metrics/authors`，同样禁止缓存。
+其中 `im_v2_author_read_*` 按固定阶段记录初次控制查询、初次房间授权、控制复核、头像准备、
+投递前控制复核和房间复核的调用数、失败数及耗时总和/生涯最大值。`room_rpc` 独立记录
+每次实际房间端口调用（含两轮核权），一个多观察者 cohort 只计一次；阶段嵌套耗时不能相加。
+`dispatch_queue` 记录连接的资料键从准入到取出/排队过期的等待，`dispatch_task` 记录每个
+读取批次从调度到任务实际开始的等待，`dispatch_encode` 记录每份读取结果的校验、组帧和
+编码，`dispatch_write_queue` 记录已准备输出到写任务实际开始的等待，`dispatch_write`
+记录实际 sender 调用直至完成的耗时。前述任务等待按批次计数，其余按连接输出工作计数；
+暂时拥塞后的每次实际尝试均记录写入阶段；`write_deferred` 统计已安排的有界重试，
+不能把这些次数当成新资料读取、独立帧或客户端接收次数。
+分段取出的同连接需求可能产生多次队列观察。尚未结束的非协作写入不计入完成耗时。
+固定结果计数中的房间失败仍按受影响的观察者/上下文项计数，不能当成 RPC 次数。房间失败
+区分截止、容量、取消、归属变化、依赖不可用、请求被拒绝和未分类失败；分类只用于定位，
+失败返回仍为可重试，不能据此把暂时失败改成权限拒绝。另记录事实变化、工作超时、许可
+过期及资料/拒绝/重试；控制读取整体失败区分
+截止超时、准入限流、取消和其他错误，原错误仍向调用方传播。读取结果不是传输成功或客户端
+应用确认。指标只复制已完成的聚合观察，不保留身份、错误文本或资料内容，也不触发业务读取。
+固定的 `im_v2_author_*` 指标分别统计连接、可见兴趣、排队键/字节、在读批次、在写帧、
+输出/确认提示字节，以及拒绝、过期、读取前去重、投递和变更读取失败。指标只含聚合数值，
+不带作者、接收者、房间、URL 或任意输入标签；抓取不触发资料读取。排障需将这些指标与
+客户端资料 HTTP 次数、数据库公共内容读取及实际字节下载分别对照，不能用投递次数代替
+客户端已应用确认，也不能以连接总数证明冷启动容量通过。
+
 结构化命令日志与精确指标是两个不同合同。低于慢命令阈值的成功命令按
 `IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE` 采样；慢命令、拒绝和失败不走该采样，但按封闭的
 `(command, outcome, rejection)` 结果键由 `IM_V2_COMMAND_DIAGNOSTIC_LOG_MAX_PER_SECOND` 限制
@@ -89,7 +112,7 @@ room wake 的 viewer/room 数同样是进程内短暂兴趣状态，必须单独
 下一次刷新仍可恢复。个人事件来源按配置中的实际房间数据库去重统计，计数相加、
 最老年龄取最大；任一来源失败都不能作为完整零积压发布。快照包含
 `im_v2_user_state_event_backlog`、`im_v2_user_state_event_oldest_unfinished_age_seconds`、
-`im_v2_direct_profile_update_backlog`、
+`im_v2_profile_security_invalidation_backlog`、
 `im_v2_read_receipt_preference_propagation_backlog`、
 `im_v2_content_review_backlog`、`im_v2_media_scan_backlog`、
 `im_v2_media_purge_backlog`、

@@ -44,9 +44,8 @@ struct V2GroupAvatarProjectionTests {
     @Test("room progress comes only from committed authorized page processing and excludes trimmed gaps")
     func durableRoomProgressBoundary() async throws {
         let store = try makeStore(temporaryURL())
-        let projected = try fact(sequence: 1, revision: 1, roomSequence: 20)
-        _ = try await store.apply(batch([projected]))
-        // Personal projection maxima do not prove that the room log was applied.
+        _ = try await store.apply(batch([membership(sequence: 1, revision: 1)]))
+        // Personal membership does not prove that the room log was applied.
         #expect(try await store.roomProgressAppliedSequence(roomID: room) == nil)
         // A server-authorized empty filtered page can still be processed through.
         _ = try await store.applyGroupEventPage(.init(roomID: room, events: [], nextRoomSequence: 20, hasMore: false))
@@ -63,21 +62,29 @@ struct V2GroupAvatarProjectionTests {
         let url = temporaryURL()
         var store = try makeStore(url)
         let latest = try fact(sequence: 1, revision: 2, roomSequence: 20)
-        _ = try await store.apply(batch([latest]))
-        try await store.applyGroupEventPage(page(latest, sequence: 20))
-        _ = try await store.apply(batch([fact(sequence: 2, revision: 1, roomSequence: 10)]))
+        _ = try await store.applyGroupEventPage(page(fact(sequence: 1, revision: 1, roomSequence: 10), sequence: 10))
+        _ = try await store.applyGroupEventPage(page(latest, sequence: 20))
+        _ = try await store.applyGroupEventPage(page(latest, sequence: 20))
         #expect(try await store.groupAvatarRevision(roomID: room) == 2)
         #expect(try await store.roomAppliedRoomSequence(roomID: room) == 20)
         try await store.close()
         store = try makeStore(url)
-        for conflicting in [
-            try fact(sequence: 3, revision: 2, roomSequence: 20, source: "different-source"),
-            try fact(sequence: 3, revision: 1, roomSequence: 11),
-            try fact(sequence: 3, revision: 3, roomSequence: 19),
+        for (sequence, conflicting) in [
+            (UInt64(20), try fact(sequence: 3, revision: 2, roomSequence: 20, source: "different-source")),
+            (UInt64(11), try fact(sequence: 3, revision: 1, roomSequence: 11)),
+            (UInt64(19), try fact(sequence: 3, revision: 3, roomSequence: 19)),
         ] {
-            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.apply(batch([conflicting])) }
+            await #expect(throws: V2ClientSyncError.invalidRecordOrdering) {
+                _ = try await store.applyGroupEventPage(page(conflicting, sequence: sequence))
+            }
         }
-        #expect(try await store.cursor()?.appliedSequence == 2)
+        // A later log position must not carry a regressing content revision.
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+            _ = try await store.applyGroupEventPage(page(fact(sequence: 3, revision: 1,
+                roomSequence: 30, source: "regressing-revision"), sequence: 30))
+        }
+        #expect(try await store.cursor() == nil)
+        #expect(try await store.groupEventCursor(roomID: room) == 20)
         #expect(try await store.groupAvatarRevision(roomID: room) == 2)
         #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_group_avatar_effects") } == 2)
         try await store.close()
@@ -112,9 +119,9 @@ struct V2GroupAvatarProjectionTests {
         try await store.applyGroupEventPage(page(fact(sequence: 2, revision: 2, roomSequence: 20), sequence: 20))
         let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
         let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: room.rawValue), sourceEventID: member.sourceEventID, sequence: 1, payload: member.payload)
-        let old = try fact(sequence: 2, revision: 1, roomSequence: 10)
-        let avatar = try V2SnapshotProjectionItem(key: .init(projectionKind: "group_capability", entityKey: "avatar:" + room.rawValue.lowercased()), sourceEventID: old.sourceEventID, sequence: 2, payload: old.payload)
-        let fixture = try makeSnapshotFixture(reset: reset, pages: removed ? [] : [.init(items: [avatar, item])])
+        // Personal snapshots contain membership only; recovered room-log
+        // invalidations are retained exactly when this room remains eligible.
+        let fixture = try makeSnapshotFixture(reset: reset, pages: removed ? [] : [.init(items: [item])])
         try await store.beginReset(reset)
         try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
         for page in fixture.pages { try await store.applySnapshotPage(page, for: fixture.manifest) }

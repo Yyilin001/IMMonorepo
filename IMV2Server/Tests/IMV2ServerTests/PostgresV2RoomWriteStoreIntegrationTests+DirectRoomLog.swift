@@ -484,8 +484,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("display-name updates propagate to direct peers in bounded, idempotent pages")
-    func propagatesDisplayNameToExistingDirectPeers() async throws {
+    @Test("ordinary profile edits avoid fanout and durable security invalidations resume checkpoints")
+    func ordinaryProfileChangesAvoidFanoutAndSecurityInvalidationsRecover() async throws {
         guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
               ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
@@ -498,7 +498,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let identityDatabaseID = DatabaseID(string: "direct-profile-identity")
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: identityDatabaseID)
             guard let sql = resources.database(.psql) as? any SQLDatabase else {
-                throw V2DirectRoomProfilePropagationError.corruptPersistenceState
+                throw V2ProfileSecurityInvalidationError.corruptPersistenceState
             }
             guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
                 throw TestConfigurationError.schemaAlreadyExists
@@ -576,10 +576,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await personalWorker.runOnce(limit: 100) == 6)
             #expect(try await personalWorker.runOnce(limit: 100) == 0)
 
-            let profileEventID = UUID(uuidString: "00000000-0000-0000-0000-00000000a020")!
+            let updateEventID = UUID(uuidString: "00000000-0000-0000-0000-00000000a020")!
             let directory = V2PostgresPublicIdentityDirectory(
                 database: resources.database(.psql), policy: try .init(maximumQueries: 10, window: 60),
-                makeUUID: { profileEventID }, now: { now.addingTimeInterval(1) }
+                makeUUID: { updateEventID }, now: { now.addingTimeInterval(1) }
             )
             let updated = try await directory.updateDisplayName(for: sourceUserID, displayName: "新名称")
             #expect(updated.displayName == "新名称")
@@ -598,11 +598,30 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 routeFence: router,
                 coLocatedControlBuckets: ["users-primary"]
             )
+            let ordinaryWorker = V2ProfileSecurityInvalidationWorker(database: resources.database(.psql), projectionDelivery: shadow)
+            #expect(try await ordinaryWorker.runOnce(limit: 8).claimedUpdateCount == 0)
+            #expect(try await count("im_v2.profile_security_invalidation_outbox", on: sql) == 0)
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: updateEventID)").first(decoding: CountRow.self)?.value == 0)
+            let profileEventID = UUID(uuidString: "00000000-0000-0000-0000-00000000a021")!
+            let disabled = try await withFixturePolicyOwners(database: resources.database(.psql),
+                projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+                let service = try V2PostgresAccountDisableService(operatorPrincipal: "account-safety-primary", policyOwners: owners)
+                return try await service.disable(.init(userID: sourceUserID,
+                    operationID: profileEventID, reason: .policyEnforcement))
+            }
+            guard case .disabled(let disabledAt) = disabled else {
+                throw V2AccountDisableError.unavailable
+            }
+            let persistedDisable = try #require(try await sql.raw("""
+                SELECT disabled_at AS value FROM im_v2.account_disables
+                WHERE user_id = \(bind: sourceUUID) AND operation_id = \(bind: profileEventID)
+                """).first(decoding: ProjectionEligibility.self)).value
+            #expect(disabledAt == persistedDisable)
             // Simulate a process loss after the control-plane sync record was
             // committed but before it reached the current user shard. The
             // expired lease must retry that exact source event rather than
             // append a second control record or skip the first recipient.
-            let interruptedWorker = V2DirectRoomProfilePropagationWorker(
+            let interruptedWorker = V2ProfileSecurityInvalidationWorker(
                 database: resources.database(.psql), projectionDelivery: ProfilePropagationFailingProjectionDelivery(),
                 now: { now.addingTimeInterval(2) }
             )
@@ -613,7 +632,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 SELECT COUNT(*)::bigint AS value FROM im_v2.user_sync_log
                 WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'direct_room_profile'
                 """).first(decoding: CountRow.self))
-            #expect(interruptedControlCount.value == 1)
+            #expect(interruptedControlCount.value == 0)
             let interruptedInvalidationCount = try #require(try await sql.raw("""
                 SELECT COUNT(*)::bigint AS value FROM im_v2.user_sync_log
                 WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'profile_invalidation'
@@ -621,17 +640,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(interruptedInvalidationCount.value == 1)
             let interruptedOutbox = try #require(try await sql.raw("""
                 SELECT state, enumeration_checkpoint IS NOT NULL AS checkpointed
-                FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: profileEventID)
+                FROM im_v2.profile_security_invalidation_outbox WHERE source_event_id = \(bind: profileEventID)
                 """).first(decoding: ProfilePropagationOutboxRow.self))
             #expect(interruptedOutbox.state == "claimed")
             #expect(!interruptedOutbox.checkpointed)
             try await sql.raw("""
-                UPDATE im_v2.public_profile_update_outbox
+                UPDATE im_v2.profile_security_invalidation_outbox
                 SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
                 WHERE source_event_id = \(bind: profileEventID)
                 """).run()
             let recoveryNow = Date()
-            let worker = V2DirectRoomProfilePropagationWorker(
+            let worker = V2ProfileSecurityInvalidationWorker(
                 database: resources.database(.psql), projectionDelivery: shadow, now: { recoveryNow }
             )
             let firstPage = try await worker.runOnce(limit: 1)
@@ -639,7 +658,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(firstPage.completedUpdateCount == 0)
             let pending = try #require(try await sql.raw("""
                 SELECT state, enumeration_checkpoint IS NOT NULL AS checkpointed
-                FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: profileEventID)
+                FROM im_v2.profile_security_invalidation_outbox WHERE source_event_id = \(bind: profileEventID)
                 """).first(decoding: ProfilePropagationOutboxRow.self))
             #expect(pending.state == "pending")
             #expect(pending.checkpointed)
@@ -649,7 +668,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(secondPage.completedUpdateCount == 1)
             let completed = try #require(try await sql.raw("""
                 SELECT state, completed_at IS NOT NULL AS completed
-                FROM im_v2.public_profile_update_outbox WHERE source_event_id = \(bind: profileEventID)
+                FROM im_v2.profile_security_invalidation_outbox WHERE source_event_id = \(bind: profileEventID)
                 """).first(decoding: ProfilePropagationCompletedRow.self))
             #expect(completed.state == "completed")
             #expect(completed.completed)
@@ -660,9 +679,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 WHERE source_event_id = \(bind: profileEventID) AND projection_kind = 'direct_room_profile'
                 ORDER BY user_id
                 """).all(decoding: ProfilePropagationProjectionRow.self)
-            #expect(projections.map(\.userID) == [firstPeerUUID, secondPeerUUID])
-            #expect(projections.allSatisfy { $0.displayName == "新名称" && $0.revision == 2 })
-            #expect(projections.allSatisfy { UUID(uuidString: $0.roomID)?.uuidString == $0.roomID })
+            #expect(projections.isEmpty)
             let invalidations = try await sql.raw("""
                 SELECT user_id, payload->>'user_id' AS user_id_payload,
                        (payload->>'minimum_profile_revision')::bigint AS minimum_profile_revision
@@ -672,39 +689,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).all(decoding: ProfileInvalidationAssertionRow.self)
             #expect(invalidations.map(\.recipientUserID) == [firstPeerUUID, secondPeerUUID])
             #expect(invalidations.allSatisfy {
-                $0.invalidatedUserID == sourceUUID && $0.minimumProfileRevision == 2
+                $0.invalidatedUserID == sourceUUID && $0.minimumProfileRevision == 3
             })
 
             // A completed source event is never reprojected on a later poll.
             let replay = try await worker.runOnce(limit: 8)
             #expect(replay.projectedRecipientCount == 0)
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: firstPeerUUID, on: sql) == 3)
-            #expect(try await scopedCount("im_v2", "user_sync_log", user: secondPeerUUID, on: sql) == 3)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: firstPeerUUID, on: sql) == 2)
+            #expect(try await scopedCount("im_v2", "user_sync_log", user: secondPeerUUID, on: sql) == 2)
 
-            let disableOperationID = UUID(uuidString: "00000000-0000-0000-0000-00000000a021")!
-            let disabled = try await withFixturePolicyOwners(database: resources.database(.psql),
-                projectionDelivery: SuccessfulProjectionDelivery()) { owners in
-                let service = try V2PostgresAccountDisableService(operatorPrincipal: "account-safety-primary", policyOwners: owners)
-                return try await service.disable(.init(userID: sourceUserID,
-                    operationID: disableOperationID, reason: .policyEnforcement))
-            }
-            guard case .disabled(let disabledAt) = disabled else {
-                throw V2AccountDisableError.unavailable
-            }
-            let persistedDisable = try #require(try await sql.raw("""
-                SELECT disabled_at AS value FROM im_v2.account_disables
-                WHERE user_id = \(bind: sourceUUID) AND operation_id = \(bind: disableOperationID)
-                """).first(decoding: ProjectionEligibility.self)).value
-            #expect(disabledAt == persistedDisable)
-            let suspensionWorker = V2DirectRoomProfilePropagationWorker(
-                database: resources.database(.psql), projectionDelivery: shadow, now: Date.init)
-            let suspensionReport = try await suspensionWorker.runOnce(limit: 8)
-            let suspensionProfiles = try await sql.raw("SELECT user_id FROM im_v2.user_sync_log WHERE source_event_id = \(bind: disableOperationID) AND projection_kind = 'direct_room_profile'").all(decoding: ProjectionRecipientAssertionRow.self)
-            let suspensionInvalidations = try await sql.raw("SELECT user_id, payload->>'profile_state' AS profile_state, (payload->>'minimum_profile_revision')::bigint AS minimum_profile_revision FROM im_v2.user_sync_log WHERE source_event_id = \(bind: disableOperationID) AND projection_kind = 'profile_invalidation' ORDER BY user_id").all(decoding: ProfileSuspensionInvalidationAssertionRow.self)
-            #expect(suspensionReport == .init(claimedUpdateCount: 1, projectedRecipientCount: 2, completedUpdateCount: 1))
-            #expect(suspensionProfiles.isEmpty)
-            #expect(suspensionInvalidations.map(\.recipientUserID) == [firstPeerUUID, secondPeerUUID])
-            #expect(suspensionInvalidations.allSatisfy { $0.profileState == "suspended" && $0.minimumProfileRevision == 3 })
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()

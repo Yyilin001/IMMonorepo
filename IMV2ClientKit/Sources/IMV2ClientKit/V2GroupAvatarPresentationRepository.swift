@@ -14,9 +14,11 @@ public enum V2GroupAvatarPresentationError: Error, Equatable, Sendable {
 /// Account/device-owned, memory-only authorization. A new visible activation
 /// reauthorizes even when another page already has the same image on disk.
 public actor V2GroupAvatarPresentationRepository {
+    private enum ReadPolicy { case cached, refreshAvatar(replacing: V2ResourceAvatarAccess?) }
     private struct Activation {
         let roomID: RoomID
         var authorized = false
+        var authorityGeneration = UUID()
         var observerID: UUID?
         var observer: AsyncStream<Void>.Continuation?
     }
@@ -25,6 +27,7 @@ public actor V2GroupAvatarPresentationRepository {
         let deadline: ContinuousClock.Instant
         let byteDeadline: ContinuousClock.Instant?
         let cost: Int
+        var avatarRefreshNotBefore: ContinuousClock.Instant?
     }
     private struct Waiter {
         let activation: V2GroupAvatarActivation
@@ -143,13 +146,39 @@ public actor V2GroupAvatarPresentationRepository {
         for id in activations.keys where activations[id]?.roomID == room {
             let wasVisible = activations[id]?.authorized == true
             activations[id]?.authorized = false
+            activations[id]?.authorityGeneration = UUID()
             if wasVisible { activations[id]?.observer?.yield(()) }
         }
     }
 
     public func presentation(for token: V2GroupAvatarActivation) async throws -> V2GroupAvatarPresentation {
+        try await readPresentation(for: token, policy: .cached)
+    }
+
+    public func refreshAvatarReadGrant(for token: V2GroupAvatarActivation,
+                                      replacing avatar: V2ResourceAvatarAccess?) async throws -> V2AvatarReadGrant? {
+        _ = try await readPresentation(for: token, policy: .refreshAvatar(replacing: avatar))
+        return try await avatarReadGrant(for: token)
+    }
+
+    private func readPresentation(for token: V2GroupAvatarActivation, policy: ReadPolicy) async throws -> V2GroupAvatarPresentation {
         try Task.checkCancellation()
-        if let cached = try await validatedAccess(token) { return cached.value }
+        if let cached = try await validatedAccess(token) {
+            switch policy {
+            case .cached: return cached.value
+            case .refreshAvatar(let previous):
+                let content = cached.byteDeadline.map { $0 > now() } == true ? cached.value.avatar : cached.value.avatar?.withoutDownloadPlan()
+                let sameContent = previous.flatMap { old in content.map { $0.hasSameContent(as: old) } } ?? false
+                if cached.value.state.mediaID == nil || (content != previous && (!sameContent || content?.plan != nil)) { return cached.value }
+                if demand[token.roomID] == nil {
+                    if let until = cached.avatarRefreshNotBefore, until > now() {
+                        let remaining = now().duration(to: until).components
+                        throw V2GroupAvatarReadError.throttled(retryAfter: Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18)
+                    }
+                    access[token.roomID]?.avatarRefreshNotBefore = now() + .seconds(Double.random(in: 2.1...2.5))
+                }
+            }
+        }
         try requireActive(token)
         if let cooldown = cooldowns[token.roomID], cooldown.until > now() { throw cooldown.error }
         cooldowns.removeValue(forKey: token.roomID)
@@ -174,9 +203,23 @@ public actor V2GroupAvatarPresentationRepository {
         try await validatedAccess(token)?.deadline
     }
 
-    public func avatarAccess(for token: V2GroupAvatarActivation) async throws -> V2ResourceAvatarAccess? {
-        guard let entry = try await validatedAccess(token), let deadline = entry.byteDeadline, deadline > now() else { return nil }
-        return entry.value.avatar
+    public func avatarReadGrant(for token: V2GroupAvatarActivation) async throws -> V2AvatarReadGrant? {
+        guard let entry = try await validatedAccess(token), let content = entry.value.avatar,
+              let generation = activations[token.id]?.authorityGeneration else { return nil }
+        let downloadable = entry.byteDeadline.map { $0 > now() } == true
+        return .init(avatar: downloadable ? content : content.withoutDownloadPlan(), home: .room(token.roomID),
+            deadline: entry.deadline, downloadDeadline: downloadable ? entry.byteDeadline : nil, now: now) { [weak self] in
+                guard let self else { return false }
+                return try await self.validateAvatarRead(token, generation: generation, value: entry.value)
+            }
+    }
+
+    private func validateAvatarRead(_ token: V2GroupAvatarActivation, generation: UUID,
+                                   value: V2GroupAvatarPresentation) async throws -> Bool {
+        guard let current = try await validatedAccess(token), activations[token.id]?.authorityGeneration == generation,
+              current.value.state == value.state, current.value.resourceGeneration == value.resourceGeneration,
+              current.value.membershipRevision == value.membershipRevision, let avatar = value.avatar else { return false }
+        return current.value.avatar?.hasSameContent(as: avatar) == true
     }
 
     private func validatedAccess(_ token: V2GroupAvatarActivation) async throws -> Access? {
@@ -235,28 +278,33 @@ public actor V2GroupAvatarPresentationRepository {
             guard elapsedSeconds >= 0, remaining > 0, remaining <= 300 else { throw V2GroupAvatarPresentationError.expired }
             let cost = try JSONEncoder().encode(value).count
             guard cost <= 64 * 1_024 else { throw V2GroupAvatarPresentationError.invalidResponse }
-            let byteDeadline = value.avatar.map {
-                instant.advanced(by: .seconds(Double($0.plan.expiresAtUnixMilliseconds - value.serverNowUnixMilliseconds) / 1_000 - elapsedSeconds))
+            let byteDeadline = value.avatar?.plan.map {
+                instant.advanced(by: .seconds(Double($0.expiresAtUnixMilliseconds - value.serverNowUnixMilliseconds) / 1_000 - elapsedSeconds))
             }
             if let prior = access[room]?.value,
                prior.state != value.state || prior.resourceGeneration != value.resourceGeneration ||
-                prior.membershipRevision != value.membershipRevision || prior.canManage != value.canManage {
+                prior.membershipRevision != value.membershipRevision || prior.canManage != value.canManage ||
+                prior.avatar?.withoutDownloadPlan() != value.avatar?.withoutDownloadPlan() {
                 revokeVisibleAccess(room)
             }
+            let avatarRefreshNotBefore = access[room]?.avatarRefreshNotBefore
             removeAccess(room)
             while access.count >= 256 || bytes > maximumBytes - cost {
                 guard let oldest = access.min(by: { $0.value.deadline < $1.value.deadline }) else { break }
                 removeAccess(oldest.key)
             }
-            access[room] = .init(value: value, deadline: instant.advanced(by: .seconds(remaining)), byteDeadline: byteDeadline, cost: cost)
+            access[room] = .init(value: value, deadline: instant.advanced(by: .seconds(remaining)), byteDeadline: byteDeadline,
+                                 cost: cost, avatarRefreshNotBefore: avatarRefreshNotBefore)
             bytes += cost; cooldowns.removeValue(forKey: room)
             for waiter in demand[room]?.waiters.values ?? Dictionary<UUID, Waiter>().values {
                 if waiter.activation.epoch == epoch { activations[waiter.activation.id]?.authorized = true }
             }
             complete(room, result: .success(value))
         } catch {
-            removeAccess(room)
-            if error as? V2GroupAvatarPresentationError == .staleRevision { revokeVisibleAccess(room) }
+            if error as? V2GroupAvatarPresentationError == .staleRevision || error as? V2GroupAvatarReadError == .forbidden
+                || error as? V2ClientMediaTransferError == .authorizationUnavailable {
+                removeAccess(room); revokeVisibleAccess(room)
+            }
             // Only a definite denial or explicit server backoff suppresses new
             // reads. Transport failures must never be cached as permission denial.
             if let failure = error as? V2GroupAvatarReadError {

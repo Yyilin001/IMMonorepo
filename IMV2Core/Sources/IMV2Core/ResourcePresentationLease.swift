@@ -10,6 +10,7 @@ public struct V2PresentationAccessLease: Equatable, Codable, Sendable {
     public let profileRevision: V2ProfileRevision
     public let visibilityRevision: V2ProfileRevision
     public let contextRevision: UInt64
+    public let authorityVersion: V2PresentationAuthorityVersion
     public let observedAtUnixMilliseconds: Int64
     public let validUntilUnixMilliseconds: Int64
     public var observedAt: Date { V2ResourceTime.date(observedAtUnixMilliseconds) }
@@ -17,19 +18,21 @@ public struct V2PresentationAccessLease: Equatable, Codable, Sendable {
 
     public init(actorUserID: UserID, deviceID: DeviceID, key: V2ProfileViewLookupKey,
                 profileRevision: V2ProfileRevision, visibilityRevision: V2ProfileRevision,
-                contextRevision: UInt64, observedAt: Date, validUntil: Date) throws {
+                contextRevision: UInt64, authorityVersion: V2PresentationAuthorityVersion, observedAt: Date, validUntil: Date) throws {
         try self.init(actorUserID: actorUserID, deviceID: deviceID, key: key, profileRevision: profileRevision,
-                      visibilityRevision: visibilityRevision, contextRevision: contextRevision,
+                      visibilityRevision: visibilityRevision, contextRevision: contextRevision, authorityVersion: authorityVersion,
                       observedAtUnixMilliseconds: V2ResourceTime.milliseconds(observedAt),
                       validUntilUnixMilliseconds: V2ResourceTime.milliseconds(validUntil))
     }
 
     private init(actorUserID: UserID, deviceID: DeviceID, key: V2ProfileViewLookupKey,
                  profileRevision: V2ProfileRevision, visibilityRevision: V2ProfileRevision,
-                 contextRevision: UInt64, observedAtUnixMilliseconds: Int64, validUntilUnixMilliseconds: Int64) throws {
+                 contextRevision: UInt64, authorityVersion: V2PresentationAuthorityVersion,
+                 observedAtUnixMilliseconds: Int64, validUntilUnixMilliseconds: Int64) throws {
         let duration = validUntilUnixMilliseconds.subtractingReportingOverflow(observedAtUnixMilliseconds)
         guard !duration.overflow, duration.partialValue > 0,
-              duration.partialValue <= Self.maximumLifetimeMilliseconds, contextRevision <= UInt64(Int64.max)
+              duration.partialValue <= Self.maximumLifetimeMilliseconds, contextRevision <= UInt64(Int64.max),
+              authorityVersion.matches(key.context), authorityVersion.membershipRevision == contextRevision
         else { throw V2ResourceValidationError.invalidPresentationLease }
         self.actorUserID = actorUserID
         self.deviceID = deviceID
@@ -37,12 +40,13 @@ public struct V2PresentationAccessLease: Equatable, Codable, Sendable {
         self.profileRevision = profileRevision
         self.visibilityRevision = visibilityRevision
         self.contextRevision = contextRevision
+        self.authorityVersion = authorityVersion
         self.observedAtUnixMilliseconds = observedAtUnixMilliseconds
         self.validUntilUnixMilliseconds = validUntilUnixMilliseconds
     }
 
     private enum CodingKeys: String, CodingKey {
-        case actorUserID, deviceID, key, profileRevision, visibilityRevision, contextRevision
+        case actorUserID, deviceID, key, profileRevision, visibilityRevision, contextRevision, authorityVersion
         case observedAtUnixMilliseconds, validUntilUnixMilliseconds
     }
     public init(from decoder: any Decoder) throws {
@@ -50,6 +54,7 @@ public struct V2PresentationAccessLease: Equatable, Codable, Sendable {
         try self.init(actorUserID: values.decode(UserID.self, forKey: .actorUserID), deviceID: values.decode(DeviceID.self, forKey: .deviceID),
                       key: values.decode(V2ProfileViewLookupKey.self, forKey: .key), profileRevision: values.decode(V2ProfileRevision.self, forKey: .profileRevision),
                       visibilityRevision: values.decode(V2ProfileRevision.self, forKey: .visibilityRevision), contextRevision: values.decode(UInt64.self, forKey: .contextRevision),
+                      authorityVersion: values.decode(V2PresentationAuthorityVersion.self, forKey: .authorityVersion),
                       observedAtUnixMilliseconds: values.decode(Int64.self, forKey: .observedAtUnixMilliseconds),
                       validUntilUnixMilliseconds: values.decode(Int64.self, forKey: .validUntilUnixMilliseconds))
     }

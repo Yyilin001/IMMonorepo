@@ -15,6 +15,7 @@ final class V2AvatarPipeline {
         let identity: V2PublicIdentity?
         let image: V2SendableImage?
         let deadline: ContinuousClock.Instant
+        var avatarRetryAt: ContinuousClock.Instant?
     }
     let profiles: V2ProfilePresentationRepository
     let groups: V2GroupAvatarPresentationRepository
@@ -54,57 +55,112 @@ final class V2AvatarPipeline {
         guard let presentation = try await profiles.presentation(for: key, activation: activation),
               let initial = await profiles.cachedSnapshot(for: key, activation: activation),
               initial.presentation == presentation else { return nil }
-        var image: V2SendableImage?
-        if let access = initial.avatar, let pixels {
+        var decoded: AuthorizedAvatarImage?, retryAt: ContinuousClock.Instant?
+        if presentation.view.avatar != nil, let pixels {
             do {
-                let file = try await files.avatar(access, home: .account(key.userID))
-                image = await thumbnails.thumbnail(fileURL: file.fileURL, maximumPixelSize: pixels)
-                await file.release()
+                let original = await profiles.avatarReadGrant(for: key, activation: activation)
+                decoded = try await avatarImage(original, pixels: pixels) {
+                    try await self.profiles.refreshAvatarReadGrant(for: key, activation: activation, replacing: original?.avatar)
+                }
+                if decoded == nil { retryAt = avatarRetryDeadline() }
             } catch is CancellationError { throw CancellationError() }
-            catch { /* A failed byte capability does not revoke the independent name lease. */ }
+            catch { decoded = nil; retryAt = avatarRetryDeadline(error) }
         }
         try Task.checkCancellation()
-        guard !isClosed, !isSuspending, generation == startedGeneration,
-              let current = await profiles.cachedSnapshot(for: key, activation: activation),
+        let latest = await profiles.cachedSnapshot(for: key, activation: activation)
+        guard !isClosed, !isSuspending, generation == startedGeneration, let current = latest,
               current.presentation.view == initial.presentation.view,
               current.presentation.groupMember == initial.presentation.groupMember,
               current.presentation.contactAlias == initial.presentation.contactAlias,
-              current.presentation.lease.contextRevision == initial.presentation.lease.contextRevision,
-              initial.deadline > .now else { return nil }
-        // Compare immutable content identity, not a rotating signed URL. A
-        // concurrent lease extension cannot extend this older decode's deadline.
-        if current.avatar?.mediaID != initial.avatar?.mediaID || current.avatar?.variantID != initial.avatar?.variantID
-            || current.avatar?.version != initial.avatar?.version || current.avatar?.checksum != initial.avatar?.checksum { image = nil }
+              current.presentation.lease.contextRevision == initial.presentation.lease.contextRevision else { return nil }
+        // The name can use a newly observed lease. Pixels retain the exact
+        // grant used by the download/decode, including an explicit URL refresh.
+        if let value = decoded, value.deadline <= .now || current.avatar?.hasSameContent(as: value.avatar) != true {
+            decoded = nil; retryAt = avatarRetryDeadline()
+        }
         return .init(key: key, name: current.presentation.contactAlias?.remarkName ?? current.presentation.groupMember?.groupNickname ?? current.presentation.view.publicIdentity?.displayName ?? "用户",
-                     identity: current.presentation.view.publicIdentity, image: image, deadline: min(initial.deadline, current.deadline))
+                     identity: current.presentation.view.publicIdentity, image: decoded?.image,
+                     deadline: min(decoded?.deadline ?? current.deadline, current.deadline), avatarRetryAt: retryAt)
     }
     struct GroupSnapshot: Sendable {
         let image: V2SendableImage?
         let deadline: ContinuousClock.Instant
+        var avatarRetryAt: ContinuousClock.Instant?
     }
     func groupSnapshot(activation: V2GroupAvatarActivation, pixels: Int) async throws -> GroupSnapshot {
         guard !isClosed, !isSuspending else { throw V2GroupAvatarPresentationError.inactive }
+        let startedGeneration = generation
         let presentation = try await groups.presentation(for: activation)
-        var image: V2SendableImage?
-        if let access = presentation.avatar {
+        var decoded: AuthorizedAvatarImage?, retryAt: ContinuousClock.Instant?
+        if presentation.state.mediaID != nil {
             do {
-                let file = try await files.avatar(access, home: .room(activation.roomID))
-                image = await thumbnails.thumbnail(fileURL: file.fileURL, maximumPixelSize: pixels)
-                await file.release()
-                guard image != nil else { throw V2ClientMediaTransferError.invalidResponse }
-            } catch V2ClientMediaTransferError.targetExpired {
-                await groups.invalidate(roomID: activation.roomID)
-                throw V2ClientMediaTransferError.targetExpired
-            }
+                let original = try await groups.avatarReadGrant(for: activation)
+                decoded = try await avatarImage(original, pixels: pixels) {
+                    try await self.groups.refreshAvatarReadGrant(for: activation, replacing: original?.avatar)
+                }
+                if decoded == nil { retryAt = avatarRetryDeadline() }
+            } catch is CancellationError { throw CancellationError() }
+            catch { decoded = nil; retryAt = avatarRetryDeadline(error) }
         }
         try Task.checkCancellation()
-        guard !isClosed, let current = try await groups.cachedPresentation(for: activation),
+        guard !isClosed, !isSuspending, generation == startedGeneration,
+              let current = try await groups.cachedPresentation(for: activation),
               current.state == presentation.state, current.resourceGeneration == presentation.resourceGeneration,
               current.membershipRevision == presentation.membershipRevision,
               let deadline = try await groups.authorizationDeadline(for: activation) else {
             throw V2GroupAvatarPresentationError.inactive
         }
-        return .init(image: image, deadline: deadline)
+        guard !isClosed, !isSuspending, generation == startedGeneration else { throw V2GroupAvatarPresentationError.inactive }
+        if let value = decoded, value.deadline <= .now || current.avatar?.hasSameContent(as: value.avatar) != true {
+            decoded = nil; retryAt = avatarRetryDeadline()
+        }
+        return .init(image: decoded?.image, deadline: min(decoded?.deadline ?? deadline, deadline), avatarRetryAt: retryAt)
+    }
+
+    private struct AuthorizedAvatarImage {
+        let image: V2SendableImage
+        let avatar: V2ResourceAvatarAccess
+        let deadline: ContinuousClock.Instant
+    }
+    private func avatarImage(_ original: V2AvatarReadGrant?, pixels: Int,
+                             refresh: () async throws -> V2AvatarReadGrant?) async throws -> AuthorizedAvatarImage? {
+        let authorization: V2AvatarReadGrant, file: V2ConversationMediaFileLease
+        if let original {
+            do {
+                file = try await files.avatar(original)
+                authorization = original
+            } catch {
+                switch error {
+                case V2ClientMediaTransferError.targetExpired, V2ClientMediaTransferError.authorizationDenied,
+                     V2ClientMediaTransferError.serverStatus(401), V2ClientMediaTransferError.serverStatus(403),
+                     V2ClientMediaTransferError.serverStatus(404): break
+                case let failure as V2HTTPFailure where [401, 403, 404].contains(failure.statusCode ?? 0): break
+                default: throw error
+                }
+                guard let renewed = try await refresh() else { return nil }
+                authorization = renewed; file = try await files.avatar(renewed)
+            }
+        } else {
+            guard let renewed = try await refresh() else { return nil }
+            authorization = renewed; file = try await files.avatar(renewed)
+        }
+        let image = await thumbnails.thumbnail(fileURL: file.fileURL, maximumPixelSize: pixels)
+        await file.release()
+        try await authorization.requireValid()
+        return image.map { .init(image: $0, avatar: authorization.avatar, deadline: authorization.deadline) }
+    }
+
+    private func avatarRetryDeadline(_ error: (any Error)? = nil) -> ContinuousClock.Instant {
+        let requested: TimeInterval
+        if let error {
+            switch error {
+            case V2ProfilePresentationError.throttled(let delay), V2GroupAvatarReadError.throttled(let delay): requested = delay
+            case let failure as V2HTTPFailure: requested = failure.retryAfter?.timeIntervalSinceNow ?? 0
+            default: requested = 0
+            }
+        } else { requested = 0 }
+        let bounded = requested.isFinite ? min(315_576_000, max(0, requested)) : 0
+        return .now + .seconds(max(bounded, Double.random(in: 2.5...3.5)))
     }
     func suspend() async {
         guard !isClosed, !isSuspending else { return }
@@ -293,7 +349,7 @@ private struct V2AuthorizedProfileView: View {
                 subscription = try await .init(activation: activation, updates: pipeline.profiles.invalidations(for: activation))
             } catch { await pipeline.profiles.deactivate(activation); return }
         }
-        var failures = 0
+        var failures = 0, avatarRetries = V2AvatarRetrySchedule()
         while !Task.isCancelled && failures < 5 {
             do {
                 let pixels: Int? = if case .avatar(let size, _) = appearance { min(512, max(1, Int(size * scale))) } else { nil }
@@ -306,7 +362,14 @@ private struct V2AuthorizedProfileView: View {
                 snapshotGeneration = activeGeneration; snapshotRefresh = activeRefresh
                 snapshotActivation = page == nil ? nil : activation; snapshotPageRevision = pageRevision
                 snapshot = value; failures = 0
-                if let deadline = value?.deadline { try await ContinuousClock().sleep(until: deadline) }
+                if let deadline = value?.deadline {
+                    if let retry = avatarRetries.next(retryAt: value?.avatarRetryAt, deadline: deadline), retry < deadline {
+                        try await ContinuousClock().sleep(until: retry)
+                        continue // Keep the independently authorized name visible.
+                    }
+                    try await ContinuousClock().sleep(until: deadline)
+                    avatarRetries = .init()
+                }
                 else { try await Task.sleep(for: .seconds(30)) }
                 snapshot = nil
             } catch is CancellationError { break }

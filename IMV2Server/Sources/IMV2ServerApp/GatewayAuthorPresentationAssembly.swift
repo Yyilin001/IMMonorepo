@@ -10,12 +10,19 @@ import IMV2ServerInfrastructure
 /// ownership below accept only the resource delivery port.
 enum GatewayAuthorPresentationAssembly {
     static func build(controlDatabase: any Database, actors: V2RoomActorApplication,
-                      delivery: any V2ResourceDelivery) throws -> V2AuthorPresentationRuntime {
+                      delivery: any V2ResourceDelivery) async throws -> V2AuthorPresentationRuntime {
         let profiles = V2ResourceProfilePresentationService(controlDatabase: controlDatabase,
             authorization: .init(directory: actors.directory), avatars: .init(delivery: delivery))
-        return .init(configuration: try .init(), ingressConfiguration: try .init(), read: { request, identity in
-            try await profiles.read(request, actorUserID: identity.userID, deviceID: identity.deviceID)
-        }, closeReader: { await profiles.close() })
+        let runtime = V2AuthorPresentationRuntime(configuration: try .init(), ingressConfiguration: try .init(), readBatch: { requests in
+            try await profiles.readMany(requests)
+        }, readDiagnostics: { profiles.readDiagnostics.snapshot() }, closeReader: { await profiles.close() })
+        do {
+            try await runtime.startProfileChanges(PostgresV2AuthorProfileChangeReader(database: controlDatabase))
+            return runtime
+        } catch {
+            await runtime.close()
+            throw error
+        }
     }
 
     /// Signs for the account resource-byte endpoint with the same configured backend registry.

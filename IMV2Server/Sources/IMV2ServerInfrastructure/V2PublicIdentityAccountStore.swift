@@ -152,10 +152,8 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
             }
             try await sql.raw("""
                 INSERT INTO im_v2.public_profile_update_outbox
-                    (source_event_id, source_user_id, public_handle, display_name, account_kind, profile_state, revision, profile_updated_at, created_at)
-                VALUES (\(bind: makeUUID()), \(bind: userUUID), \(bind: validated.handle.rawValue),
-                    \(bind: validated.displayName), \(bind: validated.accountKind.rawValue), 'active',
-                    \(bind: updated.revision), \(bind: updated.updatedAt), \(bind: changedAt))
+                    (source_event_id, source_user_id, revision, created_at)
+                VALUES (\(bind: makeUUID()), \(bind: userUUID), \(bind: updated.revision), \(bind: changedAt))
                 """).run()
             return validated
         }

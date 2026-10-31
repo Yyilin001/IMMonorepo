@@ -384,7 +384,7 @@ struct V2ResourceGroupAvatarPostgresTests {
                 #expect(value.state.mediaID == media && value.avatar?.mediaID == media)
                 #expect(value.resourceGeneration == 1 && !value.canManage && value.deviceID == device)
                 #expect(value.validUntilUnixMilliseconds - value.observedAtUnixMilliseconds <= 300_000)
-                #expect(try #require(value.avatar).plan.expiresAtUnixMilliseconds <= value.validUntilUnixMilliseconds)
+                #expect(try #require(value.avatar?.plan).expiresAtUnixMilliseconds <= value.validUntilUnixMilliseconds)
             } else {
                 await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
                     _ = try await service.read(roomID: f.room, actorUserID: f.member, deviceID: device)

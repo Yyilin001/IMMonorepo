@@ -126,7 +126,7 @@ struct V2MemberRoleRecoveryTests {
         try await reopened.close()
     }
 
-    @Test("snapshot member history merges removals and rejects conflicting sources", arguments: ["stale", "payload", "source", "sequence"])
+    @Test("personal reset preserves member removals and rejects conflicting room replays", arguments: ["stale", "payload", "source", "sequence"])
     func snapshotMemberHistory(scenario: String) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "member-snapshot-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -148,64 +148,64 @@ struct V2MemberRoleRecoveryTests {
         if scenario == "payload" { payload["role"] = "member" }
         if scenario == "sequence" { payload["room_sequence"] = 3 }
         let manifest = try await Self.importSnapshot(store, items: [
-            .init(key: .init(projectionKind: "room", entityKey: Self.room.rawValue), sourceEventID: grant.sourceEventID, sequence: 1, payload: grant.payload),
-            .init(key: .init(projectionKind: "group_capability", entityKey: "member-role:\(Self.room.rawValue):\(Self.member.rawValue)"),
-                sourceEventID: scenario == "source" ? .init(uuid: UUID()) : source, sequence: 8,
-                payload: JSONSerialization.data(withJSONObject: payload))
+            .init(key: .init(projectionKind: "room", entityKey: Self.room.rawValue), sourceEventID: grant.sourceEventID, sequence: 1, payload: grant.payload)
         ])
+        try await store.prepareSnapshotActivation(manifest)
+        try await store.activateAcknowledgedSnapshot(manifest)
+        #expect(try await store.cursor()?.generation == 2)
+        // Personal reset preserves both the role and its later removal from
+        // the room log. Replaying its old role must not resurrect that member.
+        let replay = try V2ClientGroupEvent(sourceEventID: scenario == "source" ? .init(uuid: UUID()) : source,
+            roomSequence: 1, projectionKind: "group_capability", payload: JSONSerialization.data(withJSONObject: payload))
+        let page = try V2ClientGroupEventPage(roomID: Self.room, events: [replay], nextRoomSequence: 2, hasMore: false)
+        let before = try await store.cursor()
         if scenario == "stale" {
-            try await store.prepareSnapshotActivation(manifest)
-            try await store.activateAcknowledgedSnapshot(manifest)
-            #expect(try await store.cursor()?.generation == 2)
-            // An absent source room sequence is enriched from the retained room log,
-            // never from the snapshot's unrelated personal sequence 8.
-            #expect(try await store.databasePool.read { try Int64.fetchOne($0, sql: "SELECT room_sequence FROM v2_member_effects WHERE source_event_id = ?", arguments: [source.rawValue]) } == 1)
-            #expect(try await store.databasePool.read { try String.fetchOne($0, sql: "SELECT action FROM v2_member_effects WHERE room_id = ? AND user_id = ? ORDER BY membership_revision DESC LIMIT 1", arguments: [Self.room.rawValue, Self.member.rawValue]) } == "remove")
+            let result = try await store.applyGroupEventPageReportingChanges(page)
+            #expect(result.insertedEventCount == 0)
         } else {
-            let before = try await store.cursor()
-            #expect(before?.state == .resetPending)
-            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(manifest) }
-            #expect(try await store.cursor() == before)
-            #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_member_effects") } == 3)
+            await #expect(throws: V2ClientSyncError.invalidRecordOrdering) { try await store.applyGroupEventPage(page) }
         }
+        #expect(try await store.cursor() == before)
+        #expect(try await store.databasePool.read { try Int64.fetchOne($0, sql: "SELECT room_sequence FROM v2_member_effects WHERE source_event_id = ?", arguments: [source.rawValue]) } == 1)
+        #expect(try await store.databasePool.read { try String.fetchOne($0, sql: "SELECT action FROM v2_member_effects WHERE room_id = ? AND user_id = ? ORDER BY membership_revision DESC LIMIT 1", arguments: [Self.room.rawValue, Self.member.rawValue]) } == "remove")
         #expect(try await store.groupEventCursor(roomID: Self.room) == 2)
         #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_group_member_roles") } == 0)
         try await store.close()
     }
 
-    @Test("member history rejects noninteger versions and sequences without advancing", arguments:
-        ["history", "membership_revision", "room_sequence", "projection_sequence"], [1.5, Double(Int64.max)])
+    // Sequence storage is checked during snapshot retention below. New role
+    // reduction reads the membership revisions, not old transport positions.
+    @Test("member reduction rejects noninteger history revisions without advancing", arguments:
+        ["history", "membership_revision"], [1.5, Double(Int64.max)])
     func memberStorageTypes(location: String, value: Double) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "member-storage-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"),
             installationBinding: .init(value: UUID()), userID: Self.viewer)
-        func record(_ revision: Int, _ sequence: UInt64, source: EventID = .init(uuid: UUID())) throws -> V2ClientSyncRecord {
-            try .init(sequence: sequence, sourceEventID: source, projectionKind: "group_capability",
+        func record(_ revision: Int) throws -> V2ClientGroupEvent {
+            try .init(sourceEventID: .init(uuid: UUID()), roomSequence: UInt64(revision), projectionKind: "group_capability",
                 payload: JSONSerialization.data(withJSONObject: ["event_type": "group.member_role_changed",
                     "room_id": Self.room.rawValue, "target_user_id": Self.member.rawValue,
                     "role": "admin", "membership_revision": revision, "room_sequence": revision]))
         }
-        func apply(_ record: V2ClientSyncRecord) async throws {
-            _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("member"),
-                receipt: .init("member"), hasMore: false, capabilityProfile: "base"))
+        func applyRoomEvent(_ event: V2ClientGroupEvent) async throws {
+            _ = try await store.applyGroupEventPage(.init(roomID: Self.room, events: [event], nextRoomSequence: event.roomSequence, hasMore: false))
         }
-        let original = try record(2, 1)
-        try await apply(original)
-        if location == "history" { try await apply(record(4, 2)) }
+        let original = try record(2)
+        try await applyRoomEvent(original)
+        if location == "history" { try await applyRoomEvent(record(4)) }
         let column = location == "history" ? "membership_revision" : location
-        let before = try await store.cursor()
-        // Keep the effect receipt but remove the separate delivery receipt so a
-        // personal redelivery exercises the effect's independent replay checks.
+        let before = try await store.groupEventCursor(roomID: Self.room)
+        // A subsequent room event must validate retained history before
+        // reducing the current role; corruption cannot be silently skipped.
         try await store.databasePool.write { db in
-            if location != "history" { try db.execute(sql: "DELETE FROM v2_sync_events") }
             try db.execute(sql: "UPDATE v2_member_effects SET \(column) = ? WHERE source_event_id = ?",
                 arguments: [value, original.sourceEventID.rawValue])
         }
-        let incoming = try location == "history" ? record(5, 3) : record(2, 2, source: original.sourceEventID)
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await apply(incoming) }
-        #expect(try await store.cursor() == before)
+        let incoming = try location == "history" ? record(5) : record(3)
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await applyRoomEvent(incoming) }
+        #expect(try await store.groupEventCursor(roomID: Self.room) == before)
         let state = try await store.databasePool.read { db in
             let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM v2_member_effects WHERE source_event_id = ?", arguments: [original.sourceEventID.rawValue])
             let raw = try Double.fetchOne(db, sql: "SELECT \(column) FROM v2_member_effects WHERE source_event_id = ?", arguments: [original.sourceEventID.rawValue])
@@ -219,10 +219,11 @@ struct V2MemberRoleRecoveryTests {
         #expect(state.3 == (location == "history" ? 4 : 2))
         try await store.databasePool.write { db in
             try db.execute(sql: "UPDATE v2_member_effects SET \(column) = ? WHERE source_event_id = ?",
-                arguments: [column == "projection_sequence" ? 1 : 2, original.sourceEventID.rawValue])
+                arguments: [2, original.sourceEventID.rawValue])
         }
-        try await apply(incoming)
-        #expect(try await store.cursor()?.appliedSequence == incoming.sequence)
+        try await applyRoomEvent(incoming)
+        #expect(try await store.groupEventCursor(roomID: Self.room) == incoming.roomSequence)
+        #expect(try await store.cursor() == nil)
         try await store.close()
     }
 
@@ -272,22 +273,29 @@ struct V2MemberRoleRecoveryTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: .init(value: UUID()), userID: Self.viewer)
         let grant = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(uuid: UUID()), projectionKind: "membership",
             payload: Self.membership(user: Self.viewer, action: "add", revision: 1))
-        let role = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init(uuid: UUID()), projectionKind: "group_capability",
+        let role = try V2ClientGroupEvent(sourceEventID: .init(uuid: UUID()), roomSequence: 10, projectionKind: "group_capability",
             payload: JSONSerialization.data(withJSONObject: ["event_type": "group.member_role_changed", "room_id": Self.room.rawValue,
                 "target_user_id": Self.member.rawValue, "role": "admin", "membership_revision": 2, "room_sequence": 10]))
-        _ = try await store.apply(.init(generation: 1, records: [grant, role], nextSyncToken: .init("members"), receipt: .init("members"), hasMore: false, capabilityProfile: "base"))
+        _ = try await store.apply(.init(generation: 1, records: [grant], nextSyncToken: .init("members"), receipt: .init("members"), hasMore: false, capabilityProfile: "base"))
+        _ = try await store.applyGroupEventPage(.init(roomID: Self.room, events: [role], nextRoomSequence: 10, hasMore: false))
         let removal = try V2ClientGroupEvent(sourceEventID: .init(uuid: UUID()), roomSequence: 20, projectionKind: "membership",
             payload: Self.membership(user: Self.member, action: "remove", revision: 3))
         _ = try await store.applyGroupEventPage(.init(roomID: Self.room, events: [removal], nextRoomSequence: 20, hasMore: false))
         let manifest = try await Self.importSnapshot(store, items: [
-            .init(key: .init(projectionKind: "room", entityKey: Self.room.rawValue), sourceEventID: grant.sourceEventID, sequence: 1, payload: grant.payload),
-            .init(key: .init(projectionKind: "group_capability", entityKey: "member-role:\(Self.room.rawValue):\(Self.member.rawValue)"), sourceEventID: role.sourceEventID, sequence: 8, payload: role.payload)
+            .init(key: .init(projectionKind: "room", entityKey: Self.room.rawValue), sourceEventID: grant.sourceEventID, sequence: 1, payload: grant.payload)
         ])
         let shadow = location.hasPrefix("shadow-")
         let table = shadow ? "v2_snapshot_shadow_member_effects" : "v2_member_effects"
         let column = String(location.split(separator: "-", maxSplits: 1)[1])
         let cursor = try await store.cursor()
         let original = try await store.databasePool.write { db in
+            if shadow {
+                // Shadow history is a local copy of the room log, never a
+                // public record supplied by the personal snapshot. Inject its
+                // corruption explicitly to exercise the staging validator.
+                try db.execute(sql: "INSERT INTO v2_snapshot_shadow_member_effects SELECT * FROM v2_member_effects WHERE source_event_id = ?",
+                    arguments: [role.sourceEventID.rawValue])
+            }
             let original = try #require(try Int64.fetchOne(db, sql: "SELECT \(column) FROM \(table) WHERE source_event_id = ?", arguments: [role.sourceEventID.rawValue]))
             try db.execute(sql: "UPDATE \(table) SET \(column) = ? WHERE source_event_id = ?", arguments: [value, role.sourceEventID.rawValue])
             return original

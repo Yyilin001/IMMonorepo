@@ -2,10 +2,10 @@ import Crypto
 import Foundation
 import IMV2Core
 
-/// 个人同步与两个房间事件入口共用的已解析消息事实。
+/// 房间日志入口使用的已解析消息事实。
 ///
 /// 摘要覆盖语义内容，但排除投递流游标与 JSON 书写形式；构造过程始终复用既有的线路解码器，
-/// 以保证两条路径得到完全相同的解析结果。
+/// 以保证实时投递与补拉得到完全相同的解析结果。
 enum V2LocalMessageEffect: Encodable {
     /// 消息被接受。
     case accepted(V2ClientMessageProjection)

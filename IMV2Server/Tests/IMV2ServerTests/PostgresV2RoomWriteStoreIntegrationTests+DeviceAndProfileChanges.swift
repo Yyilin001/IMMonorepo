@@ -719,7 +719,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 policy: try .init(maximumQueries: 10, window: 60), makeUUID: { operation }, now: { now })
             let updated = try await directory.updateDisplayName(for: senderID, displayName: "Precise name")
             #expect(try await directory.updateDisplayName(for: senderID, displayName: "Precise name") == updated)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.public_profile_update_outbox o JOIN im_v2.public_user_profiles p ON p.user_id = o.source_user_id WHERE o.source_event_id = \(bind: operation) AND o.profile_updated_at = p.updated_at AND o.created_at = p.updated_at AND p.updated_at = \(bind: now) AND o.revision = p.revision AND o.display_name = p.display_name").first(decoding: CountRow.self)?.value == 1)
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.public_profile_update_outbox o JOIN im_v2.public_user_profiles p ON p.user_id = o.source_user_id WHERE o.source_event_id = \(bind: operation) AND o.created_at = p.updated_at AND p.updated_at = \(bind: now) AND o.revision = p.revision").first(decoding: CountRow.self)?.value == 1)
             #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == 1)
         }
     }

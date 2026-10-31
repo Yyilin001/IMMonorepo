@@ -132,7 +132,7 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             return .init(scopes: .resources, requiresImmediateRefresh: false)
         case "v2_resource_references", "v2_resource_access_generation", "v2_resource_room_denials":
             return .init(scopes: .resources, requiresImmediateRefresh: true)
-        case "v2_local_profile_display_meta", "v2_local_profile_display", "v2_resource_file_operations", "v2_resource_query_checkpoints": return .none
+        case "v2_local_profile_display", "v2_resource_file_operations", "v2_resource_query_checkpoints": return .none
         case "v2_resource_transfer_staging": return .init(scopes: .resources, requiresImmediateRefresh: false)
         case "v2_room_recovery_work", "v2_room_recovery_scan", "v2_send_intent_dependencies", "v2_send_intent_import_dependencies":
             return .none

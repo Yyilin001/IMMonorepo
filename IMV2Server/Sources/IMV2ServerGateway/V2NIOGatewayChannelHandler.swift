@@ -251,12 +251,15 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                 await withCheckedContinuation { continuation in
                     eventLoop.execute {
                         let handler = boundHandler.value, context = boundContext.value
-                        // Optional data gets no retry queue and never closes a
-                        // healthy connection merely because it is congested.
-                        guard !handler.closed, !handler.processing, !handler.needsFrameDrain,
-                              handler.pendingResponseWrite == nil, context.channel.isActive,
+                        // The socket owns no optional retry queue. The dispatcher
+                        // may retain busy work within its existing budget.
+                        guard !handler.closed, context.channel.isActive else {
+                            continuation.resume(returning: .discarded); return
+                        }
+                        guard !handler.processing, !handler.needsFrameDrain,
+                              handler.pendingResponseWrite == nil,
                               context.channel.isWritable, !foregroundWriter.hasPendingFrames else {
-                            continuation.resume(returning: false); return
+                            continuation.resume(returning: .temporarilyUnavailable); return
                         }
                         var buffer = context.channel.allocator.buffer(capacity: write.bytes.count)
                         buffer.writeBytes(write.bytes)
@@ -265,7 +268,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                             boundContext.value.write(boundHandler.value.wrapOutboundOut(outbound), promise: nil)
                         }
                         if accepted { context.flush() }
-                        continuation.resume(returning: accepted)
+                        continuation.resume(returning: accepted ? .enqueued : .discarded)
                     }
                 }
             }, roomSubscriptionSocketGate: socketGate, diagnosticPeerPort: diagnosticPeerPort)

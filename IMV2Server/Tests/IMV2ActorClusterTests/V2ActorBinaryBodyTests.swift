@@ -28,7 +28,7 @@ struct V2ActorBinaryBodyTests {
             let response = try signer.sign(reply, maximumBytes: 65_536)
             #expect(try trust.verify(response, as: V2ActorAuthenticatedReply.self, maximumBytes: 65_536).0 == reply)
             #expect(try trust.verifyReply(response, for: call, maximumBytes: 65_536) == .acknowledged)
-            let wrong = V2ActorAuthenticatedReply(version: 1, host: host, sessionID: call.sessionID,
+            let wrong = V2ActorAuthenticatedReply(version: V2ActorSessionHello.protocolVersion, host: host, sessionID: call.sessionID,
                 sequence: call.sequence, attemptID: UUID(), response: .acknowledged)
             #expect(throws: V2ActorAuthenticationError.wrongRecipient) {
                 try trust.verifyReply(signer.sign(wrong, maximumBytes: 65_536),

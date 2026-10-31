@@ -6,7 +6,7 @@ Source: clean `f1cdd78d6a21bf0ae23da627c0710c65115236aa` business tree, inspecte
 
 2026-10-11 清理说明：历史清单中的 `V2OwnerValidatedRoomWriteStore`、`V2AtomicRoomWriteBatchStore` 及跨房间原子追加入口已删除。当前消息发送由房间 Actor 独立排序、Policy Owner 授权、sendOperation 房间轮次独立提交；对应旧接口及失效 DTO 已从当前清单移除；历史签名通过 Git 历史追溯。
 
-2026-10-11 拒绝结果退役：`direct_message_denials` 及其读写、重放路径已删除，建库与启动校验统一为 `im-v2-current-72`。消息发送拒绝仅返回业务结果，不生成持久发送回执；私有提示仍作为独立呈现事实保留。下文历史拒绝回执签名不是当前协议。
+2026-10-11 拒绝结果退役：`direct_message_denials` 及其读写、重放路径已删除，建库与启动校验统一为 `im-v2-current-76`。消息发送拒绝仅返回业务结果，不生成持久发送回执；私有提示仍作为独立呈现事实保留。下文历史拒绝回执签名不是当前协议。
 
 2026-10-11 消息变更入口退役：`V2OwnerValidatedMessageMutationStores.swift` 中编辑、撤回和表情变更的三套归属接口及存储分支已删除；当前 Actor 路径通过持有 activation scope 的存储执行，权限、修订和业务事务校验保留。无调用方的 `readerCandidatesOwnerValidated` 已从代码和当前接口清单删除。
 

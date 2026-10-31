@@ -196,6 +196,12 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 按精确 stream、room、view 停止可选补充，不取消房间订阅。
     public static let authorPresentationEnd = Self(rawValue: 122)
     public static let authorPresentationEnded = Self(rawValue: 123)
+    public static let authorPresentationReceipt = Self(rawValue: 133)
+    public static let authorPresentationReceipted = Self(rawValue: 134)
+    public static let authorPresentationInterests = Self(rawValue: 135)
+    public static let authorPresentationInterestsReceived = Self(rawValue: 136)
+    public static let authorPresentationStart = Self(rawValue: 137)
+    public static let authorPresentationStarted = Self(rawValue: 138)
 
 }
 

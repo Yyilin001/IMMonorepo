@@ -525,6 +525,62 @@ struct V2ResourceDownloadCacheTests {
         await center.close(); try await f.remove()
     }
 
+    @Test func avatarBytesSurviveURLExpiryButNeverOutliveDisplayAuthority() async throws {
+        let f = try Fixture(), resolver = CacheResolver(), bytes = CacheBytes(), authority = AvatarCacheTestAuthority()
+        let center = try await V2ResourceCenter.make(scope: f.scope, store: f.store)
+        let cache = try await center.downloadCache(using: .init(targetResolver: resolver, byteTransfer: bytes))
+        let media = MediaID(uuid: UUID()), target = try await resolver.resolveDownloadTarget(mediaID: media, message: nil)
+        let content = try V2ResourceAvatarAccess(mediaID: media, variantID: .init(uuid: UUID()), version: 1,
+            checksum: target.checksum, byteCount: target.expectedByteCount,
+            plan: .init(mode: .httpGet, url: target.url, expiresAt: target.expiresAt,
+                expectedByteCount: target.expectedByteCount, checksum: target.checksum))
+        let home = V2ResourceHome.account(f.scope.accountID)
+        let metadataOnly = authority.grant(content.withoutDownloadPlan(), home: home)
+        await #expect(throws: V2ClientMediaTransferError.targetExpired) { try await cache.avatar(metadataOnly) }
+        #expect(await bytes.calls == 0)
+        let grant = authority.grant(content, home: home)
+        let downloaded = try await cache.avatar(grant)
+        authority.advance(.seconds(2))
+        #expect(throws: V2ClientMediaTransferError.targetExpired) { try grant.downloadPlan() }
+        let warm = try await cache.avatar(grant)
+        let withoutURL = try await cache.avatar(metadataOnly)
+        for file in [downloaded, warm, withoutURL] {
+            let lease = try await file.borrowFile()
+            #expect(try Data(contentsOf: lease.fileURL) == CacheBytes.payload)
+            await lease.release()
+        }
+        #expect(await bytes.calls == 1)
+        authority.revoke()
+        await #expect(throws: V2ResourceStorageError.unavailable) { try await downloaded.borrowFile() }
+        await #expect(throws: V2ResourceStorageError.unavailable) { try await cache.avatar(metadataOnly) }
+        #expect(await bytes.calls == 1)
+        await center.close(); try await f.remove()
+    }
+
+    @Test func lateAvatarBytesCannotRestoreRevokedDisplayAuthority() async throws {
+        let f = try Fixture(), media = MediaID(uuid: UUID()), authority = AvatarCacheTestAuthority()
+        let payloads = [media: CacheBytes.payload], resolver = ParallelRecoveryResolver(payloads: [media: CacheBytes.payload])
+        let bytes = ParallelRecoveryBytes(payloads: payloads, blocked: [media])
+        let center = try await V2ResourceCenter.make(scope: f.scope, store: f.store)
+        let cache = try await center.downloadCache(using: .init(targetResolver: resolver, byteTransfer: bytes))
+        let target = try resolver.resolveDownloadTarget(mediaID: media, message: nil)
+        let content = try V2ResourceAvatarAccess(mediaID: media, variantID: .init(uuid: UUID()), version: 1,
+            checksum: target.checksum, byteCount: target.expectedByteCount,
+            plan: .init(mode: .httpGet, url: target.url, expiresAt: target.expiresAt,
+                expectedByteCount: target.expectedByteCount, checksum: target.checksum))
+        let grant = authority.grant(content, home: .account(f.scope.accountID))
+        let pending = Task { try await cache.avatar(grant) }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await bytes.started.contains(media)) {
+            try #require(ContinuousClock.now < deadline)
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        authority.revoke()
+        await bytes.release(media)
+        await #expect(throws: V2ResourceStorageError.unavailable) { try await pending.value }
+        await center.close(); try await f.remove()
+    }
+
     @Test func actualAvatarAndMessageDownloadsClassifyOneSharedPhysicalFile() async throws {
         let f = try Fixture(), resolver = CacheResolver(), bytes = CacheBytes()
         let center = try await V2ResourceCenter.make(scope: f.scope, store: f.store)
@@ -1862,6 +1918,19 @@ private actor CacheResolver: V2ClientMediaDownloadTargetResolver {
         let checksum = try V2ResourceChecksum(value: SHA256.hash(data: changedVersion ? Data([4,3,2,1]) : CacheBytes.payload).map { String(format: "%02x", $0) }.joined())
         return try .init(downloadPlan: .init(mode: .httpGet, url: #require(URL(string: "https://bytes.invalid/\(UUID())")),
             expiresAt: Date().addingTimeInterval(120), expectedByteCount: 4, checksum: checksum))
+    }
+}
+
+private final class AvatarCacheTestAuthority: Sendable {
+    private struct State { var now = ContinuousClock.now; var valid = true }
+    private let state = Mutex(State())
+    func advance(_ duration: Duration) { state.withLock { $0.now += duration } }
+    func revoke() { state.withLock { $0.valid = false } }
+    func grant(_ avatar: V2ResourceAvatarAccess, home: V2ResourceHome) -> V2AvatarReadGrant {
+        let started = state.withLock { $0.now }
+        return .init(avatar: avatar, home: home, deadline: started + .seconds(60),
+            downloadDeadline: avatar.plan == nil ? nil : started + .seconds(1),
+            now: { self.state.withLock { $0.now } }, validate: { self.state.withLock { $0.valid } })
     }
 }
 

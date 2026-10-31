@@ -4,14 +4,14 @@ import SwiftUI
 import IMV2ClientKit
 import IMV2Core
 
-/// The chat page owns authority; visible rows only borrow interests. A complete
+/// Each page owns authority; visible rows only borrow interests. A complete
 /// per-key revision snapshot survives coalesced repository notifications.
 @MainActor @Observable
 final class V2AuthorPresentationPageScope {
     enum Context: Hashable {
         case group(RoomID)
         case direct(roomID: RoomID, actorUserID: UserID, peerUserID: UserID)
-        /// A selector has independently scoped keys and never opens author push.
+        /// A selector contributes complete keys without a room-message subscription.
         case list(UUID)
 
         func key(for userID: UserID) -> V2ProfileViewLookupKey? {
@@ -71,22 +71,23 @@ final class V2AuthorPresentationPageScope {
 
     func run(pipeline: V2AvatarPipeline) async {
         let id = UUID(); runID = id
-        let active = await pipeline.profiles.activateVisiblePage()
+        let active = await pipeline.profiles.activateVisiblePage(delivery: pipeline.authors == nil ? .http : .authorStream)
         do {
             try Task.checkCancellation()
             let updates = try await pipeline.profiles.invalidations(for: active)
             guard runID == id, !Task.isCancelled else { throw CancellationError() }
             activation = active; revisions = [:]; snapshots = [:]
             await withTaskGroup(of: Void.self) { group in
-                if let roomID = context.authorRoomID, let authors = pipeline.authors {
-                    group.addTask { try? await authors.run(roomID: roomID, activation: active) }
+                if let authors = pipeline.authors {
+                    let roomID = context.authorRoomID
+                    group.addTask { try? await authors.run(messageRoomID: roomID, activation: active) }
                 }
                 for await _ in updates {
                     if Task.isCancelled || runID != id { break }
                     guard let next = try? await pipeline.profiles.invalidationRevisions(for: active),
                           !Task.isCancelled, runID == id, activation == active else { break }
-                    // Retain bounded interests while the tab container lives so hidden
-                    // rows still receive revocations. Revision mismatch hides old values.
+                    // Retained snapshots observe revocations while admitted.
+                    // Their bounded cache interests yield to actual visible rows.
                     revisions = next
                 }
                 group.cancelAll()
@@ -115,12 +116,15 @@ final class V2AuthorPresentationPageScope {
         guard self.activation == activation, self.runID == runID, revisions[key] == revision else { return nil }
         let cacheKey = SnapshotKey(profile: key, pixels: pixels)
         if let value {
-            let interest = try await pipeline.profiles.retainVisibleInterest(for: key, activation: activation)
+            let cachedInterest: V2ProfileVisibleInterest?
+            do { cachedInterest = try await pipeline.profiles.retainCachedVisibleInterest(for: key, activation: activation) }
+            catch V2ProfilePresentationError.overloaded { cachedInterest = nil }
             guard self.activation == activation, self.runID == runID, revisions[key] == revision,
                   !Task.isCancelled else {
-                await pipeline.profiles.releaseVisibleInterest(interest)
+                if let cachedInterest { await pipeline.profiles.releaseVisibleInterest(cachedInterest) }
                 return nil
             }
+            guard let interest = cachedInterest else { return value }
             var removed: [V2ProfileVisibleInterest] = []
             for (key, cached) in snapshots where cached.value.deadline <= .now {
                 removed.append(cached.interest)
@@ -167,18 +171,16 @@ private struct V2AuthorPresentationPageModifier: ViewModifier {
         } else {
         content
             .environment(\.v2AuthorPresentationPageScope, scope)
-            .task(id: TaskKey(phase: scope.context.authorRoomID == nil || phase != .background ? .active : .background, generation: pipeline?.generation ?? 0)) {
+            .task(id: TaskKey(phase: phase != .background ? .active : .background, generation: pipeline?.generation ?? 0)) {
                 scope.hide()
-                // List scopes only observe local invalidations. Keep their
-                // original, bounded leases through inactive/background phases;
-                // row tasks stop fetching until the scene becomes active.
-                // Room author streams retain their foreground-only lifetime.
-                guard scope.context.authorRoomID == nil || phase != .background,
+                // All pages contribute to the account connection's foreground
+                // view. Backgrounding retires their grants and subscriptions.
+                guard phase != .background,
                       let pipeline, !pipeline.isSuspending else { return }
                 await scope.run(pipeline: pipeline)
             }
             .onChange(of: phase) { _, value in
-                if value == .background, scope.context.authorRoomID != nil { scope.hide() }
+                if value == .background { scope.hide() }
             }
             .onDisappear { scope.hide() }
         }

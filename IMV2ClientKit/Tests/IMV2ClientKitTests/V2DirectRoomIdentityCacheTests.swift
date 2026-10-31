@@ -378,7 +378,7 @@ struct V2DirectRoomIdentityCacheTests {
         let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000d31")!)
         let userID: UserID = try .init("00000000-0000-0000-0000-000000000d32")
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let invalidation = Data("{\"user_id\":\"\(userID.rawValue)\",\"minimum_profile_revision\":3}".utf8)
+        let invalidation = Data("{\"user_id\":\"\(userID.rawValue)\",\"minimum_profile_revision\":3,\"profile_state\":\"hidden\"}".utf8)
         _ = try await store.apply(.init(
             generation: 1,
             records: [.init(sequence: 1, sourceEventID: try .init("00000000-0000-0000-0000-000000000d33"), projectionKind: "profile_invalidation", payload: invalidation)],
@@ -397,7 +397,7 @@ struct V2DirectRoomIdentityCacheTests {
             publicIdentity: identity,
             avatar: nil,
             state: .active,
-            revision: try #require(V2ProfileRevision(rawValue: 3)),
+            revision: try #require(V2ProfileRevision(rawValue: 4)),
             visibilityRevision: try #require(V2ProfileRevision(rawValue: 1))
         ))
         #expect(try await store.pendingProfileInvalidations(limit: 10).isEmpty)
@@ -421,7 +421,6 @@ struct V2DirectRoomIdentityCacheTests {
             generation: 1,
             records: [
                 .init(sequence: 1, sourceEventID: try .init("00000000-0000-0000-0000-000000000d24"), projectionKind: "direct_room_profile", payload: directProfile),
-                .init(sequence: 2, sourceEventID: try .init("00000000-0000-0000-0000-000000000d25"), projectionKind: "message", payload: acceptedMessage),
             ],
             nextSyncToken: try .init("direct-mixed-case-token"),
             receipt: .init("direct-mixed-case-receipt"),
@@ -430,6 +429,10 @@ struct V2DirectRoomIdentityCacheTests {
         ))
 
         let roomID = try RoomID(lowerRoomID)
+        _ = try await store.applyGroupEventPage(.init(roomID: roomID, events: [
+            .init(sourceEventID: .init("00000000-0000-0000-0000-000000000d25"), roomSequence: 1,
+                projectionKind: "message", payload: acceptedMessage)
+        ], nextRoomSequence: 1, hasMore: false))
         #expect(try await store.directRoomIdentities().map(\.roomID) == [roomID])
         #expect(try await store.messages(in: roomID).map(\.text) == ["离线重放"])
     }

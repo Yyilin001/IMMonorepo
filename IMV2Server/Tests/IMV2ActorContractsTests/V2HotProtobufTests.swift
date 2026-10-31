@@ -6,6 +6,43 @@ import Testing
 
 @Suite("Fixed hot Protobuf contracts")
 struct V2HotProtobufTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_PROFILE_CODEC_BENCHMARK"] == "1"))
+    func profileCohortCosts() throws {
+        let activation = try token(), target = UserID(uuid: UUID()), observed = Date()
+        let requests = (0..<100).map { _ in
+            V2ActorProfileVisibilityBatchWire(roomID: room, actorUserID: .init(uuid: UUID()),
+                roomKind: .group, targetUserIDs: [target])
+        }
+        let request = V2RoomRequest.mediaAuthorization(.profileVisibilityCohort(.init(roomID: room, requests: requests)))
+        let response = V2RoomResponse.mediaAuthorization(.profilesVisibleCohort(requests.map {
+            .init(request: $0, activation: activation, membershipRevision: 3, visibleTargetUserIDs: [target],
+                observedAt: observed, activationExpiresAt: observed.addingTimeInterval(20),
+                groupMembers: [.init(roomID: room, userID: target, groupNickname: "群昵称😀", revision: .init(rawValue: 1)!)],
+                permissionRevision: 2)
+        }))
+        let requestBytes = try V2ActorProtobuf.encode(request), responseBytes = try V2ActorProtobuf.encode(response)
+        #expect(try V2ActorProtobuf.decode(V2RoomRequest.self, from: requestBytes) == request)
+        #expect(try V2ActorProtobuf.decode(V2RoomResponse.self, from: responseBytes) == response)
+        func measure(_ name: String, _ body: () throws -> Int) rethrows {
+            for _ in 0..<10 { _ = try body() }
+            let start = ContinuousClock.now
+            var checksum = 0
+            for _ in 0..<200 { checksum &+= try body() }
+            let duration = start.duration(to: .now).components
+            let milliseconds = (Double(duration.seconds) * 1_000 + Double(duration.attoseconds) / 1e15) / 200
+            print("Profile cohort benchmark: \(name), milliseconds=\(milliseconds), checksum=\(checksum)")
+        }
+        try measure("request encode") { try V2ActorProtobuf.encode(request).count }
+        try measure("request decode") { try V2ActorProtobuf.decode(V2RoomRequest.self, from: requestBytes).profileVisibilityTargetCount ?? 0 }
+        try measure("response encode") { try V2ActorProtobuf.encode(response).count }
+        try measure("response decode") {
+            if case .mediaAuthorization(.profilesVisibleCohort(let values)) = try V2ActorProtobuf.decode(V2RoomResponse.self, from: responseBytes) { return values.count }
+            return 0
+        }
+        measure("request retained bytes") { V2ActorPayloadBudget.retainedBytes(of: request) }
+        measure("response retained bytes") { V2ActorPayloadBudget.retainedBytes(of: response) }
+    }
+
     private let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
     private func token() throws -> V2RoomActivationToken {
         try .init(roomID: room, owner: .init(shardID: "rooms", epoch: 0), activationEpoch: .init(1), host: .init(hostID: .init("owner"), incarnationID: UUID()))

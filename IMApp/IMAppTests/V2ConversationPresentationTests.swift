@@ -107,7 +107,14 @@ struct V2ConversationPresentationTests {
                 try V2ClientSyncRecord(sequence: UInt64(index + 1), sourceEventID: .init(uuid: UUID()),
                     projectionKind: entry.0, payload: JSONSerialization.data(withJSONObject: entry.1))
             }
-            _ = try await local.apply(.init(generation: 1, records: records, nextSyncToken: .init("selectors"),
+            _ = try await local.apply(.init(generation: 1, records: Array(records.prefix(2)), nextSyncToken: .init("selectors-metadata"),
+                receipt: .init("selectors-metadata"), hasMore: false, capabilityProfile: "base"))
+            let roomMessage = try V2ClientGroupEvent(sourceEventID: records[2].sourceEventID, roomSequence: 1,
+                projectionKind: "message", payload: records[2].payload)
+            _ = try await local.applyGroupEventPage(.init(roomID: direct, events: [roomMessage], nextRoomSequence: 1, hasMore: false))
+            let favorite = try V2ClientSyncRecord(sequence: 3, sourceEventID: records[3].sourceEventID,
+                projectionKind: "message_favorite", payload: records[3].payload)
+            _ = try await local.apply(.init(generation: 1, records: [favorite], nextSyncToken: .init("selectors"),
                 receipt: .init("selectors"), hasMore: false, capabilityProfile: "base"))
             let source = V2GRDBConversationDataSource(localStore: local, requestLatestVisible: { _ in })
             let key = V2ProfileViewLookupKey(userID: peer, context: .directConversation)

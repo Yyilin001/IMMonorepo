@@ -275,6 +275,12 @@ public enum V2ProtobufFrameCodec {
         case .authorPresentationDelta?: return .authorPresentationDelta
         case .authorPresentationEnd?: return .authorPresentationEnd
         case .authorPresentationEnded?: return .authorPresentationEnded
+        case .authorPresentationReceipt?: return .authorPresentationReceipt
+        case .authorPresentationReceipted?: return .authorPresentationReceipted
+        case .authorPresentationInterests?: return .authorPresentationInterests
+        case .authorPresentationInterestsReceived?: return .authorPresentationInterestsReceived
+        case .authorPresentationStart?: return .authorPresentationStart
+        case .authorPresentationStarted?: return .authorPresentationStarted
         case .personalPreferenceReceipt?: return .personalPreferenceReceipt
 
         case .groupEventPull?: return .groupEventPull

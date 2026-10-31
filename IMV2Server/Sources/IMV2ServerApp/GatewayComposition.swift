@@ -11,6 +11,7 @@ import Glibc
 #endif
 import IMV2Server
 import IMV2ServerInfrastructure
+import IMV2ServerHTTP
 import IMV2ActorApplication
 import Vapor
 
@@ -126,9 +127,15 @@ struct GatewayComposition {
                 // enabled, optional SQL does not use foreground connections.
                 let delivery = try await GatewayAuthorPresentationAssembly.delivery(
                     configuration: resourceConfiguration, storage: resourceStorage, controlDatabase: prepared.topology.deliveryDatabase)
-                let authors = try GatewayAuthorPresentationAssembly.build(controlDatabase: prepared.topology.deliveryDatabase,
+                let authors = try await GatewayAuthorPresentationAssembly.build(controlDatabase: prepared.topology.deliveryDatabase,
                     actors: actors, delivery: delivery)
                 authorPresentations = authors
+                // Physical resources, not logical shard aliases: a shared
+                // recorder must contribute only once to this node's scrape.
+                let roomReadDiagnostics = prepared.roomOwners.physicalResources.values.map(\.profileReadDiagnostics)
+                V2VaporMetricsRoutes.registerAuthorPresentations(on: app, runtime: authors, roomReads: {
+                    roomReadDiagnostics.reduce(.init()) { $0.merging($1.snapshot()) }
+                })
                 try await prepared.frontdoor.connectionRegistry.installAuthorPresentationIngress(authors.ingress)
             }
             // 3. 用 Actor 目录装配房间创建、查询与事件服务；指标只登记为 Vapor 路由，

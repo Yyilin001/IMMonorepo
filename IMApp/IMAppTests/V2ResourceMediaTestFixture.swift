@@ -43,7 +43,10 @@ struct V2ResourceMediaTestOwner: V2ConversationMediaDownloading, V2ConversationM
         try await downloader.download(media, message: message)
     }
     func avatar(_ access: V2ResourceAvatarAccess, home: V2ResourceHome) async throws -> V2ConversationMediaFileLease {
-        try await downloader.avatar(access, home: home)
+        let remaining = access.plan?.expiresAt.timeIntervalSinceNow ?? 0
+        let deadline = ContinuousClock.now + .seconds(max(0, remaining))
+        return try await downloader.avatar(.init(avatar: access, home: home, deadline: deadline,
+            downloadDeadline: deadline, validate: { true }))
     }
     func discard(_ media: V2MediaReference) async { await downloader.discard(media) }
     func performMaintenance(now: Date = Date()) async throws {

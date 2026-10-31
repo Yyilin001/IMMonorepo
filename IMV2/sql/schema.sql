@@ -1474,31 +1474,56 @@ CREATE TRIGGER public_profile_operation_immutable
 BEFORE UPDATE OR DELETE ON im_v2.public_profile_update_operations
 FOR EACH ROW EXECUTE FUNCTION im_v2.protect_profile_operation_receipt();
 
+-- One row orders profile outbox publication by COMMIT, not by sequence allocation.
+CREATE TABLE im_v2.author_presentation_change_head (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    sequence bigint NOT NULL DEFAULT 0 CHECK (sequence >= 0)
+);
+INSERT INTO im_v2.author_presentation_change_head DEFAULT VALUES;
+
 CREATE TABLE im_v2.public_profile_update_outbox (
+    publication_sequence bigint NOT NULL UNIQUE CHECK (publication_sequence > 0),
     source_event_id uuid NOT NULL,
     source_user_id uuid NOT NULL,
-    public_handle text NOT NULL,
-    display_name text NOT NULL,
-    revision bigint NOT NULL,
+    revision bigint NOT NULL CHECK (revision > 0),
+    created_at timestamp with time zone NOT NULL CHECK (isfinite(created_at))
+);
+
+-- Security invalidations retain durable delivery to existing direct peers.
+-- Public profile edits never enter this queue.
+CREATE TABLE im_v2.profile_security_invalidation_outbox (
+    source_event_id uuid PRIMARY KEY,
+    source_user_id uuid NOT NULL,
+    revision bigint NOT NULL CHECK (revision > 0),
+    profile_state text NOT NULL CHECK (profile_state IN ('deleted', 'suspended', 'hidden')),
     profile_updated_at timestamp with time zone NOT NULL,
-    state text DEFAULT 'pending'::text NOT NULL,
+    state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'claimed', 'completed')),
     claim_token uuid,
     lease_expires_at timestamp with time zone,
     enumeration_checkpoint uuid,
-    retry_count bigint DEFAULT 0 NOT NULL,
+    retry_count bigint NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
     created_at timestamp with time zone NOT NULL,
     completed_at timestamp with time zone,
-    account_kind text DEFAULT 'regular'::text NOT NULL,
-    profile_state text DEFAULT 'active'::text NOT NULL,
-    CONSTRAINT public_profile_update_outbox_account_kind_check CHECK ((account_kind = ANY (ARRAY['regular'::text, 'system'::text, 'customer_support'::text]))),
-    CONSTRAINT public_profile_update_outbox_check CHECK (((state = 'claimed'::text) = (claim_token IS NOT NULL))),
-    CONSTRAINT public_profile_update_outbox_check1 CHECK (((state = 'claimed'::text) = (lease_expires_at IS NOT NULL))),
-    CONSTRAINT public_profile_update_outbox_check2 CHECK (((state = 'completed'::text) = (completed_at IS NOT NULL))),
-    CONSTRAINT public_profile_update_outbox_profile_state_check CHECK ((profile_state = ANY (ARRAY['active'::text, 'deleted'::text, 'suspended'::text, 'hidden'::text]))),
-    CONSTRAINT public_profile_update_outbox_retry_count_check CHECK ((retry_count >= 0)),
-    CONSTRAINT public_profile_update_outbox_revision_check CHECK ((revision > 0)),
-    CONSTRAINT public_profile_update_outbox_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'claimed'::text, 'completed'::text])))
+    CHECK ((state = 'claimed') = (claim_token IS NOT NULL)),
+    CHECK ((state = 'claimed') = (lease_expires_at IS NOT NULL)),
+    CHECK ((state = 'completed') = (completed_at IS NOT NULL))
 );
+
+CREATE FUNCTION im_v2.sequence_public_profile_update() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = pg_catalog, im_v2 AS $$
+BEGIN
+    UPDATE im_v2.author_presentation_change_head SET sequence = sequence + 1
+    WHERE singleton AND sequence < 9223372036854775807
+    RETURNING sequence INTO NEW.publication_sequence;
+    IF NEW.publication_sequence IS NULL THEN
+        RAISE EXCEPTION 'profile publication sequence unavailable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER public_profile_update_sequence
+BEFORE INSERT ON im_v2.public_profile_update_outbox
+FOR EACH ROW EXECUTE FUNCTION im_v2.sequence_public_profile_update();
 
 CREATE TABLE im_v2.public_user_profiles (
     user_id uuid NOT NULL,
@@ -1763,7 +1788,7 @@ CREATE TABLE im_v2.rooms (
     frozen_by_user_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     capacity_class text DEFAULT 'standard'::text NOT NULL,
-    -- 群权限状态的独立修订；公共内容统一从房间日志恢复。
+    -- 群权限状态（含申请审核资料可见性）的独立修订；公共内容统一从房间日志恢复。
     group_permission_revision bigint DEFAULT 1 NOT NULL,
     timeline_sequence bigint DEFAULT 0 NOT NULL,
     -- 房间序列最后一次前进的事实时间，由 rooms_touch_last_event_at 维护。
@@ -1787,6 +1812,41 @@ CREATE TABLE im_v2.rooms (
 -- 是为了让新增写入路径无法忘记刷新。
 CREATE TRIGGER rooms_touch_last_event_at BEFORE UPDATE ON im_v2.rooms
     FOR EACH ROW EXECUTE FUNCTION im_v2.touch_room_last_event_at();
+
+-- Pending applications are part of profile visibility for group reviewers.
+-- Advancing the room authority counter in the same transaction also fences ABA
+-- (cancel and resubmit) even when membership and public profile content do not change.
+CREATE FUNCTION im_v2.advance_group_join_review_authority() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO pg_catalog, im_v2
+    AS $$
+DECLARE
+    old_room uuid;
+    new_room uuid;
+    affected_room uuid;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        IF OLD.state = 'pending' THEN old_room := OLD.room_id; END IF;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        IF NEW.state = 'pending' THEN new_room := NEW.room_id; END IF;
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        IF old_room IS NOT DISTINCT FROM new_room
+           AND OLD.applicant_user_id = NEW.applicant_user_id THEN RETURN NULL; END IF;
+    END IF;
+    FOR affected_room IN
+        SELECT DISTINCT room_id FROM unnest(ARRAY[old_room, new_room]) AS rooms(room_id)
+        WHERE room_id IS NOT NULL ORDER BY room_id
+    LOOP
+        UPDATE im_v2.rooms SET group_permission_revision = group_permission_revision + 1
+        WHERE room_id = affected_room;
+    END LOOP;
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER group_join_review_authority
+    AFTER INSERT OR UPDATE OR DELETE ON im_v2.group_join_requests
+    FOR EACH ROW EXECUTE FUNCTION im_v2.advance_group_join_review_authority();
 
 -- Physical room-store routing is control-plane metadata. The canonical room,
 -- membership and message rows live only in the selected owner store; these
@@ -1930,14 +1990,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-72'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-72'::text))
+    schema_id text DEFAULT 'im-v2-current-76'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-76'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-72');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-76');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2824,9 +2884,11 @@ CREATE INDEX moderation_operations_cleanup_idx ON im_v2.moderation_operations US
 
 CREATE INDEX public_profile_update_operations_cleanup_idx ON im_v2.public_profile_update_operations USING btree (created_at);
 
-CREATE INDEX public_profile_update_outbox_claim_idx ON im_v2.public_profile_update_outbox USING btree (state, lease_expires_at, created_at) WHERE (state <> 'completed'::text);
+CREATE INDEX profile_security_invalidation_claim_idx ON im_v2.profile_security_invalidation_outbox USING btree (state, lease_expires_at, created_at) WHERE (state <> 'completed'::text);
 
-CREATE INDEX public_profile_update_outbox_completed_cleanup_idx ON im_v2.public_profile_update_outbox USING btree (completed_at, source_event_id) WHERE (state = 'completed'::text);
+CREATE INDEX profile_security_invalidation_cleanup_idx ON im_v2.profile_security_invalidation_outbox USING btree (completed_at, source_event_id) WHERE (state = 'completed'::text);
+
+CREATE INDEX public_profile_update_cleanup_idx ON im_v2.public_profile_update_outbox USING btree (created_at, publication_sequence);
 
 CREATE INDEX public_user_profiles_active_avatar_idx ON im_v2.public_user_profiles USING btree (avatar_media_id) WHERE (avatar_media_id IS NOT NULL);
 
@@ -4005,5 +4067,65 @@ CREATE INDEX policy_authorization_outbox_pending_idx
     ON im_v2.policy_authorization_outbox(created_at, operation_key) WHERE published_at IS NULL;
 CREATE INDEX policy_authorization_outbox_scope_pending_idx
     ON im_v2.policy_authorization_outbox(scope_key, revision) WHERE published_at IS NULL;
+
+-- No private value or authorization grant enters this journal. Each gateway
+-- independently follows the commit-ordered head shared with public profiles.
+CREATE TABLE im_v2.author_presentation_control_changes (
+    publication_sequence bigint PRIMARY KEY CHECK (publication_sequence > 0),
+    kind text NOT NULL CHECK (kind IN ('contact_alias','relationship','user_block')),
+    owner_user_id uuid NOT NULL,
+    target_user_id uuid NOT NULL CHECK (owner_user_id <> target_user_id),
+    revision bigint NOT NULL CHECK (revision > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp() CHECK (isfinite(created_at))
+);
+CREATE INDEX author_presentation_control_changes_cleanup_idx
+    ON im_v2.author_presentation_control_changes(created_at, publication_sequence);
+
+CREATE FUNCTION im_v2.append_author_presentation_control_change(change_kind text, owner_user uuid, target_user uuid, changed_revision bigint)
+    RETURNS void LANGUAGE plpgsql SET search_path = pg_catalog, im_v2 AS $$
+DECLARE publication bigint;
+BEGIN
+    UPDATE im_v2.author_presentation_change_head SET sequence = sequence + 1
+    WHERE singleton AND sequence < 9223372036854775807
+    RETURNING sequence INTO publication;
+    IF publication IS NULL THEN
+        RAISE EXCEPTION 'presentation publication sequence unavailable';
+    END IF;
+    INSERT INTO im_v2.author_presentation_control_changes
+        (publication_sequence, kind, owner_user_id, target_user_id, revision)
+    VALUES (publication, change_kind, owner_user, target_user, changed_revision);
+END;
+$$;
+
+CREATE FUNCTION im_v2.capture_contact_alias_presentation_change() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = pg_catalog, im_v2 AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.revision = OLD.revision THEN RETURN NULL; END IF;
+    PERFORM im_v2.append_author_presentation_control_change('contact_alias', NEW.owner_user_id, NEW.target_user_id, NEW.revision);
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER contact_alias_presentation_change
+AFTER INSERT OR UPDATE ON im_v2.user_contact_aliases
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION im_v2.capture_contact_alias_presentation_change();
+
+CREATE FUNCTION im_v2.capture_social_presentation_change() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = pg_catalog, im_v2 AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.revision = OLD.revision THEN RETURN NULL; END IF;
+    IF TG_TABLE_NAME = 'social_block_revisions' THEN
+        PERFORM im_v2.append_author_presentation_control_change('user_block', NEW.actor_user_id, NEW.target_user_id, NEW.revision);
+    ELSE
+        PERFORM im_v2.append_author_presentation_control_change('relationship', NEW.lower_user_id, NEW.higher_user_id, NEW.revision);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER relationship_presentation_change
+AFTER INSERT OR UPDATE ON im_v2.social_relationship_revisions
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION im_v2.capture_social_presentation_change();
+CREATE CONSTRAINT TRIGGER user_block_presentation_change
+AFTER INSERT OR UPDATE ON im_v2.social_block_revisions
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION im_v2.capture_social_presentation_change();
 
 COMMIT;

@@ -18,8 +18,8 @@ struct V2LocalRolePolicyEffect {
     let permissions: Set<V2GroupPermission>
     /// 权限集合的规范 JSON 编码。
     let encodedPermissions: Data
-    /// 来源房间序号；历史载荷可能缺失。
-    let roomSequence: Int64?
+    /// 已验证的来源房间序号，正文省略时取房间日志外层。
+    let roomSequence: Int64
     /// 由房间、角色、修订、权限、发起者与时间戳计算的规范摘要。
     let digest: Data
 
@@ -58,7 +58,9 @@ struct V2LocalRolePolicyEffect {
             role = parsedRole
             revision = wire.revision
             permissions = parsedPermissions
-            roomSequence = wire.room_sequence
+            guard let sequence = wire.room_sequence ?? expectedRoomSequence.flatMap(Int64.init(exactly:)), sequence > 0
+            else { throw V2ClientProjectionError.invalidMessagePayload }
+            roomSequence = sequence
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             encodedPermissions = try encoder.encode(parsedPermissions.map(\.rawValue).sorted())

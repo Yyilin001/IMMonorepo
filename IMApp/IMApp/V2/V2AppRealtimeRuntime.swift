@@ -1166,8 +1166,7 @@ struct V2AppRealtimeRuntime {
         )
         self.roomSubscriptions = roomSubscriptions
         makeAuthorPresentationCoordinator = { profiles in
-            .init(rooms: roomSubscriptions, source: connection, subscriptions: transport, profiles: profiles,
-                roomCursor: { try await localStore.groupEventCursor(roomID: $0) })
+            .init(rooms: roomSubscriptions, source: connection, subscriptions: transport, profiles: profiles)
         }
         let coordinator = V2RealtimeSessionCoordinator(
             authSession: authSession,
@@ -1187,17 +1186,8 @@ struct V2AppRealtimeRuntime {
                 // runtime-owned worker continues without blocking startup.
                 await roomCatchUpWorker.requestCatchUp()
                 await roomSubscriptions.authorityDidChange()
-                // Profile invalidations are already durable at this point.
-                // A transient account-edge failure must not roll back or
-                // stall realtime synchronization; the next sync activity
-                // coalesces the same pending rows into another bounded read.
-                do {
-                    _ = try await profileRepository.refreshPendingInvalidations()
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    // Keep the invalidation row for a later authorized retry.
-                }
+                // Durable security invalidations already remove local display facts.
+                // Only visible presentation demand may request fresh authority.
             },
             roomSubscriptionLoop: { connectionID in
                 guard let connectionID else { throw V2TLSFrameConnectionError.notConnected }

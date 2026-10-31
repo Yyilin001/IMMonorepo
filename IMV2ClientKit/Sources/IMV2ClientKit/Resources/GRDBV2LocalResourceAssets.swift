@@ -3,14 +3,6 @@ import GRDB
 import IMV2Core
 
 extension GRDBV2LocalSyncStore {
-    static let localResourceImageDimensionsSchemaSQL = """
-        ALTER TABLE v2_resource_local_assets ADD COLUMN pixel_width INTEGER;
-        ALTER TABLE v2_resource_local_assets ADD COLUMN pixel_height INTEGER
-        CHECK ((pixel_width IS NULL AND pixel_height IS NULL) OR
-               (pixel_width BETWEEN 1 AND 16384 AND pixel_height BETWEEN 1 AND 16384
-                AND pixel_width IS NOT NULL AND pixel_height IS NOT NULL
-                AND pixel_width * pixel_height <= 40000000));
-        """
     static let localResourceAssetSchemaSQL = """
         CREATE TABLE v2_resource_local_assets(
             asset_id TEXT PRIMARY KEY,planned_file_id TEXT NOT NULL UNIQUE,
@@ -20,6 +12,11 @@ extension GRDBV2LocalSyncStore {
             purpose TEXT NOT NULL CHECK(purpose IN ('messageDraft','personalAvatar','groupAvatar')),room_id TEXT,
             state TEXT NOT NULL CHECK(state IN ('importing','published','unavailable')),
             selection_active INTEGER NOT NULL CHECK(selection_active IN (0,1)),created_at REAL NOT NULL CHECK(created_at>=0),
+            pixel_width INTEGER,pixel_height INTEGER,
+            CHECK ((pixel_width IS NULL AND pixel_height IS NULL) OR
+                   (pixel_width BETWEEN 1 AND 16384 AND pixel_height BETWEEN 1 AND 16384
+                    AND pixel_width IS NOT NULL AND pixel_height IS NOT NULL
+                    AND pixel_width * pixel_height <= 40000000)),
             CHECK((purpose='personalAvatar' AND room_id IS NULL) OR (purpose<>'personalAvatar' AND room_id IS NOT NULL))
         );
         CREATE INDEX v2_resource_local_assets_selection ON v2_resource_local_assets(purpose,room_id,created_at,asset_id) WHERE selection_active=1;

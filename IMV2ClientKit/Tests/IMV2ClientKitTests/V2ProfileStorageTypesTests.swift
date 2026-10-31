@@ -26,7 +26,11 @@ struct V2ProfileStorageTypesTests {
                 "updated_at_ms": 1000, "room_created_at_ms": 1000])
         }
         _ = try await store.apply(direct(1, revision: 1))
-        _ = try await store.apply(batch(2, kind: "profile_invalidation", payload: ["user_id": user.rawValue, "minimum_profile_revision": 2]))
+        // Seed the durable floor independently of its purge effect so this
+        // test can corrupt and validate each retained storage representation.
+        try await store.databasePool.write {
+            try $0.execute(sql: "INSERT INTO v2_profile_invalidations VALUES (?,2,'hidden',0)", arguments: [user.rawValue])
+        }
         let table = path == "direct" ? "v2_direct_room_profile_projections" : ["invalidate-merge", "clear"].contains(path) ? "v2_profile_invalidations" : "v2_profile_views"
         let column = table == "v2_profile_invalidations" ? "minimum_revision" : path.hasSuffix("visibility") ? "visibility_revision" : "revision"
         let before = try await store.cursor()
@@ -35,8 +39,8 @@ struct V2ProfileStorageTypesTests {
         let profile = try V2ProfileView(userID: user, publicIdentity: .init(userID: user, handle: .init("profile_user"),
             displayName: "Updated", accountKind: .regular), avatar: nil, state: .active, revision: revision, visibilityRevision: revision)
         let incoming = try path.hasPrefix("invalidate")
-            ? batch(3, kind: "profile_invalidation", payload: ["user_id": user.rawValue, "minimum_profile_revision": 3, "profile_state": "hidden"])
-            : direct(3, revision: 3)
+            ? batch(2, kind: "profile_invalidation", payload: ["user_id": user.rawValue, "minimum_profile_revision": 3, "profile_state": "hidden"])
+            : direct(2, revision: 3)
         func perform() async throws {
             if path.hasPrefix("save") || path == "clear" { try await store.saveProfileView(profile) }
             else { _ = try await store.apply(incoming) }
@@ -68,7 +72,7 @@ struct V2ProfileStorageTypesTests {
             #expect(state.1 == 3)
         } else {
             #expect(try await store.profileView(userID: user)?.revision.rawValue == 3)
-            #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_profile_invalidations") } == 0)
+            #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_profile_invalidations") } == 1)
         }
         try await store.close()
     }

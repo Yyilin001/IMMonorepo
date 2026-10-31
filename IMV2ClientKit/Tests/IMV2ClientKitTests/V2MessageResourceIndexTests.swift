@@ -12,7 +12,8 @@ struct V2MessageResourceIndexTests {
         let first = try await f.store.resourceDirectory()
         #expect(first.entries.map(\.descriptor) == [resource])
         #expect(first.entries.first?.referenceCount == 1)
-        #expect(try await f.store.cursor()?.appliedSequence == 1)
+        #expect(try await f.store.groupEventCursor(roomID: f.room) == 1)
+        #expect(try await f.store.cursor() == nil)
         try await f.accept(id: .init(uuid: UUID()), sequence: 2, resources: [resource])
         #expect(try await f.store.resourceDirectory().entries.count == 1)
         #expect(try await f.store.resourceDirectory().entries.first?.referenceCount == 2)
@@ -20,7 +21,7 @@ struct V2MessageResourceIndexTests {
     }
 
     @Test(arguments: ["missing", "wrongRoom", "wrongBytes", "wrongMedia"])
-    func invalidDescriptorRollsBackMessageAndSyncCursor(mode: String) async throws {
+    func invalidDescriptorRollsBackMessageAndRoomCursor(mode: String) async throws {
         let f = try Fixture(), resource = try f.resource()
         var body = try f.body(resources: [resource])
         var items = try #require(body["media_presentations"] as? [[String: Any]])
@@ -32,10 +33,11 @@ struct V2MessageResourceIndexTests {
         }
         body["media_presentations"] = items
         let record = try f.record(body, sequence: 1)
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await f.apply(record) }
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await f.applyRoomEvent(record) }
         #expect(try await f.store.messages(in: f.room).isEmpty)
         #expect(try await f.store.resourceDirectory().entries.isEmpty)
         #expect(try await f.store.cursor() == nil)
+        #expect(try await f.store.groupEventCursor(roomID: f.room) == 0)
         try await f.remove()
     }
 
@@ -45,7 +47,7 @@ struct V2MessageResourceIndexTests {
         let conflict = try V2ResourceDescriptor(key: existing.key, revision: existing.revision, displayName: .init("conflict.png"),
             contentType: existing.contentType, byteCount: existing.byteCount, checksum: existing.checksum, state: .ready)
         let record = try f.record(f.body(resources: [incoming,conflict]), sequence: 1)
-        await #expect(throws: V2ResourceStorageError.conflict) { try await f.apply(record) }
+        await #expect(throws: V2ResourceStorageError.conflict) { try await f.applyRoomEvent(record) }
         #expect(try await f.store.messages(in: f.room).isEmpty)
         #expect(try await f.store.cursor() == nil)
         #expect(try await f.store.resourceDirectory().entries.map(\.descriptor) == [existing])
@@ -60,32 +62,37 @@ struct V2MessageResourceIndexTests {
             "room_sequence": 2, "message_revision": 2, "text": "附件", "entities": [],
             "replacement": ["schema_version": 1, "accepted_event_id": f.origin.rawValue,
                 "accepted_membership_revision": 0, "state": state]], sequence: 2, origin: .init(uuid: UUID()))
-        try await f.apply(edit)
+        try await f.applyRoomEvent(edit)
         #expect(try await f.store.resourceDirectory().entries.map(\.descriptor.key) == [second.key])
         #expect(try await f.store.resourceDirectory().entries.first?.referenceCount == 1)
         try await f.store.indexResource(first, reference: .message(.init(roomID: f.room, messageID: f.message), ordinal: 0), businessRevision: 1)
         #expect(try await f.store.resourceDirectory().entries.map(\.descriptor.key) == [second.key])
         let removal = try f.record(["event_type": "message.withdrawn", "room_id": f.room.rawValue,
             "message_id": f.message.rawValue, "message_revision": 3], sequence: 3, origin: .init(uuid: UUID()))
-        try await f.apply(removal)
+        try await f.applyRoomEvent(removal)
         #expect(try await f.store.resourceDirectory().entries.isEmpty)
         try await f.store.indexResource(second, reference: .message(.init(roomID: f.room, messageID: f.message), ordinal: 0), businessRevision: 2)
         #expect(try await f.store.resourceDirectory().entries.isEmpty)
         try await f.remove()
     }
 
-    @Test func snapshotMetadataStaysInvisibleUntilActivationAndDurableIndexResumesInBoundedBatches() async throws {
+    @Test func personalResetPreservesRoomMessagesAndRebuildsResourceIndexInBoundedBatches() async throws {
         let f = try Fixture(), first = try f.resource(name: "snapshot-a.png"), second = try f.resource(name: "snapshot-b.png")
-        let fixtures = try f.snapshot(resources: [first,second])
+        try await f.accept(resources: [first])
+        try await f.accept(id: .init(uuid: UUID()), sequence: 2, resources: [second])
+        let fixtures = try f.personalSnapshot()
         try await f.importSnapshot(fixtures)
-        #expect(try await f.store.resourceDirectory().entries.isEmpty)
+        #expect(Set(try await f.store.resourceDirectory().entries.map(\.descriptor)) == Set([first,second]))
         #expect(try await f.store.resourceDirectory().isIndexing == false)
         try await f.store.prepareSnapshotActivation(fixtures.manifest)
-        #expect(try await f.store.resourceDirectory().entries.isEmpty)
+        #expect(Set(try await f.store.resourceDirectory().entries.map(\.descriptor)) == Set([first,second]))
         try await f.store.activateAcknowledgedSnapshot(fixtures.manifest)
+        #expect(try await f.store.messages(in: f.room).count == 2)
+        #expect(try await f.store.groupEventCursor(roomID: f.room) == 2)
         #expect(try await f.store.resourceDirectory().isIndexing)
         #expect(try await f.store.indexResourceProjectionBatch(limit: 1))
-        #expect(try await f.store.resourceDirectory().entries.count == 1)
+        #expect(Set(try await f.store.resourceDirectory().entries.map(\.descriptor)) == Set([first,second]))
+        #expect(try await f.store.databasePool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_resource_projection_index_jobs") } == 1)
         try await f.store.close()
         let restored = try GRDBV2LocalSyncStore(databaseURL: f.database, installationBinding: f.binding, userID: f.user)
         #expect(try await restored.resourceDirectory().isIndexing)
@@ -100,7 +107,8 @@ struct V2MessageResourceIndexTests {
     func snapshotResourceSchemaAcceptsLiveBanksAndRejectsChangedIndex(_ cleanupBeforeReopen: Bool) async throws {
         let f = try Fixture(), resource = try f.resource(name: "schema-bank.png")
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let snapshot = try f.snapshot(resources: [resource])
+        try await f.accept(resources: [resource])
+        let snapshot = try f.personalSnapshot()
         try await f.importSnapshot(snapshot)
         try await f.store.prepareSnapshotActivation(snapshot.manifest)
         try await f.store.activateAcknowledgedSnapshot(snapshot.manifest)
@@ -131,7 +139,7 @@ struct V2MessageResourceIndexTests {
         let reference = V2ResourceReferenceContext.message(.init(roomID: f.room, messageID: f.message), ordinal: 0)
         try await f.store.indexResource(resource, reference: reference, businessRevision: 1)
         #expect(try await f.store.resourceDirectory().entries.count == 1)
-        let snapshot = try f.snapshot(resources: [])
+        let snapshot = try f.personalSnapshot()
         try await f.importSnapshot(snapshot)
         try await f.store.prepareSnapshotActivation(snapshot.manifest)
         try await f.store.activateAcknowledgedSnapshot(snapshot.manifest)
@@ -145,7 +153,8 @@ struct V2MessageResourceIndexTests {
 
     @Test func resourceCenterDrainsSnapshotQueueAndPublishesIndexedDirectory() async throws {
         let f = try Fixture(), resource = try f.resource()
-        let snapshot = try f.snapshot(resources: [resource])
+        try await f.accept(resources: [resource])
+        let snapshot = try f.personalSnapshot()
         try await f.importSnapshot(snapshot)
         try await f.store.prepareSnapshotActivation(snapshot.manifest)
         try await f.store.activateAcknowledgedSnapshot(snapshot.manifest)
@@ -186,23 +195,26 @@ struct V2MessageResourceIndexTests {
         func record(_ body: [String: Any], sequence: UInt64, origin event: EventID? = nil) throws -> V2ClientSyncRecord {
             try .init(sequence: sequence, sourceEventID: event ?? origin, projectionKind: "message", payload: JSONSerialization.data(withJSONObject: body))
         }
-        func apply(_ record: V2ClientSyncRecord) async throws {
-            _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("index-\(record.sequence)"), receipt: .init("index-\(record.sequence)"), hasMore: false, capabilityProfile: "base"))
+        func applyRoomEvent(_ record: V2ClientSyncRecord) async throws {
+            _ = try await store.applyGroupEventPage(.init(roomID: room, events: [
+                .init(sourceEventID: record.sourceEventID, roomSequence: record.sequence,
+                    projectionKind: record.projectionKind, payload: record.payload)
+            ], nextRoomSequence: record.sequence, hasMore: false))
         }
         func accept(id: MessageID? = nil, sequence: UInt64 = 1, resources: [V2ResourceDescriptor]) async throws {
             var payload = try body(id: id, resources: resources)
             payload["room_sequence"] = sequence; payload["timeline_sequence"] = sequence
-            try await apply(record(payload, sequence: sequence, origin: sequence == 1 ? origin : .init(uuid: UUID())))
+            try await applyRoomEvent(record(payload, sequence: sequence, origin: sequence == 1 ? origin : .init(uuid: UUID())))
         }
-        func snapshot(resources: [V2ResourceDescriptor]) throws -> SnapshotFixture {
+        func personalSnapshot() throws -> SnapshotFixture {
             let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
-            let items = try resources.enumerated().map { offset, descriptor in
-                let id = MessageID(uuid: UUID())
-                var payload = try body(id: id, resources: [descriptor])
-                payload["room_sequence"] = offset + 1; payload["timeline_sequence"] = offset + 1
-                return try V2SnapshotProjectionItem(key: .init(projectionKind: "message", entityKey: id.rawValue), sourceEventID: .init(uuid: UUID()), sequence: UInt64(offset + 1), payload: JSONSerialization.data(withJSONObject: payload))
-            }.sorted { $0.key < $1.key }
-            return try makeSnapshotFixture(reset: reset, pages: items.isEmpty ? [] : [.init(items: items)])
+            let membership = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: room.rawValue),
+                sourceEventID: .init(uuid: UUID()), sequence: 10, payload: JSONSerialization.data(withJSONObject: [
+                    "event_type": "membership_changed", "room_id": room.rawValue, "title": "Resources",
+                    "owner_user_id": user.rawValue, "target_user_id": user.rawValue, "action": "add",
+                    "membership_revision": 1, "capacity_class": "standard", "created_at_ms": 1_750_000_000_000,
+                    "server_created_at_ms": 1_750_000_000_000]))
+            return try makeSnapshotFixture(reset: reset, pages: [.init(items: [membership])])
         }
         func importSnapshot(_ fixture: SnapshotFixture) async throws {
             try await store.beginReset(fixture.manifest.reset)

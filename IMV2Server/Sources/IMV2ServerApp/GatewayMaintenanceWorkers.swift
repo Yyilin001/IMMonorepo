@@ -17,7 +17,7 @@ extension GatewayBackgroundWorkers {
         let personalEventGCWorkers = maintenance.personalEventGCWorkers
         let messageProjectionStateGCWorkers = maintenance.messageProjectionStateGCWorkers
         let forwardBackgroundDatabases = maintenance.forwardBackgroundDatabases
-        let directRoomProfilePropagationWorker = maintenance.directRoomProfilePropagationWorker
+        let profileSecurityInvalidationWorker = maintenance.profileSecurityInvalidationWorker
         let readReceiptPreferencePropagationWorker = maintenance.readReceiptPreferencePropagationWorker
         let deviceRevocationWorker = maintenance.deviceRevocationWorker
         let moderationAuditRetentionWorker = maintenance.moderationAuditRetentionWorker
@@ -142,10 +142,10 @@ extension GatewayBackgroundWorkers {
             while !Task.isCancelled {
                 var didWork = false
                 do {
-                    // 资料变更沿独立于房间事件恢复的直接联系人图传播。
+                    // 资料安全失效沿已有私聊关系持久投递；普通修改由作者通道处理。
                     // 工作预算按接收者计算，避免联系人众多的账号
                     // 将一次维护周期变成无界循环。
-                    let report = try await directRoomProfilePropagationWorker.runOnce(
+                    let report = try await profileSecurityInvalidationWorker.runOnce(
                         limit: configuration.workerBatchSize
                     )
                     didWork = report.claimedUpdateCount > 0 || report.projectedRecipientCount > 0 ||
@@ -153,7 +153,7 @@ extension GatewayBackgroundWorkers {
                 } catch is CancellationError {
                     break
                 } catch {
-                    V2ServiceLogging.logWorkerFailure(logger, worker: "direct_profile_propagation", error: error)
+                    V2ServiceLogging.logWorkerFailure(logger, worker: "profile_security_invalidation", error: error)
                 }
                 do {
                     let report = try await readReceiptPreferencePropagationWorker.runOnce(

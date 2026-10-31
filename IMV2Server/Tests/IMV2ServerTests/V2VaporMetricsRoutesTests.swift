@@ -12,6 +12,94 @@ import VaporTesting
 
 @Suite("V2 Vapor metrics routes")
 struct V2VaporMetricsRoutesTests {
+    @Test("author metrics observe bounded pressure without initiating a profile read")
+    func authorPressureMetrics() async throws {
+        let app = try await Application(.testing)
+        let diagnostics = V2ProfilePresentationReadDiagnostics()
+        let returned = await diagnostics.measure(.initialControl) { 7 }
+        #expect(returned == 7)
+        diagnostics.record(.roomDeadline)
+        let runtime = V2AuthorPresentationRuntime(configuration: try .init(), ingressConfiguration: try .init(),
+            readBatch: { _ in Issue.record("A metric scrape initiated a profile read"); return [] },
+            readDiagnostics: { diagnostics.snapshot() }, closeReader: {})
+        runtime.dispatcher.readDiagnostics.recordElapsed(.dispatchWrite, started: .now - .milliseconds(2))
+        let ownerDiagnostics = V2ProfilePresentationReadDiagnostics()
+        ownerDiagnostics.recordDuration(.roomOwnerQueue, duration: .milliseconds(7))
+        ownerDiagnostics.recordDuration(.roomOwnerExecution, duration: .milliseconds(9))
+        V2VaporMetricsRoutes.registerAuthorPresentations(on: app, runtime: runtime,
+            roomReads: { ownerDiagnostics.snapshot() })
+        do {
+            try await app.testing { client in
+                let response = try await client.send(.get, to: "metrics/authors")
+                #expect(response.status == .ok)
+                #expect(response.headers[.cacheControl] == "no-store, no-cache")
+                let body = try await response.body.string() ?? ""
+                #expect(body.contains("im_v2_author_expired_jobs_total 0\n"))
+                #expect(body.contains("im_v2_author_reading_batches 0\n"))
+                #expect(body.contains("im_v2_author_read_initial_control_calls_total 1\n"))
+                #expect(body.contains("im_v2_author_read_dispatch_write_calls_total 1\n"))
+                #expect(body.contains("im_v2_author_read_room_owner_queue_calls_total 1\n"))
+                #expect(body.contains("im_v2_author_read_room_owner_queue_milliseconds_total 7.0\n"))
+                #expect(body.contains("im_v2_author_read_room_owner_execution_milliseconds_total 9.0\n"))
+                #expect(body.contains("im_v2_author_read_room_deadline_total 1\n"))
+                #expect(body.contains("im_v2_author_read_final_control_calls_total 0\n"))
+                #expect(body.split(separator: "\n").allSatisfy { $0.hasPrefix("# TYPE im_v2_author_") || $0.hasPrefix("im_v2_author_") })
+            }
+        } catch { await runtime.close(); try await app.shutdown(); throw error }
+        await runtime.close(); try await app.shutdown()
+    }
+
+    @Test("read diagnostics retain concurrent observations without changing errors")
+    func readDiagnostics() async throws {
+        let diagnostics = V2ProfilePresentationReadDiagnostics()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<100 {
+                group.addTask {
+                    await diagnostics.measure(.initialRoom) { diagnostics.record(.presentation) }
+                }
+            }
+        }
+        await #expect(throws: CancellationError.self) {
+            try await diagnostics.measure(.avatar) { throw CancellationError() }
+        }
+        let snapshot = diagnostics.snapshot()
+        #expect(snapshot.stages[.initialRoom]?.calls == 100)
+        #expect(snapshot.stages[.initialRoom]?.failures == 0)
+        #expect(snapshot.outcomes[.presentation] == 100)
+        #expect(snapshot.stages[.avatar]?.calls == 1)
+        #expect(snapshot.stages[.avatar]?.failures == 1)
+        let timing = try #require(snapshot.stages[.initialRoom])
+        #expect(timing.totalMilliseconds >= timing.maximumMilliseconds && timing.maximumMilliseconds >= 0)
+        #expect(diagnostics.snapshot().outcomes == snapshot.outcomes)
+    }
+
+    @Test("control failure metrics distinguish admission, work deadline and cancellation")
+    func controlFailureDiagnostics() async throws {
+        let diagnostics = V2ProfilePresentationReadDiagnostics()
+        for stage in [V2ProfilePresentationReadDiagnostics.Stage.initialControl, .finalControl, .deliveryControl] {
+            await #expect(throws: V2ProfileControlBatchError.deadlineExceeded) {
+                try await diagnostics.measure(stage) { throw V2ProfileControlBatchError.deadlineExceeded }
+            }
+            await #expect(throws: V2ResourceProviderError.throttled(retryAfter: 1)) {
+                try await diagnostics.measure(stage) { throw V2ResourceProviderError.throttled(retryAfter: 1) }
+            }
+            await #expect(throws: CancellationError.self) {
+                try await diagnostics.measure(stage) { throw CancellationError() }
+            }
+            await #expect(throws: V2ProfileControlBatchError.corruptResult) {
+                try await diagnostics.measure(stage) { throw V2ProfileControlBatchError.corruptResult }
+            }
+        }
+        await #expect(throws: V2ProfileControlBatchError.deadlineExceeded) {
+            try await diagnostics.measure(.avatar) { throw V2ProfileControlBatchError.deadlineExceeded }
+        }
+        let snapshot = diagnostics.snapshot()
+        #expect(snapshot.outcomes == [.controlDeadline: 3, .controlOverloaded: 3, .controlCancelled: 3, .controlFailure: 3])
+        for stage in [V2ProfilePresentationReadDiagnostics.Stage.initialControl, .finalControl, .deliveryControl] {
+            #expect(snapshot.stages[stage]?.calls == 4 && snapshot.stages[stage]?.failures == 4)
+        }
+    }
+
     @Test("metrics route exposes only aggregate Prometheus text with no-store semantics")
     func rendersAggregateMetrics() async throws {
         var realtime = V2ActorRealtimeMetricsSnapshot()
@@ -531,8 +619,8 @@ struct V2VaporMetricsRoutesTests {
             leasedUserStateEventRows: 1,
             scheduledUserStateEventRows: 6,
             pausedUserStateEventRows: 7,
-            readyDirectProfileUpdates: 15,
-            leasedDirectProfileUpdates: 16,
+            readyProfileSecurityInvalidations: 15,
+            leasedProfileSecurityInvalidations: 16,
             readyReadReceiptPreferencePropagations: 30,
             leasedReadReceiptPreferencePropagations: 31,
             scheduledReadReceiptPreferencePropagations: 32,
@@ -579,8 +667,8 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_user_state_event_backlog{state=\"ready\"} 2"))
             #expect(body.contains("im_v2_user_state_event_backlog{state=\"scheduled\"} 6"))
             #expect(body.contains("im_v2_user_state_event_backlog{state=\"paused\"} 7"))
-            #expect(body.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
-            #expect(body.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
+            #expect(body.contains("im_v2_profile_security_invalidation_backlog{state=\"ready\"} 15"))
+            #expect(body.contains("im_v2_profile_security_invalidation_backlog{state=\"leased\"} 16"))
             #expect(body.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"ready\"} 30"))
             #expect(body.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"leased\"} 31"))
             #expect(body.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"scheduled\"} 32"))

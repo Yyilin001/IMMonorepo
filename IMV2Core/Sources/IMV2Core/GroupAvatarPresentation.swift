@@ -38,14 +38,16 @@ public struct V2GroupAvatarPresentation: Equatable, Codable, Sendable {
             throw V2ResourceValidationError.invalidPresentationLease
         }
         if let media = state.mediaID {
-            guard let avatar, avatar.mediaID == media, (resourceGeneration ?? 0) > 0,
-                  avatar.plan.expiresAtUnixMilliseconds > serverNowUnixMilliseconds,
-                  avatar.plan.expiresAtUnixMilliseconds <= validUntilUnixMilliseconds else {
+            guard let avatar, avatar.mediaID == media, (resourceGeneration ?? 0) > 0 else {
                 throw V2ResourceValidationError.invalidPresentationLease
             }
-            let byteLifetime = avatar.plan.expiresAtUnixMilliseconds.subtractingReportingOverflow(observedAtUnixMilliseconds)
-            guard !byteLifetime.overflow, byteLifetime.partialValue > 0, byteLifetime.partialValue <= 120_000 else {
-                throw V2ResourceValidationError.invalidPresentationLease
+            if let plan = avatar.plan {
+                let byteLifetime = plan.expiresAtUnixMilliseconds.subtractingReportingOverflow(observedAtUnixMilliseconds)
+                guard plan.expiresAtUnixMilliseconds > serverNowUnixMilliseconds,
+                      plan.expiresAtUnixMilliseconds <= validUntilUnixMilliseconds,
+                      !byteLifetime.overflow, byteLifetime.partialValue > 0, byteLifetime.partialValue <= 120_000 else {
+                    throw V2ResourceValidationError.invalidPresentationLease
+                }
             }
         } else {
             guard avatar == nil, resourceGeneration == nil else { throw V2ResourceValidationError.invalidPresentationLease }

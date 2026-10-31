@@ -38,19 +38,22 @@ public struct V2HTTPProfilePresentationClient: V2ProfilePresentationReading {
         let batch = try JSONDecoder().decode(V2ProfilePresentationBatchResponse.self, from: bytes)
         var presentations: [V2ProfileViewLookupKey: V2AuthorizedProfilePresentation] = [:]
         var avatars: [V2ProfileViewLookupKey: V2ResourceAvatarAccess] = [:]
-        var unavailable = Set<V2ProfileViewLookupKey>(), retryable = Set<V2ProfileViewLookupKey>()
+        var denials: [V2ProfileViewLookupKey: V2PresentationAuthorityVersion] = [:]
+        var retryable = Set<V2ProfileViewLookupKey>()
         for entry in batch.results {
             switch entry {
             case .presentation(let presentation, let avatar):
                 presentations[entry.key] = presentation
                 if let avatar {
-                    guard !avatar.plan.headers.contains(where: { $0.value.contains(credential.accessToken) }), !avatar.plan.url.absoluteString.contains(credential.accessToken) else { throw V2ClientMediaTransferError.invalidTarget }
+                    if let plan = avatar.plan {
+                        guard !plan.headers.contains(where: { $0.value.contains(credential.accessToken) }), !plan.url.absoluteString.contains(credential.accessToken) else { throw V2ClientMediaTransferError.invalidTarget }
+                    }
                     avatars[entry.key] = avatar
                 }
-            case .unavailable(let key): unavailable.insert(key)
+            case .unavailable(let denial): denials[denial.key] = denial.authorityVersion
             case .retryable(let key): retryable.insert(key)
             }
         }
-        return .init(presentations: presentations, unavailable: unavailable, serverNow: Date(timeIntervalSince1970: Double(batch.serverNowUnixMilliseconds) / 1_000), avatars: avatars, retryable: retryable)
+        return .init(presentations: presentations, denials: denials, serverNow: Date(timeIntervalSince1970: Double(batch.serverNowUnixMilliseconds) / 1_000), avatars: avatars, retryable: retryable)
     }
 }

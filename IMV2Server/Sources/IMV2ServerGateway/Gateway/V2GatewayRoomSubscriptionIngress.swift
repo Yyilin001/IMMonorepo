@@ -13,12 +13,17 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
     public let authority: V2GatewayRoomSubscriptionAuthority
     private let offerEvent: OfferEvent
     private let offerHead: OfferHead
+    private let observePresentationEvent: @Sendable (V2RealtimeRoomEvent) -> Void
+    private let invalidatePresentations: @Sendable (RoomID) -> Void
 
     public init(authority: V2GatewayRoomSubscriptionAuthority, maximumRooms: Int = 256,
-                offerEvent: @escaping OfferEvent, offerHead: @escaping OfferHead) {
+                offerEvent: @escaping OfferEvent, offerHead: @escaping OfferHead,
+                observePresentationEvent: @escaping @Sendable (V2RealtimeRoomEvent) -> Void = { _ in },
+                invalidatePresentations: @escaping @Sendable (RoomID) -> Void = { _ in }) {
         precondition(maximumRooms > 0)
         self.authority = authority
         self.offerEvent = offerEvent; self.offerHead = offerHead
+        self.observePresentationEvent = observePresentationEvent; self.invalidatePresentations = invalidatePresentations
     }
 
     @discardableResult
@@ -73,7 +78,18 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
     public func applyRoomSubscription(_ delivery: V2RoomSubscriptionDelivery,
                                       authenticatedServiceID: String, sourceShardID: String) async -> V2RoomSubscriptionDeliveryResult {
         guard sourceShardID == delivery.fence.activation.owner.shardID else { return .stale }
-        switch await authority.apply(delivery, authenticatedServiceID: authenticatedServiceID) {
+        switch await authority.apply(delivery, authenticatedServiceID: authenticatedServiceID,
+            observeAccepted: { [observePresentationEvent, invalidatePresentations] accepted in
+                switch accepted.payload {
+                case .event(let event, _), .broadcast(let event): observePresentationEvent(event)
+                case .baseline, .grant, .revoke, .authorizationInvalidated, .head:
+                    invalidatePresentations(accepted.fence.roomID)
+                case .baselinePage(let index, let total, _):
+                    if (index + 1) * V2RoomSubscriptionPayload.maximumBaselinePageMembers >= total {
+                        invalidatePresentations(accepted.fence.roomID)
+                    }
+                }
+            }) {
         case .applied(let permits):
             if !permits.isEmpty {
                 switch delivery.payload {
@@ -89,6 +105,7 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
             }
             return .appliedThrough(delivery.deliverySequence)
         case .snapshotRequired:
+            invalidatePresentations(delivery.fence.roomID)
             await requestBaseline(for: delivery.fence)
             return .snapshotRequired
         case .stale, .invalid:

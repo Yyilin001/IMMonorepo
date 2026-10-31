@@ -259,7 +259,15 @@
       "owner": "C0"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ActorContracts/V2RoomActivationLeaseStore.swift",
+      "retiredPath": "IMV2Server/Sources/IMV2ActorContracts/V2RoomActivationLeaseStore.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ActorContracts/V2RoomActorPlacement.swift",
+        "IMV2Server/Sources/IMV2ActorContracts/V2RoomActivationIdentity.swift"
+      ],
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ActorContracts/V2RoomActorPlacement.swift",
       "owner": "C0"
     },
     {
@@ -1009,7 +1017,15 @@
       "owner": "D3"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomActivationStore.swift",
+      "retiredPath": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomActivationStore.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ActorRuntime/Lifecycle/V2RoomActivationHost.swift",
+        "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Activation/V2RoomActivationRestoration.swift"
+      ],
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Activation/V2RoomActivationRestoration.swift",
       "owner": "I1"
     },
     {
@@ -1193,7 +1209,7 @@
       "owner": "D1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift",
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ProfileSecurityInvalidationWorker.swift",
       "owner": "D6"
     },
     {
@@ -1381,7 +1397,11 @@
       "owner": "R2"
     },
     {
-      "path": "IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomActivationTests.swift",
+      "retiredPath": "IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomActivationTests.swift",
+      "replacedBy": [
+        "IMV2Server/Tests/IMV2ActorRuntimeTests/V2RoomActivationHostTests.swift",
+        "IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomWriteStoreIntegrationTests+Activation.swift"
+      ],
       "owner": "I1"
     },
     {
@@ -1625,6 +1645,14 @@
     },
     {
       "path": "IMV2Server/Sources/IMV2Server/V2EnvironmentParsing.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ActorContracts/Protobuf/V2HotProfileProtobuf.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ActorContractsTests/V2ProfileProtobufTests.swift",
       "owner": "C0"
     }
   ]

@@ -109,7 +109,7 @@ package struct V2PostgresAccountDisableMutation: Sendable {
             try await sql.raw("UPDATE im_v2.device_access_tokens SET revoked_at = COALESCE(revoked_at, \(bind: occurredAt)) WHERE user_id = \(bind: userUUID)").run()
             if let profile = try await sql.raw("""
                 WITH candidate AS MATERIALIZED (
-                    SELECT user_id, public_handle, display_name, account_kind
+                    SELECT user_id
                     FROM im_v2.public_user_profiles
                     WHERE user_id = \(bind: userUUID) AND state <> 'deleted'
                       AND state <> 'suspended'
@@ -126,8 +126,7 @@ package struct V2PostgresAccountDisableMutation: Sendable {
                       AND profile.visibility_revision < \(bind: Int64.max)
                     RETURNING profile.revision
                 )
-                SELECT candidate.public_handle, candidate.display_name,
-                       candidate.account_kind, updated.revision
+                SELECT updated.revision
                 FROM candidate LEFT JOIN updated ON TRUE
                 """).first(decoding: DisabledProfileRow.self) {
                 // 符合条件的资料必须实际被停用。修订号缺失时须区分
@@ -135,13 +134,14 @@ package struct V2PostgresAccountDisableMutation: Sendable {
                 guard let revision = profile.revision else { throw V2AccountDisableError.unavailable }
                 try await sql.raw("""
                     INSERT INTO im_v2.public_profile_update_outbox
-                        (source_event_id, source_user_id, public_handle,
-                         display_name, account_kind, profile_state, revision,
-                         profile_updated_at, created_at)
-                    VALUES (\(bind: command.operationID), \(bind: userUUID),
-                            \(bind: profile.publicHandle), \(bind: profile.displayName),
-                            \(bind: profile.accountKind), 'suspended',
-                            \(bind: revision), \(bind: occurredAt), \(bind: occurredAt))
+                        (source_event_id, source_user_id, revision, created_at)
+                    VALUES (\(bind: command.operationID), \(bind: userUUID), \(bind: revision), \(bind: occurredAt))
+                    """).run()
+                try await sql.raw("""
+                    INSERT INTO im_v2.profile_security_invalidation_outbox
+                        (source_event_id, source_user_id, revision, profile_state, profile_updated_at, created_at)
+                    VALUES (\(bind: command.operationID), \(bind: userUUID), \(bind: revision), 'suspended',
+                            \(bind: occurredAt), \(bind: occurredAt))
                     """).run()
             }
             // 持久化网关工作器在每个网关副本上消费这条逐设备事件流，
@@ -182,14 +182,8 @@ private struct DisableRecord: Decodable {
 }
 
 private struct DisabledProfileRow: Decodable {
-    let publicHandle: String
-    let displayName: String
-    let accountKind: String
     let revision: Int64?
     enum CodingKeys: String, CodingKey {
-        case publicHandle = "public_handle"
-        case displayName = "display_name"
-        case accountKind = "account_kind"
         case revision
     }
 }

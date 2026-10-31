@@ -3,6 +3,12 @@ import Foundation
 import IMV2Core
 import Synchronization
 
+/// Only a busy, still-live transport that enqueued no bytes permits another attempt. No result
+/// acknowledges client application, and a discarded permit is never retried.
+public enum V2AuthorPresentationWriteResult: Equatable, Sendable {
+    case enqueued, temporarilyUnavailable, discarded
+}
+
 /// One optional write. The adapter must invoke `enqueueIfCurrent` on its actual
 /// socket owner, after checking writability and higher-priority response work.
 /// Returning true records local enqueue only, never delivery or authorization.
@@ -26,24 +32,24 @@ package final class V2AuthorPresentationTransport: Sendable {
     private struct State: Sendable {
         var generation = UUID()
         var viewID: UUID?
-        var roomID: RoomID?
+        var messageRoomIDs: Set<RoomID> = []
         var deadline: ContinuousClock.Instant = .now
     }
     private let state = Mutex(State())
 
     package init() {}
 
-    package func activate(viewID: UUID, roomID: RoomID? = nil) {
+    package func activate(viewID: UUID, messageRoomIDs: Set<RoomID> = []) {
         state.withLock {
             guard $0.viewID != viewID else { return }
-            $0.generation = UUID(); $0.viewID = viewID; $0.roomID = roomID
+            $0.generation = UUID(); $0.viewID = viewID; $0.messageRoomIDs = messageRoomIDs
             $0.deadline = .now + .milliseconds(V2AuthorPresentationDelta.maximumViewAgeMilliseconds)
         }
     }
-    package func deactivate() { state.withLock { $0.generation = UUID(); $0.viewID = nil } }
+    package func deactivate() { state.withLock { $0.generation = UUID(); $0.viewID = nil; $0.messageRoomIDs.removeAll() } }
 
     package func selectedView(in roomID: RoomID) -> UUID? {
-        state.withLock { $0.roomID == roomID && $0.deadline > .now ? $0.viewID : nil }
+        state.withLock { $0.messageRoomIDs.contains(roomID) && $0.deadline > .now ? $0.viewID : nil }
     }
 
     package func prepare(bytes: Data, viewID: UUID, deadline: ContinuousClock.Instant,

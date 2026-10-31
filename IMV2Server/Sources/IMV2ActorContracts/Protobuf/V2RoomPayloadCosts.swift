@@ -26,8 +26,39 @@ extension V2RoomRequest: V2ActorBudgetedPayload {
         switch self {
         case .messaging(.sendOperation(let command)): Cost.sum(64, command.estimatedRetainedBytes)
         case .roomLog(.pull(let command)): Cost.sum(64, command.actorRetainedBytes)
+        case .mediaAuthorization(.profileVisibilityBatch(let request)): Cost.sum(64, request.actorRetainedBytes)
+        case .mediaAuthorization(.profileVisibilityCohort(let request)): Cost.sum(64, request.actorRetainedBytes)
         default: Cost.reflectedBytes(of: self)
         }
+    }
+}
+extension V2ActorProfileVisibilityBatchWire: V2ActorBudgetedPayload {
+    package var actorRetainedBytes: Int {
+        // Includes both identifiers' inline String/UUID caches, room kind and
+        // the target array. Each target separately charges inline storage and text.
+        var cost = Cost.sum(160, Cost.textBytes(roomID.rawValue), Cost.textBytes(actorUserID.rawValue))
+        for target in targetUserIDs { cost = Cost.sum(cost, 64, Cost.textBytes(target.rawValue)) }
+        return cost
+    }
+}
+extension V2ActorProfileVisibilityCohortWire: V2ActorBudgetedPayload {
+    package var actorRetainedBytes: Int {
+        requests.reduce(Cost.sum(192, Cost.textBytes(roomID.rawValue))) { Cost.sum($0, $1.actorRetainedBytes) }
+    }
+}
+extension V2ActorGroupMemberPresentationWire: V2ActorBudgetedPayload {
+    package var actorRetainedBytes: Int {
+        Cost.sum(192, Cost.textBytes(roomID.rawValue), Cost.textBytes(userID.rawValue), groupNickname.map(Cost.textBytes) ?? 0)
+    }
+}
+extension V2ActorProfileVisibilityBatchSnapshotWire: V2ActorBudgetedPayload {
+    package var actorRetainedBytes: Int {
+        // Charge all retained values even for malformed/oversized responses.
+        // Never serialize or traverse a reflective value tree for admission.
+        var cost = Cost.sum(320, request.actorRetainedBytes, activation.actorRetainedBytes)
+        for user in visibleTargetUserIDs { cost = Cost.sum(cost, 64, Cost.textBytes(user.rawValue)) }
+        for member in groupMembers { cost = Cost.sum(cost, member.actorRetainedBytes) }
+        return cost
     }
 }
 extension V2OperationIdentity: V2ActorBudgetedPayload {
@@ -67,6 +98,9 @@ extension V2RoomResponse: V2ActorBudgetedPayload {
         switch self {
         case .messaging(.sendOperation(let result)): Cost.sum(64, result.actorRetainedBytes)
         case .roomLog(.page(let page)): Cost.sum(64, page.actorRetainedBytes)
+        case .mediaAuthorization(.profilesVisible(let value)): Cost.sum(64, value.actorRetainedBytes)
+        case .mediaAuthorization(.profilesVisibleCohort(let values)):
+            values.reduce(128) { Cost.sum($0, $1.actorRetainedBytes) }
         default: Cost.reflectedBytes(of: self)
         }
     }

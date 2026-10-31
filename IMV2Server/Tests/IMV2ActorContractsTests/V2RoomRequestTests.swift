@@ -5,6 +5,36 @@ import Testing
 
 @Suite("Closed room capability envelope")
 struct V2RoomRequestTests {
+    @Test("multi-viewer room reads have service identity and charge all target work")
+    func profileCohortEnvelope() throws {
+        let room = RoomID(uuid: UUID()), target = UserID(uuid: UUID())
+        let viewers = (0..<100).map { _ in V2ActorProfileVisibilityBatchWire(roomID: room,
+            actorUserID: .init(uuid: UUID()), roomKind: .memberRoom, targetUserIDs: [target]) }
+        func envelope(_ values: [V2ActorProfileVisibilityBatchWire], roomID: RoomID? = nil) -> V2RoomRequest {
+            .mediaAuthorization(.profileVisibilityCohort(.init(roomID: roomID ?? room, requests: values)))
+        }
+        let valid = envelope(viewers)
+        #expect(valid.actorUserID == nil && valid.roomID == room && valid.replayPolicy == .readOnly)
+        #expect(valid.profileVisibilityTargetCount == 100 && !valid.hasStableOperationID && !valid.canShareSendTurn)
+        let retainedBytes = V2ActorPayloadBudget.retainedBytes(of: valid)
+        let encoded = try V2ActorProtobuf.encode(valid)
+        #expect(retainedBytes <= 64 * 1_024 && retainedBytes >= encoded.count)
+        #expect(try V2ActorProtobuf.decode(V2RoomRequest.self, from: encoded) == valid)
+        #expect(try JSONDecoder().decode(V2RoomRequest.self, from: JSONEncoder().encode(valid)) == valid)
+        #expect(envelope([]).profileVisibilityTargetCount == nil)
+        #expect(envelope(viewers + [viewers[0]]).profileVisibilityTargetCount == nil)
+        #expect(envelope(viewers, roomID: .init(uuid: UUID())).profileVisibilityTargetCount == nil)
+        let twoTargets = V2ActorProfileVisibilityBatchWire(roomID: room, actorUserID: viewers[0].actorUserID,
+            roomKind: .group, targetUserIDs: [target, .init(uuid: UUID())])
+        #expect(envelope(Array(repeating: twoTargets, count: 50)).profileVisibilityTargetCount == 100)
+        #expect(envelope(Array(repeating: twoTargets, count: 51)).profileVisibilityTargetCount == nil)
+        #expect(envelope([.init(roomID: room, actorUserID: try .init("invalid"), roomKind: .group,
+            targetUserIDs: [target])]).profileVisibilityTargetCount == nil)
+        // A larger or malformed model must still charge every retained item;
+        // eligibility validation is not a way to make its memory cost disappear.
+        #expect(V2ActorPayloadBudget.retainedBytes(of: envelope(viewers + viewers)) > retainedBytes)
+    }
+
     @Test("profile cohort eligibility checks shape without changing the per-user principal")
     func profileCohortEligibility() throws {
         let room = RoomID(uuid: UUID()), actor = UserID(uuid: UUID()), target = UserID(uuid: UUID())
