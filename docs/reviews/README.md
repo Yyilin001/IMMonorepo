@@ -70,7 +70,7 @@
 | 房间读模型：投递、未读与保留窗口（**已实施**：单聊与标准群默认都走读模型、未读、保留窗口与运维重放；列表为本地优先 + 服务端未读；进入房间按 §5.4 推进到已应用序号／房间头） | [房间读模型合同](room-read-model-contract.md) | B03、B04、D07 |
 | 发送请求指纹与幂等 | [发送成功记录与恢复](message-send-contract.md) | B11、D07 |
 | 房间写入存储的职责拆分与事务边界 | [Room write Store decomposition](room-write-store-decomposition.md) | D07 |
-| 消息发送双通道的当前实施与聚焦验证 | [双通道实施记录](message-send-dual-transport.md)；生产与真机验收仍待执行 | B27、D07 |
+| 普通消息的当前传输入口与能力开关 | [当前发送合同](message-send-contract.md#入口与身份)；TCP-only，HTTPS 仅预留 | B27、D07 |
 | 静态房间归属与跨库持久发送授权 | [当前归属与发送授权合同](room-owner-migration-contract.md)；在线迁移章节仅供追溯 | B27、B04、B11、D07 |
 | 房间逻辑寻址、激活、事务资格与回收 | [房间 Virtual Actor 合同](room-virtual-actor-contract.md) | B27 |
 | 消息发送、成功结果与恢复 | [当前发送合同](message-send-contract.md) | B27 |
@@ -133,7 +133,7 @@
 | 普通成员变更 | [成员变更 owner 栅栏](room-membership-owner-fence-contract.md) | B27 |
 | 消息发送 | [当前发送与恢复合同](message-send-contract.md) | B27 |
 | 消息编辑/撤回/reaction | [消息变更 owner 栅栏](message-mutation-owner-fence-contract.md) | B27 |
-| 公告、置顶、角色权限、成员角色 | [群管理 owner 栅栏](group-capability-owner-fence-contract.md) | B27 |
+| 公告、置顶、角色权限、成员角色、群主转让与解散 | [群管理 owner 栅栏](group-capability-owner-fence-contract.md) | B27 |
 | Moderation | [Moderation owner 栅栏](moderation-owner-fence-contract.md) | B27 |
 | 已读回执与读者列表 | [已读回执 owner 栅栏](read-receipt-owner-fence-contract.md) | B27 |
 | 转发导入 | [转发导入 owner 栅栏](forward-import-owner-fence-contract.md)、[前台转发 owner 栅栏](foreground-forward-owner-fence-contract.md) | B04、B27 |

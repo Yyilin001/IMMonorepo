@@ -6,6 +6,7 @@ import Testing
 import UIKit
 import SwiftUI
 import Observation
+import Synchronization
 @testable import IMApp
 
 @MainActor
@@ -52,13 +53,16 @@ struct V2ProfileAvatarPipelineTests {
         let f = try await ProfilePipelineFixture(seedCache: false)
         defer { try? FileManager.default.removeItem(at: f.root) }
         await f.reader.withholdFirstDownloadPlan(failRefresh: false)
-        await f.reader.shortenFirstLease(to: 0.15, refreshDelay: .milliseconds(300))
-        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let clock = Mutex(ContinuousClock.now)
+        await f.reader.shortenFirstLease(to: 1, beforeRefresh: { clock.withLock { $0 += .seconds(2) } })
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root])
+        let pipeline = f.pipeline(thumbnails, now: { clock.withLock { $0 } }, sleepUntil: { _ in try Task.checkCancellation() })
         let page = await pipeline.profiles.activate()
         _ = try await pipeline.profiles.presentation(for: f.key, activation: page)
         let original = try #require(await pipeline.profiles.authorizationDeadline(for: f.key, activation: page))
         let snapshot = try #require(try await pipeline.snapshot(key: f.key, activation: page, pixels: 32))
-        #expect(original <= .now && snapshot.deadline > .now)
+        let now = clock.withLock { $0 }
+        #expect(original <= now && snapshot.deadline > now)
         #expect(snapshot.image != nil && snapshot.name == "Original" && snapshot.avatarRetryAt == nil)
         #expect(snapshot.deadline <= (await pipeline.profiles.avatarReadGrant(for: f.key, activation: page)?.deadline ?? original))
         #expect(await f.reader.calls == 2)
@@ -69,14 +73,16 @@ struct V2ProfileAvatarPipelineTests {
     func oldDecodeDoesNotBorrowRenewal() async throws {
         let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        await f.reader.shortenFirstLease(to: 0.5)
+        let clock = Mutex(ContinuousClock.now)
+        await f.reader.shortenFirstLease(to: 1)
         await f.reader.removeDownloadPlan()
         let entered = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()
         let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]) { _, _ in
             await gate.wait(entered.continuation)
             return V2SendableImage(image: UIImage())
         }
-        let pipeline = f.pipeline(thumbnails), page = await pipeline.profiles.activate()
+        let pipeline = f.pipeline(thumbnails, now: { clock.withLock { $0 } }, sleepUntil: { _ in try Task.checkCancellation() })
+        let page = await pipeline.profiles.activate()
         let pending = Task {
             defer { entered.continuation.finish() }
             return try await pipeline.snapshot(key: f.key, activation: page, pixels: 32)
@@ -90,10 +96,10 @@ struct V2ProfileAvatarPipelineTests {
         }
         let original = try #require(await pipeline.profiles.avatarReadGrant(for: f.key, activation: page))
         let renewed = try #require(try await pipeline.profiles.refreshAvatarReadGrant(for: f.key, activation: page, replacing: original.avatar))
-        try await ContinuousClock().sleep(until: original.deadline + .milliseconds(10))
+        clock.withLock { $0 = original.deadline + .milliseconds(1) }
         await gate.release()
         let snapshot = try #require(try await pending.value)
-        #expect(snapshot.name == "Original" && snapshot.deadline > .now)
+        #expect(snapshot.name == "Original" && snapshot.deadline > clock.withLock { $0 })
         #expect(snapshot.image == nil && snapshot.avatarRetryAt != nil)
         #expect(snapshot.deadline <= renewed.deadline)
         await pipeline.close(); await thumbnails.close(); try await f.files.close(); entered.continuation.finish()
@@ -667,10 +673,12 @@ private struct ProfilePipelineFixture {
             await seeded.release()
         } else { cachedFile = root.appendingPathComponent("not-seeded") }
     }
-    func pipeline(_ thumbnails: V2LocalMediaThumbnailCache) -> V2AvatarPipeline {
-        .init(profiles: .init(actorUserID: actor, deviceID: device, reader: reader),
+    func pipeline(_ thumbnails: V2LocalMediaThumbnailCache,
+                  now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
+                  sleepUntil: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = { try await ContinuousClock().sleep(until: $0) }) -> V2AvatarPipeline {
+        .init(profiles: .init(actorUserID: actor, deviceID: device, reader: reader, now: now, sleepUntil: sleepUntil),
             groups: .init(actorUserID: actor, deviceID: device, reader: NoProfileByteIO(), minimumRevision: { _ in 0 }),
-            files: files.downloader, thumbnails: thumbnails)
+            files: files.downloader, thumbnails: thumbnails, now: now)
     }
 }
 private actor ProfilePipelineReader: V2ProfilePresentationReading {
@@ -686,9 +694,9 @@ private actor ProfilePipelineReader: V2ProfilePresentationReading {
     func allowRefresh() { failRefresh = false; omitAllPlans = false }
     func setOffline() { offline = true }
     private var firstLifetime: TimeInterval?
-    private var refreshDelay: Duration = .zero
-    func shortenFirstLease(to seconds: TimeInterval, refreshDelay: Duration = .zero) {
-        firstLifetime = seconds; self.refreshDelay = refreshDelay
+    private var beforeRefresh: @Sendable () -> Void = {}
+    func shortenFirstLease(to seconds: TimeInterval, beforeRefresh: @escaping @Sendable () -> Void = {}) {
+        firstLifetime = seconds; self.beforeRefresh = beforeRefresh
     }
     var calls = 0
     init(value: V2AuthorizedProfilePresentation, avatar: V2ResourceAvatarAccess) { self.value = value; self.avatar = avatar }
@@ -716,7 +724,7 @@ private actor ProfilePipelineReader: V2ProfilePresentationReading {
     }
     func readPresentations(_ keys: [V2ProfileViewLookupKey]) async throws -> V2ProfilePresentationBatch {
         calls += 1
-        if calls > 1 && refreshDelay > .zero { try await Task.sleep(for: refreshDelay) }
+        if calls > 1 { beforeRefresh() }
         if offline { throw URLError(.notConnectedToInternet) }
         if calls > 1 && failRefresh { throw URLError(.cannotConnectToHost) }
         let key = value.lease.key

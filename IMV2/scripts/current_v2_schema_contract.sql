@@ -5,6 +5,10 @@ WITH schema_visibility AS MATERIALIZED (
  SELECT pg_catalog.set_config('search_path', '', true) AS active_path
 )
 SELECT (
+(EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='rooms' AND column_name='dissolved_at' AND udt_name='timestamptz' AND is_nullable='YES')
+ AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.rooms') AND conname='rooms_dissolved_check' AND convalidated)
+ AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.rooms') AND tgname='rooms_dissolution_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=19)
+ AND (SELECT count(*)=2 FROM pg_constraint WHERE conrelid IN (to_regclass('im_v2.group_capability_admissions'),to_regclass('im_v2.group_capability_receipts')) AND contype='c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%groupOwnership%groupDissolution%')) AND
 ((SELECT array_agg(attname::text ORDER BY attnum) = ARRAY['publication_sequence','source_event_id','source_user_id','revision','created_at']
     FROM pg_attribute WHERE attrelid=to_regclass('im_v2.public_profile_update_outbox') AND attnum>0 AND NOT attisdropped)
 AND (SELECT count(*)=5 FROM pg_attribute WHERE attrelid=to_regclass('im_v2.public_profile_update_outbox')
@@ -119,7 +123,7 @@ AND to_regclass('im_v2.device_room_progress') IS NOT NULL
       AND ((attname IN ('user_id','device_id','room_id') AND atttypid = 'uuid'::regtype) OR (attname = 'applied_through' AND atttypid = 'bigint'::regtype)))
  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.device_room_progress') AND contype = 'p' AND pg_get_constraintdef(oid) = 'PRIMARY KEY (user_id, device_id, room_id)')
  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.device_room_progress') AND contype = 'c' AND pg_get_constraintdef(oid) = 'CHECK ((applied_through >= 0))')
- AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.social_operation_receipts') AND tgname='social_operation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.social_relationship_revisions') IS NOT NULL AND to_regclass('im_v2.social_block_revisions') IS NOT NULL AND to_regclass('im_v2.user_relationship_operations') IS NULL AND to_regclass('im_v2.user_block_operations') IS NULL AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.membership_operation_admissions') AND tgname='membership_operation_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.membership_operation_receipts') AND tgname='membership_operation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.group_capability_admissions') AND tgname='group_capability_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.group_capability_receipts') AND tgname='group_capability_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.room_pinned_message_operations') IS NULL AND to_regclass('im_v2.group_announcement_operations') IS NULL AND to_regclass('im_v2.group_permission_operations') IS NULL AND to_regclass('im_v2.group_role_operations') IS NULL AND EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace=to_regnamespace('im_v2') AND proname='reject_message_mutation_receipt_mutation' AND encode(sha256(convert_to(prosrc,'UTF8')),'hex')='3a110559fbb4f875263df3b192f1eebe272b3d51a0a6f7354ca389e00a8583b2') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.member_administration_admissions') AND tgname='member_administration_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.member_administration_receipts') AND tgname='member_administration_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.message_reaction_operations') IS NULL AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_reaction_receipts') AND tgname='message_reaction_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_mutation_receipts') AND tgname='message_mutation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.message_send_operation_receipts') IS NULL AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='message_send_completions' AND ((column_name='operation_fingerprint' AND udt_name='bytea') OR (column_name='operation_resolved_at_ms' AND udt_name='int8'))) AND to_regclass('im_v2.message_edit_operations') IS NULL AND to_regclass('im_v2.message_withdrawal_operations') IS NULL AND to_regclass('im_v2.direct_message_denials') IS NULL AND to_regclass('im_v2.direct_authorization_intents') IS NULL AND to_regclass('im_v2.policy_authorization_holders') IS NULL AND to_regclass('im_v2.policy_authorization_revocations') IS NULL AND to_regclass('im_v2.policy_authorization_holder_generation') IS NULL AND to_regclass('im_v2.room_policy_authorization_leases') IS NULL AND to_regclass('im_v2.direct_authorization_receipts') IS NULL AND to_regprocedure('im_v2.guard_direct_authorization_intent()') IS NULL AND to_regprocedure('im_v2.reject_direct_authorization_receipt_mutation()') IS NULL) AND ((SELECT count(*) = 19 FROM information_schema.columns
+ AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.social_operation_receipts') AND tgname='social_operation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.social_relationship_revisions') IS NOT NULL AND to_regclass('im_v2.social_block_revisions') IS NOT NULL AND to_regclass('im_v2.user_relationship_operations') IS NULL AND to_regclass('im_v2.user_block_operations') IS NULL AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.membership_operation_admissions') AND tgname='membership_operation_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.membership_operation_receipts') AND tgname='membership_operation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.group_capability_admissions') AND tgname='group_capability_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.group_capability_receipts') AND tgname='group_capability_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.room_pinned_message_operations') IS NULL AND to_regclass('im_v2.group_announcement_operations') IS NULL AND to_regclass('im_v2.group_permission_operations') IS NULL AND to_regclass('im_v2.group_role_operations') IS NULL AND EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace=to_regnamespace('im_v2') AND proname='reject_message_mutation_receipt_mutation' AND encode(sha256(convert_to(prosrc,'UTF8')),'hex')='3a110559fbb4f875263df3b192f1eebe272b3d51a0a6f7354ca389e00a8583b2') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.member_administration_admissions') AND tgname='member_administration_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.member_administration_receipts') AND tgname='member_administration_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.message_reaction_operations') IS NULL AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_reaction_receipts') AND tgname='message_reaction_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_mutation_receipts') AND tgname='message_mutation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.message_send_operation_receipts') IS NULL AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='message_send_completions' AND ((column_name='operation_fingerprint' AND udt_name='bytea') OR (column_name='operation_resolved_at_ms' AND udt_name='int8') OR (column_name='rejection_code' AND udt_name='text'))) AND (SELECT count(*)=5 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='message_send_completions' AND is_nullable='YES' AND column_name IN ('message_id','event_id','room_sequence','timeline_sequence','accepted_membership_revision')) AND (SELECT count(*)=2 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.message_send_completions') AND convalidated AND NOT condeferrable AND conname IN ('message_send_completions_result_check','message_send_completions_rejection_code_check')) AND to_regclass('im_v2.message_edit_operations') IS NULL AND to_regclass('im_v2.message_withdrawal_operations') IS NULL AND to_regclass('im_v2.direct_message_denials') IS NULL AND to_regclass('im_v2.direct_authorization_intents') IS NULL AND to_regclass('im_v2.policy_authorization_holders') IS NULL AND to_regclass('im_v2.policy_authorization_revocations') IS NULL AND to_regclass('im_v2.policy_authorization_holder_generation') IS NULL AND to_regclass('im_v2.room_policy_authorization_leases') IS NULL AND to_regclass('im_v2.direct_authorization_receipts') IS NULL AND to_regprocedure('im_v2.guard_direct_authorization_intent()') IS NULL AND to_regprocedure('im_v2.reject_direct_authorization_receipt_mutation()') IS NULL) AND ((SELECT count(*) = 19 FROM information_schema.columns
  WHERE table_schema = 'im_v2' AND table_name = 'group_join_quota_intents'
  AND (column_name,udt_name,is_nullable,COALESCE(column_default,'')) IN (('applicant_user_id','uuid','NO',''),
 ('operation_id','uuid','NO',''),
@@ -695,7 +699,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-76''::text'
+       AND column_default = '''im-v2-current-80''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -705,7 +709,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-76%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-80%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -907,6 +911,10 @@ AND (NOT EXISTS (
       ('resource_upload_sessions','storage_binding_id','text','NO'),
       ('resource_upload_sessions','storage_configuration_revision','int4','NO'),
       ('resource_upload_sessions','placement_json','jsonb','NO'),
+      ('resource_upload_sessions','staging_cleanup_pending','bool','NO'),
+      ('resource_upload_sessions','staging_cleanup_retry_at','timestamptz','NO'),
+      ('resource_upload_sessions','staging_cleanup_claim_token','uuid','YES'),
+      ('resource_upload_sessions','staging_cleanup_lease_expires_at','timestamptz','YES'),
       ('resource_blob_placements','reference_json','jsonb','NO'),
       ('resource_blob_placements','byte_count','int8','NO'),
       ('resource_blob_placements','sha256','bytea','NO'),
@@ -980,6 +988,9 @@ AND (NOT EXISTS (
       ('resource_upload_sessions','UNIQUE (home_kind, home_id, actor_user_id, operation_id)'),
       ('resource_upload_sessions','CHECK ((generation > 0))'),
       ('resource_upload_sessions','CHECK ((storage_configuration_revision > 0))'),
+      ('resource_upload_sessions','CHECK (((NOT staging_cleanup_pending) OR (state = ''completed''::text)))'),
+      ('resource_upload_sessions','CHECK (((staging_cleanup_claim_token IS NULL) = (staging_cleanup_lease_expires_at IS NULL)))'),
+      ('resource_upload_sessions','CHECK ((staging_cleanup_pending OR (staging_cleanup_claim_token IS NULL)))'),
       ('resource_blob_placements','PRIMARY KEY (placement_id)'),
       ('resource_blob_placements','UNIQUE (media_id, generation)'),
       ('resource_blob_placements','CHECK ((octet_length(sha256) = 32))'),
@@ -1025,6 +1036,10 @@ AND (SELECT count(*)=3 FROM pg_index
         'CREATE UNIQUE INDEX resource_storage_migrations_active_media_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
         'CREATE INDEX resource_storage_migrations_recovery_idx ON im_v2.resource_storage_migrations USING btree (updated_at, operation_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
         'CREATE INDEX resource_storage_migrations_retained_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (source_released_at IS NULL)'))
+AND EXISTS (SELECT 1 FROM pg_index
+    WHERE indrelid=to_regclass('im_v2.resource_upload_sessions') AND indisvalid AND indisready
+      AND pg_get_indexdef(indexrelid) =
+        'CREATE INDEX resource_upload_sessions_staging_cleanup_idx ON im_v2.resource_upload_sessions USING btree (staging_cleanup_retry_at, session_id) WHERE staging_cleanup_pending')
 AND EXISTS (SELECT 1 FROM pg_index
     WHERE indrelid=to_regclass('im_v2.resource_imports') AND indisvalid AND indisready
       AND pg_get_indexdef(indexrelid) =

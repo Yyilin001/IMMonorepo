@@ -4,8 +4,8 @@ import IMV2ServerApplication
 
 public struct V2OSSUploadTransport: V2BackgroundUploadTransport {
     public var binding: V2StorageBinding { client.configuration.binding }
-    public let capabilities = V2ResourceTransportCapabilities(modes: [.httpPut], maximumBytes: 256 * 1_024 * 1_024)
-    private let client: V2OSSClient
+    public let capabilities = V2ResourceTransportCapabilities(modes: [.httpPartPut, .httpPut], maximumBytes: 256 * 1_024 * 1_024)
+    let client: V2OSSClient
     public init(client: V2OSSClient) { self.client = client }
 
     private func key(_ mediaID: MediaID) -> String {
@@ -16,19 +16,30 @@ public struct V2OSSUploadTransport: V2BackgroundUploadTransport {
         guard mode == .httpPut, byteCount > 0, byteCount <= capabilities.maximumBytes else {
             throw V2ResourceProviderError.unsupportedCapability
         }
+        let signed = try await signedPut(key: key(mediaID), contentType: contentType, byteCount: byteCount, expiresAt: expiresAt)
+        return try .init(mode: .httpPut, url: signed.url, headers: signed.headers,
+            expiresAt: expiresAt, expectedByteCount: byteCount, checksum: checksum)
+    }
+
+    func signedPut(key: String, contentType: String, byteCount: Int64, expiresAt: Date) async throws -> (url: URL, headers: [V2ResourceTransferHeader]) {
         let headers = ["content-type": contentType, "x-oss-forbid-overwrite": "true", "x-oss-object-acl": "private"]
         var signedHeaders = headers
         signedHeaders["content-length"] = String(byteCount)
         let url = try await client.signer().presignedURL(endpoint: client.configuration.endpoint,
-            method: "PUT", key: key(mediaID), headers: signedHeaders, additionalHeaders: ["content-length"],
+            method: "PUT", key: key, headers: signedHeaders, additionalHeaders: ["content-length"],
             now: Date(), expiresAt: expiresAt)
-        return try .init(mode: .httpPut, url: url,
-            headers: headers.sorted { $0.key < $1.key }.map { try .init(name: $0.key, value: $0.value) },
-            expiresAt: expiresAt, expectedByteCount: byteCount, checksum: checksum)
+        return (url, try headers.sorted { $0.key < $1.key }.map { try .init(name: $0.key, value: $0.value) })
     }
     public func backgroundPlans(mode: V2ResourceTransferMode, mediaID: MediaID, contentType: String, byteCount: Int64,
         checksum: V2ResourceChecksum, requestedParts: [Int], sessionID: MediaUploadSessionID,
         generation: Int64, issuedAt: Date, expiresAt: Date) async throws -> [V2ResourceTransferPlan] {
+        if mode == .httpPartPut {
+            return try await makePartPlans(mediaID: mediaID, contentType: contentType, byteCount: byteCount,
+                checksum: checksum, requestedParts: requestedParts, expiresAt: expiresAt) { number in
+                try .init(id: UUID(), sessionID: sessionID, generation: generation, mediaID: mediaID,
+                    partNumber: number, issuedAt: issuedAt, expiresAt: expiresAt)
+            }
+        }
         guard mode == .httpPut, requestedParts.isEmpty else { throw V2ResourceProviderError.unsupportedCapability }
         let grant = try V2ResourceBackgroundAuthorization(id: UUID(), sessionID: sessionID, generation: generation,
             mediaID: mediaID, scope: .whole(byteCount: byteCount, checksum: checksum), issuedAt: issuedAt, expiresAt: expiresAt)

@@ -3,17 +3,26 @@
 `IMApp` 的运行入口为 V2。当前组合根只注册 V2 登录态、账户 HTTPS 入口、
 TLS 会话与本地同步投影。
 
+当前 target 支持 iPhone 与 iPad，最低系统版本为 iOS/iPadOS 26.2。
+[场景配置](Config/IMAppInfo.plist)明确关闭多窗口；iPad 声明支持四个方向，
+分屏、场景重建及真机系统行为仍须实际验收，不能由 iPhone 模拟器结果替代。
+[2026-11-01 iPad 定向证据](../docs/verification/ipad-ui-20261101.json)记录群目录导航、
+原生标签/菜单、聊天页标签隐藏与示例发送的三个 UI 用例分批通过；
+另有单条竖屏→横屏→设置页→竖屏返回用例，验证草稿保留和输入控件可操作，并保留整屏截图。
+这些普通字号、离线示例页面结果不代表完整 iPad 或真机验收。
+
 ## 当前可运行链路
 
 - SwiftUI V2 根状态机：启动时仅恢复 V2 Keychain 设备凭证。
 - 设备专属 Keychain：设备 ID、刷新凭证和本地安装绑定均不进入
   `UserDefaults`。
 - 本地 V2 SQLite：只有认证成功后才打开。
-- 密码兜底：注册或登录会将一次性密码直接交给 HTTPS 账户服务；App
+- 密码认证：注册或登录会将一次性密码直接交给 HTTPS 账户服务；App
   不持久化密码。
 - 设备凭证：账户断言必须绑定本机设备 ID，随后才换取访问/刷新凭证。
 - Passkey：底层 ClientKit 仍保留 WebAuthn 构件，但服务端尚未部署完整的
-  challenge、验签和凭据生命周期，因此 App 当前不声明关联域能力，也不展示入口。
+  challenge、验签和凭据生命周期。Passkey 未纳入当前交付范围，因此 App 不声明
+  关联域能力，也不展示入口；后续启用时须另行完成服务端认证与真机凭据验收。
 
 认证完成后，App 会打开 V2 本地会话列表，并启动 TLS 网关的同步、心跳和
 持久化命令重试。普通私聊通过认证后的精确公开 ID（`@handle`）查询创建；服务端以
@@ -25,7 +34,7 @@ TLS 会话与本地同步投影。
 独立的本地 social outbox；即使离线退出，也会在下次认证、初始同步或后续同步
 提示到达后补发。远端同步投影才是多设备之间的最终事实来源。
 
-底部“联系人”页提供好友列表、收到/发出的申请、按精确公开 ID 添加好友、接受、
+“联系人”页提供好友列表、收到/发出的申请、按精确公开 ID 添加好友、接受、
 拒绝、撤销、删除、屏蔽和从好友资料打开私聊。联系人卡片不使用 UUID：App 只会为
 当前 pending/accepted 关系向账户服务批量读取最多 100 条公开资料，并将资料缓存于
 本地投影。关系命令先持久化再尝试发送；成功 ACK 只表示命令受理，列表仍等待下一次
@@ -44,10 +53,10 @@ social outbox；目录查询仍不会向用户透露对方是否屏蔽自己。�
 含消息、房间或发送者内容，只会触发现有的同步路径。退出登录会尽力撤销服务端端点，
 而该用户的本机偏好会保留，方便下次登录同一账号时重新申请系统 token。
 
-这仍不是发布完成状态：真实设备双端到端回归、生产 WebAuthn、Push-enabled App ID /
-provisioning profile 与真实 APNs 凭据、以及生产媒体供应商与扫描器接入仍未完成。本机已具备
-文件系统媒体 provider 与 EICAR 无害扫描夹具，用于验证上传、扫描、下载和清理合同；它们不是
-生产对象存储或恶意内容防护。公开身份显示本身
+这仍不是发布完成状态：真实设备双端到端回归、Push-enabled App ID /
+provisioning profile 与真实 APNs 凭据，以及生产媒体与扫描器的部署验收仍未完成。服务端已有
+OSS 与 ClamAV 适配；本地文件系统 provider 和 EICAR 无害扫描夹具限显式测试模式，
+用于验证上传、扫描、下载和清理合同，不能替代真实引擎验收。公开身份显示本身
 已经可用：私聊列表和详情会使用服务端投影的对端显示名，群成员页只通过已授权、按需的
 成员目录显示公开 ID 与显示名，不会把群成员资料扩散为 roster 同步。仍缺的是这条体验在
 两台真机离线/重连场景下的端到端及无障碍人工验收。本机双安装回归会通过真实认证命令创建
@@ -56,7 +65,50 @@ provisioning profile 与真实 APNs 凭据、以及生产媒体供应商与扫�
 投影。禁言/审计移除与普通成员变更使用各自独立 outbox，网络中断会保留相同操作并在连接
 恢复后重放；服务端仍是角色和目标资格的最终授权方。
 
+## 会话状态边界
+
+详情页持有独立的 [在线与输入状态 Store](IMApp/V2/V2ConversationActivityStore.swift) 和
+[群消息已读名单 Store](IMApp/V2/V2GroupReadReceiptStore.swift)，视图直接观察各自状态。
+前者管理本页订阅消费者、输入租约和远端到期任务；页面观察任务退出时释放自己的共享订阅，
+线路订阅仍由 `V2RoomSubscriptionCoordinator` 统一持有，不影响其他订阅消费者。
+后者持有分页游标、请求身份和取消中的读取；切换消息或刷新先等待旧读取结束，再启动新请求，
+迟到结果不能覆盖新名单，已读成员窗口继续限制在 1,000 人。
+群公告、权限恢复、成员目录及管理确认统一由
+[群管理 Store](IMApp/V2/V2GroupManagementStore.swift)持有，群页面直接观察同一份权限与成员基线。
+群信息读取有独立的代次，时间线刷新不能废弃正在读取的权限；群信息失败只显示群管理反馈，
+不把可用的消息时间线标为失败。公告提交后只刷新群信息，不重新读取时间线。
+普通消息操作与群置顶共享[在途操作状态](IMApp/V2/V2ConversationMessageActionActivity.swift)，
+保持同一消息的互斥边界。持久操作仍由账户服务拥有，页面退出只停止观察。
+[输入与发送 Store](IMApp/V2/V2ConversationComposerStore.swift) 独立持有草稿、回复、提及、
+附件选择以及发送进度观察。附件草稿通过页面独立任务恢复；发送前恢复草稿后再次检查导入状态，
+防止等待期间新开始的导入被跳过。发送权限读取采用独立代次，失败保留已确认限制并显示输入区反馈，
+不影响消息时间线。详情页只协调文本提交后的投影刷新；持久发送和文件交接仍由账户服务负责。
+[运行组装](IMApp/V2/V2AppRealtimeRuntime.swift)的主体是持有不可变服务引用的组合根，
+同文件中的操作适配器和连接覆盖状态各有自己的类型；账户运行任务由 runtime 管理。
+连接的策略恢复、消息恢复、覆盖状态、发布设置和设备进度循环由
+`V2DefaultClientRuntimeActivity` 统一运行：任一循环失败会取消其余循环并等待收尾，
+再把原错误交给连接 runtime；正常结束的取消流也保留取消语义。
+[本地同步存储](../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalSyncStore.swift)保留单个 actor
+和权威数据库事务，使投影、同步水位与待确认回执一起提交；命令仓储已按领域分成 actor 扩展，
+派生搜索索引使用独立数据库。后续维护按这些所有权与事务边界划分；账户生命周期的完整故障
+验收另行记录，文件行数不作为拆分或验收依据。
+
 ## 本地开发
+
+单元测试和离线 UI 测试入口为 `Scripts/verify_unit_tests.sh`、`Scripts/verify_ui_tests.sh`。
+默认选择已安装的 iPhone 17 模拟器，并使用本地 ad-hoc 签名运行；不固定到某个旧运行时。
+Swift Testing 的定向用例标识须包含完整函数签名，例如
+`'IMAppTests/V2ConversationStoreTests/clearAnnouncementKeepsRevision()'`；有参数的用例须带参数标签。
+单元测试脚本读取结果包确认实际通过数量，零匹配或全部跳过不会报告通过。
+默认结果包保留在仓库 `build/test-results/`，也可通过 `IMAPP_UNIT_TEST_RESULT_BUNDLE` 指定新路径。
+CI 或指定设备验证应通过 `IMAPP_UNIT_TEST_DESTINATION` / `IMAPP_UI_TEST_DESTINATION`
+明确设置 OS 或 UDID。无参数时运行对应 target，传入一个或多个测试标识可只运行受影响用例：
+
+```sh
+IMAPP_UNIT_TEST_DESTINATION='platform=iOS Simulator,id=<SIMULATOR_UDID>' \
+  bash IMApp/Scripts/verify_unit_tests.sh \
+  'IMAppTests/V2ProfileAvatarPipelineTests/oldDecodeDoesNotBorrowRenewal()'
+```
 
 客户端直接使用 Xcode 在 macOS 上运行。账户服务、数据库和本地 HTTPS
 代理使用隔离 Docker 栈：
@@ -205,8 +257,8 @@ docker compose -f IMV2/docker-compose.isolated-tests.yml \
   run --rm --build swift-tests
 ```
 
-发布前还必须完成生产 WebAuthn verifier、账户服务 HTTPS/限流部署、真实设备
-端到端回归，以及推送、媒体等 V2 产品界面。完整证据见
+发布前还必须完成账户服务 HTTPS/限流部署、真实设备端到端回归，以及推送和媒体
+链路的部署验收。当前密码与恢复码交付不以启用 Passkey 为前提。完整证据见
 [`IMV2/docs/implementation-status.md`](../IMV2/docs/implementation-status.md)；组件
 边界与真实投递链路见 [`docs/current-system-map.md`](../docs/current-system-map.md)。
 

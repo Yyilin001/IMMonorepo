@@ -166,7 +166,8 @@ public actor V2MessageSendOperationService {
             if claim.action == .submit { result=try await client.submit(command) }
             else {
                 result=try await client.recover(.init(identity:claim.work.identity,fingerprint:claim.work.fingerprint,
-                    domainFingerprint:command.command.fingerprint))
+                    domainFingerprint:command.command.fingerprint,
+                    action: claim.work.admissionDeadline.map { Date() < $0 } == true ? .query : .closeIfAbsent))
             }
             switch result {
             case .receipt(let receipt):try await store.completeMessageSend(command,receipt:receipt)

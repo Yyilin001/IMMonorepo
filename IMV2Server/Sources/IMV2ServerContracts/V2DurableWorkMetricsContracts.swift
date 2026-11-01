@@ -11,6 +11,22 @@ public protocol V2DurableWorkMetricsSource: Sendable {
     func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot
 }
 
+/// Permanent send results, without business identities or a scan of their contents.
+public struct V2SendCompletionStorageMetrics: Equatable, Sendable {
+    /// nil means PostgreSQL has no planner estimate; it must not be rendered as zero rows.
+    public let estimatedRows: Int?
+    public let heapBytes: Int
+    public let indexBytes: Int
+    public let totalBytes: Int
+
+    public init(estimatedRows: Int?, heapBytes: Int, indexBytes: Int, totalBytes: Int) {
+        self.estimatedRows = estimatedRows.flatMap { $0 >= 0 ? $0 : nil }
+        self.heapBytes = max(0, heapBytes)
+        self.indexBytes = max(0, indexBytes)
+        self.totalBytes = max(0, totalBytes)
+    }
+}
+
 /// 持久化工作指标快照。
 public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     /// 本次快照是否由数据源成功产出。
@@ -108,6 +124,8 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let messageProjectionStatesRelationBytes: Int
     /// 仍可被同库不可变房间事件精确引用替换的修订 1 已接受状态正文行数估算。
     public let messageProjectionStateInlineBodyEstimatedRows: Int
+    /// Only physical room-owner sources contribute; unrelated sources leave this nil.
+    public let sendCompletionStorage: V2SendCompletionStorageMetrics?
     /// 尚未压缩的投影记录数量。
     public let uncompactedProjectedRecords: Int
     /// 全部设备上仍未确认的同步记录数量。
@@ -171,6 +189,7 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         messageProjectionStatesEstimatedRows: Int = 0,
         messageProjectionStatesRelationBytes: Int = 0,
         messageProjectionStateInlineBodyEstimatedRows: Int = 0,
+        sendCompletionStorage: V2SendCompletionStorageMetrics? = nil,
         uncompactedProjectedRecords: Int = 0,
         pendingSyncRecordsAcrossDevices: Int = 0,
         resetPendingDevices: Int = 0,
@@ -225,6 +244,7 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.messageProjectionStateInlineBodyEstimatedRows = max(
             0, messageProjectionStateInlineBodyEstimatedRows
         )
+        self.sendCompletionStorage = sendCompletionStorage
         self.uncompactedProjectedRecords = max(0, uncompactedProjectedRecords)
         self.pendingSyncRecordsAcrossDevices = max(0, pendingSyncRecordsAcrossDevices)
         self.resetPendingDevices = max(0, resetPendingDevices)

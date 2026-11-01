@@ -1,0 +1,173 @@
+{
+  "date": "2026-11-01",
+  "reportTimezone": "Asia/Shanghai",
+  "issue": "G06",
+  "status": "passed",
+  "scope": "Linux arm64 ext4 filesystem and Vapor route component checks using unchanged focused test sources",
+  "environment": {
+    "swift": "Swift version 6.4 (swift-6.4-RELEASE)\nTarget: aarch64-unknown-linux-gnu",
+    "kernel": "Linux 0c576efaeaf5 6.8.0-117-generic #117-Ubuntu SMP PREEMPT_DYNAMIC Thu May  7 17:26:37 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+    "filesystem": "Filesystem     Type 1K-blocks     Used Available Use% Mounted on\n/dev/vdb1      ext4  24592720 18156224   5161924  78% /media-validation",
+    "identity": "uid=0(root) gid=0(root) groups=0(root)",
+    "image": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6"
+  },
+  "validation": {
+    "passed": true,
+    "methodsPassed": 6,
+    "failures": 0,
+    "skipped": 0,
+    "seconds": 0.044,
+    "suites": 3,
+    "methods": [
+      {
+        "classname": "IMV2LinuxMediaValidationTests.V2LocalMediaPurgeFenceTests",
+        "name": "durableMarkerHidesObjectLeftBeforeUnlink()",
+        "time": "0.025536417"
+      },
+      {
+        "classname": "IMV2LinuxMediaValidationTests.V2LocalMediaPurgeFenceTests",
+        "name": "purgeFencesStagedAndConcurrentCommits()",
+        "time": "0.043830333"
+      },
+      {
+        "classname": "IMV2LinuxMediaValidationTests.V2LocalMediaReadBoundaryTests",
+        "name": "httpStreamPinsAuthorizedFile(swapTime:range:)",
+        "time": "0.025549875"
+      },
+      {
+        "classname": "IMV2LinuxMediaValidationTests.V2LocalMediaReadBoundaryTests",
+        "name": "rejectsReplacedEntry(_:)",
+        "time": "0.025634375"
+      },
+      {
+        "classname": "IMV2LinuxMediaValidationTests.V2LocalMediaReadBoundaryTests",
+        "name": "resourceStreamPinsBeforeConsumption()",
+        "time": "0.0260535"
+      },
+      {
+        "classname": "IMV2LinuxMediaValidationTests.V2ResourceStorageContractTests",
+        "name": "immutableIdentityRetryDeleteAndBackendSwitch()",
+        "time": "0.028149666"
+      }
+    ],
+    "xunitSHA256": "cb496d13c737b3bf147847c7236cf3c0d3b848a34980789731f1659bfe748e60"
+  },
+  "readBoundaryScenarios": 9,
+  "sourceVerification": {
+    "checkedAt": "2026-10-31T22:52:25.467259+00:00",
+    "matchesWorkingTree": true,
+    "sha256": {
+      "IMV2Server/Package.swift": "c44d84b1e5d2d223c6efe93ffb850ed527386514115c3da009f42a01dbe56cb5",
+      "IMV2Server/Package.resolved": "472de5a5ac574ee677729b284d78edf0d9e724c87ca817005fc1f8982ea073ec",
+      "IMV2Server/Sources/IMV2ServerContracts/V2LocalMediaByteServing.swift": "7d95d11b9941e51df18fe06c8753cd4b26ed68c7688d25f5b570660b0922f570",
+      "IMV2Server/Sources/IMV2ServerInfrastructure/V2LocalFilesystemMediaProvider.swift": "eb5909f50a37cd205fef9f4c76ff0422a3e6f82e0359630a0cd2b059ef9ea2f7",
+      "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2PinnedLocalMediaFile.swift": "2bfc550a4bb3d84d1a3471b061c94e7c08781bc61f11507e842395b219886e7b",
+      "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceStorage.swift": "14425fd4b86b2a71a4985a4833ab51673301371d6544109756ace87b5c24fc02",
+      "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceUploadTransport.swift": "b8fecf3206a6e16aab6a6ac811850c51328ff2d142a42dbb0e56ab0eb7522166",
+      "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalMultipartUpload.swift": "0a0864c22fdb002ea761bf4167c4a0903f3419f354c203e7e03d4b6672a646ba",
+      "IMV2Server/Sources/IMV2ServerInfrastructure/Forwarding/ForwardMediaFileIO.swift": "97adeb59396c9d9d46a7e13e204cda98a2b09d68f414b433212afe48b9480bb7",
+      "IMV2Server/Sources/IMV2ServerHTTP/V2VaporLocalFilesystemMediaRoutes.swift": "ef5f8db99ebe9f73ba05e6abb5406a93608201430ab67589a0dc32143cd3f62c",
+      "IMV2Server/Sources/IMV2ServerHTTP/V2VaporResourceByteRoutes.swift": "f5d609329da499cf65ef9da074bb7bd11970f71618b1b4d94574e1d6a796e3ce",
+      "IMV2Server/Tests/IMV2ServerTests/V2LocalMediaReadBoundaryTests.swift": "cbf0c2b66f1cc5061d5960c49dc9d757ffe8114d5d3f6dc6054db876a5319fd2",
+      "IMV2Server/Tests/IMV2ServerTests/V2LocalMediaPurgeFenceTests.swift": "a0f042b5b82324c8617b5f7ce07bd896bfa246731eca18106968db2cea766e54",
+      "IMV2Server/Tests/IMV2ServerTests/V2ResourceStorageContractTests.swift": "49fb92fca9642c530870a2c0e69773ed98bcbcaabe2003549d86880a18911a1e"
+    },
+    "sourceDigest": "bcf6c6af9de4b24b6fec8c3c7faf6ba46e1874856c9a5a85ec2273c059408634"
+  },
+  "focusedBuildSeconds": 10.16,
+  "initialBuild": {
+    "status": "failed before tests",
+    "memoryLimitGiB": 6,
+    "jobs": 2,
+    "kernelOOMKills": 3,
+    "details": {
+      "exitCode": 1,
+      "seconds": 1062.322,
+      "stage": "autolink before any tests",
+      "missingObjectsForSources": [
+        "PostgresV2RoomWriteStoreIntegrationTests+DurableClockAndMaintenance.swift",
+        "PostgresV2RoomWriteStoreIntegrationTests+ConcurrentRoomWrites.swift",
+        "PostgresV2RoomWriteStoreIntegrationTests+Forwarding.swift"
+      ],
+      "relatedArtifacts": [
+        "PostgresV2RoomWriteStoreIntegrationTests+ConcurrentRoomWrites.swiftconstvalues",
+        "PostgresV2RoomWriteStoreIntegrationTests+ConcurrentRoomWrites-a66beaf6.o.tmp",
+        "PostgresV2RoomWriteStoreIntegrationTests+ConcurrentRoomWrites.d",
+        "PostgresV2RoomWriteStoreIntegrationTests+ConcurrentRoomWrites.swiftdeps"
+      ]
+    },
+    "incrementalRetrySeconds": 7.976,
+    "incrementalRetryPassed": false,
+    "fullModuleRebuildCancelledAfterSeconds": 176.196,
+    "testsExecutedDuringTheseAttempts": 0
+  },
+  "harnessPreparation": {
+    "automaticSwiftProtobufUpgradeRejectedBeforeBuild": true,
+    "missingSharedFixtureRestoredVerbatim": true
+  },
+  "excludes": [
+    "production service-account and mount permissions",
+    "untrusted ancestors, mutable inodes or shared writable volumes",
+    "throughput and concurrency budgets",
+    "real media-process crash recovery",
+    "full Server test gate"
+  ],
+  "artifacts": "build/reports/2026-11-01-feature-audit/repair-logs/linux-media-83191d41",
+  "testHarness": {
+    "testsCopiedUnchanged": {
+      "V2LocalMediaReadBoundaryTests.swift": "cbf0c2b66f1cc5061d5960c49dc9d757ffe8114d5d3f6dc6054db876a5319fd2",
+      "V2LocalMediaPurgeFenceTests.swift": "a0f042b5b82324c8617b5f7ce07bd896bfa246731eca18106968db2cea766e54",
+      "V2ResourceStorageContractTests.swift": "49fb92fca9642c530870a2c0e69773ed98bcbcaabe2003549d86880a18911a1e",
+      "V2ClamAVLiveTests.swift": "21572c7ee8ac62ea56f6b2bb83159cbd67c131ec632d8ffeed91f5d3c1290790"
+    },
+    "manifestSHA256": "9987fe1272fdcc8752361131183cfd627b82a2f56d50f23959bc4eb56b450c9a",
+    "harness": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/build/reports/2026-11-01-feature-audit/repair-logs/native-crash-46b87730/source/IMV2LinuxMediaValidation",
+    "copiedFixture": {
+      "source": "IMV2Server/Tests/IMV2ServerTests/TestSupport.swift",
+      "type": "V2DictionaryRuntimeEnvironment",
+      "sourceSHA256": "f74f8fd59c52b018a3074d2bbb0085ef42560befeb315c5eafa0e0bd82623ff3",
+      "verbatimDeclarationSHA256": "ba4aefbbec515ebbbe7bed4c6a91890616c7d412b04263263bebca6a42360851",
+      "harnessFileSHA256": "e246dca1b06bec2623bd2a1f55f8c4fa740417ccfe04b250b8c091a8813c7658"
+    }
+  },
+  "dependencies": {
+    "allPinsMatchOriginal": true,
+    "pins": 39,
+    "rejectedInitialChange": "swift-protobuf 1.38.1 -> 1.39.0"
+  },
+  "testProductSHA256": {
+    "IMV2LinuxMediaValidationTests-test-runner": "8cf14e619582f53d2574f0b09cda34647efc548465c26855b1d047a8fda5a31b",
+    "IMV2LinuxMediaValidationTests.so": "38db7cfd9e0cf7861cd3ca900327354a196d23282119ac81089bdd2d6e2d5e8e"
+  },
+  "fullServerTestGatePassed": false,
+  "cleanup": {
+    "containers": [
+      {
+        "name": "imv2-native-audit-41181282-clamav",
+        "exitCode": 0,
+        "running": false
+      },
+      {
+        "name": "imv2-native-audit-41181282-media",
+        "exitCode": 137,
+        "running": false
+      },
+      {
+        "name": "imv2-native-audit-41181282-media-focused",
+        "exitCode": 0,
+        "running": false
+      }
+    ],
+    "controlledBuildCancellation": [
+      "imv2-native-audit-41181282-media"
+    ],
+    "containersRemoved": true,
+    "volumesRemoved": true,
+    "vmDeleted": true,
+    "buildCacheRetained": false,
+    "completedAt": "2026-10-31T23:22:46.661084+00:00",
+    "currentDockerContext": "default",
+    "temporaryDebRemoved": true,
+    "signatureDatabasesRemoved": true
+  }
+}

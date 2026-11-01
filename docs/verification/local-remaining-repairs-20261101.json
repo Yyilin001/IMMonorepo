@@ -1,0 +1,206 @@
+{
+  "date": "2026-11-01",
+  "scope": "逐项继续修复，排除必须依赖真机的验收",
+  "device_only_exclusions": [
+    "A16",
+    "H03",
+    "J04",
+    "J16",
+    "J21",
+    "J23",
+    "J24",
+    "K05"
+  ],
+  "repairs": [
+    "V2SessionRestorationTests使用恢复开始事件而非固定轮询期限。",
+    "缺少权限服务的用例显式传入nil，避免默认fake使断言失效。",
+    "V2ListViewport恢复使用1秒有界布局预算，保留取消与单请求身份。"
+  ],
+  "app_full": {
+    "devicesAndConfigurations": [
+      {
+        "device": {
+          "architecture": "arm64",
+          "deviceId": "D07181CD-B7ED-4A22-8410-CD9EF1D3E875",
+          "deviceName": "IMV2 Remaining Gate 20261101",
+          "modelName": "iPhone 17",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        },
+        "expectedFailures": 0,
+        "failedTests": 4,
+        "passedTests": 627,
+        "skippedTests": 12,
+        "testPlanConfiguration": {
+          "configurationId": "1",
+          "configurationName": "Test Scheme Action"
+        }
+      }
+    ],
+    "environmentDescription": "IMApp · Built with macOS 27.0",
+    "expectedFailures": 0,
+    "failedTests": 4,
+    "finishTime": 1793511622.044,
+    "passedTests": 507,
+    "result": "Failed",
+    "runtimeWarnings": [],
+    "skippedTests": 12,
+    "startTime": 1793511559.65,
+    "statistics": [
+      {
+        "subtitle": "194 test runs",
+        "title": "74 tests ran with dynamic parameters"
+      }
+    ],
+    "testFailures": [
+      {
+        "failureText": "Issue recorded: scroll target=00000000-0000-0000-0000-000000000651, anchor=Optional(\"00000000-0000-0000-0000-000000000601\"), pending=nil, count=300, contains=true, layout=visibleBounds=(0.0, 133.0, 402.0, 707.0), row=nil, cachedRows=9",
+        "targetName": "IMAppTests",
+        "testIdentifier": 86,
+        "testIdentifierString": "V2ConversationWindowTests/actualListGeometryAndScrollRestoration()",
+        "testIdentifierURL": "test://com.apple.xcode/IMApp/IMAppTests/V2ConversationWindowTests/actualListGeometryAndScrollRestoration()",
+        "testName": "the actual SwiftUI List reports visible rows and restores the anchor after refresh"
+      },
+      {
+        "failureText": "Caught error: .timedOut",
+        "targetName": "IMAppTests",
+        "testIdentifier": 87,
+        "testIdentifierString": "V2SessionRestorationTests/independentCancellation()",
+        "testIdentifierURL": "test://com.apple.xcode/IMApp/IMAppTests/V2SessionRestorationTests/independentCancellation()",
+        "testName": "Cancelling one restore waiter does not cancel another caller"
+      },
+      {
+        "failureText": "Caught error: .timedOut",
+        "targetName": "IMAppTests",
+        "testIdentifier": 89,
+        "testIdentifierString": "V2SessionRestorationTests/independentDeadline()",
+        "testIdentifierURL": "test://com.apple.xcode/IMApp/IMAppTests/V2SessionRestorationTests/independentDeadline()",
+        "testName": "A Push deadline leaves the shared scene restore running"
+      },
+      {
+        "failureText": "Expectation failed: store.groupManagement.groupRolePolicyState.recovery == .unavailable\nstore.groupManagement.groupRolePolicyState.recovery → .ready",
+        "targetName": "IMAppTests",
+        "testIdentifier": 412,
+        "testIdentifierString": "V2ConversationStoreTests/missingPolicyCapabilityIsUnavailableInsteadOfOfferingAnIneffectiveRetry()",
+        "testIdentifierURL": "test://com.apple.xcode/IMApp/IMAppTests/V2ConversationStoreTests/missingPolicyCapabilityIsUnavailableInsteadOfOfferingAnIneffectiveRetry()",
+        "testName": "missingPolicyCapabilityIsUnavailableInsteadOfOfferingAnIneffectiveRetry()"
+      }
+    ],
+    "title": "Test - IMApp",
+    "topInsights": [
+      {
+        "category": "Common Failures",
+        "impact": "25% of failures",
+        "text": "2 runs of 1 test failed with Expectation failed: store.groupManagement.groupRolePolicyState.recovery == .unavailable"
+      },
+      {
+        "category": "Common Failures",
+        "impact": "50% of failures",
+        "text": "2 runs of 2 tests failed with Caught error: .timedOut"
+      },
+      {
+        "category": "Longest Test Runs",
+        "impact": "0% of duration",
+        "text": "1 longest test run with outlier durations exceeding 17.13s (three standard deviations)"
+      }
+    ],
+    "totalTestCount": 523
+  },
+  "app_repair": {
+    "devicesAndConfigurations": [
+      {
+        "device": {
+          "architecture": "arm64",
+          "deviceId": "7DDC7919-3852-4CA1-9915-CB958E05C0D6",
+          "deviceName": "IMV2 Gate Repair 20261101",
+          "modelName": "iPhone 17",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        },
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "passedTests": 5,
+        "skippedTests": 0,
+        "testPlanConfiguration": {
+          "configurationId": "1",
+          "configurationName": "Test Scheme Action"
+        }
+      }
+    ],
+    "environmentDescription": "IMApp · Built with macOS 27.0",
+    "expectedFailures": 0,
+    "failedTests": 0,
+    "finishTime": 1793511711.744,
+    "passedTests": 5,
+    "result": "Passed",
+    "runtimeWarnings": [],
+    "skippedTests": 0,
+    "startTime": 1793511674.319,
+    "statistics": [],
+    "testFailures": [],
+    "title": "Test - IMApp",
+    "topInsights": [],
+    "totalTestCount": 5
+  },
+  "window_repair": {
+    "devicesAndConfigurations": [
+      {
+        "device": {
+          "architecture": "arm64",
+          "deviceId": "6AB1D013-055A-4EC5-87B2-A65E3E5D430F",
+          "deviceName": "IMV2 Window Repair 20261101",
+          "modelName": "iPhone 17",
+          "osBuildNumber": "24A434",
+          "osVersion": "27.0",
+          "platform": "iOS Simulator"
+        },
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "passedTests": 9,
+        "skippedTests": 0,
+        "testPlanConfiguration": {
+          "configurationId": "1",
+          "configurationName": "Test Scheme Action"
+        }
+      }
+    ],
+    "environmentDescription": "IMApp · Built with macOS 27.0",
+    "expectedFailures": 0,
+    "failedTests": 0,
+    "finishTime": 1793511806.39,
+    "passedTests": 6,
+    "result": "Passed",
+    "runtimeWarnings": [],
+    "skippedTests": 0,
+    "startTime": 1793511758.025,
+    "statistics": [
+      {
+        "subtitle": "5 test runs",
+        "title": "2 tests ran with dynamic parameters"
+      }
+    ],
+    "testFailures": [],
+    "title": "Test - IMApp",
+    "topInsights": [],
+    "totalTestCount": 6
+  },
+  "server_gate": {
+    "result": "interrupted; not passed",
+    "exit_code": 143,
+    "seconds": 338.696,
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/remaining-server-gate-7de77962/server.log",
+    "owned_database_cleaned": true
+  },
+  "limits": [
+    "修复后只执行受影响的11项测试，没有再次运行全量。",
+    "原App整套12项跳过不能计为通过。",
+    "未把外部供应商、生产容量或部署验收改成模拟通过。"
+  ],
+  "source_sha256": {
+    "IMApp/IMApp/V2/V2ListViewport.swift": "73ba914e9ac7196747b81043d029289ce08a75728bb703059ea287cb8fa9d091",
+    "IMApp/IMAppTests/V2SessionRestorationTests.swift": "476e21e8e204b5df6287372289080086bc09227d780e25d8608c414350d2426e",
+    "IMApp/IMAppTests/V2ConversationStoreTests.swift": "2b98f0d4543254b5834bf04beaf967ba5adaf6f7534ae9266411c6e56f0a049b"
+  }
+}

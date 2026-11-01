@@ -74,7 +74,7 @@ public struct V2VaporResourceByteRoutes: Sendable {
     }
 }
 
-private enum ResourceResponseRange {
+enum ResourceResponseRange {
     case full
     case selected(Int64, Int64) // Exclusive upper bound.
     case unsatisfiable
@@ -82,7 +82,7 @@ private enum ResourceResponseRange {
 
 /// Unsupported units, malformed values and multipart requests are ignored (200).
 /// A valid single byte range that selects no bytes receives the authorized 416.
-private func resourceResponseRange(_ value: String?, byteCount: Int64) -> ResourceResponseRange {
+func resourceResponseRange(_ value: String?, byteCount: Int64) -> ResourceResponseRange {
     guard let value, value.utf8.count <= 256, value.hasPrefix("bytes=") else { return .full }
     let spec = value.dropFirst(6).trimmingCharacters(in: .whitespaces)
     let parts = spec.split(separator: "-", omittingEmptySubsequences: false)
@@ -94,7 +94,7 @@ private func resourceResponseRange(_ value: String?, byteCount: Int64) -> Resour
     }
     if parts[0].isEmpty {
         guard let suffix = number(parts[1]) else { return .full }
-        guard suffix > 0 else { return .unsatisfiable }
+        guard suffix > 0, byteCount > 0 else { return .unsatisfiable }
         return .selected(max(0, byteCount-suffix), byteCount)
     }
     guard let start = number(parts[0]) else { return .full }

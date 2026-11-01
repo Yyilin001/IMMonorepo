@@ -44,11 +44,12 @@ struct V2GroupAnnouncementBanner: View {
 ///
 /// 保存前只做长度与空内容校验，最终权限与版本冲突仍由服务端裁决。
 struct V2GroupAnnouncementSheet: View {
-    @Bindable var store: V2ConversationDetailStore
+    @Bindable var store: V2GroupManagementStore
     @Environment(\.dismiss) private var dismiss
     @State private var announcementText: String
+    @State private var confirmsClear = false
 
-    init(store: V2ConversationDetailStore) {
+    init(store: V2GroupManagementStore) {
         self.store = store
         _announcementText = State(initialValue: store.groupAnnouncement?.body ?? "")
     }
@@ -61,16 +62,27 @@ struct V2GroupAnnouncementSheet: View {
                         .frame(minHeight: 160)
                         .accessibilityLabel("群公告内容")
                         .accessibilityIdentifier("v2.group.announcement.body")
-                    Text("最多 \(V2GroupAnnouncementCommand.maximumUTF8Bytes) 字节；最终权限与版本冲突由服务端处理。")
+                    Text("最多 \(V2GroupAnnouncementCommand.maximumUTF8Bytes) 字节。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if let feedback = store.messageActionFeedback {
+                if let announcement = store.groupAnnouncement, !announcement.body.isEmpty {
+                    Button("清除群公告", role: .destructive) { confirmsClear = true }
+                        .disabled(store.isSavingGroupAnnouncement)
+                        .accessibilityIdentifier("v2.group.announcement.clear")
+                }
+                if let feedback = store.feedback {
                     Section { Text(feedback).foregroundStyle(.secondary) }
                 }
             }
             .navigationTitle("群公告")
             .navigationBarTitleDisplayMode(.inline)
+            .confirmationDialog("清除群公告？", isPresented: $confirmsClear, titleVisibility: .visible) {
+                Button("清除群公告", role: .destructive) {
+                    Task { if await store.clearGroupAnnouncement() { dismiss() } }
+                }
+                Button("取消", role: .cancel) {}
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
@@ -97,7 +109,7 @@ struct V2GroupAnnouncementSheet: View {
 /// 按角色（管理员/普通成员）分别编辑权限集合，
 /// 并以策略修订作为乐观并发栅栏提交。
 struct V2GroupPermissionsSheet: View {
-    @Bindable var store: V2ConversationDetailStore
+    @Bindable var store: V2GroupManagementStore
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRole: V2RoomMembershipRole = .admin
     @State private var selectedPermissions: Set<V2GroupPermission> = []
@@ -140,7 +152,7 @@ struct V2GroupPermissionsSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    if let feedback = store.messageActionFeedback {
+                    if let feedback = store.feedback {
                         Section { Text(feedback).foregroundStyle(.secondary) }
                     }
                 }
@@ -262,7 +274,7 @@ extension V2GroupPermission {
 /// 展示已读成员列表并支持按游标继续加载。
 struct V2GroupReadReceiptsSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @Bindable var store: V2ConversationDetailStore
+    let store: V2GroupReadReceiptStore
     let message: V2ConversationMessageItem
     @State private var profilePageID = UUID()
     @State private var readRequest = ReadRequest(reset: true)
@@ -275,28 +287,28 @@ struct V2GroupReadReceiptsSheet: View {
     var body: some View {
         NavigationStack {
             Group {
-                if let page = store.groupReadReceiptPage, page.messageID.rawValue == message.id {
+                if let page = store.page, page.messageID.rawValue == message.id {
                     List {
                         Section("已读成员") {
-                            if store.hasEarlierGroupReadReceipts {
+                            if store.hasEarlierReaders {
                                 Button("返回列表开头") { readRequest = .init(reset: true) }
                             }
                             ForEach(page.readers, id: \.userID) { reader in
-                                if let key = store.groupPresentationKey(for: reader.userID) {
+                                if let key = store.presentationKey(for: reader.userID) {
                                     V2AuthorizedAvatarView(key: key, showsName: true)
                                         .accessibilityValue("已读")
                                 }
                             }
                             if page.nextCursor != nil {
                                 Button("加载更多") { readRequest = .init(reset: false) }
-                                    .disabled(store.isLoadingGroupReadReceipts)
+                                    .disabled(store.isLoading)
                                     .accessibilityIdentifier("v2.message.group-readers.more.\(message.id)")
                             }
                         }
                     }
-                } else if store.isLoadingGroupReadReceipts {
+                } else if store.isLoading {
                     ProgressView("正在读取已读详情…")
-                } else if let feedback = store.groupReadReceiptFeedback {
+                } else if let feedback = store.feedback {
                     ContentUnavailableView("无法读取已读详情", systemImage: "exclamationmark.triangle", description: Text(feedback))
                 } else {
                     ContentUnavailableView("暂无已读记录", systemImage: "checkmark.circle")
@@ -310,10 +322,10 @@ struct V2GroupReadReceiptsSheet: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button("刷新") { readRequest = .init(reset: true) }
-                        .disabled(store.isLoadingGroupReadReceipts)
+                        .disabled(store.isLoading)
                 }
             }
-            .task(id: readRequest) { await store.loadGroupReadReceipts(for: message, reset: readRequest.reset) }
+            .task(id: readRequest) { await store.loadReaders(for: message, reset: readRequest.reset) }
         }
         .id(message.id)
         .authorPresentationPage(context: .list(profilePageID))
@@ -328,7 +340,7 @@ struct V2GroupMembersSheet: View {
     @State private var addingMember = false
     @State private var removal: V2GroupMemberItem?
     @State private var choosingFriend = false
-    @Bindable var store: V2ConversationDetailStore
+    @Bindable var store: V2GroupManagementStore
     @Environment(\.dismiss) private var dismiss
     @State private var userProfile: V2UserProfileTarget?
     @State private var newMemberUserID = ""
@@ -366,6 +378,10 @@ struct V2GroupMembersSheet: View {
                         Text(member.role).foregroundStyle(.secondary)
                         if store.canChangeGroupMemberRole(member) || store.canRemoveGroupMember(member) {
                             Menu {
+                                if store.canManageGroupLifecycle && member.role != "群主" {
+                                    Button("转让群主", systemImage: "person.crop.circle.badge.checkmark") { store.prepareOwnershipTransfer(to: member) }
+                                        .accessibilityIdentifier("v2.group.member.transfer.\(member.id)")
+                                }
                                 if store.canChangeGroupMemberRole(member) {
                                     Button("设为管理员", systemImage: "person.badge.key") { runRoleChange(member, role: .admin) }
                                         .disabled(member.role == "管理员")
@@ -394,8 +410,13 @@ struct V2GroupMembersSheet: View {
                             .accessibilityIdentifier("v2.group.members.leave")
                     }
                 } else if store.groupActorRole == "群主" {
-                    Text("请先转让群主，再退出群聊。")
-                        .font(.footnote).foregroundStyle(.secondary)
+                    Section {
+                        Text("可在成员菜单中转让群主，转让后你将成为普通成员并可退出。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Button("解散群聊", role: .destructive) { store.prepareGroupDissolution() }
+                            .disabled(!store.canManageGroupLifecycle)
+                            .accessibilityIdentifier("v2.group.members.dissolve")
+                    }
                 }
                 if store.canLoadMoreGroupMembers {
                     Button("加载更多") { Task { await store.loadGroupMembers() } }
@@ -422,6 +443,7 @@ struct V2GroupMembersSheet: View {
             .onDisappear {
                 membershipChangeTask?.cancel()
                 moderationTask?.cancel()
+                store.groupLifecycleProposal = nil
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -432,6 +454,24 @@ struct V2GroupMembersSheet: View {
                     Button("刷新", systemImage: "arrow.clockwise") { Task { await store.loadGroupMembers(reset: true) } }
                         .disabled(store.isLoadingGroupMembers)
                         .accessibilityValue(store.isLoadingGroupMembers ? "正在读取成员" : "")
+                }
+            }
+            .sheet(item: $store.groupLifecycleProposal) { proposal in
+                NavigationStack {
+                    Form {
+                        if proposal.isDissolution {
+                            Text("所有成员都将退出，不能再发送或接收该群消息，原邀请将失效。解散后无法恢复。")
+                        } else if case .transferOwnership(let target, _) = proposal.action,
+                                  let key = store.groupPresentationKey(for: target) {
+                            Section("接任群主") { V2AuthorizedProfileNameView(key: key) }
+                            Text("转让后你将成为普通成员，可以继续留在群中或自行退出。")
+                        }
+                        Button(proposal.isDissolution ? "确认解散群聊" : "确认转让群主", role: .destructive) { runLifecycle(proposal) }
+                            .accessibilityIdentifier("v2.group.lifecycle.confirm")
+                        Button("取消", role: .cancel) { store.groupLifecycleProposal = nil }
+                    }
+                    .navigationTitle(proposal.isDissolution ? "解散群聊" : "转让群主")
+                    .navigationBarTitleDisplayMode(.inline)
                 }
             }
             .alert("确认退出群聊？", isPresented: $confirmsLeave) {
@@ -498,6 +538,14 @@ struct V2GroupMembersSheet: View {
         }
         .v2UserProfileSheet(item: $userProfile)
         .authorPresentationPage(context: .list(profilePageID))
+    }
+
+    private func runLifecycle(_ proposal: V2GroupManagementStore.GroupLifecycleProposal) {
+        guard membershipChangeTask == nil else { return }
+        membershipChangeTask = Task {
+            defer { membershipChangeTask = nil }
+            await store.confirmGroupLifecycle(proposal)
+        }
     }
 
     private func runLeaveGroup() {

@@ -1,0 +1,56 @@
+{
+  "observed_at": "2026-10-31T21:01:18.351405+00:00",
+  "environment": "owned disposable macOS PostgreSQL; synthetic storage records only",
+  "postgres_version": "16.13 (Homebrew)",
+  "schema_sha256": "76a4ba002c735389bf3bcb6d996b81597c48b7b67091343a1cc5df4f4ed41ccc",
+  "schema_id": "im-v2-current-78",
+  "sample_rows": 10000,
+  "sample_shape": "100 rooms, 1000 sender identities, half group / half direct; operation metadata present; one bulk INSERT",
+  "before": {
+    "heap_bytes": 0,
+    "index_bytes": 8192,
+    "total_bytes": 16384
+  },
+  "after": {
+    "heap_bytes": 2564096,
+    "index_bytes": 942080,
+    "total_bytes": 3538944
+  },
+  "increment": {
+    "heap_bytes": 2564096,
+    "index_bytes": 933888,
+    "total_bytes": 3522560
+  },
+  "statement_wal_bytes": 4270780,
+  "statement_wal_records": 20113,
+  "statement_full_page_images": 0,
+  "cluster_wal_lsn_advance_bytes": 4293424,
+  "illustrative_daily_increment_at_1000000_acceptances": {
+    "heap_bytes": 256409600,
+    "index_bytes": 93388800,
+    "total_bytes": 352256000,
+    "bulk_statement_wal_bytes": 427078000
+  },
+  "limits": [
+    "Not application sends, throughput, production traffic or an approved capacity forecast.",
+    "Statement WAL excludes commit records and unrelated write paths; isolated cluster LSN advance is separately reported.",
+    "Bulk transaction, B-tree fill, row shape, checkpoint timing, replication and other tables change actual costs."
+  ],
+  "fixture_insert_sql": "INSERT INTO im_v2.message_send_completions\n(room_id,sender_user_id,client_message_id,fingerprint_version,request_fingerprint,message_id,event_id,\n room_sequence,timeline_sequence,accepted_membership_revision,group_capacity_class,direct_recipient_user_id,\n created_at,operation_fingerprint,operation_resolved_at_ms)\nSELECT md5('room-'||(i%100))::uuid,md5('sender-'||(i%1000))::uuid,md5('client-'||i)::uuid,3,\n decode(md5('request-'||i)||md5('request-2-'||i),'hex'),md5('message-'||i)::uuid,md5('event-'||i)::uuid,\n i/100+1,i/100+1,1,CASE WHEN i%2=1 THEN 'standard' END,\n CASE WHEN i%2=0 THEN md5('recipient-'||(i%1000))::uuid END,clock_timestamp(),\n decode(md5('operation-'||i)||md5('operation-2-'||i),'hex'),1793481600000\nFROM generate_series(1,10000) i;",
+  "source_sha256": {
+    "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2SendCompletionMetricsSource.swift": "bba45af4b4c3c1555a7c71f235db1e1e461da271dba6540b7ed9f6a32e81958a",
+    "IMV2Server/Sources/IMV2ServerContracts/V2DurableWorkMetricsContracts.swift": "dc2cf96fe427634870643b28b2e6f60913709657000e5bcea3be7796fbf69a43",
+    "IMV2Server/Sources/IMV2ServerApplication/V2DurableWorkMetrics.swift": "904b86e72adca21c3095a694f9f1ccf4d46210297abbb44d735ea38b6ca44243",
+    "IMV2Server/Sources/IMV2ServerApp/GatewayOwnerMaintenanceAssembly.swift": "65f402ee735d04bf41200945be5d599944a731fa84e5f984f33c583ed37326d1"
+  },
+  "validation": {
+    "focused_swift_methods": 3,
+    "swift_duration_seconds": 0.016,
+    "postgres_read_only_collector": "passed",
+    "prometheus_version": "2.54.1",
+    "capacity_alert_cases": 2,
+    "capacity_alerts": "passed",
+    "live_environment": false
+  },
+  "owned_database_stopped_and_removed": true
+}

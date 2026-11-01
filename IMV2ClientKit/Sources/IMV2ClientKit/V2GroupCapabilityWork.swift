@@ -121,6 +121,8 @@ extension GRDBV2LocalSyncStore {
         case let (.announcement(a,_),.announcement(b,_)): return a==b
         case let (.rolePermissions(a,b,_),.rolePermissions(c,d,_)): return a==c && b==d
         case let (.memberRole(a,b,_),.memberRole(c,d,_)): return a==c && b==d
+        case let (.transferOwnership(a,_),.transferOwnership(b,_)): return a==b
+        case (.dissolve,.dissolve): return true
         default: return false
         }
     }

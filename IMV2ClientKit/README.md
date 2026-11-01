@@ -41,7 +41,9 @@ SDK 包含与框架无关的 WebAuthn 构件；账户服务尚未实现完整的
 
 `V2RealtimeSessionCoordinator` 是设备认证会话进入 `V2TLSFrameConnection` 的唯一 App 边界。它获取一致的用户/设备/访问令牌组合，必要时刷新；并发调用共享握手，只接受匹配的认证身份，网关终态拒绝后清除本地会话。App 将同一个已连接的 `V2TLSFrameConnection` 交给 `V2ProtobufSyncTransport`，页面和功能模块不自行处理访问令牌。
 
-`V2ClientRuntime` 管理握手后的前台生命周期。`start()` 合并并发启动尝试，完成首次持久化同步及待处理快照重置后，才启动实时提示与心跳循环；`stop()` 负责取消任务并关闭连接。页面仅通过该边界表达前后台意图，实时提示不作为投递完成状态。
+`V2ClientRuntime` 管理握手后的前台生命周期。`start()` 合并并发启动尝试；握手完成后，首次持久化同步与实时提示、心跳独立运行，慢同步不阻塞连接就绪。`stop()` 取消任务、关闭连接并等待已持有的任务收尾。页面仅通过该边界表达前后台意图，实时提示不作为投递完成状态。
+
+`V2DefaultClientRuntimeActivity` 统一持有当前连接的恢复循环。任一子循环抛错时，立即取消其他子循环，等待清理完成后把原始错误交给 runtime，记录失败并断开当前代连接。取消时正常结束的监听流仍向上报告取消。账户持久操作继续由独立的账户执行器管理。
 
 打开本地数据库前，App 必须注入具体的 V2 认证与同步传输，并向 `V2LocalStoreBootstrapper` 注入 `V2KeychainInstallationBindingStore`。SDK 不读取外部传输、缓存、凭据或数据库表状态。
 

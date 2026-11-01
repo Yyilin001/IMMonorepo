@@ -7,6 +7,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 python3 "${repo_root}/scripts/check_v2_postgres_vendor.py"
 python3 "${repo_root}/scripts/check_v2_server_boundaries.py"
 python3 "${repo_root}/scripts/check_actor_serialization_boundaries.py"
+python3 "${repo_root}/scripts/test_v2_protocol_documentation.py"
 
 for package in IMV2Core IMV2ClientKit IMV2Server; do
   # Let the selected Swift toolchain run Swift Testing itself. Invoking

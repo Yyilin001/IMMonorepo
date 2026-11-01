@@ -10,11 +10,13 @@ public enum V2GroupCapabilityAction: Codable, Equatable, Sendable {
     case announcement(body: String, expectedRevision: UInt64)
     case rolePermissions(role: V2RoomMembershipRole, permissions: Set<V2GroupPermission>, expectedRevision: UInt64)
     case memberRole(targetUserID: UserID, role: V2RoomMembershipRole, expectedMembershipRevision: UInt64)
+    case transferOwnership(targetUserID: UserID, expectedMembershipRevision: UInt64)
+    case dissolve(expectedMembershipRevision: UInt64)
     public var kind: V2OperationKind {
-        switch self { case .pin: .pinnedMessage; case .announcement: .groupAnnouncement; case .rolePermissions: .groupPermission; case .memberRole: .groupRole }
+        switch self { case .pin: .pinnedMessage; case .announcement: .groupAnnouncement; case .rolePermissions: .groupPermission; case .memberRole: .groupRole; case .transferOwnership: .groupOwnership; case .dissolve: .groupDissolution }
     }
     public var observedRevision: UInt64 {
-        switch self { case .pin(_,_,let v), .announcement(_,let v), .rolePermissions(_,_,let v), .memberRole(_,_,let v): v }
+        switch self { case .pin(_,_,let v), .announcement(_,let v), .rolePermissions(_,_,let v), .memberRole(_,_,let v), .transferOwnership(_,let v), .dissolve(let v): v }
     }
 }
 public struct V2GroupCapabilityIntent: Codable, Equatable, Sendable {
@@ -33,13 +35,18 @@ public struct V2GroupCapabilityIntent: Codable, Equatable, Sendable {
         case .pin(let message,_,_):
             guard case .message(let room,let scopedMessage)=identity.scope,room.uuidValue != nil,message.uuidValue != nil,scopedMessage == message else { throw V2GroupCapabilityValidationError.invalidIntent }
         case .announcement(let body,let revision):
-            guard case .room(let room)=identity.scope,room.uuidValue != nil,!body.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,
+            guard case .room(let room)=identity.scope,room.uuidValue != nil,(body.isEmpty || !body.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty),
                   body.utf8.count <= V2GroupAnnouncementCommand.maximumUTF8Bytes,revision < UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidIntent }
         case .rolePermissions(let role,_,let revision):
             guard case .room(let room)=identity.scope,room.uuidValue != nil,role != .owner,revision > 0 else { throw V2GroupCapabilityValidationError.invalidIntent }
         case .memberRole(let target,let role,_):
             guard case .room(let room)=identity.scope,room.uuidValue != nil,target.uuidValue != nil,target != identity.accountID,
                   role != .owner else { throw V2GroupCapabilityValidationError.invalidIntent }
+        case .transferOwnership(let target, let revision):
+            guard case .room(let room) = identity.scope, room.uuidValue != nil, target.uuidValue != nil,
+                  target != identity.accountID, revision > 0 else { throw V2GroupCapabilityValidationError.invalidIntent }
+        case .dissolve(let revision):
+            guard case .room(let room) = identity.scope, room.uuidValue != nil, revision > 0 else { throw V2GroupCapabilityValidationError.invalidIntent }
         }
         self.identity=identity;self.action=action;self.confirmedUntilMilliseconds=confirmedUntilMilliseconds
     }
@@ -50,6 +57,8 @@ public struct V2GroupCapabilityIntent: Codable, Equatable, Sendable {
         case .announcement(let body,_): fields += [.init("body",.text(body))]
         case .rolePermissions(let role,let permissions,_): fields += [.init("role",.text(role.rawValue)),.init("permissions",.orderedText(permissions.map(\.rawValue).sorted()))]
         case .memberRole(let target,let role,_): fields += [.init("target",.text(target.rawValue)),.init("role",.text(role.rawValue))]
+        case .transferOwnership(let target,_): fields += [.init("target",.text(target.rawValue))]
+        case .dissolve: break
         }
         return try .init(kind:identity.kind,fields:fields)
     } }
@@ -67,15 +76,15 @@ public struct V2GroupCapabilityAdmission: Codable, Equatable, Sendable {
     public let expiresAtMilliseconds: UInt64
     public let targetJoinedRevision: UInt64?
     public init(id:V2GroupCapabilityAdmissionID,identity:V2OperationIdentity,intentFingerprint:V2OperationFingerprint,issuedAtMilliseconds:UInt64,expiresAtMilliseconds:UInt64,targetJoinedRevision:UInt64? = nil) throws {
-        guard id.uuidValue != nil,[V2OperationKind.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole].contains(identity.kind),
+        guard id.uuidValue != nil,[V2OperationKind.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole,.groupOwnership,.groupDissolution].contains(identity.kind),
               issuedAtMilliseconds>0,expiresAtMilliseconds>issuedAtMilliseconds,expiresAtMilliseconds<=UInt64(Int64.max),expiresAtMilliseconds-issuedAtMilliseconds<=120_000 else { throw V2GroupCapabilityValidationError.invalidAdmission }
-        guard (identity.kind == .groupRole) == (targetJoinedRevision != nil),targetJoinedRevision.map({ $0<=UInt64(Int64.max) }) ?? true else { throw V2GroupCapabilityValidationError.invalidAdmission }
+        guard ([V2OperationKind.groupRole, .groupOwnership].contains(identity.kind)) == (targetJoinedRevision != nil),targetJoinedRevision.map({ $0<=UInt64(Int64.max) }) ?? true else { throw V2GroupCapabilityValidationError.invalidAdmission }
         self.targetJoinedRevision=targetJoinedRevision
         self.id=id;self.identity=identity;self.intentFingerprint=intentFingerprint;self.issuedAtMilliseconds=issuedAtMilliseconds;self.expiresAtMilliseconds=expiresAtMilliseconds
     }
     public func validates(intent:V2GroupCapabilityIntent)->Bool {
         guard identity==intent.identity,intentFingerprint==(try? intent.fingerprint),expiresAtMilliseconds<=intent.confirmedUntilMilliseconds else { return false }
-        if case .memberRole(_,_,let revision)=intent.action { return targetJoinedRevision.map { $0<=revision } ?? false }
+        if identity.kind == .groupRole || identity.kind == .groupOwnership { return targetJoinedRevision.map { $0<=intent.action.observedRevision } ?? false }
         return targetJoinedRevision==nil
     }
     private enum CodingKeys:CodingKey { case id,identity,intentFingerprint,issuedAtMilliseconds,expiresAtMilliseconds,targetJoinedRevision }
@@ -100,7 +109,7 @@ public struct V2GroupCapabilityCommand: Codable, Equatable, Sendable {
     }
 }
 public enum V2GroupCapabilityRejection: Codable, Equatable, Sendable {
-    case invalidAdmission,admissionExpired,permissionDenied,roomNotFound,notGroupRoom,messageNotFound,messageWithdrawn,targetNotMember,targetChanged
+    case invalidAdmission,admissionExpired,permissionDenied,roomNotFound,roomDissolved,notGroupRoom,messageNotFound,messageWithdrawn,targetNotMember,targetChanged
     case revisionChanged(currentRevision:UInt64)
 }
 public enum V2GroupCapabilityAdmissionUnavailable: Codable, Equatable, Sendable {
@@ -115,8 +124,10 @@ public enum V2GroupCapabilityValue: Codable, Equatable, Sendable {
     case announcement(body:String,revision:UInt64,roomSequence:UInt64)
     case rolePermissions(role:V2RoomMembershipRole,permissions:Set<V2GroupPermission>,revision:UInt64,roomSequence:UInt64)
     case memberRole(targetUserID:UserID,role:V2RoomMembershipRole,membershipRevision:UInt64,roomSequence:UInt64)
-    public var kind:V2OperationKind { switch self { case .pinned:.pinnedMessage;case .announcement:.groupAnnouncement;case .rolePermissions:.groupPermission;case .memberRole:.groupRole } }
-    public var roomSequence:UInt64 { switch self { case .pinned(_,_,let value),.announcement(_,_,let value),.rolePermissions(_,_,_,let value),.memberRole(_,_,_,let value):value } }
+    case ownershipTransferred(previousOwnerUserID: UserID, ownerUserID: UserID, membershipRevision: UInt64, roomSequence: UInt64)
+    case dissolved(membershipRevision: UInt64, roomSequence: UInt64)
+    public var kind:V2OperationKind { switch self { case .pinned:.pinnedMessage;case .announcement:.groupAnnouncement;case .rolePermissions:.groupPermission;case .memberRole:.groupRole;case .ownershipTransferred:.groupOwnership;case .dissolved:.groupDissolution } }
+    public var roomSequence:UInt64 { switch self { case .pinned(_,_,let value),.announcement(_,_,let value),.rolePermissions(_,_,_,let value),.memberRole(_,_,_,let value),.ownershipTransferred(_,_,_,let value),.dissolved(_,let value):value } }
 }
 public enum V2GroupCapabilityTerminalOutcome: Codable, Equatable, Sendable { case applied(V2GroupCapabilityValue),alreadySatisfied(V2GroupCapabilityValue),rejected(V2GroupCapabilityRejection),closed }
 public struct V2GroupCapabilityReceipt: Codable, Equatable, Sendable {
@@ -125,7 +136,7 @@ public struct V2GroupCapabilityReceipt: Codable, Equatable, Sendable {
     public let outcome:V2GroupCapabilityTerminalOutcome
     public let resolvedAtMilliseconds:UInt64
     public init(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,outcome:V2GroupCapabilityTerminalOutcome,resolvedAtMilliseconds:UInt64) throws {
-        guard [V2OperationKind.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole].contains(identity.kind),resolvedAtMilliseconds>0,resolvedAtMilliseconds<=UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidReceipt }
+        guard [V2OperationKind.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole,.groupOwnership,.groupDissolution].contains(identity.kind),resolvedAtMilliseconds>0,resolvedAtMilliseconds<=UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidReceipt }
         if case .applied(let value)=outcome { guard value.roomSequence>0 else { throw V2GroupCapabilityValidationError.invalidReceipt } }
         switch outcome {
         case .applied(let value),.alreadySatisfied(let value):
@@ -134,10 +145,14 @@ public struct V2GroupCapabilityReceipt: Codable, Equatable, Sendable {
             case .pinned(let message,_,let sequence):
                 guard case .message(_,let scopedMessage)=identity.scope,message==scopedMessage,sequence<=UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidReceipt }
             case .announcement(let body,let revision,let sequence):
-                guard !body.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,body.utf8.count<=V2GroupAnnouncementCommand.maximumUTF8Bytes,
+                guard (body.isEmpty || !body.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty),body.utf8.count<=V2GroupAnnouncementCommand.maximumUTF8Bytes,
                     revision>0,revision<=UInt64(Int64.max),sequence<=UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidReceipt }
             case .rolePermissions(let role,_,let revision,let sequence):
                 guard role != .owner,revision>0,revision<=UInt64(Int64.max),sequence<=UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidReceipt }
+            case .ownershipTransferred(let previous,let owner,let revision,let sequence):
+                guard previous == identity.accountID, owner.uuidValue != nil, owner != previous, revision > 0, revision <= UInt64(Int64.max), sequence > 0, sequence <= UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidReceipt }
+            case .dissolved(let revision,let sequence):
+                guard revision > 0, revision <= UInt64(Int64.max), sequence > 0, sequence <= UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidReceipt }
             case .memberRole(let target,let role,let revision,let sequence):
                 guard target.uuidValue != nil,target != identity.accountID,role != .owner,revision<=UInt64(Int64.max),sequence<=UInt64(Int64.max) else { throw V2GroupCapabilityValidationError.invalidReceipt }
             }
@@ -159,6 +174,10 @@ public struct V2GroupCapabilityReceipt: Codable, Equatable, Sendable {
             return role==actualRole && permissions==actualPermissions && revision==(applied ? expected+1:expected) && sequence>0
         case (.memberRole(let target,let role,let expected),.memberRole(let actualTarget,let actualRole,let revision,_)):
             return target==actualTarget && role==actualRole && revision==(applied ? expected+1:expected)
+        case (.transferOwnership(let target,let expected),.ownershipTransferred(let previous,let owner,let revision,_)):
+            return applied && previous == identity.accountID && target == owner && revision == expected + 1
+        case (.dissolve(let expected),.dissolved(let revision,_)):
+            return applied && revision == expected + 1
         default:return false
         }
     }
@@ -172,7 +191,7 @@ public struct V2GroupCapabilityRecoveryRequest: Codable, Equatable, Sendable {
     public let fingerprint:V2OperationFingerprint
     public let action:V2OperationRecoveryRequest.Action
     public init(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,action:V2OperationRecoveryRequest.Action) throws {
-        guard [V2OperationKind.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole].contains(identity.kind),identity.accountID.uuidValue != nil,UUID(uuidString:identity.operation.rawOperationID) != nil else { throw V2GroupCapabilityValidationError.invalidIntent }
+        guard [V2OperationKind.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole,.groupOwnership,.groupDissolution].contains(identity.kind),identity.accountID.uuidValue != nil,UUID(uuidString:identity.operation.rawOperationID) != nil else { throw V2GroupCapabilityValidationError.invalidIntent }
         self.identity=identity;self.fingerprint=fingerprint;self.action=action
     }
     private enum CodingKeys:CodingKey { case identity,fingerprint,action }

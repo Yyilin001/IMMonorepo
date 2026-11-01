@@ -61,7 +61,8 @@ struct PostgresV2DurableSendBatchReceipts: Sendable {
                    result.fingerprint_version AS fingerprint_version,
                    NULL::uuid AS recipient_id,
                    result.operation_fingerprint AS operation_fingerprint,
-                   result.operation_resolved_at_ms AS operation_resolved_at_ms
+                   result.operation_resolved_at_ms AS operation_resolved_at_ms,
+                   result.rejection_code AS rejection_code
             FROM input JOIN im_v2.message_send_completions result
               ON result.room_id=input.room_id AND result.sender_user_id=input.sender_id
              AND result.client_message_id=input.operation_id
@@ -76,9 +77,10 @@ struct PostgresV2DurableSendBatchReceipts: Sendable {
                    result.fingerprint_version AS fingerprint_version,
                    result.direct_recipient_user_id AS recipient_id,
                    NULL::bytea AS operation_fingerprint,
-                   NULL::bigint AS operation_resolved_at_ms
+                   NULL::bigint AS operation_resolved_at_ms,
+                   NULL::text AS rejection_code
             FROM input JOIN im_v2.message_send_completions result ON result.room_id=input.room_id AND result.sender_user_id=input.sender_id
-             AND result.client_message_id=input.operation_id
+             AND result.client_message_id=input.operation_id AND result.rejection_code IS NULL
             """
         return .init(query: query, decode: { rows in
             var envelopes: [DurableEnvelopeRow] = [], completions: [DurableCompletionRow] = []
@@ -101,7 +103,7 @@ struct PostgresV2DurableSendBatchReceipts: Sendable {
         let rows = try await sql.raw("""
             SELECT input.ordinal, receipt.message_id, receipt.room_sequence,
                    receipt.request_fingerprint AS domain_fingerprint, receipt.fingerprint_version,
-                   receipt.operation_fingerprint, receipt.operation_resolved_at_ms
+                   receipt.operation_fingerprint, receipt.operation_resolved_at_ms, receipt.rejection_code
             FROM jsonb_to_recordset(\(bind: input)::jsonb)
               AS input(ordinal integer, room_id uuid, sender_id uuid, operation_id uuid)
             JOIN im_v2.message_send_completions receipt
@@ -182,11 +184,11 @@ private struct DurableReceiptKey: Encodable {
 }
 private struct DurableEnvelopeRow: Decodable {
     let ordinal: Int
-    let receipt: V2SendSuccessRow
+    let receipt: V2SendResultRow
     enum CodingKeys: String, CodingKey { case ordinal }
     init(from decoder: any Decoder) throws {
         ordinal = try decoder.container(keyedBy: CodingKeys.self).decode(Int.self, forKey: .ordinal)
-        receipt = try V2SendSuccessRow(from: decoder)
+        receipt = try V2SendResultRow(from: decoder)
     }
 }
 private struct DurableCompletionRow: Decodable {

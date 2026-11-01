@@ -20,6 +20,8 @@ struct GroupCapabilitiesTests {
     @Test("announcement and role changes reject unsafe shapes")
     func commandValidation() throws {
         let announcement = try GroupAnnouncementOperationID("00000000-0000-0000-0000-000000000803")
+        let clear = try V2GroupAnnouncementCommand(operationID: announcement, roomID: roomID, body: "", expectedRevision: 7)
+        #expect(clear.body.isEmpty && clear.expectedRevision == 7)
         #expect(throws: V2GroupPermissionValidationError.emptyAnnouncement) {
             _ = try V2GroupAnnouncementCommand(operationID: announcement, roomID: roomID, body: " \n ", expectedRevision: 0)
         }

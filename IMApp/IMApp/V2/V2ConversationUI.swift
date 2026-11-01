@@ -1435,7 +1435,7 @@ struct V2ConversationListView: View {
                 }
             }
             .task { await store.observeDirectConversationRequests() }
-        .task { await store.observeProjectionChanges() }
+            .task { await store.observeProjectionChanges() }
             .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
                 openConversationAfterSheetDismissal()
                 messageSearchStore = nil
@@ -1832,6 +1832,8 @@ struct V2ConversationDetailView: View {
 
     var body: some View {
         @Bindable var store = store
+        @Bindable var groupManagement = store.groupManagement
+        @Bindable var composer = store.composer
         Group {
             switch store.state {
             case .loading:
@@ -1887,7 +1889,7 @@ struct V2ConversationDetailView: View {
                     if let feedback = store.readSyncFeedback {
                         Text(feedback).font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
                     }
-                    ForEach(store.groupCapabilityPending,id:\.id) { pending in
+                    ForEach(store.groupManagement.groupCapabilityPending,id:\.id) { pending in
                         HStack {
                             Text(groupCapabilityTitle(pending.intent.action))
                             if pending.work?.execution == .committed { Text("服务器已确认") }
@@ -1895,16 +1897,16 @@ struct V2ConversationDetailView: View {
                             else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未执行，请刷新后重新操作") }
                             else if pending.work?.scheduling == .needsAttention {
                                 Text("原操作结果待确认")
-                                Button("重试") { Task { await store.continueGroupCapability(pending) } }
+                                Button("重试") { Task { await store.groupManagement.continueGroupCapability(pending) } }
                             } else if pending.confirmationRequired {
                                 Text("需要重新确认")
-                                Button("查看并确认") { Task { await store.prepareGroupCapabilityReconfirmation(pending) } }
+                                Button("查看并确认") { Task { await store.groupManagement.prepareGroupCapabilityReconfirmation(pending) } }
                             }
                             else { Text(pending.work==nil ? "正在准备操作" : "正在处理") }
-                            if pending.work==nil { Button("取消确认") { Task { await store.discardGroupCapability(pending) } } }
+                            if pending.work==nil { Button("取消确认") { Task { await store.groupManagement.discardGroupCapability(pending) } } }
                         }.font(.caption).padding(.horizontal)
                     }
-                    ForEach(store.membershipPending,id:\.id) { pending in
+                    ForEach(store.groupManagement.membershipPending,id:\.id) { pending in
                         HStack {
                             Text(pending.intent.action == .add ? "添加成员确认" : "移除成员确认")
                             if pending.work?.execution == .committed { Text("原操作已获服务器确认") }
@@ -1912,15 +1914,15 @@ struct V2ConversationDetailView: View {
                             else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未获准执行，请刷新成员状态") }
                             else if pending.work?.scheduling == .needsAttention {
                                 Text("原操作结果待确认")
-                                Button("重试") { Task { await store.continueMembership(pending) } }
+                                Button("重试") { Task { await store.groupManagement.continueMembership(pending) } }
                             } else if pending.confirmationRequired {
                                 Text("成员状态已变化，请重新确认")
-                                Button("重新确认") { Task { await store.continueMembership(pending) } }
+                                Button("重新确认") { Task { await store.groupManagement.continueMembership(pending) } }
                             } else { Text(pending.work==nil ? "正在准备操作" : "正在处理") }
-                            if pending.work==nil { Button("取消确认") { Task { await store.discardMembership(pending) } } }
+                            if pending.work==nil { Button("取消确认") { Task { await store.groupManagement.discardMembership(pending) } } }
                         }.font(.caption).padding(.horizontal)
                     }
-                    ForEach(store.memberAdministrationPending,id:\.id) { pending in
+                    ForEach(store.groupManagement.memberAdministrationPending,id:\.id) { pending in
                         HStack {
                             Text(pending.intent.action == .remove ? "成员移除" : "成员禁言")
                             if pending.work?.execution == .committed { Text("服务器已确认原操作结果") }
@@ -1928,19 +1930,19 @@ struct V2ConversationDetailView: View {
                             else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未获准执行，请刷新成员状态") }
                             else if pending.work?.scheduling == .needsAttention {
                                 Text("原操作结果待确认")
-                                Button("重试") { Task { await store.continueMemberAdministration(pending) } }
+                                Button("重试") { Task { await store.groupManagement.continueMemberAdministration(pending) } }
                             } else if pending.confirmationRequired {
                                 Text("确认窗口已结束或权限需重新核对")
-                                Button("重新确认") { Task { await store.continueMemberAdministration(pending) } }
+                                Button("重新确认") { Task { await store.groupManagement.continueMemberAdministration(pending) } }
                             } else { Text(pending.work == nil ? "正在准备操作" : "正在处理") }
-                            if pending.work==nil { Button("取消确认") { Task { await store.discardMemberAdministration(pending) } } }
+                            if pending.work==nil { Button("取消确认") { Task { await store.groupManagement.discardMemberAdministration(pending) } } }
                         }.font(.caption).padding(.horizontal)
                     }
-                    ForEach(store.messageRemovalPending, id: \.work.id) { pending in
+                    ForEach(store.groupManagement.messageRemovalPending, id: \.work.id) { pending in
                         VStack(alignment: .leading) {
-                            Text(store.messageRemovalStatus(pending)).font(.footnote)
+                            Text(store.groupManagement.messageRemovalStatus(pending)).font(.footnote)
                             if pending.work.scheduling == .needsAttention {
-                                Button("继续核对原移除") { Task { await store.resumeMessageRemoval(pending.work.id) } }
+                                Button("继续核对原移除") { Task { await store.groupManagement.resumeMessageRemoval(pending.work.id) } }
                             }
                         }
                     }
@@ -1989,12 +1991,12 @@ struct V2ConversationDetailView: View {
                         Text(feedback).font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
                     }
 
-                    if store.isGroupConversation, let announcement = store.groupAnnouncement {
+                    if store.isGroupConversation, let announcement = store.groupManagement.groupAnnouncement, !announcement.body.isEmpty {
                         V2GroupAnnouncementBanner(announcement: announcement) {
                             presentedDetailSheet = .groupAnnouncement
                         }
                     }
-                    if store.timeline.isEmpty && store.pendingResourceSends.isEmpty {
+                    if store.timeline.isEmpty && store.composer.pendingResourceSends.isEmpty {
                         V2ConversationEmptyState(title: "暂无消息", symbol: "bubble", description: "发送第一条消息，开始会话。")
                     } else {
                         V2MessageTimelineEnvironment { environment in
@@ -2018,9 +2020,9 @@ struct V2ConversationDetailView: View {
                                             V2ConversationTimelineActivityRow(activity: activity)
                                         case .pending(let pending):
                                             V2PendingMessageRow(pending: pending,
-                                                retry: { Task { await store.retryResourceSend(pending.id) } },
-                                                cancel: { Task { await store.cancelResourceSend(pending.id) } },
-                                                borrowImage: { try await store.borrowPendingImage(jobID: $0) })
+                                                retry: { Task { await store.composer.retryResourceSend(pending.id) } },
+                                                cancel: { Task { await store.composer.cancelResourceSend(pending.id) } },
+                                                borrowImage: { try await store.composer.borrowPendingImage(jobID: $0) })
                                             }
                                 }
                                 .modifier(V2MessageTimelineInheritedEnvironment(source: environment))
@@ -2029,11 +2031,11 @@ struct V2ConversationDetailView: View {
                             }
                             .headerContent(.header {
                                 VStack(spacing: 8) {
-                                    if store.pendingResourceSendPage > 0 {
-                                        Button("较新的待处理发送") { store.previousPendingResourceSendPage() }
+                                    if store.composer.pendingResourceSendPage > 0 {
+                                        Button("较新的待处理发送") { store.composer.previousPendingResourceSendPage() }
                                     }
-                                    if store.hasNextPendingResourceSendPage {
-                                        Button("查看更多待处理发送") { store.nextPendingResourceSendPage() }
+                                    if store.composer.hasNextPendingResourceSendPage {
+                                        Button("查看更多待处理发送") { store.composer.nextPendingResourceSendPage() }
                                     }
                                     if store.isHistoryIncomplete {
                                         Label("更早的消息已不可用", systemImage: "clock.badge.exclamationmark")
@@ -2084,7 +2086,7 @@ struct V2ConversationDetailView: View {
                             }
                             .onScrollFailure { _ in focusedMessageID = nil }
                             .onChange(of: V2MessageTimelinePresentation.Snapshot(
-                                timeline: store.timeline, pending: store.pendingResourceSends
+                                timeline: store.timeline, pending: store.composer.pendingResourceSends
                             ), initial: true) { _, snapshot in
                                 let wasEmpty = timelinePresentation.dataSource.items.isEmpty
                                 let wasFollowingLatest = timelinePosition.autoScrollsToBottomOnAppend
@@ -2111,7 +2113,7 @@ struct V2ConversationDetailView: View {
                                         Button {
                                             Task {
                                                 await store.returnToLatestTimeline()
-                                                if !store.isBrowsingHistoricalTimeline, timelinePresentation.apply(store.timeline, pending: store.pendingResourceSends) {
+                                                if !store.isBrowsingHistoricalTimeline, timelinePresentation.apply(store.timeline, pending: store.composer.pendingResourceSends) {
                                                     scrollToLatestMessage()
                                                 }
                                             }
@@ -2130,11 +2132,11 @@ struct V2ConversationDetailView: View {
                         }
                         }
                     }
-                    if !store.attachments.isEmpty {
+                    if !store.composer.attachments.isEmpty {
                         ScrollView(.horizontal) {
                             HStack(spacing: 10) {
-                                ForEach(store.attachments) { attachment in
-                                    V2ConversationAttachmentRow(store: store, attachment: attachment)
+                                ForEach(store.composer.attachments) { attachment in
+                                    V2ConversationAttachmentRow(store: store.composer, attachment: attachment)
                                         .frame(width: 240)
                                         .padding(8)
                                         .background(V2VisualStyle.surface, in: RoundedRectangle(cornerRadius: 12))
@@ -2146,27 +2148,27 @@ struct V2ConversationDetailView: View {
                         .padding(.vertical, 8)
                         .accessibilityIdentifier("v2.message.attachments")
                     }
-                    if store.isGroupConversation && (showsMentionInput || !store.mentionHandlesText.isEmpty) {
+                    if store.isGroupConversation && (showsMentionInput || !store.composer.mentionHandlesText.isEmpty) {
                         V2ComposerTextInput(
-                            text: $store.mentionHandlesText,
+                            text: $composer.mentionHandlesText,
                             placeholder: "提及（@all 或 @handle）",
                             accessibilityLabel: "提及成员",
                             accessibilityHint: "输入 @all 或成员公开 ID，用逗号或换行分隔；最多 20 个"
                         )
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                            .disabled(store.isSending || store.canSendInDirectConversation == false)
+                            .disabled(store.composer.isSending || store.composer.canSendInDirectConversation == false)
                             .accessibilityIdentifier("v2.message.mentions")
                             .padding(.horizontal)
                             .padding(.top, 8)
                     }
-                    if let replyTarget = store.replyTarget {
+                    if let replyTarget = store.composer.replyTarget {
                         HStack(spacing: 8) {
                             Image(systemName: "arrowshape.turn.up.left.fill")
                             Text("回复：\(replyTarget.text.isEmpty ? "附件" : replyTarget.text)")
                                 .lineLimit(1)
                             Spacer()
-                            Button("取消") { store.cancelReply() }
+                            Button("取消") { store.composer.cancelReply() }
                                 .accessibilityIdentifier("v2.message.reply.cancel")
                         }
                         .font(.subheadline)
@@ -2179,15 +2181,15 @@ struct V2ConversationDetailView: View {
                         HStack(alignment: .bottom, spacing: 12) {
                             Menu {
                                 Button("照片", systemImage: "photo.on.rectangle") {
-                                    photoSelectionLimit = V2MessageCommandLimits.maxMediaAttachments - store.attachments.count
+                                    photoSelectionLimit = V2MessageCommandLimits.maxMediaAttachments - store.composer.attachments.count
                                     isPresentingPhotoPicker = true
                                 }
-                                .disabled(!store.canAddAttachment || store.directAccountKind == .system || isImportingPhotos)
+                                .disabled(!store.composer.canAddAttachment || store.directAccountKind == .system || isImportingPhotos)
                                 .accessibilityIdentifier("v2.message.photo.add")
                                 Button("文件", systemImage: "paperclip") {
                                     isPresentingAttachmentImporter = true
                                 }
-                                .disabled(!store.canAddAttachment || store.directAccountKind == .system || isImportingPhotos)
+                                .disabled(!store.composer.canAddAttachment || store.directAccountKind == .system || isImportingPhotos)
                                 .accessibilityIdentifier("v2.message.attachment.add")
                                 if store.isGroupConversation {
                                     Button(showsMentionInput ? "收起提及" : "提及成员", systemImage: "at") {
@@ -2215,15 +2217,15 @@ struct V2ConversationDetailView: View {
 
                             HStack(alignment: .bottom, spacing: 8) {
                                 V2ComposerTextInput(
-                                    text: $store.draft,
+                                    text: $composer.draft,
                                     placeholder: "发送消息…",
                                     accessibilityLabel: "消息内容",
                                     accessibilityHint: "输入要发送的消息"
                                 )
-                                .disabled(store.isSending || store.canSendInDirectConversation == false || store.directAccountKind == .system)
-                                .onChange(of: store.draft) { _, _ in store.updateTypingForDraft() }
+                                .disabled(store.composer.isSending || store.composer.canSendInDirectConversation == false || store.directAccountKind == .system)
+                                .onChange(of: store.composer.draft) { _, _ in store.liveActivity.updateTyping(for: store.composer.draft) }
                                 .accessibilityIdentifier("v2.message.draft")
-                                if store.isSending {
+                                if store.composer.isSending {
                                     ProgressView()
                                         .frame(width: 36, height: 36)
                                         .accessibilityLabel("正在保存消息")
@@ -2233,7 +2235,7 @@ struct V2ConversationDetailView: View {
                                         followsOwnSend = true
                                         Task {
                                             await store.sendDraft()
-                                            if !store.draft.isEmpty {
+                                            if !store.composer.draft.isEmpty {
                                                 followsOwnSend = false
                                             }
                                         }
@@ -2261,7 +2263,7 @@ struct V2ConversationDetailView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    if !store.isGroupConversation, store.canSendInDirectConversation == false || store.directAccountKind == .system {
+                    if !store.isGroupConversation, store.composer.canSendInDirectConversation == false || store.directAccountKind == .system {
                         Text(store.directAccountKind == .system ? "此系统账号仅用于发送通知" : "当前无法向此会话发送消息")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -2269,7 +2271,13 @@ struct V2ConversationDetailView: View {
                             .padding(.bottom, 8)
                             .accessibilityIdentifier("v2.message.sending-restricted")
                     }
-                    if let sendFeedback = store.sendFeedback {
+                    if let feedback = store.composer.availabilityFeedback {
+                        Text(feedback).font(.footnote).foregroundStyle(.secondary)
+                            .onAppear { announceV2AccessibilityAnnouncement(feedback) }
+                            .onChange(of: feedback) { _, value in announceV2AccessibilityAnnouncement(value) }
+                            .accessibilityIdentifier("v2.message.availability-feedback")
+                    }
+                    if let sendFeedback = store.composer.sendFeedback {
                         Text(sendFeedback)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -2292,6 +2300,16 @@ struct V2ConversationDetailView: View {
                                 announceV2AccessibilityAnnouncement(updatedFeedback)
                             }
                             .accessibilityIdentifier("v2.message.action-feedback")
+                    }
+                    if let feedback = store.groupManagement.feedback {
+                        Text(feedback)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal)
+                            .padding(.bottom, 8)
+                            .onAppear { announceV2AccessibilityAnnouncement(feedback) }
+                            .onChange(of: feedback) { _, value in announceV2AccessibilityAnnouncement(value) }
+                            .accessibilityIdentifier("v2.group.action-feedback")
                     }
                 }
             }
@@ -2330,7 +2348,7 @@ struct V2ConversationDetailView: View {
         .sheet(item: $presentedDetailSheet) { sheet in
             switch sheet {
             case .groupReadReceipts(let message):
-                V2GroupReadReceiptsSheet(store: store, message: message)
+                V2GroupReadReceiptsSheet(store: store.groupReadReceipts, message: message)
             case .edit(let message):
                 V2MessageEditSheet(store: store, message: message)
             case .forward:
@@ -2338,7 +2356,7 @@ struct V2ConversationDetailView: View {
             case .copyAttachments(let message):
                 V2CopyAttachmentsSheet(store: store, message: message)
             case .groupAnnouncement:
-                V2GroupAnnouncementSheet(store: store)
+                V2GroupAnnouncementSheet(store: store.groupManagement)
             }
         }
         .v2UserProfileSheet(item: $userProfile)
@@ -2353,47 +2371,48 @@ struct V2ConversationDetailView: View {
             allowsMultipleSelection: false
         ) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
-            Task { await store.stageAttachment(from: url) }
+            Task { await store.composer.stageAttachment(from: url) }
         }
         .v2PhotoLibraryPicker(isPresented: $isPresentingPhotoPicker, isImporting: $isImportingPhotos,
                               maximumSelectionCount: photoSelectionLimit) { photo in
-            await store.stageAttachment(photo: photo)
+            await store.composer.stageAttachment(photo: photo)
         }
+        .task { _ = await store.composer.restoreDraft() }
         .task { await store.observeProjectionChanges() }
         .task { await store.pollVisibleHybridGroupEvents() }
         .authorPresentationPage(context: store.authorPresentationContext)
-        .task(id: store.trackedSendIntentID) { await store.observeSendConfirmation() }
-        .task(id: store.pendingResourceSendPage) { await store.observeResourceSends() }
+        .task(id: store.composer.trackedSendIntentID) { await store.composer.observeSendConfirmation() }
+        .task(id: store.composer.pendingResourceSendPage) { await store.composer.observeResourceSends() }
         .task { await store.observeReadSync() }
         .task { await store.observeMessageMutations() }
         .task { await store.observeReactionIntents() }
-        .task { await store.observeMessageRemoval() }
+        .task { await store.groupManagement.observeMessageRemoval() }
         .task {
-            await store.loadGroupMembers()
+            await store.groupManagement.loadGroupMembers()
             guard !Task.isCancelled else { return }
-            await store.loadGroupRolePolicies()
+            await store.groupManagement.loadGroupRolePolicies()
         }
-        .onDisappear { store.endMessageRemovalPage() }
-        .task(id: store.messageRemovalProposal?.expires) {
-            guard let expires = store.messageRemovalProposal?.expires else { return }
+        .onDisappear { store.groupManagement.endMessageRemovalPage() }
+        .task(id: store.groupManagement.messageRemovalProposal?.expires) {
+            guard let expires = store.groupManagement.messageRemovalProposal?.expires else { return }
             do { try await Task.sleep(until: expires, clock: .continuous) }
             catch { return }
-            if store.messageRemovalProposal?.expires == expires { store.messageRemovalProposal = nil }
+            if store.groupManagement.messageRemovalProposal?.expires == expires { store.groupManagement.messageRemovalProposal = nil }
         }
         .confirmationDialog("管理移除这条消息？", isPresented: Binding(
-            get: { store.messageRemovalProposal != nil },
-            set: { if !$0 { store.messageRemovalProposal = nil } }), titleVisibility: .visible, presenting: store.messageRemovalProposal) { proposal in
+            get: { store.groupManagement.messageRemovalProposal != nil },
+            set: { if !$0 { store.groupManagement.messageRemovalProposal = nil } }), titleVisibility: .visible, presenting: store.groupManagement.messageRemovalProposal) { proposal in
             Button("移除消息", role: .destructive) {
-                Task { await store.confirmMessageRemoval(proposal) }
+                Task { await store.groupManagement.confirmMessageRemoval(proposal) }
             }
-            Button("取消", role: .cancel) { store.messageRemovalProposal = nil }
+            Button("取消", role: .cancel) { store.groupManagement.messageRemovalProposal = nil }
         } message: { _ in Text("此操作将对所有成员移除消息。状态或权限变化时，服务器会拒绝原确认。") }
 
-        .confirmationDialog(store.pendingPinBaseline?.isPinned == true ? "取消置顶这条消息？" : "置顶这条消息？", isPresented:Binding(get:{store.pendingPinBaseline != nil},set:{if !$0 {store.pendingPinBaseline=nil}}),titleVisibility:.visible) {
-            Button(store.pendingPinBaseline?.isPinned == true ? "取消置顶" : "置顶") { if let baseline=store.pendingPinBaseline { Task { await store.confirmPinInGroup(baseline) } } }
-            Button("取消",role:.cancel) { store.pendingPinBaseline=nil }
+        .confirmationDialog(store.groupManagement.pendingPinBaseline?.isPinned == true ? "取消置顶这条消息？" : "置顶这条消息？", isPresented:Binding(get:{store.groupManagement.pendingPinBaseline != nil},set:{if !$0 {store.groupManagement.pendingPinBaseline=nil}}),titleVisibility:.visible) {
+            Button(store.groupManagement.pendingPinBaseline?.isPinned == true ? "取消置顶" : "置顶") { if let baseline=store.groupManagement.pendingPinBaseline { Task { await store.groupManagement.confirmPinInGroup(baseline) } } }
+            Button("取消",role:.cancel) { store.groupManagement.pendingPinBaseline=nil }
         }
-        .sheet(item:$store.groupCapabilityReconfirmation) { proposal in
+        .sheet(item:$groupManagement.groupCapabilityReconfirmation) { proposal in
             NavigationStack {
                 Form {
                     Section("重新确认群操作") {
@@ -2404,21 +2423,25 @@ struct V2ConversationDetailView: View {
                         case .rolePermissions(let role,let permissions,_):
                             Text(role == .admin ? "角色：管理员" : "角色：普通成员")
                             Text(permissions.isEmpty ? "不授予上述群权限" : permissions.map(\.title).sorted().joined(separator:"、"))
+                        case .transferOwnership(let target,_):
+                            Text("转让群主后，你将成为普通成员。接任成员：")
+                            if let key = store.groupManagement.groupPresentationKey(for: target) { V2AuthorizedProfileNameView(key: key) }
+                        case .dissolve: Text("所有成员都将退出群聊，解散后无法恢复。")
                         case .memberRole(_,let role,_): Text(role == .admin ? "将原目标成员设为管理员" : "将原目标成员设为普通成员")
                         }
                         Text("请确认操作内容，提交后将在后台处理。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Button("确认提交") { Task { await store.confirmGroupCapability(proposal) } }
-                    Button("返回",role:.cancel) { store.groupCapabilityReconfirmation=nil }
+                    Button("确认提交") { Task { await store.groupManagement.confirmGroupCapability(proposal) } }
+                    Button("返回",role:.cancel) { store.groupManagement.groupCapabilityReconfirmation=nil }
                 }.navigationTitle("确认群操作")
             }
         }
-        .task { await store.observeGroupCapabilities() }
-        .task { await store.observeMembership() }
-        .task { await store.observeMemberAdministration() }
+        .task { await store.groupManagement.observeGroupCapabilities() }
+        .task { await store.groupManagement.observeMembership() }
+        .task { await store.groupManagement.observeMemberAdministration() }
         .task { await store.observeForwardPlans() }
-        .task { await store.observeLiveActivity() }
+        .task { await store.liveActivity.observe() }
         .task(id: focusedMessageID) {
             guard let focusedMessageID else { return }
             await store.loadTimeline(containing: focusedMessageID)
@@ -2431,17 +2454,19 @@ struct V2ConversationDetailView: View {
         case .announcement: "群公告"
         case .rolePermissions: "群权限"
         case .memberRole: "成员角色"
+        case .transferOwnership: "群主转让"
+        case .dissolve: "解散群聊"
         }
     }
 
     private var headerActivityText: String? {
-        if !store.typingUserIDs.isEmpty {
+        if !store.liveActivity.typingUserIDs.isEmpty {
             if store.isGroupConversation {
-                return store.typingUserIDs.count == 1 ? "有人正在输入…" : "多位成员正在输入…"
+                return store.liveActivity.typingUserIDs.count == 1 ? "有人正在输入…" : "多位成员正在输入…"
             }
             return "对方正在输入…"
         }
-        guard !store.isGroupConversation, let presence = store.peerPresence else { return nil }
+        guard !store.isGroupConversation, let presence = store.liveActivity.peerPresence else { return nil }
         return presence.isOnline ? "在线" : "离线"
     }
 
@@ -2454,17 +2479,17 @@ struct V2ConversationDetailView: View {
                 .lineLimit(1)
                 .accessibilityLabel(store.isGroupConversation ? "会话状态" : "对方状态")
                 .accessibilityValue(text)
-                .accessibilityIdentifier(store.typingUserIDs.isEmpty ? "v2.conversation.presence" : "v2.conversation.typing")
+                .accessibilityIdentifier(store.liveActivity.typingUserIDs.isEmpty ? "v2.conversation.presence" : "v2.conversation.typing")
         }
     }
 
     private var canSendDraft: Bool {
-        !store.isSending
-            && store.attachmentImportsInFlight == 0
+        !store.composer.isSending
+            && store.composer.attachmentImportsInFlight == 0
             && !isImportingPhotos
             && store.directAccountKind != .system
-            && store.canSendInDirectConversation != false
-            && (!store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.attachments.isEmpty)
+            && store.composer.canSendInDirectConversation != false
+            && (!store.composer.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.composer.attachments.isEmpty)
     }
 
     @ToolbarContentBuilder
@@ -2531,7 +2556,7 @@ struct V2ComposerTextInput: View {
 }
 
 private struct V2ConversationAttachmentRow: View {
-    @Bindable var store: V2ConversationDetailStore
+    @Bindable var store: V2ConversationComposerStore
     let attachment: V2ConversationAttachmentItem
     @State private var preview: UIImage?
 
@@ -2692,7 +2717,7 @@ private struct V2ConversationMessageRow: View {
             canWithdraw: store.canWithdrawMessage(message),
             canUseMessageMenu: !message.isWithdrawn,
             isFavorited: message.isFavorited,
-            reply: { store.beginReply(to: message) },
+            reply: { store.composer.beginReply(to: message) },
             forward: beginForward,
             setFavorite: { desired in Task { await store.setFavorite(message, desired: desired) } },
             edit: beginEditing,
@@ -2825,7 +2850,7 @@ private struct V2ConversationMessageBubble: View {
     @ViewBuilder
     private var messageActions: some View {
         if !message.isWithdrawn {
-            Button("回复", systemImage: "arrowshape.turn.up.left") { store.beginReply(to: message) }
+            Button("回复", systemImage: "arrowshape.turn.up.left") { store.composer.beginReply(to: message) }
                 .accessibilityIdentifier("v2.message.reply.\(message.id)")
         }
         if store.canReactToMessage(message) {
@@ -2860,14 +2885,14 @@ private struct V2ConversationMessageBubble: View {
                 Button("取消收藏") { Task { await store.setFavorite(message, desired: false) } }
             }
             .accessibilityIdentifier("v2.message.favorite.\(message.id)")
-            if store.canManageMessages && !message.isWithdrawn {
+            if store.groupManagement.canManageMessages && !message.isWithdrawn {
                 Button("管理移除消息", systemImage: "trash", role: .destructive) {
-                    Task { await store.prepareMessageRemoval(message) }
+                    Task { await store.groupManagement.prepareMessageRemoval(message) }
                 }
                 .accessibilityIdentifier("v2.group.message.remove.\(message.id)")
             }
             if store.isGroupConversation {
-                Button(message.isPinnedInGroup ? "取消置顶消息" : "置顶消息", systemImage: message.isPinnedInGroup ? "pin.slash" : "pin") { Task { await store.pinInGroup(message) } }
+                Button(message.isPinnedInGroup ? "取消置顶消息" : "置顶消息", systemImage: message.isPinnedInGroup ? "pin.slash" : "pin") { Task { await store.groupManagement.pinInGroup(message) } }
                     .accessibilityIdentifier("v2.group.message.pin.\(message.id)")
             }
         }

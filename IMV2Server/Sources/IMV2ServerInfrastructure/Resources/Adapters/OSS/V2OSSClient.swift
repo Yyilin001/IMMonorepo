@@ -13,13 +13,29 @@ struct V2OSSResponse: Sendable {
 public final class V2OSSClient: Sendable {
     let configuration: V2OSSConfiguration
     let credentials: V2OSSCredentialProvider
-    private let http: HTTPClient
+    private let execute: @Sendable (HTTPClientRequest, Int) async throws -> V2OSSResponse
+    private let close: @Sendable () async throws -> Void
 
-    public init(configuration: V2OSSConfiguration, credentials: V2OSSCredentialProvider) {
-        self.configuration = configuration; self.credentials = credentials
-        self.http = HTTPClient(configuration: .init(redirectConfiguration: .disallow))
+    public convenience init(configuration: V2OSSConfiguration, credentials: V2OSSCredentialProvider) {
+        let http = HTTPClient(configuration: .init(redirectConfiguration: .disallow))
+        self.init(configuration: configuration, credentials: credentials, execute: { request, maximumBytes in
+            let response = try await http.execute(request, timeout: .seconds(120))
+            let collected = try await response.body.collect(upTo: maximumBytes)
+            var headers: [String: String] = [:]
+            for (name, value) in response.headers { headers[name.lowercased()] = value }
+            return .init(status: Int(response.status.code), headers: headers, body: Data(collected.readableBytesView))
+        }, close: { try await http.shutdown() })
     }
-    public func shutdown() async throws { try await http.shutdown() }
+
+    /// The executor receives the final signed request. Production owns its HTTP pool;
+    /// deterministic transport verification can supply responses without cloud writes.
+    init(configuration: V2OSSConfiguration, credentials: V2OSSCredentialProvider,
+         execute: @escaping @Sendable (HTTPClientRequest, Int) async throws -> V2OSSResponse,
+         close: @escaping @Sendable () async throws -> Void = {}) {
+        self.configuration = configuration; self.credentials = credentials
+        self.execute = execute; self.close = close
+    }
+    public func shutdown() async throws { try await close() }
 
     func signer() async throws -> V2OSSSigner {
         try await .init(region: configuration.region, bucket: configuration.bucket, credentials: credentials.load())
@@ -28,6 +44,7 @@ public final class V2OSSClient: Sendable {
     func request(_ method: String, key: String, query: [String: String] = [:],
                  headers: [String: String] = [:], body: V2ResourceByteStream? = nil,
                  byteCount: Int64 = 0, maximumResponseBytes: Int = 65_536) async throws -> V2OSSResponse {
+        try Task.checkCancellation()
         var url = URLComponents(url: configuration.endpoint, resolvingAgainstBaseURL: false)!
         url.percentEncodedPath = "/" + V2OSSSigner.encode(key, preserveSlash: true)
         if !query.isEmpty { url.percentEncodedQuery = V2OSSSigner.queryString(query) }
@@ -40,12 +57,10 @@ public final class V2OSSClient: Sendable {
             request.body = .stream(V2OSSBodySequence(stream: body), length: .known(byteCount))
         } else if method == "PUT" { request.body = .bytes(Data()) }
         do {
-            let response = try await http.execute(request, timeout: .seconds(120))
-            let collected = try await response.body.collect(upTo: maximumResponseBytes)
-            var resultHeaders: [String: String] = [:]
-            for (name, value) in response.headers { resultHeaders[name.lowercased()] = value }
-            return .init(status: Int(response.status.code), headers: resultHeaders,
-                         body: Data(collected.readableBytesView))
+            let response = try await execute(request, maximumResponseBytes)
+            try Task.checkCancellation()
+            guard response.body.count <= maximumResponseBytes else { throw V2ResourceProviderError.integrityMismatch }
+            return response
         } catch is CancellationError { throw CancellationError()
         } catch {
             try Task.checkCancellation()

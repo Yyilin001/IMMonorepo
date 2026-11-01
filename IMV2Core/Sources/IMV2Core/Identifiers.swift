@@ -221,6 +221,8 @@ public enum PinnedMessageOperationIDTag: V2IdentifierTag {}
 public enum GroupAnnouncementOperationIDTag: V2IdentifierTag {}
 public enum GroupPermissionOperationIDTag: V2IdentifierTag {}
 public enum GroupRoleOperationIDTag: V2IdentifierTag {}
+public enum GroupOwnershipOperationIDTag: V2IdentifierTag {}
+public enum GroupDissolutionOperationIDTag: V2IdentifierTag {}
 public enum MessageForwardOperationIDTag: V2IdentifierTag {}
 public enum MediaIDTag: V2IdentifierTag {}
 public enum MediaUploadOperationIDTag: V2IdentifierTag {}
@@ -263,6 +265,8 @@ public typealias PinnedMessageOperationID = V2Identifier<PinnedMessageOperationI
 public typealias GroupAnnouncementOperationID = V2Identifier<GroupAnnouncementOperationIDTag>
 public typealias GroupPermissionOperationID = V2Identifier<GroupPermissionOperationIDTag>
 public typealias GroupRoleOperationID = V2Identifier<GroupRoleOperationIDTag>
+public typealias GroupOwnershipOperationID = V2Identifier<GroupOwnershipOperationIDTag>
+public typealias GroupDissolutionOperationID = V2Identifier<GroupDissolutionOperationIDTag>
 public typealias MessageForwardOperationID = V2Identifier<MessageForwardOperationIDTag>
 public typealias MediaID = V2Identifier<MediaIDTag>
 public typealias MediaUploadOperationID = V2Identifier<MediaUploadOperationIDTag>

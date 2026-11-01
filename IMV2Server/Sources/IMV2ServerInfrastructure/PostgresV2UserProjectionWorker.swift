@@ -503,14 +503,18 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         sql: any SQLDatabase
     ) async throws {
         let isCreation = record.projectionKind == "room"
-        guard object["event_type"] as? String == (isCreation ? "room.created" : "membership_changed") else {
+        let eventType = object["event_type"] as? String
+        let isTransfer = eventType == "group.ownership_transferred", isDissolved = eventType == "group.dissolved"
+        let isLifecycle = isTransfer || isDissolved
+        guard eventType == (isCreation ? "room.created" : "membership_changed") || (!isCreation && isLifecycle) else {
             throw V2UserProjectionWorkerError.invalidPayload
         }
         let roomValue = try string("room_id", object)
         guard let roomID = UUID(uuidString: roomValue) else { throw V2UserProjectionWorkerError.invalidPayload }
-        let targetUserID = isCreation ? userID : UUID(uuidString: try string("target_user_id", object))
-        let action = isCreation ? "add" : try string("action", object)
-        guard targetUserID != nil, action == "add" || action == "remove" else { throw V2UserProjectionWorkerError.invalidPayload }
+        // A transfer changes roles, not a recipient's membership grant.
+        let targetUserID = (isCreation || isDissolved) ? userID : isTransfer ? nil : UUID(uuidString: try string("target_user_id", object))
+        let action = isDissolved ? "remove" : (isCreation || isTransfer) ? "add" : try string("action", object)
+        guard targetUserID != nil || isTransfer, action == "add" || action == "remove" else { throw V2UserProjectionWorkerError.invalidPayload }
         struct Revision: Decodable {
             let value: Int64
             enum CodingKeys: String, CodingKey { case value = "membership_revision" }
@@ -522,14 +526,14 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         let key = try projectionKey("room", roomValue)
         let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql)
         let priorWasOwn = prior.map {
-            $0.object["event_type"] as? String == "room.created" ||
+            ["room.created", "group.dissolved"].contains($0.object["event_type"] as? String ?? "") ||
                 ($0.object["target_user_id"] as? String).flatMap(UUID.init(uuidString:)) == userID
         } ?? false
         var ownRevision = (prior?.object["viewer_membership_revision"] as? NSNumber)?.int64Value ??
             (priorWasOwn ? (prior?.object["membership_revision"] as? NSNumber)?.int64Value ?? 0 : 0)
         var ownSource = (prior?.object["viewer_membership_source_event_id"] as? String) ?? prior?.sourceEventID.uuidString
         var isMember = (prior?.object["viewer_is_member"] as? Bool) ??
-            !(priorWasOwn && prior?.object["action"] as? String == "remove")
+            !(priorWasOwn && ["remove", "dissolve"].contains(prior?.object["action"] as? String ?? ""))
         if targetUserID == userID {
             if revision < ownRevision { return }
             if revision == ownRevision {

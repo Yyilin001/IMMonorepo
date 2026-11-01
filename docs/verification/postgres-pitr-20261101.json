@@ -1,0 +1,130 @@
+{
+  "observed_at": "2026-10-31T22:11:33.150159+00:00",
+  "pitr": {
+    "status": "passed",
+    "scope": "local PostgreSQL 16 physical backup and WAL time-target recovery",
+    "excludes": [
+      "production scale",
+      "cross-region transport",
+      "encryption/key recovery",
+      "failover routing",
+      "writes during outage",
+      "approved RPO/RTO"
+    ],
+    "sources": {
+      "IMV2/sql/schema.sql": "76a4ba002c735389bf3bcb6d996b81597c48b7b67091343a1cc5df4f4ed41ccc",
+      "IMV2/scripts/current_v2_schema_contract.sql": "850ce1c2991cd6056ed35a97bd83c65ada41a54b1be4f52fbb9667ac73001768",
+      "IMV2/scripts/test_v2_postgres_pitr.py": "a775fd1c503b6e44fde631f5ff0667575645660a6c1789fdb45591a48f8af736"
+    },
+    "postgresVersion": "postgres (PostgreSQL) 16.13 (Homebrew)",
+    "schemaID": "im-v2-current-78",
+    "baseBackupSeconds": 1.538,
+    "recoveryTargetTime": "2026-10-31 22:09:03.385193+00",
+    "archiveStats": {
+      "archivedCount": 4,
+      "failedCount": 0
+    },
+    "backupVerified": true,
+    "baseBackupManifestSHA256": "b20137fdfdac8dc2f1610ef6592960c0bd08fa8a6d395d0173f223061930e61b",
+    "archivedWAL": [
+      {
+        "name": "000000010000000000000001",
+        "bytes": 16777216,
+        "sha256": "992afcbc5a4984997da7cad2eece2d1078ed07ade908046e6a80aca0da0618a9"
+      },
+      {
+        "name": "000000010000000000000002",
+        "bytes": 16777216,
+        "sha256": "374f6edbb248aa39a606011cef8065bd7f5b3f4922ae799aef5237f462a9b58f"
+      },
+      {
+        "name": "000000010000000000000003",
+        "bytes": 16777216,
+        "sha256": "b6f121ca500cdbd7e9c322880a108227c75fce837982586648a1c81a31eb98ed"
+      }
+    ],
+    "sourceRemovedBeforeRecovery": true,
+    "replayPosition": {
+      "lsn": "0/3000448",
+      "lastTransactionTime": "2026-10-31T22:09:03.364783+00:00"
+    },
+    "retainedAuditRows": [
+      {
+        "outcome": "requeued",
+        "reason_code": "dependency_recovered",
+        "target_kind": "user_state_event",
+        "operation_id": "00000000-0000-0000-0000-00000000d711",
+        "requested_at": "2026-10-31T22:09:01.813858+00:00",
+        "target_user_id": "00000000-0000-0000-0000-00000000d721",
+        "projection_kind": "membership",
+        "source_event_id": "00000000-0000-0000-0000-00000000d720",
+        "operator_principal": "before_backup"
+      },
+      {
+        "outcome": "requeued",
+        "reason_code": "dependency_recovered",
+        "target_kind": "user_state_event",
+        "operation_id": "00000000-0000-0000-0000-00000000d712",
+        "requested_at": "2026-10-31T22:09:03.364615+00:00",
+        "target_user_id": "00000000-0000-0000-0000-00000000d721",
+        "projection_kind": "membership",
+        "source_event_id": "00000000-0000-0000-0000-00000000d720",
+        "operator_principal": "before_target"
+      }
+    ],
+    "excludedAuditRows": [
+      {
+        "outcome": "requeued",
+        "reason_code": "dependency_recovered",
+        "target_kind": "user_state_event",
+        "operation_id": "00000000-0000-0000-0000-00000000d713",
+        "requested_at": "2026-10-31T22:09:03.402955+00:00",
+        "target_user_id": "00000000-0000-0000-0000-00000000d721",
+        "projection_kind": "membership",
+        "source_event_id": "00000000-0000-0000-0000-00000000d720",
+        "operator_principal": "after_target"
+      }
+    ],
+    "localRecoverySeconds": 0.653,
+    "postRecoveryWriteCommitted": true,
+    "ownedDirectoryRemoved": true,
+    "totalSeconds": 4.23
+  },
+  "initialSetupAttempt": {
+    "status": "failed",
+    "stage": "setup before PostgreSQL launch",
+    "error": "Python 3.9 lacks hashlib.file_digest; replaced with bounded chunk hashing",
+    "ownedDirectoryRemoved": true,
+    "postgresProcessesStarted": 0
+  },
+  "schemaBootstrap": {
+    "root": "/tmp/imv2-schema78-mcy9k9e4",
+    "binaryDirectory": "/opt/homebrew/opt/postgresql@16/bin",
+    "socket": "/tmp/imv2-schema78-mcy9k9e4/socket",
+    "port": "55478",
+    "role": "im_v2_test",
+    "removed": true,
+    "before": {
+      "exitCode": 1,
+      "durationSeconds": 0.544,
+      "log": "/tmp/imv2-schema78-bootstrap-before-20261101.log"
+    },
+    "after": {
+      "exitCode": 0,
+      "durationSeconds": 8.493,
+      "log": "/tmp/imv2-schema78-bootstrap-after-20261101.log"
+    },
+    "databasesRemaining": []
+  },
+  "staticGate": {
+    "command": "python3 scripts/test_v2_protocol_documentation.py",
+    "methodsPassed": 3,
+    "negativeCases": 12,
+    "seconds": 0.069
+  },
+  "sources": {
+    "scripts/check_v2_protocol_documentation.py": "d9e9b404048c398aad408b0becd67dd35e8362b00cb3a4ff91c36cf074a2bc8c",
+    "scripts/test_v2_protocol_documentation.py": "0816cc936357d1defc1e33fb0d29796c33a3124129f3bfa89fd283ad6463dc11",
+    "scripts/test_v2_postgres_schema_bootstrap.sh": "deb839659b2f3a2421b19b7520d7bde8ae5f3561bed2bcf40edb4fa8cfee4e3b"
+  }
+}

@@ -101,9 +101,9 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
                 }
             }
             let control: V2RoomSubscriptionSourceRecord.MembershipControl?
-            if ["room.created", "membership_changed", "group.member_role_changed"].contains(type) {
+            if ["room.created", "membership_changed", "group.member_role_changed", "group.ownership_transferred", "group.dissolved"].contains(type) {
                 guard effectiveRevision > 0, let membersJSON = row.members_json,
-                      type != "group.member_role_changed" || effectiveRevision == revision + 1 else {
+                      !["group.member_role_changed", "group.ownership_transferred", "group.dissolved"].contains(type) || effectiveRevision == revision + 1 else {
                     throw V2RoomSubscriptionSourceError.corruptPersistence
                 }
                 control = .init(revisionBefore: UInt64(effectiveRevision - 1), revisionAfter: UInt64(effectiveRevision),
@@ -154,7 +154,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
                    AND m.room_sequence > \(bind: after)
                  ORDER BY m.room_sequence LIMIT \(bind: limit))
             ), event AS MATERIALIZED (
-                SELECT *, CASE WHEN event_type IN ('membership_changed', 'group.member_role_changed')
+                SELECT *, CASE WHEN event_type IN ('membership_changed', 'group.member_role_changed','group.ownership_transferred','group.dissolved')
                                THEN (payload->>'membership_revision')::bigint
                                ELSE committed_membership_revision END AS effective_revision
                 FROM candidates ORDER BY room_sequence LIMIT \(bind: limit)
@@ -166,7 +166,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
                    CASE WHEN event.payload->>'payload_storage' = 'message_reference_v1'
                              OR octet_length(event.payload::text) > \(bind: maximumOnlineBodyBytes)
                         THEN NULL ELSE event.payload::text END AS payload_json,
-                   CASE WHEN event.event_type IN ('room.created','membership_changed','group.member_role_changed')
+                   CASE WHEN event.event_type IN ('room.created','membership_changed','group.member_role_changed','group.ownership_transferred','group.dissolved')
                         THEN (\(states))::text ELSE NULL END AS members_json,
                    CASE WHEN event.event_type IN ('message.edited','message.withdrawn','message.reaction_changed') THEN (
                        SELECT coalesce(jsonb_agg(u.user_id::text ORDER BY u.user_id), '[]'::jsonb)
@@ -254,7 +254,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
         guard sequence >= 0 else { throw V2RoomSubscriptionSourceError.corruptPersistence }
     }
     private static let knownTypes: Set<String> = [
-        "room.created", "membership_changed", "group.member_role_changed", "member.muted", "room.frozen", "room.unfrozen",
+        "room.created", "membership_changed", "group.member_role_changed", "group.ownership_transferred", "group.dissolved", "member.muted", "room.frozen", "room.unfrozen",
         "message.accepted", "message.edited", "message.withdrawn", "message.redacted", "message.reaction_changed",
         "message.pinned_changed", "group.announcement_changed", "group.role_permissions_changed", "group.avatar_changed", "group.nickname_changed"
     ]

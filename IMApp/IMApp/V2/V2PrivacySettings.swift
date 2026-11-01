@@ -645,7 +645,13 @@ private struct V2UserBlockSettingsSection: View {
             if store.blockedUsers.isEmpty { Text("暂无已屏蔽用户").foregroundStyle(.secondary) }
             ForEach(store.blockedUsers, id: \.targetUserID) { user in
                 HStack {
-                    V2AuthorizedAvatarView(key: .init(userID: user.targetUserID, context: .relationship), showsName: true)
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.title).foregroundStyle(.secondary).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(user.targetHandle?.description ?? "已屏蔽账号")
+                        Text(user.targetHandle == nil ? user.targetUserID.rawValue : "屏蔽记录中的公开 ID")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button("解除屏蔽") { Task { await store.unblockKnownUser(user.targetUserID) } }
                         .disabled(store.isChanging)

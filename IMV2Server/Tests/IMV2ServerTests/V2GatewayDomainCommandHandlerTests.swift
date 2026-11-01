@@ -64,8 +64,9 @@ struct V2GatewayDomainCommandHandlerTests {
         }
     }
 
-    @Test("Actor-independent send recovery uses Gateway read admission and authenticated identity")
-    func readOnlyMessageRecoveryAdmission() async throws {
+    @Test("Actor-independent send queries use read admission; explicit close uses write admission",
+          arguments: [V2OperationRecoveryRequest.Action.query, .closeIfAbsent])
+    func messageRecoveryAdmission(action: V2OperationRecoveryRequest.Action) async throws {
         let fixture = try GatewayDomainFixture()
         let operation = try V2MessageSendOperationCommand(command: .init(roomID: fixture.roomID,
             senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID,
@@ -73,6 +74,7 @@ struct V2GatewayDomainCommandHandlerTests {
             firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
         let client = V2RoomRefMessagingClient(callTimeout: try .init(1_000), recoveryQuery: { request in
             #expect(request.identity.accountID == fixture.userID)
+            #expect(request.action == action)
             return .unresolved
         }) { _, _, _ in
             Issue.record("Recovery must not call the room actor")
@@ -87,13 +89,14 @@ struct V2GatewayDomainCommandHandlerTests {
         var query = IMV2Envelope()
         query.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
             try .init(identity: operation.identity, fingerprint: operation.fingerprint,
-                domainFingerprint: operation.command.fingerprint))
+                domainFingerprint: operation.command.fingerprint, action: action))
         let response = try await handler.handle(envelope: query, identity: fixture.identity)
         #expect(try V2MessageSendOperationWireCodec.decode(result: response.messageSendOperationResult) == .unresolved)
         let snapshot = await admission.snapshot()
-        #expect(snapshot.interactiveRead.admittedRequests == 1)
-        #expect(snapshot.foregroundWrite.admittedRequests == 0)
+        #expect(snapshot.interactiveRead.admittedRequests == (action == .query ? 1 : 0))
+        #expect(snapshot.foregroundWrite.admittedRequests == (action == .closeIfAbsent ? 1 : 0))
         #expect(snapshot.interactiveRead.inFlight == 0)
+        #expect(snapshot.foregroundWrite.inFlight == 0)
         let other = V2AuthenticatedConnection(userID: .init(uuid: UUID()),
             deviceID: fixture.deviceID, capabilityProfile: "base")
         #expect(try await handler.handle(envelope: query, identity: other).error.code == "FORBIDDEN")

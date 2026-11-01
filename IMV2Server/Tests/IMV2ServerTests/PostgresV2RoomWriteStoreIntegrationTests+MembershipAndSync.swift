@@ -180,6 +180,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(snapshotBlocks.count == 1)
                 #expect(snapshotBlocks.first?.entityKey == memberThreeUUID.uuidString.lowercased())
                 #expect(snapshotBlocks.first?.bool("is_blocked") == true)
+                #expect(snapshotBlocks.first?.string("target_handle") == "member016")
                 #expect(snapshotPreference.first?.bool("allows_stranger_messages") == false)
             }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await resources.shutdown()
@@ -683,6 +684,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
             #expect(try await count("im_v2.group_capability_receipts WHERE kind = 'pinnedMessage'", on: sql) == 2)
             #expect(try await count("im_v2.group_capability_receipts WHERE kind = 'groupAnnouncement'", on: sql) == 1)
+            let clearAnnouncement = try V2GroupAnnouncementCommand(operationID: .init(uuid: UUID()), roomID: roomID, body: "", expectedRevision: 1)
+            guard case .applied(let removed) = try await service.setAnnouncement(actorUserID: senderID, command: clearAnnouncement) else {
+                throw V2GroupCapabilitiesStoreError.corruptPersistenceState
+            }
+            #expect(removed.body.isEmpty && removed.revision == 2 && removed.roomSequence == 8)
+            #expect(try await service.setAnnouncement(actorUserID: senderID, command: clearAnnouncement) == .idempotent(removed))
+            #expect(try await service.setAnnouncement(actorUserID: senderID, command: announcement) == .idempotent(announced))
+            #expect(try await count("im_v2.group_announcements WHERE body = '' AND revision = 2", on: sql) == 1)
+            let lateAnnouncement = try V2GroupAnnouncementCommand(operationID: .init(uuid: UUID()), roomID: roomID, body: "late old value", expectedRevision: 1)
+            #expect(try await service.setAnnouncement(actorUserID: senderID, command: lateAnnouncement) == .revisionConflict)
             #expect(try await count("im_v2.group_capability_receipts WHERE kind = 'groupPermission'", on: sql) == 2)
             #expect(try await count("im_v2.group_capability_receipts WHERE kind = 'groupRole'", on: sql) == 1)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()

@@ -1439,6 +1439,8 @@ extension V2LiveResourceAuthorTests {
         case .announcement: reference = .groupAnnouncement(.init(uuid: UUID())); scope = .room(room)
         case .rolePermissions: reference = .groupPermission(.init(uuid: UUID())); scope = .room(room)
         case .memberRole: reference = .groupRole(.init(uuid: UUID())); scope = .room(room)
+        case .transferOwnership: reference = .groupOwnership(.init(uuid: UUID())); scope = .room(room)
+        case .dissolve: reference = .groupDissolution(.init(uuid: UUID())); scope = .room(room)
         }
         let intent = try V2GroupCapabilityIntent(identity: .init(accountID: owner, scope: scope, operation: reference),
             action: action, confirmedUntilMilliseconds: liveAcceptanceDeadline())

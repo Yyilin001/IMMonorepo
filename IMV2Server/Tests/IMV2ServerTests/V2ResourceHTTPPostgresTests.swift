@@ -21,9 +21,9 @@ import VaporTesting
 // Each scanner claims from the same isolated database, so fixtures must not race.
 @Suite(.serialized)
 struct V2ResourceHTTPPostgresTests {
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil && ProcessInfo.processInfo.environment["IM_V2_OSS_LIVE_TEST"] == "1"))
-    func realOSSHTTPPipeline() async throws {
-        try await pipeline(mode: .httpPut, cloud: true)
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil && ProcessInfo.processInfo.environment["IM_V2_OSS_LIVE_TEST"] == "1"), arguments: [V2ResourceTransferMode.httpPut, .httpPartPut])
+    func realOSSHTTPPipeline(mode: V2ResourceTransferMode) async throws {
+        try await pipeline(mode: mode, cloud: true)
     }
 
     @Test(.enabled(if:ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil), arguments: [V2ResourceTransferMode.httpPut, .httpPartPut])
@@ -130,7 +130,8 @@ struct V2ResourceHTTPPostgresTests {
             let downloads=try V2BoundMediaProvider(database:database,registry:switchedRegistry,delivery:delivery,transports:transports)
             let target=try await downloads.issueDownloadTarget(mediaID:request.mediaID,expiresAt:Date().addingTimeInterval(60))
             // Ready-resource downloads use the verified placement even when staging is gone.
-            try await transports[0].abort(mediaID:request.mediaID)
+            let stagingCleanup=V2ResourceStagingCleanupWorker(database:database,service:service)
+            try await stagingCleanup.runOnce(limit:16)
             try await app.testing { client in
                 let components=try #require(URLComponents(url:target.url,resolvingAgainstBaseURL:false))
                 let uri=URI(string:components.percentEncodedPath+"?"+(components.percentEncodedQuery ?? ""))
@@ -194,12 +195,14 @@ struct V2ResourceHTTPPostgresTests {
             #expect(copied.count==2)
             let held=try #require(try await sql.raw("SELECT COUNT(*)::bigint AS count FROM im_v2.resource_import_holds WHERE actor_user_id=\(bind: user.uuidValue!) AND operation_id=\(bind: imported.operationID.uuidValue!) AND released_at IS NULL").first(decoding:ResourceHTTPCount.self))
             #expect(held.count==0)
+            try await stagingCleanup.runOnce(limit:16)
+            let pendingCleanup=try #require(try await sql.raw("SELECT COUNT(*)::bigint AS count FROM im_v2.resource_upload_sessions WHERE media_id IN (\(bind: request.mediaID.uuidValue!),\(bind: imported.targetMediaID.uuidValue!)) AND staging_cleanup_pending").first(decoding:ResourceHTTPCount.self))
+            #expect(pendingCleanup.count==0)
             if cloud {
                 let rows = try await sql.raw("SELECT reference_json::text AS reference FROM im_v2.resource_blob_placements WHERE media_id IN (\(bind: request.mediaID.uuidValue!),\(bind: imported.targetMediaID.uuidValue!))").all(decoding: ResourceHTTPReference.self)
                 for row in rows {
                     try await storage.delete(JSONDecoder().decode(V2StoredObjectReference.self, from: Data(row.reference.utf8)))
                 }
-                try await transport.abort(mediaID: imported.targetMediaID)
             }
             try await cloudClient?.shutdown()
             try await app.shutdown();try await resources.shutdown()

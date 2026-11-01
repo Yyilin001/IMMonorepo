@@ -112,7 +112,7 @@ public actor V2GroupCapabilityOperationService {
         }
     }
     public func execute(_ claim:V2OperationWorkClaim) async throws {
-        guard claim.work.identity.accountID==accountID,[V2OperationKind.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole].contains(claim.work.identity.kind) else { throw V2OperationWorkError.accountMismatch }
+        guard claim.work.identity.accountID==accountID,[V2OperationKind.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole,.groupOwnership,.groupDissolution].contains(claim.work.identity.kind) else { throw V2OperationWorkError.accountMismatch }
         let command=try await store.groupCapabilityCommand(workID:claim.work.id)
         guard command.identity==claim.work.identity,try command.fingerprint==claim.work.fingerprint else { throw V2OperationWorkError.identityConflict }
         do {

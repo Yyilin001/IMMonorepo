@@ -132,7 +132,11 @@ public struct PostgresV2ResourceLifecycleStore: Sendable {
                 """).run()
             try await sql.raw("UPDATE im_v2.media_objects SET state='scanning',state_updated_at=\(bind: now) WHERE media_id=\(bind: mediaID) AND state='pending_upload'").run()
             try await sql.raw("INSERT INTO im_v2.media_scan_outbox(media_id,state,created_at) VALUES(\(bind: mediaID),'pending',\(bind: now)) ON CONFLICT(media_id) DO NOTHING").run()
-            try await sql.raw("UPDATE im_v2.resource_upload_sessions SET state='completed',claim_token=NULL,lease_expires_at=NULL,updated_at=\(bind: now) WHERE session_id=\(bind: sessionID)").run()
+            try await sql.raw("""
+                UPDATE im_v2.resource_upload_sessions SET state='completed',claim_token=NULL,lease_expires_at=NULL,
+                    staging_cleanup_pending=true,staging_cleanup_retry_at=\(bind: now),updated_at=\(bind: now)
+                WHERE session_id=\(bind: sessionID)
+                """).run()
         }
     }
     public func cancel(session: UUID, generation: Int64, actor: UUID, device: UUID, now: Date) async throws -> V2PersistedResourceUpload {

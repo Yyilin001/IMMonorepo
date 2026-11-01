@@ -99,6 +99,52 @@ struct V2OSSLiveTests {
         } catch { try? await client.shutdown(); throw error }
     }
 
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IM_V2_OSS_LIVE_TEST"] == "1"))
+    func realCloudPartResumePublishAndCancel() async throws {
+        let values = ProcessInfo.processInfo.environment
+        let bucket = try #require(values["IM_V2_OSS_BUCKET"]), region = try #require(values["IM_V2_OSS_REGION"])
+        let configuration = try V2OSSConfiguration(bucket: bucket, region: region,
+            endpoint: #require(URL(string: "https://\(bucket).oss-\(region).aliyuncs.com")),
+            prefix: "validation/\(UUID().uuidString.lowercased())/", binding: .init(id: "oss-parts-live", configurationRevision: 1))
+        let client = V2OSSClient(configuration: configuration, credentials: .init(environment: V2DictionaryRuntimeEnvironment(values)))
+        let transport = V2OSSUploadTransport(client: client), storage = V2OSSObjectStorage(client: client)
+        let media = MediaID(uuid: UUID()), placement = try storage.allocate()
+        let first = Data(repeating: 41, count: 8 * 1_024 * 1_024), last = Data(repeating: 19, count: 65_537)
+        let bytes = first + last, hash = Data(SHA256.hash(data: bytes))
+        let checksum = try V2ResourceChecksum(value: V2OSSSigner.hex(hash))
+        do {
+            try await client.verifyReadiness()
+            let plans = try await transport.partPlans(mediaID: media, contentType: "application/octet-stream",
+                byteCount: Int64(bytes.count), checksum: checksum, requestedParts: [1, 2], expiresAt: .now.addingTimeInterval(120))
+            #expect(plans.count == 2)
+            func nativeRequest(_ plan: V2ResourceTransferPlan) -> URLRequest {
+                var request = URLRequest(url: plan.url); request.httpMethod = plan.httpMethod
+                for header in plan.headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
+                return request
+            }
+            #expect(try await upload(nativeRequest(plans[0]), bytes: first) == 200)
+            let reopened = V2OSSUploadTransport(client: client)
+            let missing = try #require(try await reopened.partPlans(mediaID: media, contentType: "application/octet-stream",
+                byteCount: Int64(bytes.count), checksum: checksum, requestedParts: [], expiresAt: .now.addingTimeInterval(120)).first)
+            #expect(missing.partNumber == 2 && missing.url.path == plans[1].url.path)
+            #expect(try await upload(nativeRequest(missing), bytes: last) == 200)
+            let parts = try await reopened.confirmedParts(mediaID: media, byteCount: Int64(bytes.count), checksum: checksum)
+            let joined = try await reopened.completedParts(mediaID: media, byteCount: Int64(bytes.count), checksum: checksum, parts: parts)
+            _ = try await storage.write(placement, byteCount: Int64(bytes.count), sha256: hash, bytes: joined)
+            #expect(try await collect(storage.read(placement)) == bytes)
+            try await reopened.abortParts(mediaID: media, byteCount: Int64(bytes.count), checksum: checksum)
+            #expect(try await upload(nativeRequest(missing), bytes: last) == 409)
+            #expect(try await reopened.confirmedParts(mediaID: media, byteCount: Int64(bytes.count), checksum: checksum).isEmpty)
+            try await storage.delete(placement)
+            try await client.shutdown()
+        } catch {
+            try? await transport.abortParts(mediaID: media, byteCount: Int64(bytes.count), checksum: checksum)
+            try? await storage.delete(placement)
+            try? await client.shutdown()
+            throw error
+        }
+    }
+
     private func collect(_ input: V2ResourceByteStream) async throws -> Data {
         var bytes = Data()
         while let chunk = try await input.next() { #expect(chunk.count <= 65_536); bytes.append(chunk) }

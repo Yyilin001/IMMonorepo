@@ -34,7 +34,7 @@ public struct V2CommandPolicy: Equatable, Sendable {
             window = 600_000; merge = .never
         case .membership, .moderation, .memberMute, .moderatedMemberRemoval, .userBlock, .strangerMessagePreference, .userAddPreference,
              .readReceiptPreference, .liveActivityPreference, .pinnedMessage, .groupAnnouncement,
-             .groupPermission, .groupRole, .groupInvite, .groupJoinDecision, .groupAvatar:
+             .groupPermission, .groupRole, .groupOwnership, .groupDissolution, .groupInvite, .groupJoinDecision, .groupAvatar:
             window = 120_000; merge = .never
         }
         return Self(kind: kind, firstSubmissionWindowMilliseconds: window,

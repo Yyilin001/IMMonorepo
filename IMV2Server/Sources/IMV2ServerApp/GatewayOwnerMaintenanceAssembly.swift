@@ -46,6 +46,9 @@ struct GatewayOwnerMaintenanceAssembly {
         let roomMessageStateMetricsSources = roomOwnerMaintenanceDatabases.map {
             PostgresV2RoomMessageStateMetricsSource(database: $0)
         }
+        let sendCompletionMetricsSources = roomOwnerMaintenanceDatabases.map {
+            PostgresV2SendCompletionMetricsSource(database: $0)
+        }
         let messageProjectionStateBodyCompactionWorkers = roomOwnerMaintenanceDatabases.map {
             PostgresV2MessageProjectionStateBodyCompactionWorker(database: $0)
         }
@@ -60,7 +63,7 @@ struct GatewayOwnerMaintenanceAssembly {
                     gatewayNodeID: configuration.gatewayNodeID,
                     includesUserShardMetrics: false
                 )
-            ] + userShardMetricsSources + personalEventMetricsSources + roomMessageStateMetricsSources),
+            ] + userShardMetricsSources + personalEventMetricsSources + roomMessageStateMetricsSources + sendCompletionMetricsSources),
             minimumRefreshInterval: TimeInterval(
                 configuration.metricsMinimumRefreshIntervalMilliseconds
             ) / 1_000,

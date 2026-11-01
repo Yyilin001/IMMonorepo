@@ -2116,7 +2116,7 @@ struct V2SyncEngineTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
         let target = "00000000-0000-0000-0000-000000000290"
         let relationship = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000000291"), projectionKind: "relationship", payload: socialPayload(["target_user_id": target, "state": "pending", "requested_by_user_id": target, "updated_at_ms": 1_750_000_000_000]))
-        let block = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-000000000292"), projectionKind: "user_block", payload: socialPayload(["target_user_id": target, "is_blocked": true, "updated_at_ms": 1_750_000_001_000]))
+        let block = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-000000000292"), projectionKind: "user_block", payload: socialPayload(["target_user_id": target, "target_handle": "blocked_member", "is_blocked": true, "updated_at_ms": 1_750_000_001_000]))
         let preference = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-000000000293"), projectionKind: "stranger_message_permission", payload: socialPayload(["allows_stranger_messages": false, "revision": 1, "updated_at_ms": 1_750_000_002_000]))
         _ = try await store.apply(.init(generation: 1, records: [relationship, block, preference], nextSyncToken: .init("social-token"), receipt: .init("social-receipt"), hasMore: false, capabilityProfile: "base"))
 
@@ -2124,6 +2124,7 @@ struct V2SyncEngineTests {
         #expect(storedRelationship.targetUserID.rawValue == target)
         #expect(storedRelationship.state == .pending)
         #expect(try await store.blocks().map(\.targetUserID.rawValue) == [target])
+        #expect(try await store.blocks().first?.targetHandle?.description == "@blocked_member")
         #expect(try await store.strangerMessagePreference()?.allowsStrangerMessages == false)
     }
 
@@ -3036,6 +3037,7 @@ struct V2SyncEngineTests {
         #expect(try await store.cursor()?.state == .ready)
         #expect(await transport.pageRequests() == [0, 1, 1])
         #expect(await transport.snapshotAcknowledgements() == 1)
+        #expect(try await store.blocks().first?.targetHandle?.description == "@snapshot_blocked")
         try await store.close()
     }
 
@@ -3573,6 +3575,7 @@ private actor ResumableSnapshotTransport: V2ClientSyncTransport {
                     sequence: 3,
                     payload: socialPayload([
                         "target_user_id": target2,
+                        "target_handle": "snapshot_blocked",
                         "is_blocked": true,
                         "updated_at_ms": 1_750_000_001_000,
                     ])

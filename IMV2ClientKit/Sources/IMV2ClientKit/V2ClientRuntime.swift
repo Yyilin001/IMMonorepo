@@ -25,7 +25,7 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
     private let afterDurableSynchronization: @Sendable () async throws -> Void
     private let roomSubscriptionLoop: @Sendable (UUID?) async throws -> Void
     private let roomCatchUpLoop: @Sendable () async throws -> Void
-    private let policyRecoveryLoop: @Sendable () async throws -> Void
+    private let policyRecoveryLoops: [@Sendable () async throws -> Void]
     private let onProjectionSynchronized: @Sendable () async -> Void
 
     public init(
@@ -36,7 +36,7 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         afterDurableSynchronization: @escaping @Sendable () async throws -> Void = {},
         roomSubscriptionLoop: @escaping @Sendable (UUID?) async throws -> Void = { _ in },
         roomCatchUpLoop: @escaping @Sendable () async throws -> Void = {},
-        policyRecoveryLoop: @escaping @Sendable () async throws -> Void = {},
+        policyRecoveryLoops: [@Sendable () async throws -> Void] = [],
         onProjectionSynchronized: @escaping @Sendable () async -> Void = {}
     ) {
         self.syncEngine = syncEngine
@@ -48,7 +48,7 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         self.heartbeatScheduler = .init(sender: heartbeatSender, interval: heartbeatInterval)
         self.afterDurableSynchronization = afterDurableSynchronization
         self.roomCatchUpLoop = roomCatchUpLoop
-        self.policyRecoveryLoop = policyRecoveryLoop
+        self.policyRecoveryLoops = policyRecoveryLoops
         self.roomSubscriptionLoop = roomSubscriptionLoop
         self.onProjectionSynchronized = onProjectionSynchronized
     }
@@ -61,7 +61,16 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
     }
     public func runAvailabilityLoop() async throws { try await availabilityRunner.run() }
     public func runHeartbeatLoop() async throws { try await heartbeatScheduler.run() }
-    public func runPolicyRecoveryLoop() async throws { try await policyRecoveryLoop() }
+    public func runPolicyRecoveryLoop() async throws {
+        try Task.checkCancellation()
+        // These are long-lived siblings: the first error must cancel the rest,
+        // then await their cleanup before reaching the connection owner.
+        try await withThrowingDiscardingTaskGroup { group in
+            for loop in policyRecoveryLoops { group.addTask(operation: loop) }
+        }
+        // AsyncStream consumers may end normally when cancelled.
+        try Task.checkCancellation()
+    }
     public func runRoomCatchUpLoop() async throws { try await roomCatchUpLoop() }
     public func runRoomSubscriptionLoop(connectionID: UUID?) async throws {
         try await roomSubscriptionLoop(connectionID)

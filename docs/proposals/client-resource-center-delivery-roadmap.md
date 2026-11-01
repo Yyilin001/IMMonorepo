@@ -31,7 +31,7 @@
 | 上传和消息 | canonical上传/导入journal、冻结消息与原操作确认；任务批量/单项回归37项通过；真实OSS记录见完整设计第74节 | 全入口配对发布回归及真机生命周期，不把受控任务当真实OSS |
 | 下载 | 受管缓存、版本/校验、Range、原生后台桥接、共享需求与排队；具体分层证据见完整设计 | 原生系统等待、网络切换及全部业务消费入口的真机验证 |
 | 自动策略 | 持久类型/大小/网络政策；缓存额度与自动上限实际选择、返回、保存UI通过 | 全执行端政策一致性最终复核和手机后台验证 |
-| OSS | 生产适配器仅声明httpPut，项目上限256MiB；通用客户端/本地适配器另有httpPartPut | 不把通用分片协议当OSS续传；配对部署和生产限制核对 |
+| OSS | 适配器提供 httpPut 与 httpPartPut，上限 256 MiB；每片最多 8 MiB、最多 32 片，完成后由持久队列回收暂存字节 | 逐片 PUT 与真实云端/真机后台验收分别记录；配对部署、请求费用及磁盘预算见[接入合同](aliyun-oss-integration.md#分片续传与暂存回收) |
 | 页面 | 文件页面3项、资源批量和任务批量相关审计有通过证据；亮色实际操作及最大字号深色流程通过 | 有界设置页完整all、亮色contrast、大字深色和真实模拟器VoiceOver已局部通过；全App及真机验证仍待完成 |
 | 不兼容准入 | 读写/只读共同拒绝不支持的保留意图字段，保留账户/凭据/原件，不自动重建 | 全量客户端/服务端合同、schema清单及具体发布范围，不只验证一个字段 |
 
@@ -207,7 +207,7 @@ W1 和 W2 已存在较多在途实现，应先核验复用，不重新开发同�
 
 ### 13.1 第一批必须形成的交付物
 
-1. **合同清单**：列明 Core 类型、客户端/服务端 schema、上传 capabilities、目录权限与消费者；明确当前 OSS 仅支持 PUT、单对象供应商上限 256 MiB。实际入口上限取产品、业务 API、供应商及可用磁盘准入限制中的最小值。
+1. **合同清单**：列明 Core 类型、客户端/服务端 schema、上传 capabilities、目录权限与消费者；OSS 整文件和逐片 PUT 的项目上限均为 256 MiB，逐片传输使用独立不可覆盖对象与持久回收队列。实际入口上限取产品、业务 API、供应商及可用磁盘准入限制中的最小值。
 2. **纵向样例**：独立测试账号 A/B，A 选择图片和普通文件，离线立即显示本地消息，恢复网络后 B 收到并打开；A/B 在资源目录看到对应来源。记录原消息 operationID 与资源 jobID，证明确认丢失后重启没有重复业务操作。
 3. **恢复矩阵**：每项列出触发方式、预期数据库/文件/页面事实、测试命令、结果与构建版本；模拟、真实 HTTP、真实 OSS、模拟器、手机证据分列。
 4. **存储账本**：逐项列出选择临时文件、原件、规范化副本、后台上传副本、下载 partial/系统收件、发布副本、缩略图和分享副本的所有者、目录、预算、释放点及崩溃恢复方式。
@@ -231,7 +231,7 @@ W1 和 W2 已存在较多在途实现，应先核验复用，不重新开发同�
 - [Apple 文件存储与备份](https://developer.apple.com/documentation/foundation/optimizing-your-app-s-data-for-icloud-backup)：Caches/tmp 可被系统回收。唯一待发送原件必须在持久目录；可重建下载和缩略图放 Caches；备份排除按是否可重建分别确定。
 - [Apple Photos picker](https://developer.apple.com/videos/play/wwdc2022/10023/)：大资源优先文件表示加载，提供逐项加载状态。项目继续使用 FileRepresentation 和有界复制，不一次把批量原件读入内存。
 - [OSS 预签名上传](https://help.aliyun.com/en/oss/user-guide/upload-files-using-presigned-urls)：临时签名有有效期，过期需重新取得计划。签名不是资源身份，刷新不能删除目录记录；客户端不持有长期 AccessKey。
-- [OSS 分片上传](https://help.aliyun.com/en/oss/user-guide/multipart-upload)：真正续传需要 UploadId、分片及完成/中止协议。当前 `V2OSSUploadTransport` 仅声明 httpPut，因此首版明确整文件重传；multipart 列为后续独立工作包，包含分片持久化、校验、重试和遗留碎片回收，不仅添加一个 UI 按钮。
+- [OSS 分片上传](https://help.aliyun.com/en/oss/user-guide/multipart-upload)：供应商原生 multipart 使用 UploadId、分片及完成/中止协议。当前 `V2OSSUploadTransport` 的 httpPartPut 使用独立 PutObject、ETag 回执、服务端流式校验发布及持久暂存回收；未启用供应商 UploadId 接口。两种方案的请求、磁盘和流量成本不同，当前实现及验证边界见[接入合同](aliyun-oss-integration.md#分片续传与暂存回收)。
 - [OSS GetObject](https://help.aliyun.com/en/oss/developer-reference/getobject)：核验 Range/Content-Range 与 If-Match，版本不匹配重新取得计划；整文件响应不追加到旧 partial。下载结果继续按业务可信长度及 SHA-256 验证。
 
 上述页面支持平台和协议边界；目录布局、并发额度、缓存初值、工作包顺序与性能目标属于结合本项目的工程决定，需实测调整。

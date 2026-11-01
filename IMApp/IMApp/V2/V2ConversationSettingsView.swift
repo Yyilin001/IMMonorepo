@@ -117,9 +117,9 @@ struct V2ConversationSettingsView: View {
                         presentedSheet = nil
                     }
                 }
-            case .members: V2GroupMembersSheet(store: store)
-            case .announcement: V2GroupAnnouncementSheet(store: store)
-            case .permissions: V2GroupPermissionsSheet(store: store)
+            case .members: V2GroupMembersSheet(store: store.groupManagement)
+            case .announcement: V2GroupAnnouncementSheet(store: store.groupManagement)
+            case .permissions: V2GroupPermissionsSheet(store: store.groupManagement)
             case .avatar(let manager): V2GroupAvatarManagementView(store: manager)
             case .nickname(let editor): V2NameEditorView(store: editor)
             case .invitations:

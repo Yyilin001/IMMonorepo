@@ -29,7 +29,7 @@ public struct V2RoomRefMessagingClient: Sendable {
 
     // 数据库准入属于物理宿主，不属于等待中的网关。
     public var managesForegroundWriteAdmission: Bool { true }
-    package var usesReadOnlySendRecovery: Bool { recoveryQuery != nil }
+    package var usesDirectSendRecovery: Bool { recoveryQuery != nil }
 
 
 

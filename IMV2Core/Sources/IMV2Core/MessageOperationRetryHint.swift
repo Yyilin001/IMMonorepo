@@ -8,7 +8,7 @@ public struct V2MessageOperationRetryHint:Equatable,Codable,Sendable {
     public let reason:Reason
     public let retryAfterMilliseconds:UInt64?
     public init(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,reason:Reason,retryAfterMilliseconds:UInt64?) throws {
-        guard [.sendMessage,.editMessage,.withdrawMessage,.reaction,.forwardMessage,.directRoom,.relationship,.userBlock,.strangerMessagePreference,.userAddPreference,.readReceiptPreference,.liveActivityPreference,.membership,.moderation,.memberMute,.moderatedMemberRemoval,.groupRoom,.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole,.groupInvite,.groupJoinRequest,.groupJoinDecision].contains(identity.kind),
+        guard [.sendMessage,.editMessage,.withdrawMessage,.reaction,.forwardMessage,.directRoom,.relationship,.userBlock,.strangerMessagePreference,.userAddPreference,.readReceiptPreference,.liveActivityPreference,.membership,.moderation,.memberMute,.moderatedMemberRemoval,.groupRoom,.pinnedMessage,.groupAnnouncement,.groupPermission,.groupRole,.groupOwnership,.groupDissolution,.groupInvite,.groupJoinRequest,.groupJoinDecision].contains(identity.kind),
             retryAfterMilliseconds.map({ $0>0 && $0<=86_400_000 }) ?? true else { throw V2MessageOperationValidationError.invalidReceipt }
         self.identity=identity;self.fingerprint=fingerprint;self.reason=reason;self.retryAfterMilliseconds=retryAfterMilliseconds
     }

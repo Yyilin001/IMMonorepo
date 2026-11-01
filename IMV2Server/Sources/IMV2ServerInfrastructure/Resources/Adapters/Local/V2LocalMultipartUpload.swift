@@ -65,11 +65,11 @@ extension V2LocalResourceUploadTransport: V2MultipartUploadTransport, V2Backgrou
     public func completedParts(mediaID: MediaID, byteCount: Int64, checksum: V2ResourceChecksum, parts: [V2ResourceUploadPart]) async throws -> V2ResourceByteStream {
         let confirmed = try await confirmedParts(mediaID:mediaID,byteCount:byteCount,checksum:checksum)
         guard confirmed.count == (try partCount(byteCount)), parts == confirmed else { throw V2ResourceProviderError.preconditionFailed }
-        var files:[URL] = []
+        var files:[V2LocalFilesystemDownloadedObject] = []
         for part in confirmed {
             let id = partID(mediaID:mediaID,checksum:checksum,number:part.number)
             let target = try await provider.issueDownloadTarget(mediaID:id,expiresAt:Date().addingTimeInterval(60))
-            files.append(try await provider.downloadedObject(mediaID:id,targetURL:target.url).fileURL)
+            files.append(try await provider.downloadedObject(mediaID:id,targetURL:target.url))
         }
         let reader = MultipartReader(files:files)
         return V2ResourceByteStream { try await reader.next() }
@@ -79,23 +79,26 @@ extension V2LocalResourceUploadTransport: V2MultipartUploadTransport, V2Backgrou
     }
 }
 private actor MultipartReader {
-    private var files:[URL]
-    private var handle:FileHandle?
-    init(files:[URL]) { self.files = files }
-    deinit { try? handle?.close() }
+    private var files: [V2LocalFilesystemDownloadedObject]
+    private var offset: Int64 = 0
+    private var reading = false
+    init(files: [V2LocalFilesystemDownloadedObject]) { self.files = files }
     func next() async throws -> Data? {
         try Task.checkCancellation()
-        while true {
-            if handle == nil {
-                guard !files.isEmpty else { return nil }
-                let file = files.removeFirst()
-                handle = try await Task.detached(priority:.utility) { try FileHandle(forReadingFrom:file) }.value
+        guard !reading else { throw V2ResourceProviderError.preconditionFailed }
+        reading = true
+        defer { reading = false }
+        do {
+            while let file = files.first {
+                let data = try await file.readChunk(offset: offset, maximumBytes: 65_536)
+                if !data.isEmpty { offset += Int64(data.count); return data }
+                files.removeFirst()
+                offset = 0
             }
-            let input = handle!
-            let data = try await Task.detached(priority:.utility) { try input.read(upToCount:65_536) }.value
-            if let data, !data.isEmpty { return data }
-            try await Task.detached(priority:.utility) { try input.close() }.value
-            handle = nil
+            return nil
+        } catch {
+            files.removeAll()
+            throw error
         }
     }
 }

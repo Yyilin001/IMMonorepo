@@ -167,6 +167,19 @@ groups:
           summary: IM V2 stable projection-effect storage exceeded 10 GiB
           runbook: IMV2/docs/10-operations/observability.md
 
+      # Deployment must calibrate this example against the approved physical
+      # storage budget. Permanent send results must not be deleted to clear it.
+      - alert: IMV2SendCompletionStorageHigh
+        expr: max(im_v2_send_completions_relation_bytes{component="total"}) > 10737418240
+        for: 30m
+        labels:
+          severity: warning
+          owner: im-v2-platform-oncall
+          service: im-v2
+        annotations:
+          summary: IM V2 permanent send-result storage exceeded 10 GiB
+          runbook: IMV2/docs/10-operations/observability.md
+
       # Device-revocation events close already-authenticated gateway channels
       # after an account or device fence. A short non-zero interval is normal
       # during consumption; persistence means a gateway may retain a revoked

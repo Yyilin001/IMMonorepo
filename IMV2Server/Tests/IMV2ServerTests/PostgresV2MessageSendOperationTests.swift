@@ -504,8 +504,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 #expect(try await store.sendBatch(batch, token: token, capacityProfile: profile,
                     identifiers: .init(), now: { now }) == batchResults)
-                // The protobuf Gateway command and JSON HTTP command must reach the
-                // same durable operation key and return the original receipt.
+                // The protobuf wire value and generic JSON representation preserve
+                // the same identity; production send transport remains TCP-only.
                 let gatewayCommand = try V2MessageSendOperationWireCodec.decode(
                     command: V2MessageSendOperationWireCodec.encode(command: first))
                 let httpCommand = try JSONDecoder().decode(V2MessageSendOperationCommand.self,
@@ -525,7 +525,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let expired=try command("Expired",deadlineMS:deadline-120_000)
                 guard case .receipt(let expiredReceipt)=try await store.send(expired,token:token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) else { throw CancellationError() }
                 #expect(expiredReceipt.outcome == .rejected(.expiredUnsubmitted))
-                #expect(try await store.recover(recovery(expired),token:token) == .unresolved)
+                #expect(try await store.recover(recovery(expired),token:token) == .receipt(expiredReceipt))
                 let pending=try command("Unsubmitted")
                 #expect(try await store.recover(recovery(pending),token:token) == .unresolved)
                 guard case .receipt(let laterReceipt) = try await store.send(pending,token:token,capacityProfile:profile,

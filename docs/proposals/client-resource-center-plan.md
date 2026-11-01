@@ -30,7 +30,7 @@
 | --- | --- | --- |
 | 账号隔离 | [V2AccountStorageScope](../../IMV2ClientKit/Sources/IMV2ClientKit/V2AccountStorageScope.swift) 包含账号及 incarnation，已有关闭与退役边界 | 保留并作为所有任务、文件、回调的根边界 |
 | 上传恢复 | [GRDBV2ResourceJournal](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2ResourceJournal.swift)、[TransferEngine](../../IMV2ClientKit/Sources/IMV2ClientKit/V2ResourceTransferEngine.swift) 已有任务、发送意图及依赖；工作区已改为 LocalAssetID 和受管原件借用 | 补完整恢复/取消验收，统一展示既有任务事实，保持原消息确认语义 |
-| 上传能力 | [OSSUploadTransport](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSUploadTransport.swift) 当前仅声明 `httpPut` | 首版按整文件 PUT 恢复；不把本地 provider 的分片能力当成 OSS 已实现 |
+| 上传能力 | [OSSUploadTransport](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSUploadTransport.swift) 提供 `httpPut` 与 `httpPartPut`；最多 256 MiB，逐片最多 8 MiB / 32 片 | 独立 PutObject 续传、最终校验和持久暂存回收已有实现；真实 OSS 与真机后台仍需验收，详见[接入合同](aliyun-oss-integration.md#分片续传与暂存回收) |
 | 下载与使用保护 | [下载服务](../../IMApp/IMApp/V2/V2ConversationMediaDownloadService.swift) 已作为展示桥接；[FileStore](../../IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceFileStore.swift)、[DownloadCache](../../IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDownloadCache.swift) 已承担授权缓存、借用、发布、退役与清理 | 补双根目录、逻辑保留策略、所有临时副本预算及真实消费端验收 |
 | Range 与上传切片 | [RangeDownloadTransport](../../IMV2ClientKit/Sources/IMV2ClientKit/V2RangeDownloadTransport.swift) 已有基础；上传切片已转入 FileStore，旧 V2ResourcePartFile 正在删除 | 纳入统一调度，补版本变化、中断和真实 OSS 验收 |
 | 系统后台 | [AppStore](../../IMApp/IMApp/V2/V2AppStore.swift) 已装配上传、下载协调器；[NativeBackgroundSession](../../IMV2ClientKit/Sources/IMV2ClientKit/V2NativeBackgroundSession.swift) 已接收系统文件 | 不是从零开发；重点统一任务映射、锁屏保护和恢复验收 |
@@ -602,7 +602,7 @@ OSS `V2OSSUploadTransport` 当前声明 `.httpPut`、最大 256 MiB；有效上�
 2. **统一任务展示，执行状态各有唯一所有者**。上传、导入、下载 journal 派生统一列表；新增共享调度准入而非第二份任务状态。`V2ResourceOperationScope(limit: 4)` 只是局部操作上限，不代表全 App 已实现“上传2、下载2、合计4”的公平调度。
 3. **本地业务事实先落盘**。离线导入和消息冻结不得等待 capabilities/上传/服务器创建资源完成；服务器结果回来更新原 ID。先恢复本地目录，再补网络差量，避免首屏和切 Tab 闪占位。
 4. **业务授权与字节缓存分离**。ResourceKey 和访问上下文决定能否读取；hash + 长度只用于校验和账号内字节复用。签名 URL 更新不更换资源 ID、不清空目录。保留本机不增加永久权限。
-5. **整文件 PUT 是当前 OSS 发布合同**。`V2OSSUploadTransport.capabilities` 只有 `.httpPut`，上限 256 MiB；端侧仍须取业务、导入和部署限制的最小值。上传暂停后不承诺从某字节继续；真正 multipart 另以完整供应商合同实现，不能借用本地测试 provider 的分片结果。
+5. **OSS 同时支持整文件与逐片 PUT**。2026-11-01 工作区实现增加 `.httpPartPut`，双方支持时优先选用；上限 256 MiB，每片最多 8 MiB、最多 32 片。独立不可覆盖片对象以 ETag 恢复，服务端顺序校验并发布最终对象，随后由持久队列回收暂存字节。没有使用供应商 UploadId 接口；端侧仍须取业务、导入和部署限制的最小值。定向验证与真实云端/真机验收分别记录，详见[OSS 接入合同](aliyun-oss-integration.md#分片续传与暂存回收)。
 6. **系统后台是独立生命周期**。稳定少量 session、文件型上传、最小 AFU 映射和收件箱；正式 DB/可展示文件仍保持 Complete 保护。以真机锁屏及系统终止测试作为发布门槛。[Apple 后台传输](https://developer.apple.com/documentation/foundation/downloading-files-in-the-background)
 7. **持久原件与可淘汰缓存分开**。待发送原件和保留内容在持久根，可重建文件在 Caches；系统清缓存只改变本地可用性，不删除资源目录或保留意图。[Apple 存储与备份](https://developer.apple.com/documentation/foundation/optimizing-your-app-s-data-for-icloud-backup)
 8. **下载按响应事实处理**。续传时验证状态码、Content-Range、总长度、版本条件和最终摘要；服务器返回整文件不能直接追加到 partial，版本不符先重新授权及准入。[OSS GetObject](https://help.aliyun.com/zh/oss/developer-reference/getobject)
@@ -1876,6 +1876,8 @@ journal正常保存和取消确认共用同一个绑定校验：request.mediaID�
 
 
 ## 95. 冻结传输模式、上传计划与实际字节准入（2026-10-25）
+
+本节记录 2026-10-25 当时的验证范围。2026-11-01 已增加 OSS 逐片 PUT 及持久暂存回收，当前能力与证据以[OSS 接入合同](aliyun-oss-integration.md#分片续传与暂存回收)为准；下列历史测试不证明新增适配器已通过真实云端或真机验收。
 
 继续R0上传协议审查，发现执行器前未统一检查计划模式是否属于原request.clientModes、整文件长度/摘要及计划有效期；后台能力稍后变为可用时，PUT-only冻结请求也可能向控制器申请分片后台计划。全局能力是调度条件，不能覆盖已持久化任务的原协商合同。
 

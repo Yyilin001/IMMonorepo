@@ -8,9 +8,11 @@ public protocol V2StagedMediaFile: Sendable {
 }
 
 public protocol V2DownloadedMediaFile: Sendable {
-    var fileURL: URL { get }
     var byteCount: Int64 { get }
     func strongETag() async throws -> String
+    /// Reads the already-authorized file, without resolving its pathname again.
+    /// Returns at most 64 KiB; an empty chunk is permitted only at byteCount.
+    func readChunk(offset: Int64, maximumBytes: Int) async throws -> Data
 }
 
 /// A staged upload can only be committed or discarded through its provider's

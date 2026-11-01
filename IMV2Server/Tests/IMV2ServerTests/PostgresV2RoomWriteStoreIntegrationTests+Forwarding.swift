@@ -1240,12 +1240,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } else if scenario == "large" { bytes = Data(repeating: 97, count: 8 * 1_024 * 1_024 + 11) }
             else { bytes = Data("forwarded attachment bytes\n".utf8) }
             let sourceMediaID = MediaID(uuid: UUID())
-            let actualSourceBytes = scenario == "short-source" ? Data(bytes.dropLast()) : bytes
             try await sourceSQL.raw("""
                 INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
                 VALUES (\(bind: sourceMediaID.uuidValue!), \(bind: senderUUID), 'application/octet-stream', \(bind: Int64(bytes.count)), 'available', \(bind: UUID()), \(bind: now.addingTimeInterval(600)), \(bind: now), \(bind: now))
                 """).run()
-            try await resource.seedPlacement(mediaID: sourceMediaID.uuidValue!, roomID: roomID, bytes: actualSourceBytes, sql: sourceSQL, now: now)
+            try await resource.seedPlacement(mediaID: sourceMediaID.uuidValue!, roomID: roomID, bytes: bytes, sql: sourceSQL, now: now)
             var references = [V2MediaReference(mediaID: sourceMediaID)]
             let secondBytes = Data("second independent attachment".utf8)
             if scenario == "two-files" {
@@ -1264,6 +1263,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: memberTwoUUID)
             let export = try await PostgresV2ForwardExportStore(database: sourceDB).prepare(actorUserID: actor, operationID: .init(uuid: UUID()),
                 source: .init(roomID: roomID, messageID: sourceMessage.messageID, revision: .init(1)), sourceRoute: .init(shardID: "room-a", epoch: 0), targetRoomID: targetRoom, targetRoute: .init(shardID: "room-b", epoch: 0), now: now)
+            if scenario == "short-source" {
+                // Corrupt the object after valid source acceptance and export.
+                // Keep the frozen size/digest so the copy boundary detects it.
+                let facts = try await resource.facts(mediaID: sourceMediaID.uuidValue!, sql: sourceSQL)
+                let file = root.appending(path: "objects").appending(path: facts.reference.placementID.uuidString.lowercased())
+                try Data(bytes.dropLast()).write(to: file)
+            }
             let inbox = PostgresV2ForwardInboxStore(database: targetDB)
             try await inbox.receive(export, now: now)
             let importer = try PostgresV2ForwardMediaImportStore(database: targetDB, temporaryLifetime: 2)

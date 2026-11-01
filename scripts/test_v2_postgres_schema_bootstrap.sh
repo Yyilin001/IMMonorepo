@@ -96,11 +96,11 @@ assert_scalar() {
 assert_scalar 'im_v2 relation count' \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '176'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '376'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '377'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '64'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '65'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '41'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '42'
 
 # A same-named trigger function is not enough: replacing its body must fail
 # readiness, as must a nullable ready-variant constraint or a weakened replay key.
@@ -155,6 +155,11 @@ for drift in \
   "ALTER TABLE im_v2.resource_import_holds ALTER COLUMN sha256 DROP NOT NULL;" \
   "ALTER TABLE im_v2.resource_forward_outputs DROP CONSTRAINT resource_forward_outputs_export_id_ordinal_fkey;" \
   "ALTER TABLE im_v2.resource_upload_sessions DROP CONSTRAINT resource_upload_sessions_home_kind_home_id_actor_user_id_op_key;" \
+  "ALTER TABLE im_v2.resource_upload_sessions DROP COLUMN staging_cleanup_pending CASCADE;" \
+  "ALTER TABLE im_v2.resource_upload_sessions DROP COLUMN staging_cleanup_retry_at CASCADE;" \
+  "ALTER TABLE im_v2.resource_upload_sessions DROP COLUMN staging_cleanup_claim_token CASCADE;" \
+  "ALTER TABLE im_v2.resource_upload_sessions DROP COLUMN staging_cleanup_lease_expires_at CASCADE;" \
+  "DROP INDEX im_v2.resource_upload_sessions_staging_cleanup_idx;" \
   "ALTER TABLE im_v2.resource_variants DROP CONSTRAINT resource_variants_check; ALTER TABLE im_v2.resource_variants ADD CONSTRAINT resource_variants_check CHECK(state <> 'ready' OR (byte_count > 0 AND octet_length(sha256)=32));" \
   "CREATE TABLE im_v2.direct_message_denials (obsolete integer);"
 do

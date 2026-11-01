@@ -1,0 +1,117 @@
+{
+  "date": "2026-11-01",
+  "status": "prepared-awaiting-data-choice; not activated",
+  "host": "120.77.66.38",
+  "instance": "i-wz9fohk2rhrt5mq44iab",
+  "deployment": "existing imtest Compose environment",
+  "backup": {
+    "backupDirectory": "/opt/im-test/private/releases/imv2-deploy-audit-557d0017",
+    "database": "im_author_6e72bca7_r2",
+    "bytes": 636251,
+    "sha256": "870f7ca4a7ad57db79f96953ac07736a556dc249b0aa8efc121b10eb318017cc",
+    "archiveReadable": true
+  },
+  "candidate": {
+    "status": "candidate-image-runtime-and-schema-verified",
+    "imageID": "sha256:cb56953426b8917eb4d590f7b79ed97d9d5bb2f2610467a7d1e84ce68436a082",
+    "previousImageID": "sha256:87fa43c19138504902afcd52824841a7567fd324a0053a6aae7bff98498c5970",
+    "database": "im_audit_557d0017",
+    "previousDatabase": "im_author_6e72bca7_r2",
+    "schema": "im-v2-current-80",
+    "protocol": 55,
+    "activated": false
+  },
+  "linuxRuntime": {
+    "status": "passed-linux-loader-and-worker",
+    "runtimeImageID": "sha256:cb56953426b8917eb4d590f7b79ed97d9d5bb2f2610467a7d1e84ce68436a082",
+    "manifestSHA256": "efa89affe79ced1093a9fddee114169893e856f2034955f76a8928a89d45e937",
+    "products": [
+      {
+        "product": "IMV2AccountServerApp",
+        "sha256": "c29aacd912a6337be47e61e908f3ce7c746221faad9da3df8fe193f3e34fcd31",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2ServerApp",
+        "sha256": "31c5dfbf933a237cda15df4150aad4ae3c50d0ef9cc72ae69ab111370849c6c3",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2OperatorServerApp",
+        "sha256": "f68e7c60675bf73df5b57e053267e0735994f80ccb2ba44e8a965e422e41a51f",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2PlacementControlApp",
+        "sha256": "dd6f1a1fc14959aa93a315c55753413176660ed0fa0cc1fb1add12f18eb2eedc",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2RoomHostSupervisorApp",
+        "sha256": "7544ed8919a002bb97211634dcf646bdf20fc6311c0325ce574420e26daca4ab",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2ResourceImageWorker",
+        "sha256": "f313c33fbba0751a16ee490c2c5352232b7c5d874d412c9efe942b948d318637",
+        "librariesResolved": true
+      },
+      {
+        "product": "IMV2LocalGatewayProbe",
+        "sha256": "09dc68e4dae1444529d7936b07c9c8fd8b7a092c32e9156de709c8b8fd72435d",
+        "librariesResolved": true
+      }
+    ],
+    "worker": {
+      "sourceDimensions": {
+        "width": 640,
+        "height": 480
+      },
+      "previews": {
+        "320": {
+          "width": 320,
+          "height": 240,
+          "bytes": 104
+        },
+        "1280": {
+          "width": 640,
+          "height": 480,
+          "bytes": 133
+        }
+      }
+    },
+    "network": "none",
+    "serviceEndToEndTest": false
+  },
+  "scannerSignatures": {
+    "volume": "imtest-clamav-557d0017",
+    "status": "official-signatures-downloaded",
+    "imageID": "sha256:1b826c3dc5bab0ddba6fdfa398dbf63470bc6b318cdeea425ff07a536bcd7600"
+  },
+  "archive": {
+    "sha256": "3b5c8d50ffadf7c3340d9da053a72a4c21eeb7a69c6a26950c6e6d6b00e61b25",
+    "bytes": 203172706,
+    "sourceManifestMatches": true,
+    "protocol": 55,
+    "schema": "im-v2-current-80"
+  },
+  "artifactSupplement": {
+    "Dockerfile": "63fed2437dfa57044a51c5614cf8ba73a9575415472ea63cec5b1a089be75173"
+  },
+  "existingData": {
+    "accounts": 20,
+    "messages": 14,
+    "rooms": 6,
+    "resources": 25
+  },
+  "existingPublicBaseline": {
+    "httpsStatusWithoutCredentials": 401,
+    "certificateVerification": true
+  },
+  "pending": "User choice: activate an empty schema80 database and retain the original database for rollback, or preserve current business data.",
+  "limitations": [
+    "New image is not publicly activated.",
+    "No production capacity or mixed-load acceptance performed.",
+    "Scanner periodic updates and configuration are not activated."
+  ]
+}

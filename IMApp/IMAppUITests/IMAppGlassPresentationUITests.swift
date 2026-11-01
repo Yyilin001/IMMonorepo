@@ -13,6 +13,16 @@ final class IMAppGlassPresentationUITests: XCTestCase {
     }
 
     @MainActor
+    private func tabItems(_ title: String, in app: XCUIApplication) -> XCUIElementQuery {
+        // Native tabs are buttons on iPhone and floating item cells on iPad.
+        app.descendants(matching: .any).matching(identifier: title).matching(
+            NSPredicate(format: "elementType == %@ OR elementType == %@",
+                NSNumber(value: XCUIElement.ElementType.button.rawValue),
+                NSNumber(value: XCUIElement.ElementType.cell.rawValue))
+        )
+    }
+
+    @MainActor
     func testContactsGroupsNavigateToChatSettingsAndBackToDirectory() {
         let app = launch("contacts")
         let entry = app.buttons["v2.contacts.groups"]
@@ -30,7 +40,9 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         XCTAssertTrue(room.waitForExistence(timeout: 5))
         app.navigationBars["我的群组"].buttons.element(boundBy: 0).tap()
         XCTAssertTrue(entry.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.tabBars.buttons["联系人"].isSelected)
+        let contactsIsSelected = tabItems("联系人", in: app).allElementsBoundByIndex
+            .contains { $0.isSelected }
+        XCTAssertTrue(contactsIsSelected)
     }
 
     @MainActor
@@ -201,11 +213,17 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let badge = app.descendants(matching: .any)["v2.conversation.unread.\(room)"]
         XCTAssertTrue(badge.waitForExistence(timeout: 10))
         XCTAssertEqual(badge.frame.width, badge.frame.height, accuracy: 1)
+        XCTAssertTrue(tabItems("消息", in: app).allElementsBoundByIndex
+            .contains { $0.isSelected && $0.isHittable })
         app.buttons["v2.conversation.group.\(room)"].tap()
         let draft = app.textFields["v2.message.draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
         XCTAssertLessThan(draft.frame.height, 65)
-        XCTAssertFalse(app.tabBars.firstMatch.isHittable)
+        // A pushed chat must not leave the selected root tab interactive.
+        XCTAssertFalse(["消息", "联系人", "我的"].contains { title in
+            tabItems(title, in: app).allElementsBoundByIndex
+                .contains { $0.isSelected && $0.isHittable }
+        })
         XCTAssertFalse(app.buttons["v2.message.reply.mock-message-0"].exists)
         app.staticTexts["大家早上好！我们今天一起看一下新的界面。"].press(forDuration: 1)
         let reply = app.buttons["v2.message.reply.mock-message-0"]
@@ -220,6 +238,58 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    @MainActor
+    func testRotationPreservesDraftAndSettingsNavigation() {
+        let device = XCUIDevice.shared
+        device.orientation = .portrait
+        defer { device.orientation = .portrait }
+        let app = launch()
+        let room = app.buttons["v2.conversation.group.00000000-0000-0000-0000-000000000101"]
+        XCTAssertTrue(room.waitForExistence(timeout: 10)); room.tap()
+        let draft = app.textFields["v2.message.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        let text = "iPad rotation draft"
+        draft.tap(); draft.typeText(text)
+
+        device.orientation = .landscapeLeft
+        let landscape = NSPredicate { _, _ in app.frame.width > app.frame.height }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: landscape, object: nil)], timeout: 10), .completed)
+        XCTAssertEqual(draft.value as? String, text)
+        let tools = app.buttons["v2.conversation.detail.tools"]
+        for element in [draft, app.buttons["v2.message.send"], app.buttons["v2.message.composer.options"], tools] {
+            XCTAssertTrue(element.isHittable)
+            XCTAssertFalse(element.frame.isEmpty)
+            XCTAssertTrue(app.frame.contains(element.frame), "Control \(element.identifier) must fit the rotated window")
+        }
+        // Capture the screen directly; app-scoped cropping can use stale rotation coordinates.
+        let landscapeScreen = XCUIScreen.main.screenshot()
+        let landscapeImage = XCTAttachment(screenshot: landscapeScreen)
+        landscapeImage.name = "Landscape draft before settings"
+        landscapeImage.lifetime = .keepAlways
+        add(landscapeImage)
+        let landscapeFrames = XCTAttachment(string:
+            "window=\(app.frame)\ndraft=\(draft.frame)\ntools=\(tools.frame)\nscreenImage=\(landscapeScreen.image.size)\nimageOrientation=\(landscapeScreen.image.imageOrientation.rawValue)")
+        landscapeFrames.name = "Landscape layout frames"
+        landscapeFrames.lifetime = .keepAlways
+        add(landscapeFrames)
+
+        tools.tap()
+        let settings = app.navigationBars["群聊设置"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        device.orientation = .portrait
+        let portrait = NSPredicate { _, _ in app.frame.height > app.frame.width }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: portrait, object: nil)], timeout: 10), .completed)
+        settings.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(draft.waitForExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, text)
+        XCTAssertTrue(draft.isHittable)
+        XCTAssertTrue(app.frame.contains(draft.frame))
+        let portraitImage = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        portraitImage.name = "Portrait draft after settings"
+        portraitImage.lifetime = .keepAlways
+        add(portraitImage)
     }
 
     @MainActor
@@ -422,21 +492,32 @@ final class IMAppGlassPresentationUITests: XCTestCase {
     @MainActor
     func testNativeTabsPrivacyAndChatMenusRemainReachable() {
         let app = launch()
-        XCTAssertTrue(app.tabBars.buttons["联系人"].waitForExistence(timeout: 10))
-        app.tabBars.buttons["联系人"].tap()
+        let contactsTab = tabItems("联系人", in: app).firstMatch
+        XCTAssertTrue(contactsTab.waitForExistence(timeout: 10))
+        contactsTab.tap()
         XCTAssertTrue(app.staticTexts["小林"].waitForExistence(timeout: 10))
-        app.tabBars.buttons["我的"].tap()
+        tabItems("我的", in: app).firstMatch.tap()
         app.buttons["v2.privacy.open"].tap()
         XCTAssertTrue(app.switches["v2.privacy.allow-stranger-messages"].waitForExistence(timeout: 10))
         app.buttons["v2.privacy.done"].tap()
-        app.tabBars.buttons["消息"].tap()
+        tabItems("消息", in: app).firstMatch.tap()
         app.buttons["v2.conversation.tools"].tap()
-        XCTAssertTrue(app.buttons["v2.conversation.new-group"].waitForExistence(timeout: 5))
+        // The native menu preserves action labels, but not SwiftUI identifiers.
+        let newGroup = app.buttons["新建群聊"]
+        XCTAssertTrue(newGroup.waitForExistence(timeout: 5)); newGroup.tap()
+        let groupTitle = app.textFields["v2.conversation.group-title"]
+        XCTAssertTrue(groupTitle.waitForExistence(timeout: 5))
+        app.buttons["v2.conversation.group-cancel"].tap()
+        XCTAssertTrue(groupTitle.waitForNonExistence(timeout: 5))
         app.terminate()
         app.launchArguments = ["-v2-mock-preview", "-v2-mock-hide-controls", "-v2-mock-screen", "chat"]
         app.launch()
         XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 10))
         app.buttons["v2.message.composer.options"].tap()
-        XCTAssertTrue(app.buttons["v2.message.attachment.add"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["文件"].waitForExistence(timeout: 5))
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Native composer menu"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 }

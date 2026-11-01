@@ -10,7 +10,7 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-76"
+    public static let currentSchemaID = "im-v2-current-80"
     private static let requiredTables = [
         "schema_contract", "author_presentation_change_head", "author_presentation_control_changes", "control_housekeeping_cursor", "realtime_device_control_versions", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "profile_security_invalidation_outbox", "public_profile_update_operations", "user_contact_aliases", "contact_alias_operation_receipts", "room_member_nicknames", "group_nickname_operation_receipts", "group_rooms", "group_invitation_admissions", "group_invitation_receipts", "group_invitation_control_commands", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
@@ -320,13 +320,32 @@ public enum V2SchemaReadiness {
             """).first(decoding:ProfileOperationContractRow.self), forward.valid else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).forward_plan_operations.contract")
         }
+        guard let lifecycle = try await sql.raw("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=\(bind:schema)
+                AND table_name='rooms' AND column_name='dissolved_at' AND udt_name='timestamptz' AND is_nullable='YES')
+              AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass(\(bind:schema + ".rooms"))
+                AND conname='rooms_dissolved_check' AND convalidated)
+              AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(\(bind:schema + ".rooms"))
+                AND tgname='rooms_dissolution_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=19)
+              AND (SELECT count(*)=2 FROM pg_constraint WHERE conrelid IN
+                (to_regclass(\(bind:schema + ".group_capability_admissions")),to_regclass(\(bind:schema + ".group_capability_receipts")))
+                AND contype='c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%groupOwnership%groupDissolution%') AS valid
+            """).first(decoding: ProfileOperationContractRow.self), lifecycle.valid else {
+            throw V2SchemaReadinessError.unavailableTable("\(schema).rooms.lifecycle")
+        }
         guard let sendContract = try await sql.raw("""
             SELECT NOT EXISTS (
-                SELECT 1 FROM (VALUES ('operation_fingerprint','bytea'),('operation_resolved_at_ms','int8')) expected(name,type)
+                SELECT 1 FROM (VALUES ('operation_fingerprint','bytea'),('operation_resolved_at_ms','int8'),('rejection_code','text')) expected(name,type)
                 LEFT JOIN information_schema.columns actual ON actual.table_schema=\(bind:schema)
                     AND actual.table_name='message_send_completions' AND actual.column_name=expected.name
                     AND actual.udt_name=expected.type
                 WHERE actual.column_name IS NULL)
+              AND (SELECT count(*) = 5 FROM information_schema.columns
+                WHERE table_schema=\(bind:schema) AND table_name='message_send_completions' AND is_nullable='YES'
+                  AND column_name IN ('message_id','event_id','room_sequence','timeline_sequence','accepted_membership_revision'))
+              AND (SELECT count(*) = 2 FROM pg_constraint
+                WHERE conrelid=to_regclass(\(bind:schema + ".message_send_completions")) AND convalidated AND NOT condeferrable
+                  AND conname IN ('message_send_completions_result_check','message_send_completions_rejection_code_check'))
               AND to_regclass(\(bind:schema + ".message_send_operation_receipts")) IS NULL
               AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass(\(bind:schema + ".message_send_completions"))
                 AND tgname='message_send_completions_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27) AS valid
@@ -483,6 +502,10 @@ public enum V2SchemaReadiness {
                   ('resource_upload_sessions','storage_binding_id','text','NO'),
                   ('resource_upload_sessions','storage_configuration_revision','int4','NO'),
                   ('resource_upload_sessions','placement_json','jsonb','NO'),
+                  ('resource_upload_sessions','staging_cleanup_pending','bool','NO'),
+                  ('resource_upload_sessions','staging_cleanup_retry_at','timestamptz','NO'),
+                  ('resource_upload_sessions','staging_cleanup_claim_token','uuid','YES'),
+                  ('resource_upload_sessions','staging_cleanup_lease_expires_at','timestamptz','YES'),
                   ('resource_blob_placements','reference_json','jsonb','NO'),
                   ('resource_blob_placements','byte_count','int8','NO'),
                   ('resource_blob_placements','sha256','bytea','NO'),
@@ -556,6 +579,9 @@ public enum V2SchemaReadiness {
                   ('resource_upload_sessions','UNIQUE (home_kind, home_id, actor_user_id, operation_id)'),
                   ('resource_upload_sessions','CHECK ((generation > 0))'),
                   ('resource_upload_sessions','CHECK ((storage_configuration_revision > 0))'),
+                  ('resource_upload_sessions','CHECK (((NOT staging_cleanup_pending) OR (state = ''completed''::text)))'),
+                  ('resource_upload_sessions','CHECK (((staging_cleanup_claim_token IS NULL) = (staging_cleanup_lease_expires_at IS NULL)))'),
+                  ('resource_upload_sessions','CHECK ((staging_cleanup_pending OR (staging_cleanup_claim_token IS NULL)))'),
                   ('resource_blob_placements','PRIMARY KEY (placement_id)'),
                   ('resource_blob_placements','UNIQUE (media_id, generation)'),
                   ('resource_blob_placements','CHECK ((octet_length(sha256) = 32))'),
@@ -600,6 +626,10 @@ public enum V2SchemaReadiness {
                     'CREATE UNIQUE INDEX resource_storage_migrations_active_media_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
                     'CREATE INDEX resource_storage_migrations_recovery_idx ON im_v2.resource_storage_migrations USING btree (updated_at, operation_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
                     'CREATE INDEX resource_storage_migrations_retained_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (source_released_at IS NULL)'))
+            AND EXISTS (SELECT 1 FROM pg_index
+                WHERE indrelid=to_regclass(\(bind: schema + ".resource_upload_sessions")) AND indisvalid AND indisready
+                  AND replace(pg_get_indexdef(indexrelid),\(bind: schema + "."),'im_v2.') =
+                    'CREATE INDEX resource_upload_sessions_staging_cleanup_idx ON im_v2.resource_upload_sessions USING btree (staging_cleanup_retry_at, session_id) WHERE staging_cleanup_pending')
             AND EXISTS (SELECT 1 FROM pg_index
                 WHERE indrelid=to_regclass(\(bind: schema + ".resource_imports")) AND indisvalid AND indisready
                   AND replace(pg_get_indexdef(indexrelid),\(bind: schema + "."),'im_v2.') =

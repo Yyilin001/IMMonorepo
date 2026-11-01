@@ -90,7 +90,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("operation policy denial keeps one private hint per identity without a durable rejection result")
+    @Test("operation policy denial atomically keeps its private hint and permanent rejection")
     func durableSendBatchRestoresDirectDenial() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
@@ -116,7 +116,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 let query = try V2MessageSendOperationRecoveryRequest(identity: denied.identity,
                     fingerprint: denied.fingerprint, domainFingerprint: denied.command.fingerprint)
-                #expect(try await store.recover(query, token: token) == .unresolved)
+                guard case .sendOperation(let originalResult) = results[0] else { throw V2MessageOperationValidationError.invalidReceipt }
+                #expect(try await store.recover(query, token: token) == originalResult)
                 // A fresh message produces a fresh sender-only hint. Retrying
                 // the original identity above did not duplicate its hint.
                 let another = try V2MessageSendOperationCommand(command: .init(roomID: direct.roomID,
@@ -128,9 +129,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 #expect(rejection.outcome == .rejected(.directPolicyDenied))
             }
-            for table in ["messages", "message_send_completions"] {
-                #expect(try await count("im_v2.\(table)", on: sql) == 0)
-            }
+            #expect(try await count("im_v2.messages", on: sql) == 0)
+            #expect(try await count("im_v2.message_send_completions", on: sql) == 2)
             #expect(try await count("im_v2.user_state_event_outbox", on: sql) == initialOutbox + 3)
             #expect(try await count("im_v2.room_timeline_activities", on: sql) == initialTimeline + 2)
             #expect(try await count("im_v2.room_timeline_activities WHERE activity_type='direct_message_restricted' AND recipient_user_id='\(senderUUID.uuidString)'", on: sql) == 2)

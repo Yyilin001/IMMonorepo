@@ -23,7 +23,7 @@ public struct V2LocalResourceUploadTransport: V2UploadTransport {
         let target = try await provider.issueDownloadTarget(mediaID: mediaID, expiresAt: Date().addingTimeInterval(60))
         let object = try await provider.downloadedObject(mediaID: mediaID, targetURL: target.url)
         guard object.byteCount == byteCount else { throw V2ResourceProviderError.integrityMismatch }
-        return try await V2LocalResourceStorage.stream(file: object.fileURL)
+        return object.stream()
     }
     public func importBytes(mediaID: MediaID, contentType: String, byteCount: Int64, bytes: V2ResourceByteStream) async throws {
         let target = try await provider.issueUploadTarget(mediaID: mediaID,contentType: contentType,byteCount: byteCount,expiresAt: Date().addingTimeInterval(300))

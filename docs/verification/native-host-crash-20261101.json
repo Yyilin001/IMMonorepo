@@ -1,0 +1,214 @@
+{
+  "auditIssue": "I11",
+  "date": "2026-11-01",
+  "reportTimezone": "Asia/Shanghai",
+  "status": "passed",
+  "scope": {
+    "environment": "one isolated Linux arm64 Colima VM, 4 vCPU and 8 GiB memory",
+    "runtime": "three Placement voters, two Host business-probe processes, production Supervisor, PostgreSQL, client and quorum-inspection probes",
+    "faults": [
+      "actual Docker network disconnection",
+      "Host exit 137 after commit and before ACK",
+      "PostgreSQL pause",
+      "Supervisor SIGKILL and a new Supervisor process",
+      "explicit Host generation replacement"
+    ],
+    "excludes": [
+      "production multi-host topology and partitions",
+      "physical host failure",
+      "App/Gateway end-to-end acceptance",
+      "sustained workload and capacity approval",
+      "full Server package test suite"
+    ]
+  },
+  "build": {
+    "passed": true,
+    "stage": "completed",
+    "container": "imv2-native-audit-41181282-build",
+    "scratchVolume": "imv2-native-audit-41181282-scratch",
+    "image": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
+    "sourceDigest": "bcf6c6af9de4b24b6fec8c3c7faf6ba46e1874856c9a5a85ec2273c059408634",
+    "products": {
+      "VirtualActorBusinessProbe": "11e48774770a911388c9a78729fdb9f9559c04ab724a92ba062e01ff0b2001c3",
+      "IMV2PlacementControlApp": "8da1fe2d246bb77f484f097e3977ebcc733ee2dda1380d3227e12e9decbd1848",
+      "IMV2RoomHostSupervisorApp": "92a90c3a2c12b6d744948154829f247b2ceb9070f0968cb5228d7a639613103e"
+    },
+    "startedAt": "2026-10-31T22:30:37.095553+00:00",
+    "exitCode": 0,
+    "seconds": 645.847
+  },
+  "images": [
+    {
+      "requested": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
+      "id": "sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
+      "repoDigests": [
+        "swift@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6"
+      ],
+      "os": "linux",
+      "architecture": "arm64"
+    },
+    {
+      "requested": "postgres:16-alpine",
+      "id": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab",
+      "repoDigests": [
+        "postgres@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab"
+      ],
+      "os": "linux",
+      "architecture": "arm64"
+    }
+  ],
+  "sourceVerification": {
+    "checkedAt": "2026-10-31T22:43:17.451588+00:00",
+    "manifestFiles": 2313,
+    "changed": [],
+    "added": [],
+    "removed": [],
+    "phase": "before documentation-only evidence updates",
+    "documentationUpdatedAfterFreeze": [
+      "IMV2/docs/implementation-status.md"
+    ],
+    "runtimeSourcesChangedAfterFreeze": []
+  },
+  "sourceManifestSHA256": "6e856ed67a90e1c6cd8ebb948a981e6f5b246763dd225124794968018cad815a",
+  "runStartedAt": "2026-10-31T22:41:35.395288+00:00",
+  "runFinishedAt": "2026-10-31T22:42:28.569774+00:00",
+  "runSecondsIncludingCleanup": 53.174,
+  "result": {
+    "passed": true,
+    "crashTakeoverVerified": true,
+    "run": "imv2-native-crash-7190f381fd34",
+    "productsSHA256": {
+      "VirtualActorBusinessProbe": "11e48774770a911388c9a78729fdb9f9559c04ab724a92ba062e01ff0b2001c3",
+      "IMV2PlacementControlApp": "8da1fe2d246bb77f484f097e3977ebcc733ee2dda1380d3227e12e9decbd1848",
+      "IMV2RoomHostSupervisorApp": "92a90c3a2c12b6d744948154829f247b2ceb9070f0968cb5228d7a639613103e"
+    },
+    "sourceDigest": "bcf6c6af9de4b24b6fec8c3c7faf6ba46e1874856c9a5a85ec2273c059408634",
+    "image": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
+    "placementBefore": {
+      "roomID": "00000000-0000-0000-0000-000000000011",
+      "shardID": "room-a",
+      "clusterID": "2029BDF0-0C7A-5982-F139-8B136C83E178",
+      "revision": 3,
+      "partition": 102,
+      "hostID": "04D1973B-DEDE-46B6-894F-B265A53A4C80",
+      "incarnationID": "92CD9A92-2333-465E-B861-3EF9D5E41D0F",
+      "epoch": 2,
+      "retired": false,
+      "hostRetired": false,
+      "transfer": null
+    },
+    "networkLossDidNotGrantOwnership": true,
+    "unknownSendDurable": true,
+    "recoveryOperationID": "9244154e-f8c1-4b63-ad31-7e77925c91f9",
+    "placementPending": {
+      "roomID": "00000000-0000-0000-0000-000000000011",
+      "shardID": "room-a",
+      "clusterID": "2029BDF0-0C7A-5982-F139-8B136C83E178",
+      "revision": 3,
+      "partition": 102,
+      "hostID": "04D1973B-DEDE-46B6-894F-B265A53A4C80",
+      "incarnationID": "92CD9A92-2333-465E-B861-3EF9D5E41D0F",
+      "epoch": 2,
+      "retired": false,
+      "hostRetired": false,
+      "transfer": null
+    },
+    "generationReplacementVerified": true,
+    "generationRetentionVerified": true,
+    "placementReplaced": {
+      "roomID": "00000000-0000-0000-0000-000000000011",
+      "shardID": "room-a",
+      "clusterID": "2029BDF0-0C7A-5982-F139-8B136C83E178",
+      "revision": 262,
+      "partition": 102,
+      "hostID": "A52EE0FE-A0FC-4E0C-90E0-88D1E25402A0",
+      "incarnationID": "3E54AC2E-13F5-4D15-BA34-647C1127432C",
+      "epoch": 4,
+      "retired": false,
+      "hostRetired": false,
+      "transfer": null
+    },
+    "placementAfter": {
+      "roomID": "00000000-0000-0000-0000-000000000011",
+      "shardID": "room-a",
+      "clusterID": "2029BDF0-0C7A-5982-F139-8B136C83E178",
+      "revision": 260,
+      "partition": 102,
+      "hostID": "A52EE0FE-A0FC-4E0C-90E0-88D1E25402A0",
+      "incarnationID": "A926AC78-B842-4C8E-AD2E-21DAF19C15C8",
+      "epoch": 3,
+      "retired": false,
+      "hostRetired": false,
+      "transfer": null
+    },
+    "supervisorRestartResumed": true,
+    "business": {
+      "original": {
+        "activationEpoch": 8589934593,
+        "host": {
+          "hostID": {
+            "rawValue": "04D1973B-DEDE-46B6-894F-B265A53A4C80"
+          },
+          "incarnationID": "92CD9A92-2333-465E-B861-3EF9D5E41D0F"
+        },
+        "roomID": {
+          "rawValue": "00000000-0000-0000-0000-000000000011"
+        },
+        "owner": {
+          "epoch": 0,
+          "shardID": "room-a"
+        }
+      },
+      "replacement": {
+        "activationEpoch": 12884901889,
+        "host": {
+          "hostID": {
+            "rawValue": "A52EE0FE-A0FC-4E0C-90E0-88D1E25402A0"
+          },
+          "incarnationID": "A926AC78-B842-4C8E-AD2E-21DAF19C15C8"
+        },
+        "roomID": {
+          "rawValue": "00000000-0000-0000-0000-000000000011"
+        },
+        "owner": {
+          "shardID": "room-a",
+          "epoch": 0
+        }
+      },
+      "messageRows": 1,
+      "originalResultUnknown": true,
+      "messageID": "01A19420-74E4-7C27-A9C9-A02E3FE246A8"
+    },
+    "cleanupErrors": [],
+    "resourcesRemoved": true
+  },
+  "cleanup": {
+    "drillResourcesRemoved": true,
+    "buildContainerRemoved": true,
+    "containersRemaining": [],
+    "drillNetworksRemaining": [],
+    "privateConfigurationRemoved": true,
+    "vmStopped": true,
+    "vmDeleted": false,
+    "buildCacheRetained": true,
+    "retainedVolume": "imv2-native-audit-41181282-scratch",
+    "retentionReason": "Reuse the already-built Linux dependencies for remaining G06/G10 platform checks; no running workloads retained.",
+    "currentDockerContext": "default",
+    "stoppedAt": "2026-10-31T22:43:20.004132+00:00"
+  },
+  "artifacts": {
+    "root": "build/reports/2026-11-01-feature-audit/repair-logs/native-crash-46b87730",
+    "buildLog": "build.log",
+    "sourceManifest": "source-manifest.json",
+    "rawResult": "drill/result.json",
+    "driverLog": "drill-driver.log",
+    "containerLogs": "drill/*.log"
+  },
+  "reproduction": {
+    "script": "IMV2/scripts/test_v2_native_host_crash.py",
+    "requirements": "explicit separately owned colima-imv2-native-* Docker context, frozen source, three matching Linux release products and successful build-result.json",
+    "sourceDirectory": "source",
+    "releaseDirectory": "products",
+    "buildResult": "build-result.json"
+  }
+}

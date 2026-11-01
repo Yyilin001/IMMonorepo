@@ -142,7 +142,8 @@ public actor V2ProfilePresentationRepository {
     private let reader: any V2ProfilePresentationReading
     private let aliasRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])?
     private let nicknameRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])?
-    private let clock = ContinuousClock()
+    private let readNow: @Sendable () -> ContinuousClock.Instant
+    private let sleepUntil: @Sendable (ContinuousClock.Instant) async throws -> Void
     private let retryJitter: @Sendable () -> TimeInterval
     private var throttleUntil: ContinuousClock.Instant?
     private var epoch = UUID()
@@ -172,20 +173,26 @@ public actor V2ProfilePresentationRepository {
     private let maximumEntries = 2_000
     private let maximumBytes = 2 * 1_024 * 1_024
 
+    /// Authority checks, grants and scheduling share one monotonic time domain.
+    /// The defaults use live ContinuousClock time; tests may control time and scheduling independently.
     public init(actorUserID: UserID, deviceID: DeviceID, reader: any V2ProfilePresentationReading,
                 nicknameRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil,
                 aliasRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil,
-                localDisplayJournal: V2LocalProfileDisplayJournal? = nil) {
+                localDisplayJournal: V2LocalProfileDisplayJournal? = nil,
+                now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
+                sleepUntil: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = { try await ContinuousClock().sleep(until: $0) }) {
         self.actorUserID = actorUserID; self.deviceID = deviceID; self.reader = reader
         self.nicknameRevisions = nicknameRevisions
         self.aliasRevisions = aliasRevisions
         self.localDisplayJournal = localDisplayJournal
+        self.readNow = now; self.sleepUntil = sleepUntil
         retryJitter = { Double.random(in: 0.1...0.5) }
     }
     init(actorUserID: UserID, deviceID: DeviceID, reader: any V2ProfilePresentationReading,
          retryJitter: @escaping @Sendable () -> TimeInterval) {
         self.actorUserID = actorUserID; self.deviceID = deviceID; self.reader = reader; self.retryJitter = retryJitter
         nicknameRevisions = nil; aliasRevisions = nil
+        readNow = { .now }; sleepUntil = { try await ContinuousClock().sleep(until: $0) }
     }
     /// Restored before publishing the signed-in UI. Expiring server grants and
     /// account-local display facts deliberately have different lifetimes.
@@ -255,7 +262,7 @@ public actor V2ProfilePresentationRepository {
     private func activate(tracksVisibleRows: Bool, delivery: DeliveryPreference = .http) -> V2ProfilePageActivation {
         let token = V2ProfilePageActivation(id: UUID(), epoch: epoch)
         if !closed, activations.count < 256 {
-            activations[token.id] = .init(started: clock.now, tracksVisibleRows: tracksVisibleRows,
+            activations[token.id] = .init(started: readNow(), tracksVisibleRows: tracksVisibleRows,
                 expectsAuthorDelivery: delivery == .authorStream)
         }
         return token
@@ -301,9 +308,9 @@ public actor V2ProfilePresentationRepository {
                 let floor = states[key]?.floor
                 let nicknameFloor = states[key]?.nicknameRevisionFloor ?? 0
                 let aliasFloor = states[key]?.aliasRevisionFloor ?? 0
-                let deniedAt = fenceAuthorView ? clock.now : states[key]?.deniedAt
+                let deniedAt = fenceAuthorView ? readNow() : states[key]?.deniedAt
                 states[key] = .init(deniedAt: deniedAt, floor: floor, nicknameRevisionFloor: nicknameFloor, aliasRevisionFloor: aliasFloor)
-            } else if fenceAuthorView { fenceUntrackedAuthor(key, at: clock.now) }
+            } else if fenceAuthorView { fenceUntrackedAuthor(key, at: readNow()) }
             revokeGrants(key, includeInterests: true)
             complete(key, result: .failure(V2ProfilePresentationError.inactive))
         }
@@ -497,7 +504,7 @@ public actor V2ProfilePresentationRepository {
         }
         try registerInterest(key, activation: activation)
         let token = V2ProfileVisibleInterest(id: UUID(), activation: activation, key: key)
-        if cached { cachedVisibleRows[token.id] = (token, clock.now) }
+        if cached { cachedVisibleRows[token.id] = (token, readNow()) }
         activations[activation.id]?.visibleRows[key, default: []].insert(token.id)
         visibleRows += 1
         if activations[activation.id]?.visibleRows[key]?.count == 1 {
@@ -561,8 +568,8 @@ public actor V2ProfilePresentationRepository {
     private func currentSnapshot(for key: V2ProfileViewLookupKey, activation: V2ProfilePageActivation) -> V2ProfilePresentationSnapshot? {
         guard !closed, activation.epoch == epoch, activations[activation.id]?.grants[key] != nil,
               activations[activation.id]?.tracksVisibleRows != true || activations[activation.id]?.interests.contains(key) == true,
-              let value = access[key], value.deadline > clock.now else { return nil }
-        let avatarIsLive = value.avatarDeadline.map { $0 > clock.now } ?? false
+              let value = access[key], value.deadline > readNow() else { return nil }
+        let avatarIsLive = value.avatarDeadline.map { $0 > readNow() } ?? false
         return .init(presentation: value.presentation, deadline: value.deadline,
             avatar: avatarIsLive ? value.avatar : value.avatar?.withoutDownloadPlan(), avatarDeadline: avatarIsLive ? value.avatarDeadline : nil)
     }
@@ -576,7 +583,7 @@ public actor V2ProfilePresentationRepository {
         guard let snapshot = await cachedSnapshot(for: key, activation: activation), let avatar = snapshot.avatar,
               let valueID = states[key]?.valueID else { return nil }
         return .init(avatar: avatar, home: .account(key.userID), deadline: snapshot.deadline,
-            downloadDeadline: snapshot.avatarDeadline) { [weak self] in
+            downloadDeadline: snapshot.avatarDeadline, now: readNow) { [weak self] in
                 guard let self else { return false }
                 return await self.validateAvatarRead(key, activation: activation, valueID: valueID, avatar: avatar)
             }
@@ -620,16 +627,16 @@ public actor V2ProfilePresentationRepository {
                     (cached.avatar != previous && (!sameContent || cached.avatar?.plan != nil)) { return cached.presentation }
             }
         }
-        if let until = negative[key], until > clock.now { return nil }
-        if let until = states[key]?.retryUntil, until > clock.now { throw V2ProfilePresentationError.throttled(retryAfter: seconds(until)) }
+        if let until = negative[key], until > readNow() { return nil }
+        if let until = states[key]?.retryUntil, until > readNow() { throw V2ProfilePresentationError.throttled(retryAfter: seconds(until)) }
         if let throttled = throttlingError() { throw throttled }
         guard (demand[key] != nil || demand.count < 256),
               demand.values.reduce(0, { $0 + $1.waiters.count }) < 512 else { throw V2ProfilePresentationError.overloaded }
         if case .refreshAvatar = policy, demand[key] == nil {
-            if let until = states[key]?.avatarRefreshNotBefore, until > clock.now {
+            if let until = states[key]?.avatarRefreshNotBefore, until > readNow() {
                 throw V2ProfilePresentationError.throttled(retryAfter: seconds(until))
             }
-            states[key]?.avatarRefreshNotBefore = clock.now + .seconds(2 + retryJitter())
+            states[key]?.avatarRefreshNotBefore = readNow() + .seconds(2 + retryJitter())
         }
         let waiter = UUID()
         return try await withTaskCancellationHandler {
@@ -638,7 +645,7 @@ public actor V2ProfilePresentationRepository {
                 let proposedJitter = retryJitter()
                 let jitter = proposedJitter.isFinite ? min(0.5, max(0, proposedJitter)) : 0.25
                 var item = demand[key] ?? Demand(priority: priority, waiters: [:],
-                    authorFallbackAt: clock.now + .seconds(2 + jitter), waitsForAuthor: true)
+                    authorFallbackAt: readNow() + .seconds(2 + jitter), waitsForAuthor: true)
                 if case .refreshAvatar = policy { item.waitsForAuthor = false }
                 if priority.rawValue < item.priority.rawValue { item.priority = priority }
                 item.waiters[waiter] = Waiter(activation: activation, continuation: continuation)
@@ -669,7 +676,7 @@ public actor V2ProfilePresentationRepository {
     public func bindAuthorView(_ view: V2AuthorPresentationView,
                                activations pages: Set<V2ProfilePageActivation>) throws -> V2ProfileAuthorBinding {
         try Task.checkCancellation()
-        guard !pages.isEmpty, pages.count <= 256, view.renewBy > clock.now else { throw V2ProfilePresentationError.inactive }
+        guard !pages.isEmpty, pages.count <= 256, view.renewBy > readNow() else { throw V2ProfilePresentationError.inactive }
         for page in pages {
             try requireActive(page)
             guard let active = activations[page.id], active.started <= view.started else { throw V2ProfilePresentationError.inactive }
@@ -736,7 +743,7 @@ public actor V2ProfilePresentationRepository {
     @discardableResult
     public func ingest(_ delta: V2ReceivedAuthorPresentationDelta, binding expected: V2ProfileAuthorBinding) async throws -> V2AuthorPresentationReceipt? {
         try Task.checkCancellation()
-        guard !liveActivations(in: expected).isEmpty, binding == expected, delta.view == expected.view, expected.view.renewBy > clock.now else {
+        guard !liveActivations(in: expected).isEmpty, binding == expected, delta.view == expected.view, expected.view.renewBy > readNow() else {
             throw V2ProfilePresentationError.inactive
         }
         guard delta.sequence > 0, delta.sequence <= UInt64(Int64.max),
@@ -754,8 +761,8 @@ public actor V2ProfilePresentationRepository {
                       avatar == nil || avatar?.mediaID == value.view.avatar?.mediaID,
                       (avatar?.plan != nil) == (byteDeadline != nil),
                       byteDeadline.map({ $0 <= deadline }) ?? true else { throw V2ProfilePresentationError.invalidResponse }
-                if deadline > clock.now {
-                    let usableAvatar = byteDeadline.map { $0 > clock.now } == true ? avatar : avatar?.withoutDownloadPlan()
+                if deadline > readNow() {
+                    let usableAvatar = byteDeadline.map { $0 > readNow() } == true ? avatar : avatar?.withoutDownloadPlan()
                     prepared[key] = try makeAccess(value, deadline: deadline, avatar: usableAvatar, avatarDeadline: usableAvatar?.plan == nil ? nil : byteDeadline)
                 }
             }
@@ -763,7 +770,7 @@ public actor V2ProfilePresentationRepository {
         let floors = try await refreshPresentationFloors(seen)
         try Task.checkCancellation()
         let pages = liveActivations(in: expected)
-        guard !pages.isEmpty, binding == expected, expected.view.renewBy > clock.now else { throw V2ProfilePresentationError.inactive }
+        guard !pages.isEmpty, binding == expected, expected.view.renewBy > readNow() else { throw V2ProfilePresentationError.inactive }
         let interests = pages.reduce(into: Set<V2ProfileViewLookupKey>()) { $0.formUnion(activations[$1.id]?.interests ?? []) }
         pruneCandidates()
         for entry in delta.entries {
@@ -783,7 +790,7 @@ public actor V2ProfilePresentationRepository {
         // Staged candidates may be discarded before a row becomes visible. Only
         // acknowledge a still-live presentation or denial actually installed in
         // this page. Rejected, obsolete and expired entries remain recoverable.
-        let receiptAt = clock.now
+        let receiptAt = readNow()
         let retained = delta.entries.compactMap { entry -> (V2ProfileViewLookupKey, ContinuousClock.Instant)? in
             if case .unavailable(_, let until) = entry {
                 guard interests.contains(entry.key), let deniedUntil = negative[entry.key],
@@ -792,7 +799,7 @@ public actor V2ProfilePresentationRepository {
             }
             guard case .presentation(let value, _, _, _) = entry,
                   pages.contains(where: { activations[$0.id]?.grants[entry.key]?.authorBindingID == expected.id }),
-                  let stored = access[entry.key], stored.deadline > clock.now,
+                  let stored = access[entry.key], stored.deadline > readNow(),
                   stored.presentation == value else { return nil }
             return (entry.key, stored.deadline)
         }
@@ -821,7 +828,7 @@ public actor V2ProfilePresentationRepository {
         guard let state = states[key] else { return }
         switch entry {
         case .presentation(let presentation, _, _, _):
-            guard authorCanGrant(key, binding: expected, version: presentation.lease.authorityVersion), let value, value.deadline > clock.now,
+            guard authorCanGrant(key, binding: expected, version: presentation.lease.authorityVersion), let value, value.deadline > readNow(),
                   isNotOlder(presentation, than: state.floor), meetsNicknameFloor(presentation, minimum: state.nicknameRevisionFloor), meetsAliasFloor(presentation, minimum: state.aliasRevisionFloor) else { return }
             let changed = access[key] != value
             if changed {
@@ -843,10 +850,10 @@ public actor V2ProfilePresentationRepository {
                 if newlyGranted && !hasWaiter { notify(key, activationID: page.id) }
             }
         case .unavailable(let denial, let until):
-            if until > clock.now { try deny(key, version: denial.authorityVersion, until: min(until, clock.now + .seconds(30))) }
+            if until > readNow() { try deny(key, version: denial.authorityVersion, until: min(until, readNow() + .seconds(30))) }
         case .retryable(_, let notBefore):
-            guard notBefore > clock.now else { return }
-            let until = min(notBefore, clock.now + .seconds(60))
+            guard notBefore > readNow() else { return }
+            let until = min(notBefore, readNow() + .seconds(60))
             states[key]?.retryUntil = max(state.retryUntil ?? until, until)
             for page in pages {
                 complete(key, activation: page, result: .failure(V2ProfilePresentationError.throttled(retryAfter: seconds(until))))
@@ -855,7 +862,7 @@ public actor V2ProfilePresentationRepository {
     }
     private func stageCandidate(_ entry: V2ReceivedAuthorPresentationEntry, access value: Access?, binding expected: V2ProfileAuthorBinding, pages: Set<V2ProfilePageActivation>) throws {
         let key = entry.key
-        var deadline = min(clock.now + .seconds(5), expected.view.renewBy)
+        var deadline = min(readNow() + .seconds(5), expected.view.renewBy)
         switch entry {
         case .presentation(let presentation, _, _, _):
             guard let value, authorCanGrant(key, binding: expected, version: presentation.lease.authorityVersion),
@@ -865,15 +872,15 @@ public actor V2ProfilePresentationRepository {
                   isNotOlder(presentation, than: candidates[key]?.access.map { RevisionFloor($0.presentation) }) else { return }
             deadline = min(deadline, value.deadline)
         case .unavailable(let denial, let until):
-            guard until > clock.now else { return }
+            guard until > readNow() else { return }
             deadline = min(deadline, until)
             if states[key] != nil {
-                guard try deny(key, version: denial.authorityVersion, until: min(until, clock.now + .seconds(30))) else { return }
+                guard try deny(key, version: denial.authorityVersion, until: min(until, readNow() + .seconds(30))) else { return }
             }
             else if !(try recordDenial(key, version: denial.authorityVersion)) { return }
         case .retryable(_, let notBefore): deadline = min(deadline, notBefore)
         }
-        guard deadline > clock.now else { return }
+        guard deadline > readNow() else { return }
         let cost = (value?.bytes ?? ((try? JSONEncoder().encode(key).count).map { $0 + 128 } ?? 262_145)) + pages.count * 64
         guard cost <= 256 * 1_024 else { return }
         removeCandidate(key)
@@ -882,14 +889,14 @@ public actor V2ProfilePresentationRepository {
             removeCandidate(oldest.key)
         }
         candidates[key] = .init(bindingID: expected.id, pendingActivations: pages, entry: entry, access: value,
-            expires: deadline, observed: clock.now, cost: cost)
+            expires: deadline, observed: readNow(), cost: cost)
         candidateBytes += cost
     }
     private func promoteCandidate(_ key: V2ProfileViewLookupKey, activation: V2ProfilePageActivation) throws {
         pruneCandidates()
         guard let candidate = candidates[key], candidate.pendingActivations.contains(activation),
               let binding, liveActivations(in: binding).contains(activation),
-              binding.id == candidate.bindingID, binding.view.renewBy > clock.now else { return }
+              binding.id == candidate.bindingID, binding.view.renewBy > readNow() else { return }
         candidates[key]?.pendingActivations.remove(activation)
         if candidates[key]?.pendingActivations.isEmpty == true { removeCandidate(key) }
         try applyAuthorEntry(candidate.entry, access: candidate.access, binding: binding, pages: [activation], promoting: true)
@@ -902,7 +909,7 @@ public actor V2ProfilePresentationRepository {
         for key in Array(candidates.keys) {
             guard let candidate = candidates[key] else { continue }
             let pending = candidate.pendingActivations.filter { $0.epoch == epoch && activations[$0.id] != nil && !retiredAuthorPages.contains($0) }
-            if candidate.expires <= clock.now || pending.isEmpty { removeCandidate(key) }
+            if candidate.expires <= readNow() || pending.isEmpty { removeCandidate(key) }
             else { candidates[key]?.pendingActivations = pending }
         }
     }
@@ -928,7 +935,7 @@ public actor V2ProfilePresentationRepository {
     }
     private func schedule() {
         guard !closed, tasks.count < 2, throttlingError() == nil else { return }
-        let now = clock.now
+        let now = readNow()
         guard let earliest = demand.filter({ !inFlight.contains($0.key) }).map({ _, item in
             waitsForAuthor(item, now: now) ? item.authorFallbackAt : now
         }).min() else { return }
@@ -939,7 +946,7 @@ public actor V2ProfilePresentationRepository {
         mergeDeadline = deadline
         mergeTask = Task {
             do {
-                try await clock.sleep(until: deadline)
+                try await sleepUntil(deadline)
                 guard self.mergeID == id else { return }
                 self.mergeID = nil; self.mergeTask = nil; self.mergeDeadline = nil; self.launchBatch()
             } catch {
@@ -961,7 +968,7 @@ public actor V2ProfilePresentationRepository {
             for key in Array(demand.keys) where !inFlight.contains(key) { complete(key, result: .failure(throttled)) }
             return
         }
-        let ordered = demand.keys.filter { !inFlight.contains($0) && demand[$0].map { !waitsForAuthor($0, now: clock.now) } == true }.sorted {
+        let ordered = demand.keys.filter { !inFlight.contains($0) && demand[$0].map { !waitsForAuthor($0, now: readNow()) } == true }.sorted {
             (demand[$0]?.priority.rawValue ?? 1) < (demand[$1]?.priority.rawValue ?? 1)
         }
         let keys = V2ProfilePresentationBatchRequest.selectKeys(from: ordered)
@@ -972,7 +979,7 @@ public actor V2ProfilePresentationRepository {
             return .init(key: key, demandID: item.id, stateID: state.identity, valueID: state.valueID,
                          activations: Set(item.waiters.values.map(\.activation)))
         }
-        let batchID = UUID(), batchEpoch = epoch, started = clock.now
+        let batchID = UUID(), batchEpoch = epoch, started = readNow()
         inFlight.formUnion(keys)
         let task = Task {
             let response: Result<V2ProfilePresentationBatch, Error>
@@ -1011,8 +1018,8 @@ public actor V2ProfilePresentationRepository {
                     results: [.presentation(value, avatar: batch.avatars[key])])
                 let deadline = started + .milliseconds(value.lease.validUntilUnixMilliseconds - serverNow)
                 let avatarDeadline = batch.avatars[key]?.plan.map { started + .milliseconds($0.expiresAtUnixMilliseconds - serverNow) }
-                let avatar = avatarDeadline.map { $0 > clock.now } == true ? batch.avatars[key] : batch.avatars[key]?.withoutDownloadPlan()
-                if deadline > clock.now { prepared[key] = try makeAccess(value, deadline: deadline, avatar: avatar, avatarDeadline: avatar?.plan == nil ? nil : avatarDeadline) }
+                let avatar = avatarDeadline.map { $0 > readNow() } == true ? batch.avatars[key] : batch.avatars[key]?.withoutDownloadPlan()
+                if deadline > readNow() { prepared[key] = try makeAccess(value, deadline: deadline, avatar: avatar, avatarDeadline: avatar?.plan == nil ? nil : avatarDeadline) }
             }
             for read in reads {
                 let key = read.key
@@ -1136,7 +1143,7 @@ public actor V2ProfilePresentationRepository {
             // Preserve a conservative causal fence when the bounded tombstone
             // budget is exhausted. A fresh page can establish a new observation.
             if let evicted = authorDenials.keys.first {
-                fenceUntrackedAuthor(evicted, at: clock.now); authorDenials.removeValue(forKey: evicted)
+                fenceUntrackedAuthor(evicted, at: readNow()); authorDenials.removeValue(forKey: evicted)
             }
         }
         authorDenials[key] = floor
@@ -1156,7 +1163,7 @@ public actor V2ProfilePresentationRepository {
     private func applyThrottling(_ retryAfter: TimeInterval, failedReads: [ReadKey]) {
         let base = retryAfter.isFinite ? min(315_576_000, max(1, retryAfter)) : 1
         let proposedJitter = retryJitter(), jitter = proposedJitter.isFinite ? min(1, max(0, proposedJitter)) : 0.25
-        let proposed = clock.now + .seconds(base + jitter)
+        let proposed = readNow() + .seconds(base + jitter)
         throttleUntil = max(throttleUntil ?? proposed, proposed)
         let failure = throttlingError() ?? .throttled(retryAfter: base + jitter)
         let ids = Dictionary(uniqueKeysWithValues: failedReads.map { ($0.key, $0.demandID) })
@@ -1169,11 +1176,11 @@ public actor V2ProfilePresentationRepository {
         }
     }
     private func seconds(_ until: ContinuousClock.Instant) -> TimeInterval {
-        let remaining = clock.now.duration(to: until).components
+        let remaining = readNow().duration(to: until).components
         return max(0, Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18)
     }
     private func throttlingError() -> V2ProfilePresentationError? {
-        guard let until = throttleUntil, until > clock.now else { throttleUntil = nil; return nil }
+        guard let until = throttleUntil, until > readNow() else { throttleUntil = nil; return nil }
         return .throttled(retryAfter: seconds(until))
     }
     private func complete(_ key: V2ProfileViewLookupKey, activation: V2ProfilePageActivation? = nil,
@@ -1190,7 +1197,7 @@ public actor V2ProfilePresentationRepository {
         }
     }
     private func evictUnreferencedAccess() {
-        for key in Array(access.keys) where access[key]!.deadline <= clock.now {
+        for key in Array(access.keys) where access[key]!.deadline <= readNow() {
             removeAccess(key); revokeGrants(key)
         }
         let granted = activations.values.reduce(into: Set<V2ProfileViewLookupKey>()) { $0.formUnion($1.grants.keys) }

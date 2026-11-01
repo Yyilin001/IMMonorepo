@@ -1,0 +1,164 @@
+{
+  "date": "2026-11-01",
+  "reportTimezone": "Asia/Shanghai",
+  "issue": "G10",
+  "status": "passed",
+  "environment": "isolated Linux arm64 Swift 6.4 jammy container, root identity; production image was not deployed",
+  "engineVersion": "ClamAV 1.4.6/28170/Sat Oct 31 06:24:42 2026",
+  "package": {
+    "assets": [
+      {
+        "name": "clamav-1.4.6.linux.aarch64.deb",
+        "browser_download_url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.4.6/clamav-1.4.6.linux.aarch64.deb",
+        "size": 89947786,
+        "digest": "sha256:a29cc95aeb225f0dc1b99024b49f1cc109502cb17aaf168637d0901aa9674fe8",
+        "actualSHA256": "a29cc95aeb225f0dc1b99024b49f1cc109502cb17aaf168637d0901aa9674fe8",
+        "verifiedBytes": 89947786
+      },
+      {
+        "name": "clamav-1.4.6.linux.aarch64.deb.sig",
+        "browser_download_url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.4.6/clamav-1.4.6.linux.aarch64.deb.sig",
+        "size": 801,
+        "digest": "sha256:94736011e84ba3a3b666c2664bf0457c3a8fb54b454b4b3a829246783fad336a",
+        "actualSHA256": "94736011e84ba3a3b666c2664bf0457c3a8fb54b454b4b3a829246783fad336a",
+        "verifiedBytes": 801
+      }
+    ],
+    "publisherKeyURL": "https://raw.githubusercontent.com/Cisco-Talos/clamav-documentation/main/src/manual/cisco-talos.gpg",
+    "publisherKeySHA256": "5bfca75f112f04b89cd992f5f925018e8dfc28e0e7f6e33f6a4c33ed9e29d911",
+    "signingKeyFingerprint": "5BADCA2665EF59DCF8A23D8B707F0DB480836771",
+    "gpgSignatureVerified": true,
+    "extraction": "Official DEB data extracted into the disposable container; no maintainer scripts or daemon startup.",
+    "binariesModified": false
+  },
+  "databaseSource": "One successful FreshClam update from database.clamav.net; all database validation and subsequent reuse checksum checks passed.",
+  "databases": [
+    {
+      "name": "bytecode.cvd",
+      "version": 339,
+      "signatures": 80,
+      "builtAt": "11 Sep 2025 08:29 -0400",
+      "sha256": "6d4aa01f219e988060fc419f495d07f27e0cdf1a2cccc065971da922c76f7ffb",
+      "signatureVerified": true
+    },
+    {
+      "name": "daily.cvd",
+      "version": 28170,
+      "signatures": 355841,
+      "builtAt": "31 Oct 2026 06:24 +0000",
+      "sha256": "189f5d7115c92617c914dd3465d2275a3c7603a6a4d5ffb3d04f5722f96cab8b",
+      "signatureVerified": true
+    },
+    {
+      "name": "main.cvd",
+      "version": 63,
+      "signatures": 3287027,
+      "builtAt": "16 Dec 2025 23:18 +0000",
+      "sha256": "0b2182d229f46981ec8f535382222f7c9dfdd656b250ad47988b910a8d302365",
+      "signatureVerified": true
+    }
+  ],
+  "validation": {
+    "passed": true,
+    "methodsPassed": 2,
+    "failures": 0,
+    "skipped": 0,
+    "seconds": 17.209,
+    "suites": 1,
+    "methods": [
+      {
+        "classname": "IMV2LinuxMediaValidationTests.V2ClamAVLiveTests",
+        "name": "configuredEngineRejectsMissingSignatures()",
+        "time": "0.005716291"
+      },
+      {
+        "classname": "IMV2LinuxMediaValidationTests.V2ClamAVLiveTests",
+        "name": "configuredEngineScansVerifiedResources()",
+        "time": "17.202977717"
+      }
+    ],
+    "xunitSHA256": "6559df725636041581c85717393824517b159571b1a2df1670a65e8eb4e7bcf7"
+  },
+  "sourceSHA256": {
+    "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2ClamAVProcess.swift": "ffbfe0721f204f9c82b7c8cad609e634516c2366224c8467c874e13c427052f7",
+    "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2ClamAVResourceScanner.swift": "6518e069d8cfe3c3071d5b276753d214c5c44b533730ff4523127c1f2b0cd261",
+    "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceStorage.swift": "14425fd4b86b2a71a4985a4833ab51673301371d6544109756ace87b5c24fc02",
+    "IMV2Server/Tests/IMV2ServerTests/V2ClamAVLiveTests.swift": "21572c7ee8ac62ea56f6b2bb83159cbd67c131ec632d8ffeed91f5d3c1290790"
+  },
+  "hostInstallation": false,
+  "daemonStarted": false,
+  "setupNotes": {
+    "initialGPGImportExitCode": 2,
+    "retryGPGImportExitCode": 0,
+    "initialImportStderrRetained": false,
+    "independentSignatureVerificationPassed": true,
+    "preparedControllerStoppedIntentionallyBeforeTestEntryPointSwitch": true,
+    "signatureUpdateRuns": 1
+  },
+  "excludes": [
+    "production container installation and service account",
+    "scheduled signature updates, stale-database recovery and operations",
+    "malware coverage or false-positive rates",
+    "large object, concurrency, memory, disk, queue or latency budgets",
+    "CDN acceptance",
+    "full Server test gate"
+  ],
+  "artifacts": "build/reports/2026-11-01-feature-audit/repair-logs/linux-clamav-468cc6d0",
+  "testHarness": {
+    "testsCopiedUnchanged": {
+      "V2LocalMediaReadBoundaryTests.swift": "cbf0c2b66f1cc5061d5960c49dc9d757ffe8114d5d3f6dc6054db876a5319fd2",
+      "V2LocalMediaPurgeFenceTests.swift": "a0f042b5b82324c8617b5f7ce07bd896bfa246731eca18106968db2cea766e54",
+      "V2ResourceStorageContractTests.swift": "49fb92fca9642c530870a2c0e69773ed98bcbcaabe2003549d86880a18911a1e",
+      "V2ClamAVLiveTests.swift": "21572c7ee8ac62ea56f6b2bb83159cbd67c131ec632d8ffeed91f5d3c1290790"
+    },
+    "manifestSHA256": "9987fe1272fdcc8752361131183cfd627b82a2f56d50f23959bc4eb56b450c9a",
+    "harness": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/build/reports/2026-11-01-feature-audit/repair-logs/native-crash-46b87730/source/IMV2LinuxMediaValidation",
+    "copiedFixture": {
+      "source": "IMV2Server/Tests/IMV2ServerTests/TestSupport.swift",
+      "type": "V2DictionaryRuntimeEnvironment",
+      "sourceSHA256": "f74f8fd59c52b018a3074d2bbb0085ef42560befeb315c5eafa0e0bd82623ff3",
+      "verbatimDeclarationSHA256": "ba4aefbbec515ebbbe7bed4c6a91890616c7d412b04263263bebca6a42360851",
+      "harnessFileSHA256": "e246dca1b06bec2623bd2a1f55f8c4fa740417ccfe04b250b8c091a8813c7658"
+    }
+  },
+  "dependencies": {
+    "allPinsMatchOriginal": true,
+    "pins": 39,
+    "rejectedInitialChange": "swift-protobuf 1.38.1 -> 1.39.0"
+  },
+  "testProductSHA256": {
+    "IMV2LinuxMediaValidationTests-test-runner": "8cf14e619582f53d2574f0b09cda34647efc548465c26855b1d047a8fda5a31b",
+    "IMV2LinuxMediaValidationTests.so": "38db7cfd9e0cf7861cd3ca900327354a196d23282119ac81089bdd2d6e2d5e8e"
+  },
+  "fullServerTestGatePassed": false,
+  "cleanup": {
+    "containers": [
+      {
+        "name": "imv2-native-audit-41181282-clamav",
+        "exitCode": 0,
+        "running": false
+      },
+      {
+        "name": "imv2-native-audit-41181282-media",
+        "exitCode": 137,
+        "running": false
+      },
+      {
+        "name": "imv2-native-audit-41181282-media-focused",
+        "exitCode": 0,
+        "running": false
+      }
+    ],
+    "controlledBuildCancellation": [
+      "imv2-native-audit-41181282-media"
+    ],
+    "containersRemoved": true,
+    "volumesRemoved": true,
+    "vmDeleted": true,
+    "buildCacheRetained": false,
+    "completedAt": "2026-10-31T23:22:46.661084+00:00",
+    "currentDockerContext": "default",
+    "temporaryDebRemoved": true,
+    "signatureDatabasesRemoved": true
+  }
+}

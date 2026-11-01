@@ -21,36 +21,29 @@ public struct V2LocalFilesystemStagedUpload: V2StagedMediaFile {
     fileprivate let expectedByteCount: Int64
 }
 
-/// 本地开发下载目标授权通过后返回的文件元数据。
-///
-/// 字节边缘会流式转发该文件，而不是把内容完整读入进程内存。
+/// An authorized open file. Neither hashing nor streaming resolves its path again.
 public struct V2LocalFilesystemDownloadedObject: V2DownloadedMediaFile {
-    public let fileURL: URL
-    public let byteCount: Int64
+    private let file: V2PinnedLocalMediaFile
+    public var byteCount: Int64 { file.byteCount }
+    init(file: V2PinnedLocalMediaFile) { self.file = file }
 
     public func strongETag() async throws -> String {
-        try Task.checkCancellation()
-        let file = fileURL
-        // FileHandle reads are blocking. Keep them outside the HTTP actor and
-        // explicitly transfer cancellation to this owned hashing task.
-        let hashing = Task.detached(priority: .utility) {
-            let handle = try FileHandle(forReadingFrom: file)
-            defer { try? handle.close() }
-            var hash = SHA256()
-            while let bytes = try handle.read(upToCount: 128 * 1024), !bytes.isEmpty {
-                try Task.checkCancellation()
-                hash.update(data: bytes)
-            }
-            let hex = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        let file = file
+        return try await V2PinnedLocalMediaFile.blocking {
+            let hex = try file.digest().map { String(format: "%02x", $0) }.joined()
             return "\"\(hex)\""
         }
-        return try await withTaskCancellationHandler {
-            let result = try await hashing.value
-            try Task.checkCancellation()
-            return result
-        } onCancel: {
-            hashing.cancel()
-        }
+    }
+
+    public func readChunk(offset: Int64, maximumBytes: Int) async throws -> Data {
+        let file = file
+        return try await V2PinnedLocalMediaFile.blocking { try file.read(offset: offset, maximumBytes: maximumBytes) }
+    }
+
+    func stream() -> V2ResourceByteStream { file.stream() }
+    func allBytes() async throws -> Data {
+        let file = file
+        return try await V2PinnedLocalMediaFile.blocking { try file.allBytes() }
     }
 }
 
@@ -84,7 +77,7 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
         signingKey: Data,
         now: @escaping @Sendable () -> Date = Date.init
     ) throws {
-        guard signingKey.count >= 32,
+        guard rootDirectory.isFileURL, signingKey.count >= 32,
               targetBaseURL.scheme?.lowercased() == "https",
               targetBaseURL.host != nil,
               targetBaseURL.query == nil,
@@ -190,20 +183,11 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
     public func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2ResourceTransferPlan {
         _ = try validatedExpiryMilliseconds(expiresAt)
         let objectURL = try objectURL(for: mediaID)
-        let byteCount = try await Self.performBlocking { () throws -> Int64 in
-            try Self.requireNotPurged(objectURL)
-            guard FileManager.default.fileExists(atPath: objectURL.path) else {
-                throw V2LocalFilesystemMediaProviderError.objectUnavailable
-            }
-            let attributes = try FileManager.default.attributesOfItem(atPath: objectURL.path)
-            guard let size = attributes[.size] as? NSNumber else {
-                throw V2LocalFilesystemMediaProviderError.objectUnavailable
-            }
-            return size.int64Value
+        let file = try await V2PinnedLocalMediaFile.blocking {
+            try V2PinnedLocalMediaFile(file: objectURL, purgeMarkerDirectory: ".object-state")
         }
-        let digest = try await Self.performBlocking {
-            try ForwardMediaFileIO.digest(objectURL, byteCount: byteCount)
-        }
+        let byteCount = file.byteCount
+        let digest = try await V2PinnedLocalMediaFile.blocking { try file.digest() }
         let checksum = try V2ResourceChecksum(value: digest.map { String(format: "%02x", $0) }.joined())
         _ = try validatedExpiryMilliseconds(expiresAt)
         let instant = now()
@@ -360,7 +344,7 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
     /// - Parameters:
     ///   - mediaID: 目标媒体标识。
     ///   - targetURL: 客户端提交的已签名目标地址。
-    /// - Returns: 文件地址与字节数。
+    /// - Returns: 已打开的文件及字节数；后续读取不再解析路径。
     /// - Throws: 目标签名不合法、已过期或对象不可读时抛出。
     public func downloadedObject(
         mediaID: MediaID,
@@ -368,18 +352,11 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
     ) async throws -> V2LocalFilesystemDownloadedObject {
         let claims = try verify(targetURL: targetURL, kind: .download, mediaID: mediaID)
         let objectURL = try objectURL(for: mediaID)
-        let byteCount = try await Self.performBlocking { () throws -> Int64 in
-            try Self.requireNotPurged(objectURL)
-            guard FileManager.default.fileExists(atPath: objectURL.path) else {
-                throw V2LocalFilesystemMediaProviderError.objectUnavailable
-            }
-            let attributes = try FileManager.default.attributesOfItem(atPath: objectURL.path)
-            guard let size = attributes[.size] as? NSNumber,
-                  size.int64Value == claims.byteCount
-            else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
-            return size.int64Value
+        let file = try await V2PinnedLocalMediaFile.blocking {
+            try V2PinnedLocalMediaFile(file: objectURL, purgeMarkerDirectory: ".object-state")
         }
-        return .init(fileURL: objectURL, byteCount: byteCount)
+        guard file.byteCount == claims.byteCount else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+        return .init(file: file)
     }
 
     /// 读取已授权下载目标的完整字节，仅供扫描等本地用途。
@@ -394,9 +371,7 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
     /// - Throws: 目标不合法或读取失败时抛出。
     public func readDownloadedObject(mediaID: MediaID, targetURL: URL) async throws -> Data {
         let object = try await downloadedObject(mediaID: mediaID, targetURL: targetURL)
-        return try await Self.performBlocking {
-            try Data(contentsOf: object.fileURL, options: [.mappedIfSafe])
-        }
+        return try await object.allBytes()
     }
 
     /// 持久标记媒体已删除并移除对象；迟到提交不能恢复它，调用方仍负责释放暂存文件。
@@ -433,12 +408,8 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
     /// - Throws: 媒体标识非法或对象不存在时抛出。
     public func localBytesForScanning(mediaID: MediaID) async throws -> Data {
         let objectURL = try objectURL(for: mediaID)
-        return try await Self.performBlocking {
-            try Self.requireNotPurged(objectURL)
-            guard FileManager.default.fileExists(atPath: objectURL.path) else {
-                throw V2LocalFilesystemMediaProviderError.objectUnavailable
-            }
-            return try Data(contentsOf: objectURL, options: [.mappedIfSafe])
+        return try await V2PinnedLocalMediaFile.blocking {
+            try V2PinnedLocalMediaFile(file: objectURL, purgeMarkerDirectory: ".object-state").allBytes()
         }
     }
 
@@ -460,14 +431,6 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
         }
         defer { _ = flock(descriptor, LOCK_UN) }
         return try action(directory.appendingPathComponent(object.lastPathComponent + ".purged"))
-    }
-
-    private nonisolated static func requireNotPurged(_ object: URL) throws {
-        let marker = object.deletingLastPathComponent().appendingPathComponent(".object-state", isDirectory: true)
-            .appendingPathComponent(object.lastPathComponent + ".purged")
-        guard !FileManager.default.fileExists(atPath: marker.path) else {
-            throw V2LocalFilesystemMediaProviderError.objectUnavailable
-        }
     }
 
     private func signedTarget(

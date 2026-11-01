@@ -85,18 +85,24 @@ extension V2OSSClient {
             headers: ["x-oss-meta-im-deleted": "true", "x-oss-object-acl": "private", "content-type": "application/octet-stream"])
         try Self.require(response)
     }
-    func read(key: String, expectedBytes: Int64, expectedHash: Data? = nil) async throws -> V2ResourceByteStream {
+    func read(key: String, expectedBytes: Int64, expectedHash: Data? = nil, expectedETag: String? = nil) async throws -> V2ResourceByteStream {
         let head = try await head(key: key)
         guard head.byteCount == expectedBytes else { throw V2ResourceProviderError.integrityMismatch }
-        let reader = V2OSSRangeReader(client: self, key: key, size: expectedBytes, etag: head.etag, expectedHash: expectedHash)
+        guard expectedETag == nil || head.etag == expectedETag else { throw V2ResourceProviderError.preconditionFailed }
+        let reader = V2OSSRangeReader(size: expectedBytes, etag: head.etag, expectedHash: expectedHash) { start, end in
+            try await self.request("GET", key: key,
+                headers: ["range": "bytes=\(start)-\(end)", "if-match": head.etag],
+                maximumResponseBytes: V2OSSRangeReader.maximumRangeBytes)
+        }
         return .init { try await reader.next() }
     }
 }
 
-/// Each pull has a hard response bound. ETag fences ranges; SHA-256 validates content.
-private actor V2OSSRangeReader {
-    let client: V2OSSClient
-    let key: String
+/// Fetch bounded 1 MiB ranges and expose the storage port's 64 KiB chunks.
+/// ETag fences every range; SHA-256 validates the complete object.
+actor V2OSSRangeReader {
+    static let maximumRangeBytes = 1_024 * 1_024
+    private let readRange: @Sendable (Int64, Int64) async throws -> V2OSSResponse
     let size: Int64
     let etag: String
     let expectedHash: Data?
@@ -104,29 +110,40 @@ private actor V2OSSRangeReader {
     var hash = SHA256()
     var reading = false
     var failed = false
-    init(client: V2OSSClient, key: String, size: Int64, etag: String, expectedHash: Data?) {
-        self.client = client; self.key = key; self.size = size; self.etag = etag; self.expectedHash = expectedHash
+    private var buffer = Data()
+    private var bufferOffset = 0
+    init(size: Int64, etag: String, expectedHash: Data?,
+         readRange: @escaping @Sendable (Int64, Int64) async throws -> V2OSSResponse) {
+        self.size = size; self.etag = etag; self.expectedHash = expectedHash; self.readRange = readRange
     }
     func next() async throws -> Data? {
         try Task.checkCancellation()
         guard !reading, !failed else { throw V2ResourceProviderError.preconditionFailed }
-        guard offset < size else { return nil }
+        guard offset < size || bufferOffset < buffer.count else { return nil }
         reading = true
         defer { reading = false }
         do {
-            let end = min(size - 1, offset + 65_535)
-            let response = try await client.request("GET", key: key,
-                headers: ["range": "bytes=\(offset)-\(end)", "if-match": etag])
-            try V2OSSClient.require(response, statuses: [206])
-            guard response.headers["content-range"] == "bytes \(offset)-\(end)/\(size)",
-                  response.headers["etag"] == etag, Int64(response.body.count) == end - offset + 1
-            else { throw V2ResourceProviderError.integrityMismatch }
-            hash.update(data: response.body)
-            offset = end + 1
-            if offset == size, let expectedHash, Data(hash.finalize()) != expectedHash {
-                throw V2ResourceProviderError.integrityMismatch
+            if buffer.isEmpty {
+                let length = min(size - offset, Int64(Self.maximumRangeBytes))
+                let end = offset + length - 1
+                let response = try await readRange(offset, end)
+                try Task.checkCancellation()
+                try V2OSSClient.require(response, statuses: [206])
+                guard response.headers["content-range"] == "bytes \(offset)-\(end)/\(size)",
+                      response.headers["etag"] == etag, Int64(response.body.count) == length
+                else { throw V2ResourceProviderError.integrityMismatch }
+                hash.update(data: response.body)
+                offset = end + 1
+                if offset == size, let expectedHash, Data(hash.finalize()) != expectedHash {
+                    throw V2ResourceProviderError.integrityMismatch
+                }
+                buffer = response.body
             }
-            return response.body
-        } catch { failed = true; throw error }
+            let end = min(buffer.count, bufferOffset + 65_536)
+            let chunk = buffer.subdata(in: bufferOffset..<end)
+            bufferOffset = end
+            if bufferOffset == buffer.count { buffer = Data(); bufferOffset = 0 }
+            return chunk
+        } catch { failed = true; buffer = Data(); bufferOffset = 0; throw error }
     }
 }

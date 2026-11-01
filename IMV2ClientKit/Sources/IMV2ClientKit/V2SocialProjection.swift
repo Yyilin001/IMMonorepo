@@ -82,6 +82,8 @@ public struct V2ClientRelationshipPage: Equatable, Sendable {
 public struct V2ClientUserBlockProjection: Equatable, Sendable {
     /// 目标用户。
     public let targetUserID: UserID
+    /// 本人屏蔽记录保存的公开 ID，不代表当前资料读取权限。
+    public let targetHandle: V2PublicHandle?
     /// 当前用户是否已拉黑对方。
     public let isBlocked: Bool
     /// 最近更新时刻。
@@ -91,9 +93,13 @@ public struct V2ClientUserBlockProjection: Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - targetUserID: 目标用户。
+    ///   - targetHandle: 操作时保存的公开 ID；目标没有公开身份时为空。
     ///   - isBlocked: 是否已拉黑。
     ///   - updatedAt: 最近更新时刻。
-    public init(targetUserID: UserID, isBlocked: Bool, updatedAt: Date) { self.targetUserID = targetUserID; self.isBlocked = isBlocked; self.updatedAt = updatedAt }
+    public init(targetUserID: UserID, targetHandle: V2PublicHandle?, isBlocked: Bool, updatedAt: Date) {
+        self.targetUserID = targetUserID; self.targetHandle = targetHandle
+        self.isBlocked = isBlocked; self.updatedAt = updatedAt
+    }
 }
 
 /// 陌生人消息偏好的设备内读模型。

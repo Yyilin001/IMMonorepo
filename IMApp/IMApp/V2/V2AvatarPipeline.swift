@@ -22,11 +22,14 @@ final class V2AvatarPipeline {
     let authors: V2AuthorPresentationPageCoordinator?
     private let files: V2ForegroundConversationMediaDownloader
     private let thumbnails: V2LocalMediaThumbnailCache
+    private let readNow: @Sendable () -> ContinuousClock.Instant
     init(profiles: V2ProfilePresentationRepository, groups: V2GroupAvatarPresentationRepository,
          files: V2ForegroundConversationMediaDownloader, thumbnails: V2LocalMediaThumbnailCache,
-         authors: V2AuthorPresentationPageCoordinator? = nil) {
+         authors: V2AuthorPresentationPageCoordinator? = nil,
+         now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         self.profiles = profiles; self.groups = groups; self.files = files; self.thumbnails = thumbnails
         self.authors = authors
+        self.readNow = now
     }
     private(set) var localDisplay: V2LocalProfileDisplaySnapshot?
     @ObservationIgnored private var localDisplayTask: Task<Void, Never>?
@@ -75,7 +78,7 @@ final class V2AvatarPipeline {
               current.presentation.lease.contextRevision == initial.presentation.lease.contextRevision else { return nil }
         // The name can use a newly observed lease. Pixels retain the exact
         // grant used by the download/decode, including an explicit URL refresh.
-        if let value = decoded, value.deadline <= .now || current.avatar?.hasSameContent(as: value.avatar) != true {
+        if let value = decoded, value.deadline <= readNow() || current.avatar?.hasSameContent(as: value.avatar) != true {
             decoded = nil; retryAt = avatarRetryDeadline()
         }
         return .init(key: key, name: current.presentation.contactAlias?.remarkName ?? current.presentation.groupMember?.groupNickname ?? current.presentation.view.publicIdentity?.displayName ?? "用户",
@@ -111,7 +114,7 @@ final class V2AvatarPipeline {
             throw V2GroupAvatarPresentationError.inactive
         }
         guard !isClosed, !isSuspending, generation == startedGeneration else { throw V2GroupAvatarPresentationError.inactive }
-        if let value = decoded, value.deadline <= .now || current.avatar?.hasSameContent(as: value.avatar) != true {
+        if let value = decoded, value.deadline <= readNow() || current.avatar?.hasSameContent(as: value.avatar) != true {
             decoded = nil; retryAt = avatarRetryDeadline()
         }
         return .init(image: decoded?.image, deadline: min(decoded?.deadline ?? deadline, deadline), avatarRetryAt: retryAt)
@@ -160,7 +163,7 @@ final class V2AvatarPipeline {
             }
         } else { requested = 0 }
         let bounded = requested.isFinite ? min(315_576_000, max(0, requested)) : 0
-        return .now + .seconds(max(bounded, Double.random(in: 2.5...3.5)))
+        return readNow() + .seconds(max(bounded, Double.random(in: 2.5...3.5)))
     }
     func suspend() async {
         guard !isClosed, !isSuspending else { return }

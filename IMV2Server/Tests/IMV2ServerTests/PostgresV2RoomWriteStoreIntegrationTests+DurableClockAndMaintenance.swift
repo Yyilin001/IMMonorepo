@@ -838,7 +838,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if schedule == "retry" || schedule == "paused" {
                 try await scans.scheduleRetry(lease, disposition: schedule == "retry" ? .retry(at: base.addingTimeInterval(60)) : .pause, now: base.addingTimeInterval(3))
                 let released = try await snapshot()
-                try await scans.complete(lease, result: result, now: completedAt)
+                await #expect(throws: V2MediaScanWorkerError.leaseLost) {
+                    try await scans.complete(lease, result: result, now: completedAt)
+                }
                 #expect(try await snapshot() == released)
                 #expect(try await scans.claimPending(now: base.addingTimeInterval(59), leaseDuration: 30, limit: 1).isEmpty)
                 if schedule == "paused" {

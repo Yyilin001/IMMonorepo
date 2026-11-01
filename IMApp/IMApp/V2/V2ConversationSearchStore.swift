@@ -34,6 +34,11 @@ final class V2ConversationSearchStore {
     private var loadedRequest: V2MessageSearchRequest?
     private var cursor: V2MessageSearchCursor?
 
+    private var hasSearchCriteria: Bool {
+        if case .sender = scope { return true }
+        return !query.isEmpty || contentFilter != .all || senderFilter != nil
+    }
+
     var query = ""
     var contentFilter: V2MessageSearchContentFilter = .all
     private(set) var senderFilter: UserID?
@@ -60,7 +65,7 @@ final class V2ConversationSearchStore {
         canLoadMore = false
         hits = []
         isCatchingUp = false
-        guard !query.isEmpty || contentFilter != .all else {
+        guard hasSearchCriteria else {
             state = .idle
             canLoadMore = false
             return
@@ -172,7 +177,7 @@ final class V2ConversationSearchStore {
                 guard !Task.isCancelled else { return }
                 guard snapshot != previous else { continue }
                 previous = snapshot
-                guard !query.isEmpty || contentFilter != .all else { continue }
+                guard hasSearchCriteria else { continue }
                 switch snapshot.state {
                 case .ready:
                     await search()

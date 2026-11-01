@@ -1,6 +1,6 @@
 # 房间分布式 Actor 当前合同
 
-本文描述已落地并完成验收的原生归属控制实现。房间数据库租约、逐房间续租和租约行围栏已经移除；不提供旧实现的兼容运行模式。核心控制、正常排空、真实崩溃接管和监督部署代次替换已验证。控制回执滚动归档已实现；监督代次记录回收和最新 Linux 部署验证均已完成；本次没有执行性能压测。
+本文描述已落地的原生归属控制实现。房间数据库租约、逐房间续租和租约行围栏已经移除；不提供旧实现的兼容运行模式。核心控制、正常排空、真实崩溃接管、控制回执滚动归档和监督代次记录回收已有分层证据。2026-11-01 已用当前冻结源码完成隔离 Linux 多进程崩溃演练；生产多机拓扑与容量验收仍开放。
 
 ## 模块与调用边界
 
@@ -110,11 +110,11 @@ Supervisor 串行持有一个长期 `V2RoomHostControlSession`，用于检查、
 
 监督代次记录回收已接入：成功监控轮次后仅处理已被新实例替换、且不再被注册/Owner/迁移/待恢复意图引用的旧代次。重新核对 Docker 不可逆排除和全部 SQL 会话收尾后，原子修改可写私有部署文档，记录完整绑定及稳定删除 ID；关闭实际文件工作后删除准确旧文件并同步目录。中途重启先继续删除队列，再放行启动。当前和待删除条目合计上限 256，已完成历史不持续累积。最新文件占用拒删及两种删除中断检查通过。
 
-**改造已完成。** 当前生产源码与冻结的 Linux 构建源码逐文件一致；Gateway、Account、Operator、控制节点、监督服务及业务验收入口的六个 Release 产品均编译成功。最新协议下，真实提交后崩溃、数据库收尾阻断、监督服务重启、未知发送重放、显式代次替换及旧记录实际回收均通过。证据见 `/private/tmp/imv2-native-supervisor-final-20261012/completion-audit.json` 和 `run-11.json`。没有执行压测，不由功能验收推导容量。
+**原生归属控制改造已落地。** 2026-11-01 将当前四个服务端相关目录冻结并逐文件核对，在固定 Swift 镜像中构建控制节点、监督服务及业务探针三个 Linux arm64 Release 产品。真实提交后崩溃、数据库收尾阻断、监督服务重启、未知发送重放、显式代次替换及旧记录实际回收均通过，见[本轮证据](../verification/native-host-crash-20261101.json)。本轮没有重新构建 Gateway、Account、Operator，也没有执行整套测试或压力测试；2026-10-12 的六产物构建与应用栈记录属于历史专项证据。
 
 ## 实际验证证据
 
-仅运行受影响检查；本次没有吞吐负载或压力测试。已通过的非相关检查不重复运行。
+下表汇总分层证据。2026-11-01 仅重跑崩溃与代次替换脚本；数据库短断连、正常忙碌退出、异常文件和控制日志等独立专项沿用各自历史记录，没有扩大为本轮全部通过。
 
 | 场景 | 实际结果 |
 | --- | --- |
@@ -131,6 +131,6 @@ Supervisor 串行持有一个长期 `V2RoomHostControlSession`，用于检查、
 | 控制日志按载荷压缩 | 未满条数时可按载荷压缩；未完成的回复阻止压缩，恢复后保留原成功证明 |
 | 全部 Host 已退役且待迁移后继失效 | 不授予虚假归属；取消失效引用后，新代次注册并接管，针对性检查通过 |
 
-真实崩溃与代次替换入口为 `IMV2/scripts/test_v2_native_host_crash.py`，要求随机独立 `colima-imv2-native-*` context、固定源快照及三个成功构建的 Linux Release 产品摘要。最新结果保存在 `/private/tmp/imv2-native-supervisor-final-20261012/run-11.json`，`crashTakeoverVerified`、`supervisorRestartResumed`、`generationReplacementVerified`、`generationRetentionVerified` 均为 true；该轮容器、网络和私有配置均已清理。R9 是滚动归档前的旧证据，R10 在构建摘要校验阶段拒绝启动，没有进入运行时验证；不能把它们当作本轮通过记录。
+真实崩溃与代次替换入口为 `IMV2/scripts/test_v2_native_host_crash.py`，要求随机独立 `colima-imv2-native-*` context、固定源快照及三个成功构建的 Linux Release 产品摘要。[2026-11-01 结果](../verification/native-host-crash-20261101.json)中的崩溃接管、Supervisor 重启续作、代次替换、旧记录回收和短暂断网不授予归属均通过。三个 Placement 投票进程、两个 Host、Supervisor、PostgreSQL 与探针运行在同一隔离 Linux 虚拟机；故障由实际进程强杀、数据库暂停和 Docker 网络断开触发。该证据不替代生产多机分区、主机失效、持续负载或真实 App/Gateway 全链路验收。演练容器、网络和私有配置已清理；此前保留的虚拟机与构建缓存已在后续 G06/G10 验证完成后删除，最终清理记录见[Linux 读取证据](../verification/local-media-linux-20261101.json)。
 
 之前通过的数据库边界证据为 `/private/tmp/imv2-native-database-edges-20261012/edge-result/result.json`；完整 Linux 正常停机及应用栈证据为 `/private/tmp/imv2-native-linux-app-20261012/runs/run-bed1a6c43f4b4ac199a0e7e3e6ffecab/result.json`。它们分别证明自己的场景；当前崩溃证据单独取得，不由旧正常退出结果推导。

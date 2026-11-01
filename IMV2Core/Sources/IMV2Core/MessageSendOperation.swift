@@ -49,7 +49,7 @@ public struct V2MessageSendOperationCommand:Equatable,Codable,Sendable {
     }
 }
 public enum V2MessageSendOperationRejection:String,Equatable,Codable,Sendable {
-    case expiredUnsubmitted,permissionDenied,roomNotFound,invalidContent,directPolicyDenied
+    case expiredUnsubmitted,permissionDenied,roomNotFound,invalidContent,directPolicyDenied,closedUnsubmitted
 }
 public enum V2MessageSendOperationTerminalOutcome:Equatable,Codable,Sendable {
     /// Acceptance is not delivery, reading, or moderation approval.
@@ -76,14 +76,16 @@ public struct V2MessageSendOperationRecoveryRequest:Equatable,Codable,Sendable {
     public let identity:V2OperationIdentity
     public let fingerprint:V2OperationFingerprint
     public let domainFingerprint:V2SendMessageFingerprint
-    public init(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,domainFingerprint:V2SendMessageFingerprint) throws {
+    public let action: V2OperationRecoveryRequest.Action
+    public init(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,domainFingerprint:V2SendMessageFingerprint,
+                action: V2OperationRecoveryRequest.Action = .query) throws {
         guard identity.kind == .sendMessage else { throw V2MessageOperationValidationError.invalidKind }
-        self.identity=identity;self.fingerprint=fingerprint;self.domainFingerprint=domainFingerprint
+        self.identity=identity;self.fingerprint=fingerprint;self.domainFingerprint=domainFingerprint;self.action=action
     }
-    private enum CodingKeys:String,CodingKey { case identity,fingerprint,domainFingerprint }
+    private enum CodingKeys:String,CodingKey { case identity,fingerprint,domainFingerprint,action }
     public init(from decoder:any Decoder) throws {
         let v=try decoder.container(keyedBy:CodingKeys.self)
-        try self.init(identity:v.decode(V2OperationIdentity.self,forKey:.identity),fingerprint:v.decode(V2OperationFingerprint.self,forKey:.fingerprint),domainFingerprint:v.decode(V2SendMessageFingerprint.self,forKey:.domainFingerprint))
+        try self.init(identity:v.decode(V2OperationIdentity.self,forKey:.identity),fingerprint:v.decode(V2OperationFingerprint.self,forKey:.fingerprint),domainFingerprint:v.decode(V2SendMessageFingerprint.self,forKey:.domainFingerprint),action:v.decode(V2OperationRecoveryRequest.Action.self,forKey:.action))
     }
 }
 public enum V2MessageSendOperationRecoveryResult:Equatable,Codable,Sendable {

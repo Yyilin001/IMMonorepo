@@ -848,15 +848,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 await #expect(throws: V2SchemaReadinessError.self) {
                     try await V2SchemaReadiness.verify(database: resources.database(.psql))
                 }
-                try await sql.raw("INSERT INTO im_v2.control_housekeeping_cursor VALUES (true, 8)").run()
+                try await sql.raw("INSERT INTO im_v2.control_housekeeping_cursor VALUES (true, 0)").run()
                 let store = PostgresV2ControlPlaneHousekeepingStore(database: resources.database(.psql))
                 try await sql.raw("CREATE FUNCTION im_v2.fail_housekeeping() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'cleanup rollback fixture'; END; $$").run()
                 try await sql.raw("CREATE TRIGGER fail_housekeeping BEFORE DELETE ON im_v2.user_live_presence_leases FOR EACH ROW EXECUTE FUNCTION im_v2.fail_housekeeping()").run()
                 await #expect(throws: (any Error).self) {
-                    try await store.purgeTerminal(now: base, retention: 60, idempotencyRetention: retention, limit: 1)
+                    // Give every category a budget so this rollback assertion
+                    // does not depend on the presence category's numeric slot.
+                    try await store.purgeTerminal(now: base, retention: 60, idempotencyRetention: retention, limit: 1_024)
                 }
-                #expect(try await count("im_v2.control_housekeeping_cursor WHERE rotation = 8", on: sql) == 1)
+                #expect(try await count("im_v2.control_housekeeping_cursor WHERE rotation = 0", on: sql) == 1)
                 #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 1)
+                #expect(try await count("im_v2.device_session_operations", on: sql) == 1)
                 try await sql.raw("DROP TRIGGER fail_housekeeping ON im_v2.user_live_presence_leases").run()
                 try await sql.raw("UPDATE im_v2.control_housekeeping_cursor SET rotation = 0").run()
                 async let first = store.purgeTerminal(now: base, retention: 60, idempotencyRetention: retention, limit: 1)

@@ -1,0 +1,310 @@
+{
+  "observedAt": "2026-10-31T23:43:40.891088+00:00",
+  "issues": [
+    "J28",
+    "K03"
+  ],
+  "scope": "Limited iPad simulator navigation, native tabs/menus, mock chat, rotation and draft retention; full platform and physical-device acceptance remains open",
+  "gitCommit": "186bb3546695cd74b2eec7c08db1a04dd4f7faeb",
+  "workingTreeDirty": true,
+  "platform": {
+    "CFBundleIdentifier": "com.stskcxfz.imapp",
+    "MinimumOSVersion": "26.2",
+    "UIDeviceFamily": [
+      1,
+      2
+    ],
+    "UISupportedInterfaceOrientations": [
+      "UIInterfaceOrientationPortrait",
+      "UIInterfaceOrientationLandscapeLeft",
+      "UIInterfaceOrientationLandscapeRight"
+    ],
+    "UISupportedInterfaceOrientations~ipad": [
+      "UIInterfaceOrientationPortrait",
+      "UIInterfaceOrientationPortraitUpsideDown",
+      "UIInterfaceOrientationLandscapeLeft",
+      "UIInterfaceOrientationLandscapeRight"
+    ],
+    "supportsMultipleScenes": false,
+    "builtInfoPlistSHA256": "5152bfd453f28b42ad6bd399c9966f0b35334bbb49170547bb7e23820654e8db"
+  },
+  "device": {
+    "model": "iPad Pro 11-inch (M5)",
+    "runtime": "iOS Simulator 27.0 (24A434)",
+    "architecture": "arm64",
+    "physical": false,
+    "orientation": "portrait",
+    "multiWindowEnabled": false
+  },
+  "before": {
+    "evidenceDirectory": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-bc1738b8",
+    "requestedMethods": 2,
+    "loggedMethodPasses": 1,
+    "loggedMethodFailures": 1,
+    "testMethodSeconds": 36.072,
+    "failure": "Navigation completed; the final selection assertion could not find a TabBar accessibility container. iPad exposes floating tab item cells.",
+    "passedMethodInLog": "testGroupCreationFromContactsCanCancelWithoutChangingNavigation",
+    "overallProcessExitCode": -9,
+    "overallGatePassed": false,
+    "resultCollectionInterrupted": true,
+    "interruptionEvidence": "collection-interruption.json",
+    "sourceChangeTiming": "source-change-timing.json"
+  },
+  "change": {
+    "file": "IMApp/IMAppUITests/IMAppGlassPresentationUITests.swift",
+    "behavior": "Preserve the selected Contacts assertion using matching accessibility descendants; remove the phone-specific TabBar container assumption.",
+    "productRuntimeChanged": false,
+    "beforeSHA256": "d789ef30996f0b10bf5402eb71954c290c1a4b310bfb6e61f4ec05f68b42aadb",
+    "afterSHA256": "4366f10c299428804815ff686b94f40fe3e76bd5c0066df4c9f3bffc954bfe63"
+  },
+  "after": {
+    "evidenceDirectory": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-0a61b82c",
+    "selectedMethod": "IMAppGlassPresentationUITests/testContactsGroupsNavigateToChatSettingsAndBackToDirectory",
+    "exitCode": 0,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "methodSeconds": 18.477,
+    "commandSeconds": 54.032,
+    "sourceInputsUnchanged": true,
+    "sourceInputCount": 895,
+    "sourceManifestSHA256": "00cd06565ebc0f171023e7d7fa76466bd131086bd9dbf0efb9a2e5af5ca1e361",
+    "resultBundle": "result.xcresult",
+    "structuredSummary": "test-summary.json",
+    "verboseFailureDiagnostics": "disabled"
+  },
+  "visualReview": {
+    "screenshot": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-0a61b82c/attachments/93980E66-AD6A-4DEA-B74B-FD6FAB046175.png",
+    "sha256": "b409acc49234721109ac72f95c4c9da5b43718192a363a6ca1f268cc2ebb9f0e",
+    "viewedAtOriginalResolution": true,
+    "finding": "The captured portrait group directory has readable labels and aligned rows, with no observed overlap or clipping. The screenshot is of this page only."
+  },
+  "cleanup": {
+    "ownedSimulatorsDeleted": 2,
+    "ownedIdentifiersAbsentFromInventory": true,
+    "unrelatedSimulatorsModified": false,
+    "firstShutdownExitCode": 0,
+    "secondShutdownExitCode": 149,
+    "bothDeleteExitCodes": 0
+  },
+  "notValidated": [
+    "iPad split-screen and resizing",
+    "orientation changes",
+    "scene reconstruction and OS background ownership",
+    "physical devices",
+    "multiwindow (disabled in current configuration)",
+    "real accounts or providers",
+    "full App or Server suites"
+  ],
+  "checks": {
+    "documentationLinks": "passed",
+    "documentationStructure": "passed",
+    "diffWhitespace": "passed"
+  },
+  "initialValidationNote": "The before/after fields above describe the earlier single-assertion repair. The follow-up below records the final shared tab/menu locator changes and their separate focused runs.",
+  "tabAndMenuFollowup": {
+    "observedAt": "2026-10-31T23:53:57.505218+00:00",
+    "scope": "Three existing UI methods affected by tab/menu accessibility representation; mock data and portrait iPad simulator only",
+    "changes": [
+      "Shared tab query accepts native buttons or floating item cells without requiring a TabBar container",
+      "The chat test first proves the selected root tab is interactive, then verifies it is no longer interactive after pushing the conversation",
+      "Native menu actions are found by their actual Chinese labels; the group action is opened and cancelled, and the composer menu is inspected"
+    ],
+    "productRuntimeChanged": false,
+    "firstRun": {
+      "path": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-49cee698",
+      "exitCode": 65,
+      "passed": 2,
+      "failed": 1,
+      "skipped": 0,
+      "methodSeconds": 60.79,
+      "failure": "Native menu exposed the New Group action with label 新建群聊 but omitted its SwiftUI accessibilityIdentifier; exact hierarchy retained in attachments/B1C9BB78-D374-41B6-81FF-BB96B848BDB5.txt"
+    },
+    "finalAffectedRun": {
+      "path": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-b72c0662",
+      "exitCode": 0,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "methodSeconds": 31.801,
+      "commandSeconds": 66.965
+    },
+    "verifiedUniqueMethods": [
+      {
+        "name": "testContactsGroupsNavigateToChatSettingsAndBackToDirectory",
+        "seconds": 19.503,
+        "evidenceRun": "ipad-ui-49cee698"
+      },
+      {
+        "name": "testRoundUnreadBadgeAndCompactComposerCanSend",
+        "seconds": 19.268,
+        "evidenceRun": "ipad-ui-49cee698"
+      },
+      {
+        "name": "testNativeTabsPrivacyAndChatMenusRemainReachable",
+        "seconds": 31.801,
+        "evidenceRun": "ipad-ui-b72c0662"
+      }
+    ],
+    "validationMode": "Incremental affected-method validation; not one all-green 3-method run and not a full suite",
+    "sourceProof": {
+      "changedSourceInputs": [
+        "IMApp/IMAppUITests/IMAppGlassPresentationUITests.swift"
+      ],
+      "allOtherTestFunctionsAndSharedHelpersUnchanged": true,
+      "currentSourceMatchesFinalRun": true,
+      "ownedSimulatorsAbsentFromInventory": true,
+      "sourceInputCount": 895
+    },
+    "currentTestFileSHA256": "38f5b3851c4c2e0d298da793b74a331f9bb2cc639ae9a660f29ce1b14829a58e",
+    "screenshots": [
+      {
+        "path": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-49cee698/attachments/24CF297E-D5AF-4404-9955-5FF37BC4B256.png",
+        "sha256": "77fa658926d1e15fb0b129673198ee903612d901630570bf5e2eb147be56b8fe",
+        "reviewedAtOriginalResolution": true
+      },
+      {
+        "path": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-b72c0662/attachments/4A2CDE74-4938-48BD-8183-7E447D55F8D8.png",
+        "sha256": "a4a5184dc0dc38f252539af884092388b635abd0697ea0db764296b7717cfa4a",
+        "reviewedAtOriginalResolution": true
+      }
+    ],
+    "visualFinding": "The captured normal-size portrait chat and native composer menu show readable text, no observed overlap/clipping, and no root tab bar on the pushed chat. This does not cover other sizes or layouts.",
+    "cleanup": {
+      "ownedSimulatorsDeleted": 2,
+      "ownedIdentifiersAbsentFromInventory": true,
+      "unrelatedSimulatorsModified": false
+    },
+    "notRun": [
+      "full App or Server suites",
+      "iPad rotation/split screen",
+      "real account or provider calls",
+      "physical device or OS background acceptance"
+    ],
+    "checks": {
+      "documentationLinks": "passed",
+      "documentationStructure": "passed",
+      "diffWhitespace": "passed"
+    }
+  },
+  "rotationFollowup": {
+    "observedAt": "2026-11-01T00:04:36.737713+00:00",
+    "scope": "One existing-screen rotation/state-retention flow on iPad Pro 11-inch (M5), iOS Simulator 27.0; normal text size and mock account data",
+    "newMethod": "testRotationPreservesDraftAndSettingsNavigation",
+    "orientations": [
+      "portrait",
+      "landscapeLeft",
+      "portrait"
+    ],
+    "assertedBehavior": [
+      "Draft value remains unchanged after rotation",
+      "Draft, send, composer-options and chat-settings controls are hittable and within landscape app bounds",
+      "Group settings opens in landscape; returning to portrait and popping settings preserves the draft and usable editor"
+    ],
+    "initialRun": {
+      "path": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-e831d09d",
+      "exitCode": 0,
+      "methodsPassed": 1,
+      "methodSeconds": 21.161,
+      "applicationScopedScreenshot": "Black padding and clipping made the landscape application crop unsuitable for visual acceptance; original image retained."
+    },
+    "finalRun": {
+      "path": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-708f99fa",
+      "exitCode": 0,
+      "methodsPassed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "methodSeconds": 20.899,
+      "commandSeconds": 58.172,
+      "capture": "XCUIScreen.main full-screen snapshots",
+      "functionalAssertionLinesUnchanged": true,
+      "sourceInputsUnchangedDuringRun": true
+    },
+    "layoutFrames": {
+      "window": [
+        0,
+        0,
+        1210,
+        834
+      ],
+      "draft": [
+        82,
+        364,
+        1062,
+        23
+      ],
+      "tools": [
+        1160,
+        36,
+        36,
+        36
+      ],
+      "screenImageSize": [
+        1210,
+        834
+      ],
+      "imageOrientationRawValue": 2,
+      "evidence": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-708f99fa/attachments/4B4D7998-7B66-4CBA-814E-3C2C8AF06DA1.txt"
+    },
+    "visualReview": {
+      "result": "Whole-screen captures show the editor, send action, keyboard and chat toolbar within the screen. Portrait return retains the draft. No observed control clipping or overlap in these two captures.",
+      "screenshots": [
+        {
+          "path": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-708f99fa/attachments/795D7A01-EF04-4093-9BAC-E45702DF9E5A.png",
+          "phase": "landscapeLeft with software keyboard",
+          "nativePNGPixelDimensions": [
+            1668,
+            2420
+          ],
+          "sha256": "c09c443e7870add8b7e2e21fc379d1b686987ac9f17548b357783478014f03fe",
+          "reviewedWithImageOrientation": true
+        },
+        {
+          "path": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-ui-708f99fa/attachments/371EFB58-8D6C-4114-B38D-BDA7D23390EE.png",
+          "phase": "portrait after returning from settings",
+          "nativePNGPixelDimensions": [
+            1668,
+            2420
+          ],
+          "sha256": "a61c83cf9715c6467090f3c3827507e86ebad91571ae83ef073805bb9c259009",
+          "reviewedWithImageOrientation": true
+        }
+      ],
+      "initialCropExcludedFromVisualPass": true
+    },
+    "sourceProof": {
+      "soleRuntimeSourceChange": "New rotation UI-test method with full-screen captures",
+      "existingTestsAndHelpersUnchanged": true,
+      "productRuntimeInputsUnchanged": true,
+      "sourceMatchesExecutedRun": true,
+      "ownedSimulatorsAbsentFromInventory": true,
+      "sourceInputCount": 895
+    },
+    "currentTestFileSHA256": "c2dd9ec7cae76f86d60fe473f4bbbae79e99c35709f577d71e0ddb1a84489b5e",
+    "cleanup": {
+      "ownedSimulatorsDeleted": 2,
+      "ownedIdentifiersAbsentFromInventory": true,
+      "unrelatedDevicesModified": false
+    },
+    "notValidated": [
+      "split-screen/window resizing",
+      "scene destruction and reconstruction",
+      "other orientations or Dynamic Type/RTL combinations",
+      "physical devices",
+      "actual account persistence or system background ownership",
+      "full App/Server suites"
+    ],
+    "checks": {
+      "documentLinks": {
+        "result": "passed",
+        "log": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-rotation-doc-links-20261101.log"
+      },
+      "documentStructure": {
+        "result": "passed",
+        "log": "build/reports/2026-11-01-feature-audit/repair-logs/ipad-rotation-doc-structure-20261101.log"
+      },
+      "gitDiffCheck": "passed",
+      "currentTestSourceMatchesExecutedRun": true
+    }
+  }
+}

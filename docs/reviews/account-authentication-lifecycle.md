@@ -47,6 +47,9 @@ and 503 unavailable or bounded KDF saturation. No endpoint returns secrets.
 The native Account Security page is reachable from the signed-out page and the
 account menu. The client generates a 256-bit recovery code as 64 lowercase hex
 characters and requires the user to save it outside the app before enrollment.
+Registration and Account Security explain that losing both the password and the
+recovery code makes self-service recovery impossible. Account Security provides
+a direct "Set up offline recovery code" action while the user still knows the password.
 Only a domain-separated HMAC digest is stored, using the existing token HMAC key.
 Key rotation therefore also invalidates recovery codes and requires an explicit
 re-enrollment plan. The client does not automatically store codes or copy them to
@@ -61,10 +64,16 @@ security audit are committed together. Concurrent recovery consumes the code
 once. Password changes revoke all sessions and require a fresh login and recovery
 code enrollment.
 
-Responses can be lost after commit. The UI treats network failures as an unknown
-outcome: try the new password after a change/reset, or retry enrollment with the
-same saved code. It never silently generates a replacement or automatically
-retries a mutation. Do not log passwords, recovery codes, request bodies or hashes.
+Responses can be lost after commit. The UI keeps a distinct unknown-outcome state
+for transport failures and cancellation; changing the form mode does not turn it
+into an unsubmitted edit. Cancellation cannot undo a committed mutation or cause
+a late response to sign out a replacement session. After a change/reset, try the
+submitted new password first, and try the old password only if the new one is
+explicitly rejected. For enrollment, preserve and retry the same saved code.
+The client never silently generates a replacement or automatically retries a
+mutation. This guidance belongs to the open form; there is no durable result
+query or persisted password/code for recovering it after the page closes.
+Do not log passwords, recovery codes, request bodies or hashes.
 
 ## Deployment
 
@@ -79,5 +88,9 @@ Unversioned assertions are rejected; interrupted initial logins retry.
 Regression coverage includes distinct registration errors, Retry-After parsing,
 20 concurrent account-budget debits admitting only 3 attempts, password mutation,
 old-password rejection, device-token rejection, old assertion revision rejection,
-and concurrent recovery with exactly one successful consumer. Run database tests
+and concurrent recovery with exactly one successful consumer. A PostgreSQL-backed
+HTTP fixture fails the change response after commit, then verifies that the old
+password gets 401 and the new password gets a login assertion. App store tests
+cover uncertain responses and cancellation without signing out a replacement
+session. Run database tests
 only with an explicitly disposable PostgreSQL database.

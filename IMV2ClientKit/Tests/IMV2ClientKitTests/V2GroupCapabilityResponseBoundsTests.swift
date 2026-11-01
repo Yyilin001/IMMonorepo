@@ -56,6 +56,8 @@ struct V2GroupCapabilityResponseBoundsTests {
         case .announcement(let body, _): .announcement(body: body, revision: revision, roomSequence: sequence)
         case .rolePermissions(let role, let permissions, _): .rolePermissions(role: role, permissions: permissions, revision: revision, roomSequence: sequence)
         case .memberRole(let target, let role, _): .memberRole(targetUserID: target, role: role, membershipRevision: revision, roomSequence: sequence)
+        case .transferOwnership(let target, _): .ownershipTransferred(previousOwnerUserID: command.identity.accountID, ownerUserID: target, membershipRevision: revision, roomSequence: sequence)
+        case .dissolve: .dissolved(membershipRevision: revision, roomSequence: sequence)
         }
     }
 }

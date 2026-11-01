@@ -1042,7 +1042,7 @@ struct V2ResourceManagementStoreTests {
         page.changeAutomaticLimit(1024 * 1024)
         await page.execute(try #require(page.command))
         let confirmed = try #require(page.downloadNetworkPreferences)
-        #expect(confirmed.automaticDownloads.categories == [.image, .video])
+        #expect(confirmed.automaticDownloads.categories == [.video])
         #expect(confirmed.automaticDownloads.maximumByteCount == 1024 * 1024)
         #expect(!confirmed.allowsCellular && confirmed.allowsConstrained)
         try await f.local.databasePool.write {

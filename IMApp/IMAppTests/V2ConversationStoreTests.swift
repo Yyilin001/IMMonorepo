@@ -9,6 +9,8 @@ import UIKit
 @MainActor
 struct V2ConversationStoreTests {
     @Test func firstImageTimelineAndLaterSafeAreaLayoutKeepTheWholeLastRowVisible() async throws {
+        await V2UITestWindowOwnership.acquire()
+        defer { V2UITestWindowOwnership.release() }
         let messages = try (0..<9).map { index in
             let media = V2MediaReference(mediaID: .init(uuid: UUID()))
             return V2ConversationMessageItem(id: UUID().uuidString, roomSequence: UInt64(index + 1), revision: 1,
@@ -206,17 +208,17 @@ struct V2ConversationStoreTests {
         let room = RoomID(uuid: UUID())
         let page = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: fixture.scope.accountID.rawValue, roomID: room.rawValue, attachmentStager: fixture.stager)
-        await page.stageAttachment(photo: photo)
-        let draft = try #require(page.attachments.first)
-        #expect(page.attachments.count == 1 && draft.state == .staged)
+        await page.composer.stageAttachment(photo: photo)
+        let draft = try #require(page.composer.attachments.first)
+        #expect(page.composer.attachments.count == 1 && draft.state == .staged)
         #expect(draft.attachment.displayName == "照片.jpg" && draft.attachment.contentType == "image/jpeg")
         #expect(try await fixture.stager.selectedAttachments(purpose: .messageDraft(room)).map(\.id) == [draft.id])
-        let lease = try await page.borrowAttachment(id: draft.id)
+        let lease = try await page.composer.borrowAttachment(id: draft.id)
         #expect(try Data(contentsOf: lease.fileURL) == data)
         await lease.release()
         #expect(try await fixture.resources.storageSnapshot().transferReservedBytes == 0)
-        await page.removeAttachment(id: draft.id)
-        #expect(page.attachments.isEmpty)
+        await page.composer.removeAttachment(id: draft.id)
+        #expect(page.composer.attachments.isEmpty)
         let cleanup = try await fixture.resources.planCleanup()
         #expect(try await fixture.resources.commitCleanup(cleanup).deletedCount == 1)
         try await fixture.close()
@@ -236,17 +238,17 @@ struct V2ConversationStoreTests {
         let restored = try await V2OriginalResourceTestFixture(root: root, scope: fixture.scope)
         let page = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: fixture.scope.accountID.rawValue, roomID: room.rawValue, attachmentStager: restored.stager)
-        async let first: Void = page.refresh()
-        async let second: Void = page.refresh()
+        async let first = page.composer.restoreDraft()
+        async let second = page.composer.restoreDraft()
         _ = await (first, second)
-        #expect(page.attachments.map(\.id) == [draft.id])
-        #expect(page.attachments.first?.state == .staged)
-        let lease = try await page.borrowAttachment(id: draft.id)
+        #expect(page.composer.attachments.map(\.id) == [draft.id])
+        #expect(page.composer.attachments.first?.state == .staged)
+        let lease = try await page.composer.borrowAttachment(id: draft.id)
         #expect(try Data(contentsOf: lease.fileURL) == Data("saved attachment".utf8))
         await lease.release()
-        await page.removeAttachment(id: draft.id)
+        await page.composer.removeAttachment(id: draft.id)
         await page.refresh()
-        #expect(page.attachments.isEmpty)
+        #expect(page.composer.attachments.isEmpty)
         #expect(try await restored.stager.selectedAttachments(purpose: .messageDraft(room)).isEmpty)
         #expect(try await restored.stager.selectedAttachments(purpose: .messageDraft(otherRoom)).count == 1)
         try await restored.close()
@@ -897,12 +899,12 @@ struct V2ConversationStoreTests {
             userID: "current-user",
             roomID: "room-a"
         )
-        store.draft = "  离线消息  "
+        store.composer.draft = "  离线消息  "
 
         await store.sendDraft()
 
-        #expect(store.draft.isEmpty)
-        #expect(store.sendFeedback == "已安全保存，连接恢复后会重试。")
+        #expect(store.composer.draft.isEmpty)
+        #expect(store.composer.sendFeedback == "已安全保存，连接恢复后会重试。")
         #expect(await sender.sentMessages() == [.init(text: "离线消息", roomID: "room-a")])
     }
 
@@ -912,17 +914,55 @@ struct V2ConversationStoreTests {
         let store = makeConversationDetailStore(
             dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: sender, userID: "current-user", roomID: "room-a", attachmentStager: stager)
-        store.draft = "File description"
-        let importing = Task { await store.stageAttachment(from: URL(fileURLWithPath: "/tmp/import.pdf")) }
+        store.composer.draft = "File description"
+        let importing = Task { await store.composer.stageAttachment(from: URL(fileURLWithPath: "/tmp/import.pdf")) }
         await stager.waitUntilStarted()
         await store.sendDraft()
         #expect(await sender.sentMessages().isEmpty)
-        #expect(store.draft == "File description")
+        #expect(store.composer.draft == "File description")
         await stager.complete()
         await importing.value
-        #expect(store.attachments.count == 1)
-        #expect(store.attachmentImportsInFlight == 0)
+        #expect(store.composer.attachments.count == 1)
+        #expect(store.composer.attachmentImportsInFlight == 0)
         #expect(await stager.discarded == 0)
+    }
+
+    @Test func sendRechecksImportAfterWaitingForDraftRestoration() async {
+        let stager = V2SuspendingFileImportStager(suspendsFirstSelection: true)
+        let sender = V2ConversationSenderFake(result: .queuedForRetry)
+        let store = makeConversationDetailStore(
+            dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: sender, userID: "current-user", roomID: "room-a", attachmentStager: stager)
+        store.composer.draft = "File description"
+        let sending = Task { await store.sendDraft() }
+        await stager.waitUntilSelectionStarted()
+        let importing = Task { await store.composer.stageAttachment(from: URL(fileURLWithPath: "/tmp/import.pdf")) }
+        await stager.waitUntilStarted()
+        await stager.completeSelection()
+        await sending.value
+        #expect(await sender.sentMessages().isEmpty)
+        #expect(store.composer.draft == "File description")
+        #expect(!store.composer.isSending)
+        await stager.complete()
+        await importing.value
+        #expect(store.composer.attachments.count == 1)
+        #expect(store.composer.attachmentImportsInFlight == 0)
+        #expect(await stager.discarded == 0)
+    }
+
+    @Test func sendingCapabilityFailurePreservesTimelineAndConfirmedRestriction() async {
+        let source = V2FailingSendingCapabilityDataSource()
+        let store = makeConversationDetailStore(dataSource: source, sender: nil,
+            userID: "current-user", roomID: "room-a")
+        await store.refresh()
+        #expect(store.composer.canSendInDirectConversation == false)
+        await source.failCapabilityRead()
+        await store.refresh()
+        #expect(store.state == .loaded)
+        #expect(store.composer.canSendInDirectConversation == false)
+        #expect(store.composer.availabilityFeedback != nil)
+        #expect(store.composer.sendFeedback == nil)
+        #expect(store.messageActionFeedback == nil)
     }
 
     @Test func sendKeepsReplyFrozenDuringMentionResolution() async throws {
@@ -934,12 +974,12 @@ struct V2ConversationStoreTests {
             publicIdentityResolver: resolver)
         let reply = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "Original",
             createdAt: Date(), isOutgoing: false, isWithdrawn: false)
-        store.beginReply(to: reply)
-        store.draft = "Reply"
-        store.mentionHandlesText = "@other_user"
+        store.composer.beginReply(to: reply)
+        store.composer.draft = "Reply"
+        store.composer.mentionHandlesText = "@other_user"
         let sending = Task { await store.sendDraft() }
         await resolver.waitUntilResolving()
-        store.cancelReply()
+        store.composer.cancelReply()
         await resolver.completeResolution()
         await sending.value
         let messages = await sender.sentMessages()
@@ -956,19 +996,19 @@ struct V2ConversationStoreTests {
             userID: "current-user",
             roomID: "room-a"
         )
-        store.draft = "只发送一次"
+        store.composer.draft = "只发送一次"
 
         let firstSubmission = Task { await store.sendDraft() }
         await sender.waitUntilSending()
         await store.sendDraft()
 
-        #expect(store.isSending)
+        #expect(store.composer.isSending)
         #expect(await sender.sentMessages() == [.init(text: "只发送一次", roomID: "room-a")])
         await sender.complete()
         await firstSubmission.value
 
-        #expect(!store.isSending)
-        #expect(store.draft.isEmpty)
+        #expect(!store.composer.isSending)
+        #expect(store.composer.draft.isEmpty)
     }
 
     @Test func messageSendIgnoresLateSuccessAfterCancellation() async {
@@ -980,7 +1020,7 @@ struct V2ConversationStoreTests {
             userID: "current-user",
             roomID: "room-a"
         )
-        store.draft = "保留草稿"
+        store.composer.draft = "保留草稿"
 
         let submission = Task { await store.sendDraft() }
         await sender.waitUntilSending()
@@ -988,9 +1028,9 @@ struct V2ConversationStoreTests {
         await sender.complete()
         await submission.value
 
-        #expect(!store.isSending)
-        #expect(store.draft == "保留草稿")
-        #expect(store.sendFeedback == nil)
+        #expect(!store.composer.isSending)
+        #expect(store.composer.draft == "保留草稿")
+        #expect(store.composer.sendFeedback == nil)
     }
 
     @Test func messageSendExplainsRateLimitWithoutDiscardingTheDraft() async {
@@ -1002,12 +1042,12 @@ struct V2ConversationStoreTests {
             userID: "current-user",
             roomID: "room-a"
         )
-        store.draft = "稍后再发"
+        store.composer.draft = "稍后再发"
 
         await store.sendDraft()
 
-        #expect(store.draft == "稍后再发")
-        #expect(store.sendFeedback == "发送失败：发送频率已达上限，请稍后再试。")
+        #expect(store.composer.draft == "稍后再发")
+        #expect(store.composer.sendFeedback == "发送失败：发送频率已达上限，请稍后再试。")
         #expect(await sender.sentMessages() == [.init(text: "稍后再发", roomID: "room-a")])
     }
 
@@ -1020,12 +1060,12 @@ struct V2ConversationStoreTests {
             userID: "current-user",
             roomID: "room-a"
         )
-        store.draft = "陌生消息"
+        store.composer.draft = "陌生消息"
 
         await store.sendDraft()
 
-        #expect(store.draft == "陌生消息")
-        #expect(store.sendFeedback == "当前无法向此会话发送消息。")
+        #expect(store.composer.draft == "陌生消息")
+        #expect(store.composer.sendFeedback == "当前无法向此会话发送消息。")
         #expect(await sender.sentMessages() == [.init(text: "陌生消息", roomID: "room-a")])
     }
 
@@ -1049,15 +1089,15 @@ struct V2ConversationStoreTests {
             resourceSender: uploader
         )
 
-        await store.stageAttachment(from: URL(fileURLWithPath: "/tmp/imported-diagram.png"))
+        await store.composer.stageAttachment(from: URL(fileURLWithPath: "/tmp/imported-diagram.png"))
         await store.sendDraft()
 
         #expect(await uploader.uploadedAttachments() == [staged])
         #expect(await sender.sentMessages().isEmpty)
         #expect(await uploader.frozenRooms() == [try RoomID("room-a")])
         #expect(await stager.discardedAttachments().isEmpty)
-        #expect(store.attachments.isEmpty)
-        #expect(store.sendFeedback == nil)
+        #expect(store.composer.attachments.isEmpty)
+        #expect(store.composer.sendFeedback == nil)
     }
 
     @Test(arguments: [false, true])
@@ -1080,16 +1120,16 @@ struct V2ConversationStoreTests {
             attachmentStager: stager,
             resourceSender: senderUnavailable ? nil : uploader
         )
-        store.draft = "附件说明"
+        store.composer.draft = "附件说明"
 
-        await store.stageAttachment(from: URL(fileURLWithPath: "/tmp/imported-document.pdf"))
+        await store.composer.stageAttachment(from: URL(fileURLWithPath: "/tmp/imported-document.pdf"))
         await store.sendDraft()
 
         #expect(await sender.sentMessages().isEmpty)
-        #expect(store.draft == "附件说明")
-        #expect(store.attachments.count == 1)
-        #expect(store.attachments.first?.state == .staged)
-        #expect(store.sendFeedback == (senderUnavailable ? "附件发送暂不可用。" : "无法保存待发送消息。"))
+        #expect(store.composer.draft == "附件说明")
+        #expect(store.composer.attachments.count == 1)
+        #expect(store.composer.attachments.first?.state == .staged)
+        #expect(store.composer.sendFeedback == (senderUnavailable ? "附件发送暂不可用。" : "无法保存待发送消息。"))
         #expect(await uploader.uploadedAttachments() == (senderUnavailable ? [] : [staged]))
         #expect(await stager.discardedAttachments().isEmpty)
     }
@@ -1114,18 +1154,18 @@ struct V2ConversationStoreTests {
             attachmentStager: stager,
             resourceSender: uploader
         )
-        store.draft = "附件说明"
-        store.mentionHandlesText = "@member_a"
+        store.composer.draft = "附件说明"
+        store.composer.mentionHandlesText = "@member_a"
 
-        await store.stageAttachment(from: URL(fileURLWithPath: "/tmp/imported-document.pdf"))
+        await store.composer.stageAttachment(from: URL(fileURLWithPath: "/tmp/imported-document.pdf"))
         await store.sendDraft()
 
         #expect(await uploader.uploadedAttachments().isEmpty)
         #expect(await sender.sentMessages().isEmpty)
-        #expect(store.attachments.count == 1)
-        #expect(store.draft == "附件说明")
-        #expect(store.mentionHandlesText == "@member_a")
-        #expect(store.sendFeedback == "身份目录暂不可用，无法解析提及对象。")
+        #expect(store.composer.attachments.count == 1)
+        #expect(store.composer.draft == "附件说明")
+        #expect(store.composer.mentionHandlesText == "@member_a")
+        #expect(store.composer.sendFeedback == "身份目录暂不可用，无法解析提及对象。")
         #expect(await stager.discardedAttachments().isEmpty)
     }
 
@@ -1141,8 +1181,8 @@ struct V2ConversationStoreTests {
             kind: .group,
             publicIdentityResolver: resolver
         )
-        store.draft = "请关注"
-        store.mentionHandlesText = "@member_a, @all"
+        store.composer.draft = "请关注"
+        store.composer.mentionHandlesText = "@member_a, @all"
         let expectedMentions: [V2MentionTarget] = [.user(try .init("member-a")), .everyone]
 
         await store.sendDraft()
@@ -1150,8 +1190,8 @@ struct V2ConversationStoreTests {
         #expect(await sender.sentMessages() == [
             .init(text: "请关注", roomID: "room-group", mentions: expectedMentions)
         ])
-        #expect(store.mentionHandlesText.isEmpty)
-        #expect(store.sendFeedback == "已发送，正在同步。")
+        #expect(store.composer.mentionHandlesText.isEmpty)
+        #expect(store.composer.sendFeedback == "已发送，正在同步。")
     }
 
     @Test func groupMessageSendsEveryoneMentionWhenTheIdentityDirectoryIsUnavailable() async {
@@ -1164,16 +1204,16 @@ struct V2ConversationStoreTests {
             roomID: "room-group",
             kind: .group
         )
-        store.draft = "全体注意"
-        store.mentionHandlesText = "@all"
+        store.composer.draft = "全体注意"
+        store.composer.mentionHandlesText = "@all"
 
         await store.sendDraft()
 
         #expect(await sender.sentMessages() == [
             .init(text: "全体注意", roomID: "room-group", mentions: [.everyone])
         ])
-        #expect(store.mentionHandlesText.isEmpty)
-        #expect(store.sendFeedback == "已发送，正在同步。")
+        #expect(store.composer.mentionHandlesText.isEmpty)
+        #expect(store.composer.sendFeedback == "已发送，正在同步。")
     }
 
     @Test func groupMessageDoesNotSendDuplicateMentionTargets() async {
@@ -1188,14 +1228,14 @@ struct V2ConversationStoreTests {
             kind: .group,
             publicIdentityResolver: resolver
         )
-        store.draft = "请关注"
-        store.mentionHandlesText = "@member_a, @member_a"
+        store.composer.draft = "请关注"
+        store.composer.mentionHandlesText = "@member_a, @member_a"
 
         await store.sendDraft()
 
         #expect(await sender.sentMessages().isEmpty)
-        #expect(store.draft == "请关注")
-        #expect(store.sendFeedback == "提及对象不能重复。")
+        #expect(store.composer.draft == "请关注")
+        #expect(store.composer.sendFeedback == "提及对象不能重复。")
     }
 
     @Test func attachmentStagerImportsABorrowableOriginalAndCleanupNeverDeletesTheCallerSource() async throws {
@@ -1373,9 +1413,9 @@ struct V2ConversationStoreTests {
         #expect(store.messageActionFeedback == "撤回已提交，正在同步。")
     }
 
-    @Test func messageWithdrawalAllowsOnlyOneInFlightActionPerMessage() async {
+    @Test func messageWithdrawalAllowsOnlyOneInFlightActionPerMessage() async throws {
         let message = V2ConversationMessageItem(
-            id: "message-a",
+            id: UUID().uuidString,
             revision: 4,
             text: "需要撤回",
             createdAt: .now,
@@ -1384,29 +1424,45 @@ struct V2ConversationStoreTests {
         )
         let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
         let withdrawer = V2SuspendingMessageWithdrawer(result: .accepted)
+        let pinner = V2SuspendingGroupMessagePinner()
         let store = makeConversationDetailStore(
             dataSource: source,
             sender: nil,
             messageWithdrawer: withdrawer,
+            groupMessagePinner: pinner,
             userID: "current-user",
-            roomID: "room-a"
+            roomID: UUID().uuidString,
+            kind: .group
         )
 
         let firstWithdrawal = Task { await store.withdrawMessage(message) }
         await withdrawer.waitUntilRequested()
         await store.withdrawMessage(message)
+        await store.groupManagement.pinInGroup(message)
 
         #expect(store.isMessageActionInFlight(message))
         #expect(!store.canWithdrawMessage(message))
         #expect(!store.canEditMessage(message))
         #expect(!store.canReactToMessage(message))
         #expect(await withdrawer.requests().count == 1)
+        #expect(await pinner.requestCount == 0)
 
         await withdrawer.complete()
         await firstWithdrawal.value
 
         #expect(!store.isMessageActionInFlight(message))
         #expect(await withdrawer.requests().count == 1)
+
+        let pin = Task { await store.groupManagement.pinInGroup(message) }
+        await pinner.waitUntilRequested()
+        await store.withdrawMessage(message)
+        #expect(!store.canWithdrawMessage(message))
+        #expect(!store.canEditMessage(message))
+        #expect(await withdrawer.requests().count == 1)
+        await pinner.complete()
+        await pin.value
+        #expect(!store.isMessageActionInFlight(message))
+        #expect(try #require(store.groupManagement.pendingPinBaseline).messageID == MessageID(message.id))
     }
 
     @Test func messageWithdrawalIsNotAvailableForIncomingOrWithdrawnMessages() async {
@@ -2014,20 +2070,20 @@ struct V2ConversationStoreTests {
             .failure(.server(code: "UNAVAILABLE", retryable: true, retryAfterSeconds: 0, currentRevision: nil)), .success(page)])
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
-        await store.loadGroupMembers(reset: true)
-        #expect(store.canAddGroupMembers)
-        await store.loadGroupMembers(reset: true, reason: authorityChanged ? .authorizationChanged : .userInitiated)
-        #expect(store.groupMembers.count == (authorityChanged ? 0 : 1))
-        #expect(store.groupMemberDirectoryIsStale)
-        #expect(store.groupActorRole == nil)
-        #expect(!store.canAddGroupMembers)
-        #expect(!store.canRemoveGroupMember(page.members[0]))
-        #expect(store.groupMemberFeedback != nil)
-        await store.loadGroupMembers(reset: true)
-        #expect(store.groupMembers.map(\.id) == ["member-a"])
-        #expect(!store.groupMemberDirectoryIsStale)
-        #expect(store.canAddGroupMembers)
-        #expect(store.groupMemberFeedback == nil)
+        await store.groupManagement.loadGroupMembers(reset: true)
+        #expect(store.groupManagement.canAddGroupMembers)
+        await store.groupManagement.loadGroupMembers(reset: true, reason: authorityChanged ? .authorizationChanged : .userInitiated)
+        #expect(store.groupManagement.groupMembers.count == (authorityChanged ? 0 : 1))
+        #expect(store.groupManagement.groupMemberDirectoryIsStale)
+        #expect(store.groupManagement.groupActorRole == nil)
+        #expect(!store.groupManagement.canAddGroupMembers)
+        #expect(!store.groupManagement.canRemoveGroupMember(page.members[0]))
+        #expect(store.groupManagement.groupMemberFeedback != nil)
+        await store.groupManagement.loadGroupMembers(reset: true)
+        #expect(store.groupManagement.groupMembers.map(\.id) == ["member-a"])
+        #expect(!store.groupManagement.groupMemberDirectoryIsStale)
+        #expect(store.groupManagement.canAddGroupMembers)
+        #expect(store.groupManagement.groupMemberFeedback == nil)
         #expect(await reader.requestedCursors() == [nil, nil, nil])
     }
 
@@ -2055,17 +2111,18 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
+            kind: .group,
             groupMemberDirectory: reader
         )
 
-        await store.loadGroupMembers(reset: true)
-        await store.loadGroupMembers()
+        await store.groupManagement.loadGroupMembers(reset: true)
+        await store.groupManagement.loadGroupMembers()
 
-        #expect(store.groupMembers.map(\.id) == ["owner", "member-a", "member-b"])
-        #expect(store.groupMembers.first?.role == "群主")
-        #expect(store.groupMemberRevision == 3)
-        #expect(!store.canLoadMoreGroupMembers)
-        #expect(store.groupMemberFeedback == nil)
+        #expect(store.groupManagement.groupMembers.map(\.id) == ["owner", "member-a", "member-b"])
+        #expect(store.groupManagement.groupMembers.first?.role == "群主")
+        #expect(store.groupManagement.groupMemberRevision == 3)
+        #expect(!store.groupManagement.canLoadMoreGroupMembers)
+        #expect(store.groupManagement.groupMemberFeedback == nil)
         #expect(await reader.requestedCursors() == [nil, "member-a"])
     }
 
@@ -2086,18 +2143,18 @@ struct V2ConversationStoreTests {
             groupMemberDirectory: reader
         )
 
-        let firstLoad = Task { await store.loadGroupMembers(reset: true) }
+        let firstLoad = Task { await store.groupManagement.loadGroupMembers(reset: true) }
         await reader.waitUntilRequested()
-        await store.loadGroupMembers(reset: true)
+        await store.groupManagement.loadGroupMembers(reset: true)
 
-        #expect(store.isLoadingGroupMembers)
+        #expect(store.groupManagement.isLoadingGroupMembers)
         #expect(await reader.requestedCursors() == [nil])
         await reader.complete()
         await firstLoad.value
 
-        #expect(!store.isLoadingGroupMembers)
-        #expect(store.groupMembers.map(\.id) == ["owner"])
-        #expect(store.groupMemberFeedback == nil)
+        #expect(!store.groupManagement.isLoadingGroupMembers)
+        #expect(store.groupManagement.groupMembers.map(\.id) == ["owner"])
+        #expect(store.groupManagement.groupMemberFeedback == nil)
     }
 
     @Test func groupMemberDirectoryRestartsWhenMembershipChangesBetweenPages() async {
@@ -2129,14 +2186,14 @@ struct V2ConversationStoreTests {
             groupMemberDirectory: reader
         )
 
-        await store.loadGroupMembers(reset: true)
-        await store.loadGroupMembers()
+        await store.groupManagement.loadGroupMembers(reset: true)
+        await store.groupManagement.loadGroupMembers()
 
         #expect(await reader.requestedCursors() == [nil, "opaque-revision-3", nil])
-        #expect(store.groupMembers.map(\.id) == ["current-owner", "current-member"])
-        #expect(store.groupMemberRevision == 4)
-        #expect(!store.canLoadMoreGroupMembers)
-        #expect(store.groupMemberFeedback == nil)
+        #expect(store.groupManagement.groupMembers.map(\.id) == ["current-owner", "current-member"])
+        #expect(store.groupManagement.groupMemberRevision == 4)
+        #expect(!store.groupManagement.canLoadMoreGroupMembers)
+        #expect(store.groupManagement.groupMemberFeedback == nil)
     }
 
     @Test(arguments: ["conflict", "changed-page", "FORBIDDEN", "NOT_FOUND", "reset", "network"])
@@ -2155,22 +2212,22 @@ struct V2ConversationStoreTests {
         let reader = V2ScriptedGroupMemberDirectory(results: results)
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
-        await store.loadGroupMembers(reset: true)
-        #expect(store.canAddGroupMembers)
-        await store.loadGroupMembers(reset: scenario == "reset", reason: .authorizationChanged)
+        await store.groupManagement.loadGroupMembers(reset: true)
+        #expect(store.groupManagement.canAddGroupMembers)
+        await store.groupManagement.loadGroupMembers(reset: scenario == "reset", reason: .authorizationChanged)
         if scenario == "network" {
-            #expect(store.groupMembers.map(\.id) == ["member-a"])
-            #expect(store.groupMemberRevision == 3)
-            #expect(store.canLoadMoreGroupMembers)
+            #expect(store.groupManagement.groupMembers.map(\.id) == ["member-a"])
+            #expect(store.groupManagement.groupMemberRevision == 3)
+            #expect(store.groupManagement.canLoadMoreGroupMembers)
         } else {
-            #expect(store.groupMembers.isEmpty)
-            #expect(store.groupActorRole == nil)
-            #expect(store.groupMemberRevision == nil)
-            #expect(!store.canAddGroupMembers)
-            #expect(!store.canLoadMoreGroupMembers)
+            #expect(store.groupManagement.groupMembers.isEmpty)
+            #expect(store.groupManagement.groupActorRole == nil)
+            #expect(store.groupManagement.groupMemberRevision == nil)
+            #expect(!store.groupManagement.canAddGroupMembers)
+            #expect(!store.groupManagement.canLoadMoreGroupMembers)
         }
-        #expect(!store.isLoadingGroupMembers)
-        #expect(store.groupMemberFeedback != nil)
+        #expect(!store.groupManagement.isLoadingGroupMembers)
+        #expect(store.groupManagement.groupMemberFeedback != nil)
     }
 
     @Test func groupMemberRefreshDiscardsLateRoleAndKeepsOneRequestOwner() async {
@@ -2179,19 +2236,19 @@ struct V2ConversationStoreTests {
             refreshedPage: .init(membershipRevision: 4, actorRole: "成员", members: [], nextCursor: nil))
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
-        let request = Task { await store.loadGroupMembers(reset: true) }
+        let request = Task { await store.groupManagement.loadGroupMembers(reset: true) }
         await reader.waitUntilRequested()
-        await store.loadGroupMembers(reset: true)
+        await store.groupManagement.loadGroupMembers(reset: true)
         #expect(await reader.requestedCursors() == [nil])
-        #expect(!store.canAddGroupMembers)
+        #expect(!store.groupManagement.canAddGroupMembers)
         await reader.complete()
         await request.value
         #expect(await reader.requestedCursors() == [nil, nil])
-        #expect(store.groupMembers.isEmpty)
-        #expect(store.groupMemberRevision == 4)
-        #expect(store.groupActorRole == "成员")
-        #expect(!store.canAddGroupMembers)
-        #expect(!store.isLoadingGroupMembers)
+        #expect(store.groupManagement.groupMembers.isEmpty)
+        #expect(store.groupManagement.groupMemberRevision == 4)
+        #expect(store.groupManagement.groupActorRole == "成员")
+        #expect(!store.groupManagement.canAddGroupMembers)
+        #expect(!store.groupManagement.isLoadingGroupMembers)
     }
 
     @Test func groupMemberDirectoryAdvancesAcrossHiddenMemberPage() async {
@@ -2202,13 +2259,13 @@ struct V2ConversationStoreTests {
         ])
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
-        await store.loadGroupMembers(reset: true)
-        #expect(store.groupMembers.isEmpty && store.canLoadMoreGroupMembers)
-        #expect(store.groupMemberFeedback == nil)
-        await store.loadGroupMembers()
+        await store.groupManagement.loadGroupMembers(reset: true)
+        #expect(store.groupManagement.groupMembers.isEmpty && store.groupManagement.canLoadMoreGroupMembers)
+        #expect(store.groupManagement.groupMemberFeedback == nil)
+        await store.groupManagement.loadGroupMembers()
         #expect(await reader.requestedCursors() == [nil, "hidden-scanned"])
-        #expect(store.groupMembers.map(\.id) == ["member-b"])
-        #expect(!store.canLoadMoreGroupMembers)
+        #expect(store.groupManagement.groupMembers.map(\.id) == ["member-b"])
+        #expect(!store.groupManagement.canLoadMoreGroupMembers)
     }
 
     @Test(arguments: ["duplicate", "stalled"])
@@ -2223,13 +2280,13 @@ struct V2ConversationStoreTests {
         ])
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
-        await store.loadGroupMembers(reset: true)
-        await store.loadGroupMembers()
-        #expect(store.groupMembers.isEmpty)
-        #expect(store.groupMemberRevision == nil)
-        #expect(store.groupActorRole == nil)
-        #expect(!store.canLoadMoreGroupMembers)
-        #expect(store.groupMemberFeedback != nil)
+        await store.groupManagement.loadGroupMembers(reset: true)
+        await store.groupManagement.loadGroupMembers()
+        #expect(store.groupManagement.groupMembers.isEmpty)
+        #expect(store.groupManagement.groupMemberRevision == nil)
+        #expect(store.groupManagement.groupActorRole == nil)
+        #expect(!store.groupManagement.canLoadMoreGroupMembers)
+        #expect(store.groupManagement.groupMemberFeedback != nil)
     }
 
     @Test func groupMembershipChangeUsesTheDirectoryRevisionAndRefreshes() async {
@@ -2248,18 +2305,19 @@ struct V2ConversationStoreTests {
             sender: nil,
             userID: "current-user",
             roomID: "room-group",
+            kind: .group,
             groupMemberDirectory: reader,
             groupMembershipChanger: changer,
             publicIdentityResolver: resolver
         )
 
-        await store.loadGroupMembers(reset: true)
-        await store.changeGroupMembership(targetUserID: "@member_b", action: .add)
+        await store.groupManagement.loadGroupMembers(reset: true)
+        await store.groupManagement.changeGroupMembership(targetUserID: "@member_b", action: .add)
 
-        #expect(store.canAddGroupMembers)
+        #expect(store.groupManagement.canAddGroupMembers)
         #expect(await changer.requests() == [.init(roomID: "room-group", targetUserID: "member-b", action: .add, expectedMembershipRevision: 8)])
         #expect(await reader.requestedCursors() == [nil, nil])
-        #expect(store.groupMemberFeedback == nil)
+        #expect(store.groupManagement.groupMemberFeedback == nil)
     }
 
     @Test(arguments: ["成员", "管理员", "群主"])
@@ -2270,16 +2328,16 @@ struct V2ConversationStoreTests {
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group,
             groupMemberDirectory: reader, groupMembershipChanger: changer)
-        await store.loadGroupMembers(reset: true)
-        #expect(store.canLeaveGroup == (role != "群主"))
-        let saved = await store.leaveGroup()
+        await store.groupManagement.loadGroupMembers(reset: true)
+        #expect(store.groupManagement.canLeaveGroup == (role != "群主"))
+        let saved = await store.groupManagement.leaveGroup()
         #expect(saved == (role != "群主"))
         let requests = await changer.requests()
         if role == "群主" { #expect(requests.isEmpty) }
         else {
             #expect(requests == [.init(roomID: "room-group", targetUserID: "current-user", action: .remove, expectedMembershipRevision: 8)])
-            #expect(!store.canLeaveGroup)
-            #expect(store.groupMemberFeedback == "已退出群聊。")
+            #expect(!store.groupManagement.canLeaveGroup)
+            #expect(store.groupManagement.groupMemberFeedback == "已退出群聊。")
         }
     }
 
@@ -2304,19 +2362,19 @@ struct V2ConversationStoreTests {
             groupMembershipChanger: changer,
             publicIdentityResolver: resolver
         )
-        await store.loadGroupMembers(reset: true)
+        await store.groupManagement.loadGroupMembers(reset: true)
 
-        let firstChange = Task { await store.changeGroupMembership(targetUserID: "@member_b", action: .add) }
+        let firstChange = Task { await store.groupManagement.changeGroupMembership(targetUserID: "@member_b", action: .add) }
         await changer.waitUntilRequested()
-        await store.changeGroupMembership(targetUserID: "member-a", action: .remove)
+        await store.groupManagement.changeGroupMembership(targetUserID: "member-a", action: .remove)
 
-        #expect(store.isChangingGroupMembership)
+        #expect(store.groupManagement.isChangingGroupMembership)
         #expect(await changer.requests() == [.init(roomID: "room-group", targetUserID: "member-b", action: .add, expectedMembershipRevision: 8)])
         await changer.complete()
         await firstChange.value
 
-        #expect(!store.isChangingGroupMembership)
-        #expect(store.groupMemberFeedback == "成员确认已保存；两分钟窗口内核对权限，超时需重新确认。")
+        #expect(!store.groupManagement.isChangingGroupMembership)
+        #expect(store.groupManagement.groupMemberFeedback == "成员确认已保存；两分钟窗口内核对权限，超时需重新确认。")
     }
 
     @Test func groupMembershipChangeIgnoresLateSuccessAfterCancellation() async {
@@ -2338,16 +2396,16 @@ struct V2ConversationStoreTests {
             groupMemberDirectory: reader,
             groupMembershipChanger: changer
         )
-        await store.loadGroupMembers(reset: true)
+        await store.groupManagement.loadGroupMembers(reset: true)
 
-        let change = Task { await store.changeGroupMembership(targetUserID: "member-a", action: .remove) }
+        let change = Task { await store.groupManagement.changeGroupMembership(targetUserID: "member-a", action: .remove) }
         await changer.waitUntilRequested()
         change.cancel()
         await changer.complete()
         await change.value
 
-        #expect(!store.isChangingGroupMembership)
-        #expect(store.groupMemberFeedback == nil)
+        #expect(!store.groupManagement.isChangingGroupMembership)
+        #expect(store.groupManagement.groupMemberFeedback == nil)
         #expect(await reader.requestedCursors() == [nil])
     }
 
@@ -2372,17 +2430,17 @@ struct V2ConversationStoreTests {
             groupMembershipChanger: changer,
             publicIdentityResolver: resolver
         )
-        await store.loadGroupMembers(reset: true)
+        await store.groupManagement.loadGroupMembers(reset: true)
 
-        let change = Task { await store.changeGroupMembership(targetUserID: "@member_b", action: .add) }
+        let change = Task { await store.groupManagement.changeGroupMembership(targetUserID: "@member_b", action: .add) }
         await resolver.waitUntilResolving()
         change.cancel()
         await resolver.completeResolution()
         await change.value
 
         #expect(await changer.requests().isEmpty)
-        #expect(!store.isChangingGroupMembership)
-        #expect(store.groupMemberFeedback == nil)
+        #expect(!store.groupManagement.isChangingGroupMembership)
+        #expect(store.groupManagement.groupMemberFeedback == nil)
     }
 
     @Test func groupMuteUsesItsOwnDurableModerationBoundary() async throws {
@@ -2405,16 +2463,16 @@ struct V2ConversationStoreTests {
             groupMemberMuter: muter
         )
 
-        await store.loadGroupMembers(reset: true)
-        await store.muteGroupMember(try #require(store.groupMembers.first))
+        await store.groupManagement.loadGroupMembers(reset: true)
+        await store.groupManagement.muteGroupMember(try #require(store.groupManagement.groupMembers.first))
 
         let request = try #require(await muter.requests().first)
         #expect(request.roomID == "room-group")
         #expect(request.targetUserID == "member-a")
         #expect(request.reasonCode == "ADMIN_ACTION")
         #expect(request.muteUntil.timeIntervalSinceNow > 3_500)
-        #expect(store.groupMemberFeedback == "禁言已提交，正在同步。")
-        #expect(!store.isApplyingGroupModeration)
+        #expect(store.groupManagement.groupMemberFeedback == "禁言已提交，正在同步。")
+        #expect(!store.groupManagement.isApplyingGroupModeration)
     }
 
     @Test func moderatedRemovalUsesItsOwnAuditedBoundaryAndRefreshesTheRoster() async throws {
@@ -2437,13 +2495,13 @@ struct V2ConversationStoreTests {
             moderatedGroupMemberRemover: remover
         )
 
-        await store.loadGroupMembers(reset: true)
-        await store.removeGroupMemberByModerator(try #require(store.groupMembers.first))
+        await store.groupManagement.loadGroupMembers(reset: true)
+        await store.groupManagement.removeGroupMemberByModerator(try #require(store.groupManagement.groupMembers.first))
 
         #expect(await remover.requests() == [.init(roomID: "room-group", targetUserID: "member-a", reasonCode: "ADMIN_ACTION")])
         #expect(await reader.requestedCursors() == [nil, nil])
-        #expect(store.groupMemberFeedback == nil)
-        #expect(!store.isApplyingGroupModeration)
+        #expect(store.groupManagement.groupMemberFeedback == nil)
+        #expect(!store.groupManagement.isApplyingGroupModeration)
     }
 
     @Test func groupMembershipChangeWaitsForInFlightModeratedRemoval() async throws {
@@ -2468,19 +2526,19 @@ struct V2ConversationStoreTests {
             moderatedGroupMemberRemover: remover
         )
 
-        await store.loadGroupMembers(reset: true)
-        let member = try #require(store.groupMembers.first)
-        let removal = Task { await store.removeGroupMemberByModerator(member) }
+        await store.groupManagement.loadGroupMembers(reset: true)
+        let member = try #require(store.groupManagement.groupMembers.first)
+        let removal = Task { await store.groupManagement.removeGroupMemberByModerator(member) }
         await remover.waitUntilRequested()
 
-        await store.changeGroupMembership(targetUserID: "member-b", action: .add)
+        await store.groupManagement.changeGroupMembership(targetUserID: "member-b", action: .add)
 
-        #expect(store.isApplyingGroupModeration)
-        #expect(!store.isChangingGroupMembership)
+        #expect(store.groupManagement.isApplyingGroupModeration)
+        #expect(!store.groupManagement.isChangingGroupMembership)
         #expect(await changer.requests().isEmpty)
         await remover.complete()
         await removal.value
-        #expect(!store.isApplyingGroupModeration)
+        #expect(!store.groupManagement.isApplyingGroupModeration)
     }
 
     @Test func rejectedGroupModerationKeepsTheServerReasonOpaque() async throws {
@@ -2503,10 +2561,10 @@ struct V2ConversationStoreTests {
             groupMemberMuter: muter
         )
 
-        await store.loadGroupMembers(reset: true)
-        await store.muteGroupMember(try #require(store.groupMembers.first))
+        await store.groupManagement.loadGroupMembers(reset: true)
+        await store.groupManagement.muteGroupMember(try #require(store.groupManagement.groupMembers.first))
 
-        #expect(store.groupMemberFeedback == "无法完成群管理操作。")
+        #expect(store.groupManagement.groupMemberFeedback == "无法完成群管理操作。")
     }
 
     @Test func strangerMessagePreferenceKeepsDurableQueuedIntentVisible() async {
@@ -2800,12 +2858,12 @@ struct V2ConversationStoreTests {
             userID: "current-user", roomID: "room-first-pull-retry", kind: .group,
             activeHybridGroupSynchronizer: synchronizer)
         let task = Task { await store.pollVisibleHybridGroupEvents() }
-        let deadline = ContinuousClock.now + .seconds(4)
-        while await synchronizer.synchronizations() < 2, ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        #expect(await synchronizer.synchronizations() == 2)
+        defer { task.cancel() }
+        // The first failed pull owns its retry. Observe that retry and its next
+        // wake wait instead of imposing a scheduler-speed assertion on the suite.
+        await synchronizer.waitForSynchronizationCount(2)
         await synchronizer.waitForWakeCount(1)
+        #expect(await synchronizer.synchronizations() == 2)
         task.cancel()
         await task.value
         #expect(await synchronizer.unsubscribedRoomIDs() == ["room-first-pull-retry"])
@@ -2899,33 +2957,33 @@ struct V2ConversationStoreTests {
         let first = makeStore(room.rawValue)
         let second = makeStore(room.rawValue)
         let other = makeStore("other-room")
-        let firstPage = Task { await first.observeLiveActivity() }
-        let secondPage = Task { await second.observeLiveActivity() }
-        let otherPage = Task { await other.observeLiveActivity() }
+        let firstPage = Task { await first.liveActivity.observe() }
+        let secondPage = Task { await second.liveActivity.observe() }
+        let otherPage = Task { await other.liveActivity.observe() }
         let firstRun = Task { try await owner.run(connectionID: UUID()) }
-        try await waitForSubscriptionPage { first.peerPresence != nil && second.peerPresence != nil && other.peerPresence != nil }
+        try await waitForSubscriptionPage { first.liveActivity.peerPresence != nil && second.liveActivity.peerPresence != nil && other.liveActivity.peerPresence != nil }
         try await wire.emitTyping(room: room)
-        try await waitForSubscriptionPage { !first.typingUserIDs.isEmpty && !second.typingUserIDs.isEmpty }
-        #expect(other.typingUserIDs.isEmpty)
+        try await waitForSubscriptionPage { !first.liveActivity.typingUserIDs.isEmpty && !second.liveActivity.typingUserIDs.isEmpty }
+        #expect(other.liveActivity.typingUserIDs.isEmpty)
         #expect(await wire.count("subscribe-typing") == 2)
         firstPage.cancel()
         await firstPage.value
         #expect(await wire.count("unsubscribe-typing") == 0)
-        second.draft = "typing before reconnect"
-        second.updateTypingForDraft()
+        second.composer.draft = "typing before reconnect"
+        second.liveActivity.updateTyping(for: second.composer.draft)
         await wire.waitFor("set-typing", count: 1)
         firstRun.cancel()
         _ = await firstRun.result
-        try await waitForSubscriptionPage { second.typingUserIDs.isEmpty && second.peerPresence == nil && other.peerPresence == nil }
+        try await waitForSubscriptionPage { second.liveActivity.typingUserIDs.isEmpty && second.liveActivity.peerPresence == nil && other.liveActivity.peerPresence == nil }
         let secondRun = Task { try await owner.run(connectionID: UUID()) }
-        try await waitForSubscriptionPage { second.peerPresence != nil && other.peerPresence != nil }
+        try await waitForSubscriptionPage { second.liveActivity.peerPresence != nil && other.liveActivity.peerPresence != nil }
         try await wire.emitTyping(room: room)
-        try await waitForSubscriptionPage { !second.typingUserIDs.isEmpty }
-        #expect(first.typingUserIDs.isEmpty && first.peerPresence == nil)
+        try await waitForSubscriptionPage { !second.liveActivity.typingUserIDs.isEmpty }
+        #expect(first.liveActivity.typingUserIDs.isEmpty && first.liveActivity.peerPresence == nil)
         #expect(await wire.count("subscribe-typing") == 4)
         #expect(await wire.count("set-typing") == 1)
-        second.draft += " with a new keystroke"
-        second.updateTypingForDraft()
+        second.composer.draft += " with a new keystroke"
+        second.liveActivity.updateTyping(for: second.composer.draft)
         await wire.waitFor("set-typing", count: 2)
         secondPage.cancel()
         otherPage.cancel()
@@ -2992,13 +3050,13 @@ struct V2ConversationStoreTests {
         let firstExpiry = now.addingTimeInterval(3)
         let secondExpiry = now.addingTimeInterval(6)
 
-        store.applyTypingState(.init(roomID: roomID, userID: peerID, isTyping: true, expiresAt: firstExpiry), now: now)
-        store.applyTypingState(.init(roomID: roomID, userID: peerID, isTyping: true, expiresAt: secondExpiry), now: now)
-        store.expireTypingState(for: peerID, expectedExpiry: firstExpiry)
-        #expect(store.typingUserIDs == [peerID])
+        store.liveActivity.applyTypingState(.init(roomID: roomID, userID: peerID, isTyping: true, expiresAt: firstExpiry), now: now)
+        store.liveActivity.applyTypingState(.init(roomID: roomID, userID: peerID, isTyping: true, expiresAt: secondExpiry), now: now)
+        store.liveActivity.expireTypingState(for: peerID, expectedExpiry: firstExpiry)
+        #expect(store.liveActivity.typingUserIDs == [peerID])
 
-        store.expireTypingState(for: peerID, expectedExpiry: secondExpiry)
-        #expect(store.typingUserIDs.isEmpty)
+        store.liveActivity.expireTypingState(for: peerID, expectedExpiry: secondExpiry)
+        #expect(store.liveActivity.typingUserIDs.isEmpty)
     }
 
     @Test func conversationListSeparatesArchivedItemsFromTheInbox() async {
@@ -3268,6 +3326,26 @@ struct V2ConversationStoreTests {
 
 @MainActor
 extension V2ConversationStoreTests {
+    @Test("清除公告提交空正文和当前版本，清除后保留版本用于再次发布")
+    func clearAnnouncementKeepsRevision() async throws {
+        let room = RoomID(uuid: UUID())
+        let access = AnnouncementAccessFake(value: .init(roomID: room, body: "existing", revision: 7, updatedAt: .now))
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let store = makeConversationDetailStore(dataSource: source,
+            sender: nil, groupAnnouncementReader: access, groupAnnouncementManager: access,
+            userID: "current-user", roomID: room.rawValue, kind: .group)
+        await store.refresh()
+        #expect(await store.groupManagement.clearGroupAnnouncement())
+        #expect(await access.lastBody == "")
+        #expect(await access.lastExpectedRevision == 7)
+        #expect(store.groupManagement.groupAnnouncement?.body == "" && store.groupManagement.groupAnnouncement?.revision == 8)
+        #expect(await store.groupManagement.saveGroupAnnouncement("replacement"))
+        #expect(await access.lastExpectedRevision == 8)
+        #expect(store.groupManagement.groupAnnouncement?.body == "replacement")
+        #expect(!(await store.groupManagement.saveGroupAnnouncement(" \n ")))
+        #expect(await source.messageRequestCount() == 1)
+    }
+
     @Test("receipt reset waits for a cancelled transport and cannot publish the old page", arguments: [false, true])
     func readReceiptResetFencesOldPage(sameMessage: Bool) async throws {
         let room = RoomID(uuid: UUID()), gate = ReceiptPageTestGate()
@@ -3275,20 +3353,20 @@ extension V2ConversationStoreTests {
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, groupReadReceiptReader: reader, userID: "current-user", roomID: room.rawValue, kind: .group)
         let firstMessage = receiptTestMessage(), secondMessage = sameMessage ? firstMessage : receiptTestMessage()
-        let first = Task { await store.loadGroupReadReceipts(for: firstMessage, reset: true) }
+        let first = Task { await store.groupReadReceipts.loadReaders(for: firstMessage, reset: true) }
         await gate.entered()
-        let second = Task { await store.loadGroupReadReceipts(for: secondMessage, reset: true) }
+        let second = Task { await store.groupReadReceipts.loadReaders(for: secondMessage, reset: true) }
         await gate.cancelled()
-        #expect(store.groupReadReceiptPage == nil)
+        #expect(store.groupReadReceipts.page == nil)
         #expect(await reader.calls == 1)
-        #expect(store.isLoadingGroupReadReceipts)
+        #expect(store.groupReadReceipts.isLoading)
         await gate.release()
         await first.value; await second.value
         #expect(await reader.calls == 2)
-        #expect(store.groupReadReceiptPage?.messageID.rawValue == secondMessage.id)
-        #expect(store.groupReadReceiptPage?.readers == [.init(userID: reader.currentUser)])
-        #expect(!store.isLoadingGroupReadReceipts)
-        #expect(store.groupReadReceiptFeedback == nil)
+        #expect(store.groupReadReceipts.page?.messageID.rawValue == secondMessage.id)
+        #expect(store.groupReadReceipts.page?.readers == [.init(userID: reader.currentUser)])
+        #expect(!store.groupReadReceipts.isLoading)
+        #expect(store.groupReadReceipts.feedback == nil)
     }
 
     @Test("closing a receipt sheet drains its non-cooperative read and discards its result")
@@ -3296,16 +3374,16 @@ extension V2ConversationStoreTests {
         let gate = ReceiptPageTestGate(), reader = ReceiptPageTestReader(gate: gate)
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, groupReadReceiptReader: reader, userID: "current-user", roomID: UUID().uuidString, kind: .group)
-        let load = Task { await store.loadGroupReadReceipts(for: receiptTestMessage(), reset: true) }
+        let load = Task { await store.groupReadReceipts.loadReaders(for: receiptTestMessage(), reset: true) }
         await gate.entered()
         load.cancel()
         await gate.cancelled()
-        #expect(store.isLoadingGroupReadReceipts)
+        #expect(store.groupReadReceipts.isLoading)
         await gate.release()
         await load.value
-        #expect(!store.isLoadingGroupReadReceipts)
-        #expect(store.groupReadReceiptPage == nil)
-        #expect(store.groupReadReceiptFeedback == nil)
+        #expect(!store.groupReadReceipts.isLoading)
+        #expect(store.groupReadReceipts.page == nil)
+        #expect(store.groupReadReceipts.feedback == nil)
     }
 
     @Test("reader retention is bounded and returning to the first page resets the window")
@@ -3314,15 +3392,15 @@ extension V2ConversationStoreTests {
             sender: nil, groupReadReceiptReader: ReceiptWindowTestReader(), userID: "current-user",
             roomID: UUID().uuidString, kind: .group)
         let message = receiptTestMessage()
-        for index in 0..<11 { await store.loadGroupReadReceipts(for: message, reset: index == 0) }
-        #expect(store.groupReadReceiptPage?.readers.count == 1_000)
-        #expect(store.hasEarlierGroupReadReceipts)
-        #expect(store.groupReadReceiptPage?.readers.first?.userID.rawValue.hasSuffix("000000000101") == true)
-        #expect(store.groupReadReceiptPage?.nextCursor == nil)
-        await store.loadGroupReadReceipts(for: message, reset: true)
-        #expect(store.groupReadReceiptPage?.readers.count == 100)
-        #expect(!store.hasEarlierGroupReadReceipts)
-        #expect(store.groupReadReceiptPage?.readers.first?.userID.rawValue.hasSuffix("000000000001") == true)
+        for index in 0..<11 { await store.groupReadReceipts.loadReaders(for: message, reset: index == 0) }
+        #expect(store.groupReadReceipts.page?.readers.count == 1_000)
+        #expect(store.groupReadReceipts.hasEarlierReaders)
+        #expect(store.groupReadReceipts.page?.readers.first?.userID.rawValue.hasSuffix("000000000101") == true)
+        #expect(store.groupReadReceipts.page?.nextCursor == nil)
+        await store.groupReadReceipts.loadReaders(for: message, reset: true)
+        #expect(store.groupReadReceipts.page?.readers.count == 100)
+        #expect(!store.groupReadReceipts.hasEarlierReaders)
+        #expect(store.groupReadReceipts.page?.readers.first?.userID.rawValue.hasSuffix("000000000001") == true)
     }
 
     @Test("directory IDs produce only a group-scoped profile lookup")
@@ -3331,7 +3409,8 @@ extension V2ConversationStoreTests {
         for kind in [V2ConversationKind.group, .direct(accountKind: .regular), .unknown] {
             let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
                 sender: nil, userID: "current-user", roomID: room.rawValue, kind: kind)
-            #expect(store.groupPresentationKey(for: target) == (kind == .group ? .init(userID: target, context: .room(room)) : nil))
+            #expect(store.groupManagement.groupPresentationKey(for: target) == (kind == .group ? .init(userID: target, context: .room(room)) : nil))
+            #expect(store.groupReadReceipts.presentationKey(for: target) == store.groupManagement.groupPresentationKey(for: target))
         }
     }
 
@@ -3396,7 +3475,7 @@ private func makeConversationDetailStore(
     groupAnnouncementReader: (any V2GroupAnnouncementReading)? = nil,
     groupAnnouncementManager: (any V2GroupAnnouncementManaging)? = nil,
     groupMemberRoleChanger: (any V2GroupMemberRoleChanging)? = nil,
-    groupRolePolicyReader: (any V2GroupRolePolicyAccessing)? = nil,
+    groupRolePolicyReader: (any V2GroupRolePolicyAccessing)? = PolicyRecoveryAccessFake(state: .init(policies: [], recovery: .ready)),
     groupRolePolicyChanger: (any V2GroupRolePolicyChanging)? = nil,
     groupReadReceiptReader: (any V2GroupReadReceiptReading)? = nil,
     conversationLiveActivity: (any V2ConversationLiveActivityManaging)? = nil,
@@ -4211,6 +4290,33 @@ private actor V2SuspendingMessageWithdrawer: V2MessageWithdrawing {
     func requests() -> [V2MessageWithdrawerFake.Request] { requestsValue }
 }
 
+private actor V2SuspendingGroupMessagePinner: V2GroupMessagePinning {
+    private(set) var requestCount = 0
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var completion: CheckedContinuation<Void, Never>?
+
+    func pinBaseline(roomID: String, messageID: String) async throws -> V2PinnedMessageBaseline {
+        requestCount += 1
+        waiter?.resume()
+        waiter = nil
+        await withCheckedContinuation { completion = $0 }
+        try Task.checkCancellation()
+        return try .init(roomID: .init(roomID), messageID: .init(messageID), isPinned: false, roomSequence: 4)
+    }
+
+    func setPinned(roomID: String, messageID: String, isPinned: Bool, expectedRoomSequence: UInt64) async throws -> V2ConversationCapabilityOutcome {
+        Issue.record("This fixture must not submit a pin without an explicit confirmation")
+        return .rejected(code: "UNEXPECTED_SUBMIT")
+    }
+
+    func waitUntilRequested() async {
+        guard requestCount == 0 else { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    func complete() { completion?.resume(); completion = nil }
+}
+
 private actor V2MessageReactionChangerFake: V2MessageReactionChanging {
     struct Request: Equatable, Sendable {
         let messageID: String
@@ -4942,22 +5048,102 @@ private actor V2LateUserBlockChanger: V2UserBlockChanging {
 }
 
 extension V2ConversationStoreTests {
+    @Test("群管理入口采用配置权限，并保留群主和自身保护", arguments: [V2RoomMembershipRole.member, .admin, .owner])
+    func groupMemberManagementUsesConfiguredPermissions(role: V2RoomMembershipRole) async throws {
+        let room = RoomID(uuid: UUID())
+        let permissions: Set<V2GroupPermission> = role == .member ? [.inviteMembers, .removeMembers, .changeMemberRoles] : []
+        let policy = V2ClientGroupRolePolicy(roomID: room, role: role, permissions: permissions, revision: 1)
+        let access = PolicyRecoveryAccessFake(state: .init(policies: [policy], recovery: .ready))
+        let roleName = role == .owner ? "群主" : role == .admin ? "管理员" : "成员"
+        let target = V2GroupMemberItem(id: "target", role: "成员")
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: .init(membershipRevision: 3,
+            actorRole: roleName, members: [target], nextCursor: nil)])
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue,
+            kind: .group, groupMemberDirectory: reader)
+        await store.groupManagement.loadGroupMembers(reset: true)
+        let permitted = role != .admin
+        #expect(store.groupManagement.canAddGroupMembers == permitted)
+        #expect(store.groupManagement.canRemoveGroupMember(target) == permitted)
+        #expect(store.groupManagement.canChangeGroupMemberRole(target) == permitted)
+        for protected in [V2GroupMemberItem(id: "current-user", role: roleName), .init(id: "owner", role: "群主")] {
+            #expect(!store.groupManagement.canRemoveGroupMember(protected))
+            #expect(!store.groupManagement.canChangeGroupMemberRole(protected))
+        }
+        await access.setState(.init(policies: [policy], recovery: .needed))
+        await store.groupManagement.loadGroupRolePolicies()
+        #expect(store.groupManagement.canAddGroupMembers == (role == .owner))
+        #expect(store.groupManagement.canRemoveGroupMember(target) == (role == .owner))
+        #expect(store.groupManagement.canChangeGroupMemberRole(target) == (role == .owner))
+    }
+
     @Test func groupPolicyRefreshAcceptsRecoveryAndRejectsAnOlderExplicitRead() async throws {
         let room = try RoomID("00000000-0000-0000-0000-000000ABCDEF")
         let reader = SequencedRolePolicyReader()
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: reader, userID: "current-user", roomID: room.rawValue, kind: .group)
-        let oldRead = Task { await store.loadGroupRolePolicies() }
+        let oldRead = Task { await store.groupManagement.loadGroupRolePolicies() }
         await reader.waitForCount(1)
         let refresh = Task { await store.refresh() }
         await reader.waitForCount(2)
         let recovered = V2ClientGroupRolePolicy(roomID: room, role: .member, permissions: [], revision: 8)
         await reader.complete(index: 1, policies: [recovered])
         await refresh.value
-        #expect(store.groupRolePolicies == [recovered])
+        #expect(store.groupManagement.groupRolePolicies == [recovered])
         await reader.complete(index: 0, policies: [.init(roomID: room, role: .member, permissions: [.sendMessages], revision: 2)])
         await oldRead.value
-        #expect(store.groupRolePolicies == [recovered])
-        #expect(store.isLoadingGroupRolePolicies == false)
+        #expect(store.groupManagement.groupRolePolicies == [recovered])
+        #expect(store.groupManagement.isLoadingGroupRolePolicies == false)
+    }
+}
+
+extension V2ConversationStoreTests {
+    @Test func timelineOnlyRefreshCannotSupersedeGroupMetadata() async throws {
+        let room = RoomID(uuid: UUID())
+        let reader = SequencedRolePolicyReader()
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, groupRolePolicyReader: reader,
+            userID: "current-user", roomID: room.rawValue, kind: .group)
+        let metadata = Task { await store.refresh(scopes: .conversationMetadata) }
+        await reader.waitForCount(1)
+        await store.refresh(scopes: .conversationTimeline)
+        let policy = V2ClientGroupRolePolicy(roomID: room, role: .member, permissions: [], revision: 8)
+        await reader.complete(index: 0, policies: [policy])
+        await metadata.value
+        #expect(store.groupManagement.groupRolePolicies == [policy])
+        #expect(store.state == .loaded)
+        #expect(await source.messageRequestCount() == 1)
+    }
+
+    @Test func groupMetadataFailureDoesNotFailTheConversationTimeline() async {
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let store = makeConversationDetailStore(dataSource: source, sender: nil,
+            groupAnnouncementReader: UnavailableGroupAnnouncementReader(),
+            userID: "current-user", roomID: UUID().uuidString, kind: .group)
+        await store.refresh()
+        #expect(store.state == .loaded)
+        #expect(store.messageActionFeedback == nil)
+        #expect(store.groupManagement.feedback == "无法刷新群信息，请稍后重试。")
+        #expect(await source.messageRequestCount() == 1)
+    }
+}
+
+private struct UnavailableGroupAnnouncementReader: V2GroupAnnouncementReading {
+    func groupAnnouncement(in roomID: String) async throws -> V2ClientGroupAnnouncement? {
+        throw URLError(.notConnectedToInternet)
+    }
+}
+
+private actor AnnouncementAccessFake: V2GroupAnnouncementReading, V2GroupAnnouncementManaging {
+    var value: V2ClientGroupAnnouncement
+    private(set) var lastBody: String?
+    private(set) var lastExpectedRevision: UInt64?
+    init(value: V2ClientGroupAnnouncement) { self.value = value }
+    func groupAnnouncement(in roomID: String) async throws -> V2ClientGroupAnnouncement? { value }
+    func setAnnouncement(roomID: String, body: String, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
+        lastBody = body; lastExpectedRevision = expectedRevision
+        guard expectedRevision == value.revision else { return .rejected(code: "REVISION_CONFLICT") }
+        value = .init(roomID: value.roomID, body: body, revision: value.revision + 1, updatedAt: .now)
+        return .accepted
     }
 }
 
@@ -4989,19 +5175,19 @@ extension V2ConversationStoreTests {
         let policies = [V2ClientGroupRolePolicy(roomID: room, role: .member, permissions: [], revision: 8)]
         let access = PolicyRecoveryAccessFake(state: .init(policies: policies, recovery: .paused))
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue, kind: .group)
-        await store.loadGroupRolePolicies()
-        #expect(store.groupRolePolicyState.recovery == .paused)
-        let retry = Task { await store.retryGroupRolePolicyRecovery() }
+        await store.groupManagement.loadGroupRolePolicies()
+        #expect(store.groupManagement.groupRolePolicyState.recovery == .paused)
+        let retry = Task { await store.groupManagement.retryGroupRolePolicyRecovery() }
         await access.waitForRetry()
-        #expect(store.policyRecoveryAction == .requesting)
-        await store.retryGroupRolePolicyRecovery()
+        #expect(store.groupManagement.policyRecoveryAction == .requesting)
+        await store.groupManagement.retryGroupRolePolicyRecovery()
         #expect(await access.retryCount() == 1)
         let pending = V2ClientGroupRolePolicyState(policies: policies, recovery: .pending(nextAttemptAt: Date(timeIntervalSince1970: 0)))
         await access.finish(.success(pending))
         await retry.value
-        #expect(store.groupRolePolicyState == pending)
-        #expect(store.policyRecoveryAction == .idle)
-        await store.retryGroupRolePolicyRecovery()
+        #expect(store.groupManagement.groupRolePolicyState == pending)
+        #expect(store.groupManagement.policyRecoveryAction == .idle)
+        await store.groupManagement.retryGroupRolePolicyRecovery()
         #expect(await access.retryCount() == 1)
     }
 
@@ -5010,20 +5196,20 @@ extension V2ConversationStoreTests {
         let paused = V2ClientGroupRolePolicyState(policies: [], recovery: .paused)
         let access = PolicyRecoveryAccessFake(state: paused)
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue, kind: .group)
-        await store.loadGroupRolePolicies()
-        let first = Task { await store.retryGroupRolePolicyRecovery() }
+        await store.groupManagement.loadGroupRolePolicies()
+        let first = Task { await store.groupManagement.retryGroupRolePolicyRecovery() }
         await access.waitForRetry()
         await access.finish(.failure(.accountUnavailable))
         await first.value
-        #expect(store.policyRecoveryAction == .failed)
-        #expect(store.groupRolePolicyState == paused)
-        let second = Task { await store.retryGroupRolePolicyRecovery() }
+        #expect(store.groupManagement.policyRecoveryAction == .failed)
+        #expect(store.groupManagement.groupRolePolicyState == paused)
+        let second = Task { await store.groupManagement.retryGroupRolePolicyRecovery() }
         await access.waitForRetry(count: 2)
         let ready = V2ClientGroupRolePolicyState(policies: [], recovery: .ready)
         await access.finish(.success(ready))
         await second.value
-        #expect(store.groupRolePolicyState == ready)
-        #expect(store.policyRecoveryAction == .idle)
+        #expect(store.groupManagement.groupRolePolicyState == ready)
+        #expect(store.groupManagement.policyRecoveryAction == .idle)
     }
 
     @Test func policyRecoveryDoesNotSubmitWithoutARecoverableState() async throws {
@@ -5031,8 +5217,8 @@ extension V2ConversationStoreTests {
         for recovery in [V2ClientRolePolicyRecoveryState.unavailable, .waitingForSynchronization, .ready, .pending(nextAttemptAt: Date(timeIntervalSince1970: 9_000))] {
             let access = PolicyRecoveryAccessFake(state: .init(policies: [], recovery: recovery))
             let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue, kind: .group)
-            await store.loadGroupRolePolicies()
-            await store.retryGroupRolePolicyRecovery()
+            await store.groupManagement.loadGroupRolePolicies()
+            await store.groupManagement.retryGroupRolePolicyRecovery()
             #expect(await access.retryCount() == 0)
         }
     }
@@ -5065,12 +5251,12 @@ private actor PolicyRecoveryAccessFake: V2GroupRolePolicyAccessing {
 
 extension V2ConversationStoreTests {
     @Test func missingPolicyCapabilityIsUnavailableInsteadOfOfferingAnIneffectiveRetry() async {
-        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, userID: "current-user", roomID: "room-a", kind: .group)
-        await store.loadGroupRolePolicies()
-        #expect(store.groupRolePolicyState.recovery == .unavailable)
-        await store.retryGroupRolePolicyRecovery()
-        #expect(store.groupRolePolicyState.recovery == .unavailable)
-        #expect(store.policyRecoveryAction == .idle)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: nil, userID: "current-user", roomID: "room-a", kind: .group)
+        await store.groupManagement.loadGroupRolePolicies()
+        #expect(store.groupManagement.groupRolePolicyState.recovery == .unavailable)
+        await store.groupManagement.retryGroupRolePolicyRecovery()
+        #expect(store.groupManagement.groupRolePolicyState.recovery == .unavailable)
+        #expect(store.groupManagement.policyRecoveryAction == .idle)
     }
 }
 
@@ -5081,27 +5267,27 @@ extension V2ConversationStoreTests {
         let ready = V2ClientGroupRolePolicyState(policies: [.init(roomID: room, role: .admin, permissions: [], revision: 8), .init(roomID: room, role: .member, permissions: [], revision: 8)], recovery: .ready)
         let access = PolicyRecoveryAccessFake(state: paused)
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, groupRolePolicyReader: access, userID: "current-user", roomID: room.rawValue, kind: .group)
-        await store.loadGroupRolePolicies()
-        let old = Task { await store.retryGroupRolePolicyRecovery() }
+        await store.groupManagement.loadGroupRolePolicies()
+        let old = Task { await store.groupManagement.retryGroupRolePolicyRecovery() }
         await access.waitForRetry()
         await access.setState(ready)
         await store.refresh()
         await access.finish(.failure(.accountUnavailable))
         await old.value
-        #expect(store.groupRolePolicyState == ready)
-        #expect(store.policyRecoveryAction == .idle)
+        #expect(store.groupManagement.groupRolePolicyState == ready)
+        #expect(store.groupManagement.policyRecoveryAction == .idle)
         await access.setState(paused)
-        await store.loadGroupRolePolicies()
-        let failed = Task { await store.retryGroupRolePolicyRecovery() }
+        await store.groupManagement.loadGroupRolePolicies()
+        let failed = Task { await store.groupManagement.retryGroupRolePolicyRecovery() }
         await access.waitForRetry(count: 2)
         await access.finish(.failure(.accountUnavailable))
         await failed.value
-        #expect(store.policyRecoveryAction == .failed)
+        #expect(store.groupManagement.policyRecoveryAction == .failed)
         let pending = V2ClientGroupRolePolicyState(policies: [], recovery: .pending(nextAttemptAt: Date(timeIntervalSince1970: 5_000)))
         await access.setState(pending)
         await store.refresh()
-        #expect(store.groupRolePolicyState == pending)
-        #expect(store.policyRecoveryAction == .idle)
+        #expect(store.groupManagement.groupRolePolicyState == pending)
+        #expect(store.groupManagement.policyRecoveryAction == .idle)
     }
 }
 
@@ -5142,13 +5328,13 @@ extension V2ConversationStoreTests {
         let reader=V2ScriptedGroupMemberDirectory(results:[.success(page),.failure(.server(code:"UNAVAILABLE",retryable:true,retryAfterSeconds:0,currentRevision:nil)),.success(page)])
         let adapter=V2OperationGroupMemberAdministrator(service:restored)
         let detail=makeConversationDetailStore(dataSource:V2ConversationDataSourceFake(summaries:[],messages:[]),sender:nil,userID:account.rawValue,roomID:room.rawValue,kind:.group,groupMemberDirectory:reader,groupMemberMuter:adapter,moderatedGroupMemberRemover:adapter)
-        await detail.loadGroupMembers(reset:true)
-        await detail.loadGroupMembers(reset:true)
-        await detail.continueMemberAdministration(pending)
+        await detail.groupManagement.loadGroupMembers(reset:true)
+        await detail.groupManagement.loadGroupMembers(reset:true)
+        await detail.groupManagement.continueMemberAdministration(pending)
         #expect(try await local.memberAdministrationPending(id:id).preparationState == .paused)
-        #expect(detail.groupMemberFeedback == "请先刷新成员与管理权限，再重新确认。")
-        await detail.loadGroupMembers(reset:true)
-        await detail.continueMemberAdministration(pending)
+        #expect(detail.groupManagement.groupMemberFeedback == "请先刷新成员与管理权限，再重新确认。")
+        await detail.groupManagement.loadGroupMembers(reset:true)
+        await detail.groupManagement.continueMemberAdministration(pending)
         #expect(try await local.memberAdministrationPending(id:id).preparationState == .cancelled)
         var iterator=(await restored.updates(roomID:room)).makeAsyncIterator()
         let replacement=try #require(try await iterator.next()?.first)
@@ -5172,7 +5358,7 @@ extension V2ConversationStoreTests {
         let restored=V2MemberAdministrationOperationService(accountID:account,activationID:UUID(),store:local,client:remote)
         let adapter=V2OperationGroupMemberAdministrator(service:restored)
         let detail=makeConversationDetailStore(dataSource:V2ConversationDataSourceFake(summaries:[],messages:[]),sender:nil,userID:account.rawValue,roomID:room.rawValue,kind:.group,groupMemberMuter:adapter,moderatedGroupMemberRemover:adapter)
-        await detail.continueMemberAdministration(try await local.memberAdministrationPending(id:id))
+        await detail.groupManagement.continueMemberAdministration(try await local.memberAdministrationPending(id:id))
         #expect(try await local.operationWork(id:work.id)?.scheduling == .ready)
         #expect(try await local.memberAdministrationCommand(workID:work.id)==original)
         #expect(await remote.admissions==0)
@@ -5205,16 +5391,16 @@ extension V2ConversationStoreTests {
         let baseline = try V2MessageModerationBaseline(roomID: f.room, messageID: .init(uuid: UUID()), messageRevision: 1, membershipRevision: 1, isRedacted: false)
         let id = try await service.enqueue(baseline: baseline, reason: .init("moderation_removal"))
         let detail = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, messageModerator: service, userID: f.account.rawValue, roomID: f.room.rawValue, kind: .group)
-        let observer = Task { await detail.observeMessageRemoval() }
+        let observer = Task { await detail.groupManagement.observeMessageRemoval() }
         let deadline = ContinuousClock.now + .seconds(3)
-        while detail.messageRemovalPending.isEmpty { try #require(ContinuousClock.now < deadline); await Task.yield() }
-        #expect(detail.messageRemovalPending.first?.work.id == id)
-        #expect(!detail.canManageMessages)
-        detail.endMessageRemovalPage()
-        let proposal = V2ConversationDetailStore.MessageRemovalProposal(id: UUID(), baseline: baseline, generation: UUID(), expires: .now + .seconds(120), confirmedUntil: Date().addingTimeInterval(120), policies: [], membershipRevision: 1)
-        await detail.confirmMessageRemoval(proposal)
-        await detail.confirmMessageRemoval(proposal)
-        #expect(detail.messageActionFeedback == nil)
+        while detail.groupManagement.messageRemovalPending.isEmpty { try #require(ContinuousClock.now < deadline); await Task.yield() }
+        #expect(detail.groupManagement.messageRemovalPending.first?.work.id == id)
+        #expect(!detail.groupManagement.canManageMessages)
+        detail.groupManagement.endMessageRemovalPage()
+        let proposal = V2GroupManagementStore.MessageRemovalProposal(id: UUID(), baseline: baseline, generation: UUID(), expires: .now + .seconds(120), confirmedUntil: Date().addingTimeInterval(120), policies: [], membershipRevision: 1)
+        await detail.groupManagement.confirmMessageRemoval(proposal)
+        await detail.groupManagement.confirmMessageRemoval(proposal)
+        #expect(detail.groupManagement.feedback == nil)
         observer.cancel(); await observer.value
         #expect(try await f.store.messageModerationPending(id: id).intent.messageID == baseline.messageID)
         #expect(await remote.calls == 0)
@@ -5242,10 +5428,30 @@ private actor FirstPreviewDecodeCount {
 }
 
 private actor V2SuspendingFileImportStager: V2ConversationAttachmentStaging {
+    private let suspendsFirstSelection: Bool
+    private var selectionCount = 0
+    private var selectionWaiter: CheckedContinuation<Void, Never>?
+    private var selectionCompletion: CheckedContinuation<Void, Never>?
     private var started = false
     private var startWaiter: CheckedContinuation<Void, Never>?
     private var completion: CheckedContinuation<Void, Never>?
     var discarded = 0
+    init(suspendsFirstSelection: Bool = false) { self.suspendsFirstSelection = suspendsFirstSelection }
+    func selectedAttachments(purpose: V2LocalResourceAssetPurpose) async throws -> [V2StagedConversationAttachment] {
+        selectionCount += 1
+        if suspendsFirstSelection, selectionCount == 1 {
+            await withCheckedContinuation {
+                selectionCompletion = $0
+                selectionWaiter?.resume(); selectionWaiter = nil
+            }
+        }
+        return []
+    }
+    func waitUntilSelectionStarted() async {
+        if selectionCompletion != nil { return }
+        await withCheckedContinuation { selectionWaiter = $0 }
+    }
+    func completeSelection() { selectionCompletion?.resume(); selectionCompletion = nil }
     func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) async throws -> V2StagedConversationAttachment {
         started = true
         startWaiter?.resume(); startWaiter = nil
@@ -5258,4 +5464,72 @@ private actor V2SuspendingFileImportStager: V2ConversationAttachmentStaging {
     }
     func complete() { completion?.resume(); completion = nil }
     func discard(_ attachment: V2StagedConversationAttachment) { discarded += 1 }
+}
+
+private actor V2FailingSendingCapabilityDataSource: V2ConversationDataSource, V2ConversationSendingCapabilityReading {
+    private var fails = false
+    func failCapabilityRead() { fails = true }
+    func directSendingCapability(in roomID: String) throws -> Bool? {
+        if fails { throw V2SequencedConversationDataSourceFailure.failed }
+        return false
+    }
+    func conversationSummaryPage(for userID: String, isArchived: Bool,
+                                 before cursor: V2ClientConversationListCursor?, limit: Int) -> V2ConversationListPage {
+        .init(items: [], nextCursor: nil)
+    }
+    func timelinePage(in roomID: String, for userID: String,
+                      before cursor: V2ConversationTimelineCursor?, limit: Int) -> V2ConversationTimelinePage {
+        .init(items: [], olderCursor: nil)
+    }
+    func timelineWindow(in roomID: String, for userID: String, around messageID: String,
+                        before: Int, after: Int) -> V2ConversationTimelineLocation { .unavailable }
+}
+
+extension V2ConversationStoreTests {
+    @Test("群主操作绑定确认时的成员版本，过期确认不能悄悄换版本提交", arguments: [false, true])
+    func groupLifecycleConfirmationUsesDisplayedRevision(dissolve: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "group-lifecycle-app-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let account = UserID(uuid: UUID()), room = RoomID(uuid: UUID()), target = UserID(uuid: UUID())
+        let local = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: .init(value: UUID()), userID: account)
+        let service = V2GroupCapabilityOperationService(accountID: account, activationID: UUID(), store: local, client: GroupLifecycleNoNetworkClient())
+        let member = V2GroupMemberItem(id: target.rawValue, role: "成员")
+        let reader = V2ScriptedGroupMemberDirectory(results: [
+            .success(.init(membershipRevision: 3, actorRole: "群主", members: [member], nextCursor: nil)),
+            .success(.init(membershipRevision: 4, actorRole: "群主", members: [member], nextCursor: nil)),
+            .success(.init(membershipRevision: 5, actorRole: "管理员", members: [member], nextCursor: nil))
+        ])
+        let detail = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil,
+            groupMessagePinner: V2OperationGroupMessagePinner(service: service), userID: account.rawValue, roomID: room.rawValue,
+            kind: .group, groupMemberDirectory: reader)
+        let groups = detail.groupManagement
+        await groups.loadGroupMembers(reset: true)
+        #expect(groups.canManageGroupLifecycle)
+        if dissolve { groups.prepareGroupDissolution() } else { groups.prepareOwnershipTransfer(to: member) }
+        let stale = try #require(groups.groupLifecycleProposal)
+        await groups.loadGroupMembers(reset: true)
+        await groups.confirmGroupLifecycle(stale)
+        #expect(groups.groupMemberFeedback == "群状态已变化，请刷新后重新确认。")
+        if dissolve { groups.prepareGroupDissolution() } else { groups.prepareOwnershipTransfer(to: member) }
+        await groups.confirmGroupLifecycle(try #require(groups.groupLifecycleProposal))
+        var updates = await service.updates(roomID: room).makeAsyncIterator()
+        let pending = try #require(try await updates.next())
+        #expect(pending.count == 1)
+        #expect(pending.first?.intent.action.observedRevision == 4)
+        #expect(pending.first?.intent.identity.kind == (dissolve ? .groupDissolution : .groupOwnership))
+        #expect(pending.first?.work == nil)
+        await groups.loadGroupMembers(reset: true)
+        #expect(!groups.canManageGroupLifecycle)
+        groups.prepareGroupDissolution()
+        #expect(groups.groupLifecycleProposal == nil)
+        try await local.close()
+    }
+}
+
+private struct GroupLifecycleNoNetworkClient: V2GroupCapabilityOperationClient {
+    func pinBaseline(roomID: RoomID, messageID: MessageID) async throws -> V2PinnedMessageBaseline { throw CancellationError() }
+    func admit(_ intent: V2GroupCapabilityIntent) async throws -> V2GroupCapabilityAdmissionResult { throw CancellationError() }
+    func submit(_ command: V2GroupCapabilityCommand) async throws -> V2GroupCapabilityRecoveryResult { throw CancellationError() }
+    func recover(_ command: V2GroupCapabilityCommand, action: V2OperationRecoveryRequest.Action) async throws -> V2GroupCapabilityRecoveryResult { throw CancellationError() }
 }

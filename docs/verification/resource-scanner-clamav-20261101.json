@@ -1,0 +1,99 @@
+{
+  "observedAt": "2026-10-31T21:48:17.736332+00:00",
+  "environment": "macOS arm64, isolated temporary ClamAV runtime and signature directories",
+  "engineVersion": "1.4.6",
+  "package": {
+    "url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.4.6/clamav-1.4.6.macos.universal.pkg",
+    "sha256": "a1898a0269e1cad0dc9d9be988a79541f287f205c6537d4a846c5ff3ac3e4a1f",
+    "signatureURL": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.4.6/clamav-1.4.6.macos.universal.pkg.sig",
+    "publisherKeyURL": "https://raw.githubusercontent.com/Cisco-Talos/clamav-documentation/main/src/manual/cisco-talos.gpg",
+    "signingKeyFingerprint": "5BADCA2665EF59DCF8A23D8B707F0DB480836771",
+    "sha256MatchedRelease": true,
+    "gpgSignatureVerified": true,
+    "relocation": {
+      "reason": "Official macOS binaries require /usr/local/clamav/lib; changed only local copy RPATH and applied ad-hoc signing for isolated execution",
+      "files": [
+        {
+          "name": "clamscan",
+          "sourceSHA256": "14604338290f285a8a03940b94218be83789a28396cce6c0f581b64142b82424",
+          "relocatedSHA256": "ae19a46c53c930199fd3df486483e0fe7894f414ee35aed3835ba09cf1898e12"
+        },
+        {
+          "name": "freshclam",
+          "sourceSHA256": "09d46b42d0152d0a6391ede65c8984cc661f30b016b648a1ce3289a06d3d29a9",
+          "relocatedSHA256": "46167acfc407030a46329fbec5e5c3b94f9fffdbe009e161b1e6a5decc8fb984"
+        }
+      ]
+    }
+  },
+  "databaseSource": "FreshClam official database.clamav.net; one successful update, all database tests passed",
+  "databases": [
+    {
+      "name": "bytecode.cvd",
+      "version": 339,
+      "signatures": 80,
+      "builtAt": "11 Sep 2025 08-29 -0400",
+      "buildTimestamp": 1757593759,
+      "sha256": "6d4aa01f219e988060fc419f495d07f27e0cdf1a2cccc065971da922c76f7ffb",
+      "bytes": 281702
+    },
+    {
+      "name": "daily.cvd",
+      "version": 28170,
+      "signatures": 355841,
+      "builtAt": "31 Oct 2026 06-24 +0000",
+      "buildTimestamp": 1793427882,
+      "sha256": "189f5d7115c92617c914dd3465d2275a3c7603a6a4d5ffb3d04f5722f96cab8b",
+      "bytes": 23447609
+    },
+    {
+      "name": "main.cvd",
+      "version": 63,
+      "signatures": 3287027,
+      "builtAt": "16 Dec 2025 23-18 +0000",
+      "buildTimestamp": 1765927102,
+      "sha256": "0b2182d229f46981ec8f535382222f7c9dfdd656b250ad47988b910a8d302365",
+      "bytes": 89072577
+    }
+  ],
+  "validation": {
+    "focusedSwiftMethods": 2,
+    "buildSeconds": 35.62,
+    "methods": [
+      {
+        "name": "configuredEngineRejectsMissingSignatures",
+        "result": "passed",
+        "seconds": 0.031,
+        "scope": "Real engine version succeeds; adapter startup rejects an empty signature directory."
+      },
+      {
+        "name": "configuredEngineScansVerifiedResources",
+        "result": "passed",
+        "seconds": 18.892,
+        "scope": "Production adapter readiness plus real stored clean/EICAR bytes; 1 MiB configured upload limit."
+      }
+    ],
+    "expiredSignatureProbe": {
+      "source": "Official main.cvd version 63, with no newer daily database",
+      "result": "rejected",
+      "exitCode": 2,
+      "stdout": "ERROR: Virus database is older than 2 days!\n",
+      "seconds": 0.007,
+      "scope": "Direct clamscan with the same production policy flags; adapter error handling is covered separately."
+    },
+    "fullSuitesRun": false
+  },
+  "limits": [
+    "The macOS package was authenticated before changing only executable RPATH and applying ad-hoc signatures to temporary copies; deployment binary installation/signing was not tested.",
+    "Harmless clean bytes and EICAR do not measure malware coverage, false-positive rates or large-object throughput.",
+    "Linux container limits, production database update/recovery, concurrency memory, disk and queue budgets remain open."
+  ],
+  "sourceSHA256": {
+    "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2ClamAVResourceScanner.swift": "6518e069d8cfe3c3071d5b276753d214c5c44b533730ff4523127c1f2b0cd261",
+    "IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2ClamAVProcess.swift": "ffbfe0721f204f9c82b7c8cad609e634516c2366224c8467c874e13c427052f7",
+    "IMV2Server/Tests/IMV2ServerTests/V2ClamAVLiveTests.swift": "21572c7ee8ac62ea56f6b2bb83159cbd67c131ec632d8ffeed91f5d3c1290790"
+  },
+  "globalInstallation": false,
+  "daemonStarted": false,
+  "temporaryRuntimeRemoved": true
+}

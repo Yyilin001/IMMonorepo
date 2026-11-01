@@ -92,6 +92,7 @@ enum PostgresV2RoomMembershipStore {
                 """).first(decoding: MembershipRoomRow.self) else { throw V2RoomMembershipStoreError.roomNotFound }
             room = value
         }
+        guard try await sql.raw("SELECT dissolved_at IS NULL AS value FROM im_v2.rooms WHERE room_id=\(bind: roomID)").first(decoding: MembershipBooleanRow.self)?.value == true else { throw V2RoomMembershipStoreError.roomNotFound }
         guard let group = try await sql.raw("""
             SELECT owner_user_id, title, created_at
             FROM im_v2.group_rooms WHERE room_id = \(bind: roomID)

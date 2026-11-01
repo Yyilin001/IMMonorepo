@@ -29,7 +29,9 @@ struct GatewayForwardDeliveryAssembly {
         let registry = storageAssembly?.registry
         let transformer: V2LocalResourceTransformer?
         let mediaProbe: V2LocalResourceMediaProbe?
+        let resourceScanner: (any V2ResourceScanner)?
         if let resourceConfiguration {
+            resourceScanner = try await V2ResourceScannerAssembly.build(configuration: resourceConfiguration)
             mediaProbe = try .init(
                 executable: ProcessInfo.processInfo.environment["IMV2_RESOURCE_FFPROBE"].map { URL(fileURLWithPath: $0) } ?? V2LocalResourceMediaProbe.defaultExecutable,
                 temporaryDirectory: resourceConfiguration.rootDirectory.appendingPathComponent("forward-media-processing"), maximumBytes: resourceConfiguration.maximumBytes)
@@ -42,7 +44,7 @@ struct GatewayForwardDeliveryAssembly {
                     temporaryDirectory: resourceConfiguration.rootDirectory.appendingPathComponent("forward-processing"))
                 try await transformer?.verifyReadiness()
             } else { transformer = nil }
-        } else { transformer = nil; mediaProbe = nil }
+        } else { transformer = nil; mediaProbe = nil; resourceScanner = nil }
         var forwardTargetEndpoints: [String: any V2ForwardExportDelivering] = [:]
         var forwardBackgroundDatabases: [String: any Database] = [:]
         for storage in configuration.roomShardStorage {
@@ -54,7 +56,7 @@ struct GatewayForwardDeliveryAssembly {
             guard let ownerDatabase = forwardBackgroundDatabases[storage.shardID]
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let mediaWorker: V2ForwardMediaImportWorker?
-            if let resourceConfiguration, let registry, let storageAssembly {
+            if let resourceConfiguration, let registry, let storageAssembly, let resourceScanner {
                 try await V2ResourceStorageReadiness.verify(database: ownerDatabase, registry: registry)
                 let store = try PostgresV2ForwardMediaImportStore(database: ownerDatabase)
                 let allocate: @Sendable (V2StorageBinding) throws -> V2StoredObjectReference = { binding in
@@ -67,7 +69,7 @@ struct GatewayForwardDeliveryAssembly {
                     copier: V2ResourceForwardMediaCopier(sources: forwardBackgroundDatabases, target: store,
                         registry: registry, maximumBytes: resourceConfiguration.maximumBytes, allocate: allocate),
                     scanner: V2PlacementMediaScanner(database: ownerDatabase, registry: registry,
-                        scanner: V2LocalResourceScanner(),
+                        scanner: resourceScanner,
                         variants: variants, mediaProbe: mediaProbe))
             } else { mediaWorker = nil }
             forwardTargetEndpoints[storage.shardID] = V2ActorForwardImportEndpoint(

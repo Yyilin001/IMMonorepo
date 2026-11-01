@@ -104,12 +104,12 @@ struct IMAppLocalAccountIntegrationTests {
                 try await roomSubscriptions.run(connectionID: connectionID)
             }, roomCatchUpLoop: {
                 try await roomRecovery.run(userID: sender.userID)
-            }, policyRecoveryLoop: {
+            }, policyRecoveryLoops: [{
                 for await value in await connection.realtimeCoverageChanges() {
                     try Task.checkCancellation()
                     await coverage.receive(value)
                 }
-            })
+            }])
         let runtime = V2ClientRuntime(connection: session, activity: activity)
         let realtimeTask = Task { try await account.runRealtime(runtime) }
         let client = ACKCutObservedClient(base: V2RoutedMessageSendOperationClient(accountID: sender.userID,

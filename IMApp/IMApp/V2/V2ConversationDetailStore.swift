@@ -29,33 +29,17 @@ final class V2ConversationDetailStore {
     }
 
     private let dataSource: any V2ConversationDataSource
-    private let sendingCapabilityReader: (any V2ConversationSendingCapabilityReading)?
     private let messageSearcher: (any V2ConversationMessageSearching)?
-    private let sender: (any V2ConversationSending)?
     private let messageWithdrawer: (any V2MessageWithdrawing)?
     private let messageReactionChanger: (any V2MessageReactionChanging)?
     private let messageEditor: (any V2MessageEditing)?
     private let readReceiptReporter: (any V2ConversationReadReporting)?
     private let messageFavoriter: (any V2MessageFavoriting)?
-    private let messageModerator: V2MessageModerationOperationService?
-    private let groupMessagePinner: (any V2GroupMessagePinning)?
     private let messageForwarder: (any V2MessageForwarding)?
     let forwardTargets: [V2ConversationForwardTarget]
-    private let groupAnnouncementReader: (any V2GroupAnnouncementReading)?
-    private let groupAnnouncementManager: (any V2GroupAnnouncementManaging)?
     private let groupAvatarManager: (any V2GroupAvatarManaging)?
     private let nameOperations: V2NameOperationService?
-    private let groupMemberRoleChanger: (any V2GroupMemberRoleChanging)?
-    private let groupRolePolicyReader: (any V2GroupRolePolicyAccessing)?
-    private let groupRolePolicyChanger: (any V2GroupRolePolicyChanging)?
-    private let groupReadReceiptReader: (any V2GroupReadReceiptReading)?
-    private let conversationLiveActivity: (any V2ConversationLiveActivityManaging)?
     private let userID: String
-    private let groupMemberDirectory: (any V2GroupMemberDirectoryReading)?
-    private let groupMembershipChanger: (any V2GroupMembershipChanging)?
-    private let groupMemberMuter: (any V2GroupMemberMuting)?
-    private let moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)?
-    private let publicIdentityResolver: (any V2ConversationPublicIdentityResolving)?
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let resourceSender: (any V2DurableConversationSending)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
@@ -63,6 +47,10 @@ final class V2ConversationDetailStore {
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     private let roomSubscriptions: V2RoomSubscriptionCoordinator?
     private let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
+    let liveActivity: V2ConversationActivityStore
+    let groupReadReceipts: V2GroupReadReceiptStore
+    let groupManagement: V2GroupManagementStore
+    let composer: V2ConversationComposerStore
     let roomID: String
     let presentationKey: V2ProfileViewLookupKey?
     private(set) var title: String
@@ -96,52 +84,15 @@ final class V2ConversationDetailStore {
     private(set) var isLoadingOlderTimeline = false
     private(set) var isBrowsingHistoricalTimeline = false
     private(set) var isReturningToLatestTimeline = false
-    private(set) var canSendInDirectConversation: Bool?
     private(set) var state: State = .loading
-    private(set) var trackedSendIntentID: UUID?
-    private(set) var sendFeedback: String?
-    private(set) var isSending = false
     private(set) var messageActionFeedback: String?
-    private(set) var groupMembers: [V2GroupMemberItem] = []
-    private(set) var hasEarlierGroupMembers = false
-    private(set) var groupMemberRevision: UInt64?
-    private(set) var groupMemberDirectoryIsStale = true
-    enum GroupMemberRefreshReason { case userInitiated, authorizationChanged }
-    private(set) var groupActorRole: String?
-    private(set) var canLoadMoreGroupMembers = false
-    private(set) var groupMemberFeedback: String?
-    private(set) var isLoadingGroupMembers = false
-    private(set) var isChangingGroupMembership = false
-    private(set) var isApplyingGroupModeration = false
-    private(set) var attachments: [V2ConversationAttachmentItem] = []
-    @ObservationIgnored private var didRestoreAttachmentDraft = false
     private(set) var mediaDownloadStates: [MediaID: V2ConversationMediaDownloadState] = [:]
     private(set) var initialImagePreviews: [MediaID: V2SendableImage] = [:]
-    private(set) var groupReadReceiptPage: V2ReadReceiptReadersPage?
-    private(set) var hasEarlierGroupReadReceipts = false
-    private(set) var isLoadingGroupReadReceipts = false
-    private(set) var groupReadReceiptFeedback: String?
-    private var groupReadReceiptMessageID: String?
-    private var groupReadReceiptDemand = UUID()
-    private var groupReadReceiptFlight: (id: UUID, task: Task<V2ReadReceiptReadersPage, Error>)?
-    private var typingLeaseTask: Task<Void, Never>?
-    private var typingLeaseID: UUID?
-    private var activityConsumerID: UUID?
-    private var activityConnectionID: UUID?
-    /// 每个远端用户各一个到期任务。
-    ///
-    /// 线路上的到期时间才是权威：连接中断可能丢掉收尾的 `isTyping = false` 事件。
-    private var typingExpiryTasks: [UserID: Task<Void, Never>] = [:]
-    private var typingExpiryDates: [UserID: Date] = [:]
-    private(set) var peerPresence: V2PresenceState?
-    private(set) var typingUserIDs: Set<UserID> = []
-    private var nextGroupMemberCursor: String?
-    private var groupMemberReloadPending = false
     private var refreshGeneration = 0
     private var newerTimelineBoundary: V2ConversationTimelineCursor?
     private var timelineLocationID: UUID?
     private var refreshAfterTimelineLocation = false
-    private var inFlightMessageActionIDs: Set<String> = []
+    private let messageActions: V2ConversationMessageActionActivity
     private(set) var isSelectingMessagesForForward = false
     private struct SelectedForwardSource {
         let reference: V2ForwardMessageReference
@@ -150,18 +101,6 @@ final class V2ConversationDetailStore {
     private var selectedForwardSources: [String: SelectedForwardSource] = [:]
     var selectedForwardMessageIDs: Set<String> { Set(selectedForwardSources.keys) }
     private(set) var isForwardingMessages = false
-    private(set) var groupAnnouncement: V2ClientGroupAnnouncement?
-    private(set) var isSavingGroupAnnouncement = false
-    private(set) var groupRolePolicyState = V2ClientGroupRolePolicyState(policies: [], recovery: .needed)
-    var groupRolePolicies: [V2ClientGroupRolePolicy] { groupRolePolicyState.policies }
-    enum PolicyRecoveryAction: Equatable { case idle, requesting, failed }
-    private(set) var policyRecoveryAction = PolicyRecoveryAction.idle
-    private var rolePolicyReadGeneration: UInt64 = 0
-    private(set) var isLoadingGroupRolePolicies = false
-    private(set) var isSavingGroupRolePolicy = false
-    var draft = ""
-    var mentionHandlesText = ""
-    private(set) var replyTarget: V2ConversationMessageItem?
 
     private(set) var readSyncArchiveCandidate: UUID?
     private(set) var readSyncArchives: [V2ReadReceiptArchive] = []
@@ -306,29 +245,38 @@ final class V2ConversationDetailStore {
 
     init(environment: V2ConversationFeatureEnvironment, context: V2ConversationDetailContext) {
         dataSource = environment.projections.dataSource
-        sendingCapabilityReader = environment.projections.dataSource as? any V2ConversationSendingCapabilityReading
+        composer = V2ConversationComposerStore(
+            roomID: context.roomID, kind: context.kind, sender: environment.messages.sender,
+            attachmentStager: environment.media.attachmentStager, resourceSender: environment.media.resourceSender,
+            publicIdentityResolver: environment.discovery.publicIdentityResolver,
+            sendingCapabilityReader: environment.projections.dataSource as? any V2ConversationSendingCapabilityReading,
+            initialDraft: context.initialDraft, initialMentionHandles: context.initialMentionHandles)
+        let messageActions = V2ConversationMessageActionActivity()
+        self.messageActions = messageActions
+        groupManagement = V2GroupManagementStore(
+            roomID: context.roomID, userID: environment.userID, kind: context.kind,
+            groups: environment.groups,
+            announcementReader: environment.projections.groupAnnouncementReader
+                ?? (environment.projections.dataSource as? any V2GroupAnnouncementReading),
+            policyReader: environment.projections.groupRolePolicyReader
+                ?? (environment.projections.dataSource as? any V2GroupRolePolicyAccessing),
+            messagePinner: environment.messages.groupPinner, messageModerator: environment.messages.moderator,
+            publicIdentityResolver: environment.discovery.publicIdentityResolver, messageActions: messageActions)
         messageSearcher = environment.projections.messageSearcher
-        sender = environment.messages.sender
         messageWithdrawer = environment.messages.withdrawer
         messageReactionChanger = environment.messages.reactionChanger
         messageEditor = environment.messages.editor
         readReceiptReporter = environment.messages.readReceiptReporter
         messageFavoriter = environment.messages.favoriter
-        messageModerator = environment.messages.moderator
-        groupMessagePinner = environment.messages.groupPinner
         messageForwarder = environment.messages.forwarder
         forwardTargets = context.forwardTargets
-        groupAnnouncementReader = environment.projections.groupAnnouncementReader
-            ?? (environment.projections.dataSource as? any V2GroupAnnouncementReading)
-        groupAnnouncementManager = environment.groups.announcementManager
         groupAvatarManager = environment.groups.avatarManager
         nameOperations = environment.groups.nameOperations
-        groupMemberRoleChanger = environment.groups.memberRoleChanger
-        groupRolePolicyReader = environment.projections.groupRolePolicyReader
-            ?? (environment.projections.dataSource as? any V2GroupRolePolicyAccessing)
-        groupRolePolicyChanger = environment.groups.rolePolicyChanger
-        groupReadReceiptReader = environment.groups.readReceiptReader
-        conversationLiveActivity = environment.runtime.liveActivity
+        liveActivity = V2ConversationActivityStore(
+            roomID: context.roomID, userID: environment.userID, kind: context.kind,
+            activity: environment.runtime.liveActivity, roomSubscriptions: environment.runtime.roomSubscriptions)
+        groupReadReceipts = V2GroupReadReceiptStore(
+            roomID: context.roomID, kind: context.kind, reader: environment.groups.readReceiptReader)
         userID = environment.userID
         roomID = context.roomID
         title = context.title
@@ -341,11 +289,6 @@ final class V2ConversationDetailStore {
             presentationKey = nil
         }
         kind = context.kind
-        groupMemberDirectory = environment.groups.memberDirectory
-        groupMembershipChanger = environment.groups.membershipChanger
-        groupMemberMuter = environment.groups.memberMuter
-        moderatedGroupMemberRemover = environment.groups.moderatedMemberRemover
-        publicIdentityResolver = environment.discovery.publicIdentityResolver
         attachmentStager = environment.media.attachmentStager
         resourceSender = environment.media.resourceSender
         mediaDownloader = environment.media.downloader
@@ -353,8 +296,6 @@ final class V2ConversationDetailStore {
         projectionChangeNotifier = environment.runtime.projectionChangeNotifier
         activeHybridGroupSynchronizer = environment.runtime.activeHybridGroupSynchronizer
         roomSubscriptions = environment.runtime.roomSubscriptions
-        draft = context.initialDraft ?? ""
-        mentionHandlesText = context.initialMentionHandles ?? ""
     }
 
     var canSearchMessages: Bool { messageSearcher != nil && (try? RoomID(roomID)) != nil }
@@ -420,7 +361,6 @@ final class V2ConversationDetailStore {
                 initialImagePreviews = initialImagePreviews.filter { visibleMediaIDs.contains($0.key) }
             }
             if refreshTimeline { state = .loaded }
-            _ = await restoreAttachmentDraft()
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
             let refreshedHistoryIncomplete = refreshTimeline ? ((try? await dataSource.roomLogHistoryIsIncomplete(roomID: roomID)) ?? isHistoryIncomplete) : isHistoryIncomplete
@@ -432,35 +372,17 @@ final class V2ConversationDetailStore {
                 guard generation == refreshGeneration else { return }
                 title = updatedTitle
             }
-            let refreshedCanSend: Bool? = if refreshMetadata, !isGroupConversation, let sendingCapabilityReader {
-                try await sendingCapabilityReader.directSendingCapability(in: roomID)
-            } else {
-                canSendInDirectConversation
+            if refreshMetadata { await composer.refreshSendingCapability() }
+            try Task.checkCancellation()
+            guard generation == refreshGeneration else { return }
+            if refreshMetadata {
+                await groupManagement.refreshMetadata()
+                try Task.checkCancellation()
+                guard generation == refreshGeneration else { return }
             }
-            try Task.checkCancellation()
-            guard generation == refreshGeneration else { return }
-            let refreshedAnnouncement: V2ClientGroupAnnouncement? = if refreshMetadata, isGroupConversation, let groupAnnouncementReader {
-                try await groupAnnouncementReader.groupAnnouncement(in: roomID)
-            } else {
-                groupAnnouncement
-            }
-            try Task.checkCancellation()
-            guard generation == refreshGeneration else { return }
-            if refreshMetadata { rolePolicyReadGeneration &+= 1 }
-            let policyReadGeneration = rolePolicyReadGeneration
-            let refreshedPolicies: V2ClientGroupRolePolicyState? = if refreshMetadata, isGroupConversation, let groupRolePolicyReader {
-                try await groupRolePolicyReader.groupRolePolicyState(in: roomID)
-            } else { nil }
-            try Task.checkCancellation()
-            guard generation == refreshGeneration else { return }
             // 标记只增不减：一旦确认缺过历史，就不因一次读失败或旧快照而"变完整"。
             isHistoryIncomplete = isHistoryIncomplete || refreshedHistoryIncomplete
             isBrowsingHistoricalTimeline = newerTimelineBoundary != nil
-            if refreshMetadata {
-                canSendInDirectConversation = refreshedCanSend
-                groupAnnouncement = refreshedAnnouncement
-                if policyReadGeneration == rolePolicyReadGeneration, let refreshedPolicies { updateGroupRolePolicyState(refreshedPolicies) }
-            }
             state = .loaded
             // The applied room cursor can advance for invisible or metadata-only
             // events even when the rendered timeline is unchanged.
@@ -891,286 +813,11 @@ final class V2ConversationDetailStore {
         }
     }
 
-    /// 观察实时活动状态。
-    ///
-    /// 该任务由详情视图持有。实时活动是瞬时状态，视图消失时必须停止；
-    /// 消息刷新是另一条独立路径。
-    func observeLiveActivity() async {
-        if let roomSubscriptions {
-            await observeSharedLiveActivity(roomSubscriptions)
-            return
-        }
-        guard let conversationLiveActivity else { return }
-        let includesPresence = !isGroupConversation
-        do {
-            peerPresence = try await conversationLiveActivity.activate(roomID: roomID, includesPresence: includesPresence)
-            while !Task.isCancelled {
-                switch try await conversationLiveActivity.nextEvent() {
-                case .presence(let presence):
-                    guard presence.roomID.rawValue == roomID else { continue }
-                    peerPresence = presence
-                case .typing(let typing):
-                    guard typing.roomID.rawValue == roomID, typing.userID.rawValue != userID else { continue }
-                    applyTypingState(typing)
-                }
-            }
-        } catch is CancellationError {
-            // Fall through to stop this view's ephemeral subscriptions.
-        } catch {
-            // Live activity is intentionally best-effort. The detail view and
-            // durable message sync remain usable if a transient stream fails.
-            peerPresence = nil
-            typingUserIDs = []
-        }
-        let hadTypingLease = typingLeaseTask != nil
-        typingLeaseTask?.cancel()
-        typingLeaseTask = nil
-        clearTypingStates()
-        if hadTypingLease {
-            // Best effort only; the receiver-side TTL remains the recovery
-            // mechanism when the socket is already gone.
-            try? await conversationLiveActivity.setTyping(roomID: roomID, isTyping: false)
-        }
-        await conversationLiveActivity.deactivate(roomID: roomID, includesPresence: includesPresence)
+    func sendDraft() async {
+        guard case .refreshTimeline = await composer.sendDraft() else { return }
+        await refresh()
     }
 
-    private func observeSharedLiveActivity(_ owner: V2RoomSubscriptionCoordinator) async {
-        guard let room = try? RoomID(roomID) else { return }
-        var channels: Set<V2RoomSubscriptionChannel> = [.typing]
-        if !isGroupConversation { channels.insert(.presence) }
-        do {
-            let lease = try await owner.acquire(roomID: room, channels: channels)
-            activityConsumerID = lease.id
-            var observedConnectionID: UUID?
-            for await snapshot in lease.updates {
-                guard !Task.isCancelled else { break }
-                if observedConnectionID != snapshot.connectionID || snapshot.state == .offline || snapshot.state == .revoked {
-                    observedConnectionID = snapshot.connectionID
-                    typingLeaseTask?.cancel()
-                    typingLeaseTask = nil
-                    typingLeaseID = nil
-                }
-                activityConnectionID = snapshot.state == .subscribed ? snapshot.connectionID : nil
-                // Each snapshot replaces all transient facts, including when
-                // an intermediate offline value was coalesced away.
-                clearTypingStates()
-                setPeerPresence(snapshot.presence)
-                for typing in snapshot.typing { applyTypingState(typing) }
-            }
-            await owner.release(roomID: room, consumerID: lease.id)
-        } catch {
-            // Registration is bounded; local history remains available.
-        }
-        activityConsumerID = nil
-        activityConnectionID = nil
-        setPeerPresence(nil)
-        clearTypingStates()
-        typingLeaseTask?.cancel()
-        typingLeaseTask = nil
-    }
-
-    private var presenceExpiryTask: Task<Void, Never>?
-    private func setPeerPresence(_ presence: V2PresenceState?) {
-        presenceExpiryTask?.cancel()
-        presenceExpiryTask = nil
-        guard let presence, presence.expiresAt > Date() else { peerPresence = nil; return }
-        peerPresence = presence
-        presenceExpiryTask = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(max(0, presence.expiresAt.timeIntervalSinceNow))) }
-            catch { return }
-            guard let self, self.peerPresence == presence else { return }
-            self.peerPresence = nil
-            self.presenceExpiryTask = nil
-        }
-    }
-
-    /// 应用一次线路事件并负责接收端的到期处理。
-    ///
-    /// 它与流循环分离，使测试无需真实套接字即可覆盖租约边界。
-    ///
-    /// - Parameters:
-    ///   - typing: 正在输入状态。
-    ///   - now: 本次判定时刻。
-    func applyTypingState(_ typing: V2TypingState, now: Date = Date()) {
-        guard typing.roomID.rawValue == roomID, typing.userID.rawValue != userID else { return }
-        typingExpiryTasks[typing.userID]?.cancel()
-        typingExpiryTasks.removeValue(forKey: typing.userID)
-        typingExpiryDates.removeValue(forKey: typing.userID)
-        guard typing.isTyping, typing.expiresAt > now else {
-            typingUserIDs.remove(typing.userID)
-            return
-        }
-        typingUserIDs.insert(typing.userID)
-        let userID = typing.userID
-        let expiry = typing.expiresAt
-        typingExpiryDates[userID] = expiry
-        typingExpiryTasks[userID] = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .seconds(max(0, expiry.timeIntervalSinceNow)))
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else { return }
-            self?.expireTypingState(for: userID, expectedExpiry: expiry)
-        }
-    }
-
-    func expireTypingState(for userID: UserID, expectedExpiry: Date) {
-        guard typingExpiryDates[userID] == expectedExpiry else { return }
-        typingExpiryTasks[userID] = nil
-        typingExpiryDates[userID] = nil
-        typingUserIDs.remove(userID)
-    }
-
-    private func clearTypingStates() {
-        for task in typingExpiryTasks.values { task.cancel() }
-        typingExpiryTasks.removeAll()
-        typingExpiryDates.removeAll()
-        typingUserIDs.removeAll()
-    }
-
-    func updateTypingForDraft() {
-        let sendTyping: @Sendable (Bool) async throws -> Void
-        if let roomSubscriptions {
-            guard let consumerID = activityConsumerID, let connectionID = activityConnectionID,
-                  let room = try? RoomID(roomID) else { return }
-            sendTyping = { value in
-                try await roomSubscriptions.setTyping(roomID: room, consumerID: consumerID, connectionID: connectionID, isTyping: value)
-            }
-        } else if let activity = conversationLiveActivity {
-            let room = roomID
-            sendTyping = { value in try await activity.setTyping(roomID: room, isTyping: value) }
-        } else { return }
-        let shouldType = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if shouldType, typingLeaseTask == nil {
-            let leaseID = UUID()
-            typingLeaseID = leaseID
-            typingLeaseTask = Task { [weak self] in
-                defer {
-                    if self?.typingLeaseID == leaseID {
-                        self?.typingLeaseTask = nil
-                        self?.typingLeaseID = nil
-                    }
-                }
-                while !Task.isCancelled {
-                    do {
-                        try await sendTyping(true)
-                        try await Task.sleep(for: .seconds(4))
-                    } catch is CancellationError {
-                        return
-                    } catch {
-                        return
-                    }
-                }
-            }
-        } else if !shouldType, let typingLeaseTask {
-            typingLeaseTask.cancel()
-            self.typingLeaseTask = nil
-            typingLeaseID = nil
-            Task { try? await sendTyping(false) }
-        }
-    }
-
-    func loadGroupReadReceipts(for message: V2ConversationMessageItem, reset: Bool = false) async {
-        guard isGroupConversation, message.isOutgoing, !message.isWithdrawn,
-              let groupReadReceiptReader, !Task.isCancelled
-        else { return }
-        let isNewMessage = groupReadReceiptMessageID != message.id
-        if !reset, !isNewMessage, groupReadReceiptPage?.nextCursor == nil { return }
-        if !reset, !isNewMessage, isLoadingGroupReadReceipts { return }
-        let demand = UUID()
-        groupReadReceiptDemand = demand
-        if reset || isNewMessage {
-            groupReadReceiptMessageID = message.id
-            groupReadReceiptPage = nil
-            groupReadReceiptFeedback = nil
-            hasEarlierGroupReadReceipts = false
-        }
-        // A superseding message/reset owns the next read only after the old
-        // transport actually returns. Multiple resets retain only the latest.
-        if let previous = groupReadReceiptFlight {
-            previous.task.cancel()
-            _ = await previous.task.result
-            guard !Task.isCancelled, demand == groupReadReceiptDemand else { return }
-        }
-        let cursor = reset || isNewMessage ? nil : groupReadReceiptPage?.nextCursor
-        let roomID = self.roomID
-        let task = Task {
-            try Task.checkCancellation()
-            return try await groupReadReceiptReader.readers(roomID: roomID, messageID: message.id, cursor: cursor)
-        }
-        groupReadReceiptFlight = (demand, task)
-        isLoadingGroupReadReceipts = true
-        defer {
-            if groupReadReceiptFlight?.id == demand {
-                groupReadReceiptFlight = nil
-                isLoadingGroupReadReceipts = false
-            }
-        }
-        do {
-            let page = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-            try Task.checkCancellation()
-            guard demand == groupReadReceiptDemand else { return }
-            guard page.roomID.rawValue == roomID, page.messageID.rawValue == message.id,
-                  page.readers.count <= 100, page.nextCursor == nil || page.nextCursor != cursor else {
-                groupReadReceiptFeedback = "已读详情返回异常，请稍后重试。"
-                return
-            }
-            if reset || isNewMessage {
-                groupReadReceiptMessageID = message.id
-                groupReadReceiptPage = page
-            } else if let existing = groupReadReceiptPage {
-                let known = Set(existing.readers.map(\.userID))
-                let incoming = Set(page.readers.map(\.userID))
-                guard known.isDisjoint(with: incoming) else {
-                    groupReadReceiptFeedback = "已读详情返回重复数据，请刷新后重试。"
-                    return
-                }
-                let readers = existing.readers + page.readers
-                if readers.count > 1_000 { hasEarlierGroupReadReceipts = true }
-                groupReadReceiptPage = try .init(
-                    roomID: page.roomID,
-                    messageID: page.messageID,
-                    readers: Array(readers.suffix(1_000)),
-                    nextCursor: page.nextCursor
-                )
-            }
-            groupReadReceiptFeedback = nil
-        } catch is CancellationError {
-            return
-        } catch {
-            guard !Task.isCancelled, demand == groupReadReceiptDemand else { return }
-            groupReadReceiptFeedback = "无法读取已读详情，请检查网络后重试。"
-        }
-    }
-
-    func groupPresentationKey(for target: UserID) -> V2ProfileViewLookupKey? {
-        guard isGroupConversation, let room = try? RoomID(roomID) else { return nil }
-        return .init(userID: target, context: .room(room))
-    }
-
-    private(set) var pendingResourceSends: [V2DurableConversationSendService.Pending] = []
-    private(set) var pendingResourceSendPage=0
-    private(set) var hasNextPendingResourceSendPage=false
-    func nextPendingResourceSendPage() { guard hasNextPendingResourceSendPage else { return }; pendingResourceSends=[]; hasNextPendingResourceSendPage=false; pendingResourceSendPage += 1 }
-    func previousPendingResourceSendPage() { guard pendingResourceSendPage > 0 else { return }; pendingResourceSends=[]; hasNextPendingResourceSendPage=false; pendingResourceSendPage -= 1 }
-
-    func observeResourceSends() async {
-        guard let durable = resourceSender, let room = try? RoomID(roomID) else { return }
-        do {
-            let page=pendingResourceSendPage
-            for try await result in durable.pendingPageUpdates(in:room,page:page) {
-                try Task.checkCancellation()
-                guard page == pendingResourceSendPage else { return }
-                pendingResourceSends = result.items
-                hasNextPendingResourceSendPage = result.hasNext
-            }
-        } catch is CancellationError { return }
-        catch {
-            guard !Task.isCancelled else { return }
-            sendFeedback = "附件进度观察已暂停，重新进入会话后可继续查看。"
-        }
-    }
     func copyAttachments(_ message: V2ConversationMessageItem, to targetRoomID: String) async -> Bool {
         guard !message.isWithdrawn, !message.media.isEmpty,
               let durable = resourceSender else {
@@ -1187,308 +834,11 @@ final class V2ConversationDetailStore {
         catch { messageActionFeedback = "暂时无法复制附件。"; return false }
     }
 
-    func retryResourceSend(_ id: UUID) async {
-        guard let durable = resourceSender else { return }
-        do { try await durable.retry(intentID: id) }
-        catch { sendFeedback = "暂时无法恢复上传。" }
-    }
-    func cancelResourceSend(_ id: UUID) async {
-        guard let durable = resourceSender else { return }
-        do { try await durable.cancel(intentID: id); pendingResourceSends.removeAll { $0.id == id } }
-        catch is CancellationError { return }
-        catch { sendFeedback = "暂时无法取消，原消息和附件仍保留。" }
-    }
-
-    func observeSendConfirmation() async {
-        guard let id = trackedSendIntentID, let tracking = sender as? any V2ConversationSendTracking else { return }
-        do {
-            for try await execution in await tracking.sendConfirmations(intentID: id) {
-                try Task.checkCancellation()
-                guard trackedSendIntentID == id else { return }
-                switch execution {
-                case .committed: sendFeedback = nil; return
-                case .rejected, .conflicted: sendFeedback = "消息发送失败，请查看待处理消息。"; return
-                case .closed, .expiredUnsubmitted: sendFeedback = "消息未发送，请查看待处理消息。"; return
-                default: break
-                }
-            }
-        } catch is CancellationError { }
-        catch { if trackedSendIntentID == id { sendFeedback = "暂时无法确认发送状态，请查看待处理消息。" } }
-    }
-
-    private(set) var attachmentImportsInFlight = 0
-
-    func sendDraft() async {
-        guard attachmentImportsInFlight == 0 else { return }
-        guard await restoreAttachmentDraft() else { return }
-        guard !isSending else { return }
-        guard isGroupConversation || canSendInDirectConversation != false else {
-            sendFeedback = "当前无法向此会话发送消息。"
-            return
-        }
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !attachments.isEmpty else { return }
-        guard let sender else {
-            sendFeedback = "实时网关尚未可用，无法发送。"
-            return
-        }
-        let frozenAttachments = attachments.map(\.attachment)
-        guard frozenAttachments.allSatisfy({ $0.availability == .local }) else {
-            sendFeedback = "部分附件原件不可用，请移除后重新选择。"; return
-        }
-        let frozenReplyTarget = replyTarget
-        isSending = true
-        defer { isSending = false }
-        do {
-            // Resolve all user-entered intent before any attachment transfer.
-            // An invalid mention must not spend upload/scan work or alter the
-            // staged attachment state.
-            let mentions = try await resolvedMentions()
-            try Task.checkCancellation()
-            if !frozenAttachments.isEmpty {
-                guard let durable = resourceSender else {
-                    sendFeedback = "附件发送暂不可用。"
-                    return
-                }
-                let frozenReply = try frozenReplyTarget.map { try V2MessageReplyReference(messageID: .init($0.id)) }
-                try await durable.freezeSend(text: text, mentions: mentions, replyTo: frozenReply, roomID: .init(roomID), attachments: frozenAttachments)
-                // The journal now owns these files, including across process death.
-                attachments = []
-                draft = ""
-                mentionHandlesText = ""
-                replyTarget = nil
-                // The durable pending bubble owns preparation and confirmation progress.
-                sendFeedback = nil
-                return
-            }
-            let replyTo = try frozenReplyTarget.map { try V2MessageReplyReference(messageID: .init($0.id)) }
-            let outcome: V2ConversationSendOutcome
-            if let tracking = sender as? any V2ConversationSendTracking {
-                trackedSendIntentID = try await tracking.enqueueTracked(text: text, mentions: mentions, entities: [], replyTo: replyTo, roomID: roomID)
-                outcome = .queuedForRetry
-            } else {
-                outcome = try await sender.send(text: text, media: [], mentions: mentions, entities: [], replyTo: replyTo, in: roomID)
-            }
-            try Task.checkCancellation()
-            switch outcome {
-            case .accepted:
-                sendFeedback = "已发送，正在同步。"
-                await discardAttachmentsAfterDurableSend()
-                draft = ""
-                mentionHandlesText = ""
-                replyTarget = nil
-            case .queuedForRetry:
-                // Tracked sends display their progress on the pending message row.
-                sendFeedback = sender is any V2ConversationSendTracking ? nil : "已安全保存，连接恢复后会重试。"
-                await discardAttachmentsAfterDurableSend()
-                draft = ""
-                mentionHandlesText = ""
-                replyTarget = nil
-            case .rejected(let code):
-                sendFeedback = Self.sendRejectionFeedback(for: code)
-            }
-            await refresh()
-        } catch is CancellationError {
-            return
-        } catch is V2ConversationMentionInputError {
-            return
-        } catch V2ResourceCapabilityError.fileTooLarge(let maximumBytes) {
-            sendFeedback = "当前服务支持的附件上限为 \(ByteCountFormatter.string(fromByteCount: maximumBytes, countStyle: .file))。"
-        } catch V2ResourceCapabilityError.usageUnavailable {
-            sendFeedback = "当前服务暂未开放这种资源用途。"
-        } catch V2ResourceCapabilityError.uploadModeUnavailable {
-            sendFeedback = "当前服务暂不支持此设备的上传方式。"
-        } catch V2ResourceJournalError.capacityExceeded {
-            sendFeedback = "待处理附件已达上限，请先完成或取消部分任务。当前输入和附件已保留。"
-        } catch {
-            sendFeedback = "无法保存待发送消息。"
-        }
-    }
-
-    func beginReply(to message: V2ConversationMessageItem) {
-        guard !message.isWithdrawn else { return }
-        replyTarget = message
-    }
-
-    func cancelReply() {
-        replyTarget = nil
-    }
-
     func replyPreview(for reference: V2MessageReplyReference) -> String {
         guard let target = messages.first(where: { $0.id == reference.messageID.rawValue }) else {
             return "原消息不可用"
         }
         return target.text.isEmpty ? "附件" : target.text
-    }
-
-    private func resolvedMentions() async throws -> [V2MentionTarget] {
-        let handles = mentionHandlesText
-            .split(whereSeparator: { $0 == "," || $0 == "\n" })
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !handles.isEmpty else { return [] }
-        guard isGroupConversation else {
-            sendFeedback = "仅群聊支持提及成员。"
-            throw V2ConversationMentionInputError.invalidInput
-        }
-        guard handles.count <= V2MessageCommandLimits.maxMentions else {
-            sendFeedback = "每条消息最多提及 \(V2MessageCommandLimits.maxMentions) 个目标。"
-            throw V2ConversationMentionInputError.invalidInput
-        }
-        var mentions: [V2MentionTarget] = []
-        for handle in handles {
-            if handle.lowercased() == "@all" {
-                mentions.append(.everyone)
-                continue
-            }
-            // `@all` is a protocol-level target and needs no directory
-            // lookup. Only exact member handles depend on that availability.
-            guard let publicIdentityResolver else {
-                sendFeedback = "身份目录暂不可用，无法解析提及对象。"
-                throw V2ConversationMentionInputError.invalidInput
-            }
-            do {
-                let identity = try await publicIdentityResolver.resolve(handle: handle)
-                mentions.append(.user(identity.userID))
-                try Task.checkCancellation()
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                // Exact-handle lookup is deliberately opaque: do not reveal
-                // whether the target is absent, blocked, or unavailable.
-                sendFeedback = "无法解析提及对象，请检查公开 ID 后重试。"
-                throw V2ConversationMentionInputError.invalidInput
-            }
-        }
-        guard Set(mentions).count == mentions.count else {
-            sendFeedback = "提及对象不能重复。"
-            throw V2ConversationMentionInputError.invalidInput
-        }
-        return mentions
-    }
-
-    private static func sendRejectionFeedback(for code: String) -> String {
-        switch code {
-        case "RATE_LIMITED":
-            return "发送失败：发送频率已达上限，请稍后再试。"
-        case "FORBIDDEN", "DIRECT_MESSAGE_RESTRICTED":
-            // Do not disclose whether the receiver disabled stranger messages,
-            // blocked the sender, or a separate room policy denied the action.
-            return "当前无法向此会话发送消息。"
-        case "MEDIA_UNAVAILABLE":
-            return "附件暂不可用，请重新上传后再试。"
-        case "NOT_FOUND":
-            return "此会话已不可用，请返回会话列表刷新后再试。"
-        default:
-            return "发送被拒绝（\(code)）。"
-        }
-    }
-
-    var canAddAttachment: Bool {
-        !isSending
-            && attachmentImportsInFlight == 0
-            && (isGroupConversation || canSendInDirectConversation != false)
-            && attachments.count < V2MessageCommandLimits.maxMediaAttachments
-            && !attachments.contains(where: { $0.state == .uploading })
-    }
-
-    func stageAttachment(from sourceURL: URL) async {
-        await stageAttachment(.file(sourceURL))
-    }
-
-    func stageAttachment(photo: V2NormalizedPhoto) async {
-        await stageAttachment(.photo(photo))
-    }
-
-    private enum AttachmentImportSource { case file(URL), photo(V2NormalizedPhoto) }
-
-    private func stageAttachment(_ source: AttachmentImportSource) async {
-        guard await restoreAttachmentDraft() else { return }
-        guard canAddAttachment else {
-            sendFeedback = "每条消息最多可添加 \(V2MessageCommandLimits.maxMediaAttachments) 个附件。"
-            return
-        }
-        guard let attachmentStager else {
-            sendFeedback = "附件暂不可用。"
-            return
-        }
-        attachmentImportsInFlight += 1
-        defer { attachmentImportsInFlight -= 1 }
-        do {
-            let purpose = V2LocalResourceAssetPurpose.messageDraft(try .init(roomID))
-            let attachment: V2StagedConversationAttachment
-            switch source {
-            case .file(let url): attachment = try await attachmentStager.stageImportedFile(at: url, purpose: purpose)
-            case .photo(let photo): attachment = try await attachmentStager.stageNormalizedPhoto(photo, purpose: purpose)
-            }
-            if Task.isCancelled {
-                await attachmentStager.discard(attachment)
-                return
-            }
-            attachments.append(.init(attachment: attachment, state: .staged))
-            sendFeedback = nil
-        } catch is CancellationError {
-            return
-        } catch V2ConversationAttachmentStagingError.notRegularFile {
-            sendFeedback = "只能添加普通文件。"
-        } catch V2ConversationAttachmentStagingError.invalidByteCount {
-            sendFeedback = "无法添加空文件。"
-        } catch V2ConversationAttachmentStagingError.fileTooLarge {
-            sendFeedback = "附件不能超过 50 MB。"
-        } catch V2ConversationAttachmentStagingError.stagingQuotaExceeded {
-            sendFeedback = "设备上的待上传附件过多，请移除部分附件后重试。"
-        } catch {
-            sendFeedback = "无法准备附件。"
-        }
-    }
-
-    @discardableResult
-    private func restoreAttachmentDraft() async -> Bool {
-        if didRestoreAttachmentDraft { return true }
-        guard let attachmentStager else { didRestoreAttachmentDraft = true; return true }
-        do {
-            let selected = try await attachmentStager.selectedAttachments(purpose: .messageDraft(try .init(roomID)))
-            try Task.checkCancellation()
-            guard !didRestoreAttachmentDraft else { return true }
-            let known = Set(attachments.map { $0.attachment.localAssetID })
-            attachments.append(contentsOf: selected.filter { !known.contains($0.localAssetID) }.map {
-                .init(attachment: $0, state: $0.availability == .local ? .staged : .failed)
-            })
-            didRestoreAttachmentDraft = true
-            if selected.contains(where: { $0.availability != .local }) { sendFeedback = "部分附件原件不可用，请移除后重新选择。" }
-            return true
-        } catch is CancellationError { return false }
-        catch { sendFeedback = "无法读取本机附件草稿，请重试。"; return false }
-    }
-
-    func borrowAttachment(id: UUID) async throws -> V2ResourceFileLease {
-        guard let item = attachments.first(where: { $0.id == id }), let attachmentStager else { throw V2ResourceStorageError.unavailable }
-        let lease = try await attachmentStager.borrow(.selection(item.attachment.localAssetID))
-        guard !Task.isCancelled, attachments.contains(where: { $0.id == id }) else { await lease.release(); throw CancellationError() }
-        return lease
-    }
-
-    func borrowPendingImage(jobID: UUID) async throws -> V2ResourceFileLease {
-        guard pendingResourceSends.contains(where: { $0.images.contains(where: { $0.jobID == jobID }) }),
-              let attachmentStager else { throw V2ResourceStorageError.unavailable }
-        let lease = try await attachmentStager.borrow(.upload(jobID))
-        guard !Task.isCancelled else { await lease.release(); throw CancellationError() }
-        return lease
-    }
-
-    func removeAttachment(id: UUID) async {
-        guard !isSending else { return }
-        guard let index = attachments.firstIndex(where: { $0.id == id }) else { return }
-        let attachment = attachments.remove(at: index).attachment
-        await attachmentStager?.discard(attachment)
-    }
-
-    private func discardAttachmentsAfterDurableSend() async {
-        let staged = attachments.map(\.attachment)
-        attachments = []
-        for attachment in staged {
-            await attachmentStager?.discard(attachment)
-        }
     }
 
     func mediaDownloadState(for media: V2MediaReference) -> V2ConversationMediaDownloadState {
@@ -1643,7 +993,7 @@ final class V2ConversationDetailStore {
     }
 
     func isMessageActionInFlight(_ message: V2ConversationMessageItem) -> Bool {
-        inFlightMessageActionIDs.contains(message.id)
+        messageActions.contains(message.id)
     }
 
     func withdrawMessage(_ message: V2ConversationMessageItem) async {
@@ -1785,200 +1135,6 @@ final class V2ConversationDetailStore {
         catch { messageActionFeedback = "无法保存收藏操作。" }
     }
 
-    private(set) var groupCapabilityPending:[V2GroupCapabilityPending]=[]
-    func observeGroupCapabilities() async {
-        guard let manager=groupMessagePinner as? any V2GroupCapabilityManaging,let room=try? RoomID(roomID) else { return }
-        do {
-            for try await pending in await manager.service.updates(roomID:room) {
-                try Task.checkCancellation()
-                let completedIDs = Set(groupCapabilityPending.compactMap { $0.work?.scheduling == .finished ? $0.work?.id : nil })
-                if pending.contains(where: { value in
-                    guard let work = value.work, work.scheduling == .finished,
-                          !completedIDs.contains(work.id) else { return false }
-                    return work.execution == .rejected || work.execution == .conflicted
-                }) {
-                    // A rejected authority/CAS attempt cannot keep an earlier
-                    // member editing baseline valid for the next user proposal.
-                    groupMemberDirectoryIsStale = true
-                    groupCapabilityReconfirmation = nil
-                }
-                groupCapabilityPending=pending
-            }
-        } catch is CancellationError {} catch { messageActionFeedback="群操作状态暂不可读，已保存的请求不会撤销。" }
-    }
-    func continueGroupCapability(_ pending:V2GroupCapabilityPending) async {
-        guard pending.work != nil,let manager=groupMessagePinner as? any V2GroupCapabilityManaging else { return }
-        do { try await manager.service.resumeConfirmation(id:pending.id) }
-        catch { messageActionFeedback="暂时无法核对原操作，请稍后继续。" }
-    }
-    struct GroupCapabilityReconfirmation:Identifiable {
-        let id:UUID
-        let action:V2GroupCapabilityAction
-    }
-    var groupCapabilityReconfirmation:GroupCapabilityReconfirmation?
-    func prepareGroupCapabilityReconfirmation(_ pending:V2GroupCapabilityPending) async {
-        guard pending.work==nil,pending.confirmationRequired,
-            let manager=groupMessagePinner as? any V2GroupCapabilityManaging else { return }
-        do {
-            let action:V2GroupCapabilityAction
-            switch pending.intent.action {
-            case .pin(let messageID,let desired,_):
-                let baseline=try await manager.service.pinBaseline(roomID:.init(roomID),messageID:messageID)
-                action = .pin(messageID:messageID,isPinned:desired,expectedRoomSequence:baseline.roomSequence)
-            case .announcement(let body,_):
-                await refresh()
-                action = .announcement(body:body,expectedRevision:groupAnnouncement?.revision ?? 0)
-            case .rolePermissions(let role,let permissions,_):
-                await loadGroupRolePolicies()
-                guard let policy=groupRolePolicies.first(where:{$0.role==role}) else { throw V2GroupCapabilityAdmissionError.confirmationRequired }
-                action = .rolePermissions(role:role,permissions:permissions,expectedRevision:policy.revision)
-            case .memberRole(let target,let role,_):
-                await loadGroupMembers(reset:true,reason:.authorizationChanged)
-                guard let revision=groupMemberRevision,let member=groupMembers.first(where:{$0.id==target.rawValue}),canChangeGroupMemberRole(member) else { throw V2GroupCapabilityAdmissionError.confirmationRequired }
-                action = .memberRole(targetUserID:target,role:role,expectedMembershipRevision:revision)
-            }
-            try Task.checkCancellation()
-            groupCapabilityReconfirmation = .init(id:pending.id,action:action)
-        } catch is CancellationError {} catch { messageActionFeedback="无法读取确认所需的群状态，请稍后重试。" }
-    }
-    func confirmGroupCapability(_ proposal:GroupCapabilityReconfirmation) async {
-        guard let manager=groupMessagePinner as? any V2GroupCapabilityManaging else { return }
-        groupCapabilityReconfirmation=nil
-        do {
-            let confirmation=try manager.service.confirmationWindow(roomID:.init(roomID),action:proposal.action)
-            _ = try await manager.service.reconfirmDraft(id:proposal.id,confirmation:confirmation)
-            messageActionFeedback="新的确认已保存，服务器仍会校验当前权限与版本。"
-        } catch is CancellationError {} catch { messageActionFeedback="原操作状态已变化，无法重新确认，请查看最新状态。" }
-    }
-    func discardGroupCapability(_ pending:V2GroupCapabilityPending) async {
-        guard pending.work==nil,let manager=groupMessagePinner as? any V2GroupCapabilityManaging else { return }
-        do { try await manager.service.discardDraft(id:pending.id) }
-        catch { messageActionFeedback="无法取消未提交的群操作。" }
-    }
-    struct MessageRemovalProposal {
-        let id: UUID
-        let baseline: V2MessageModerationBaseline
-        let generation: UUID
-        let expires: ContinuousClock.Instant
-        let confirmedUntil: Date
-        let policies: [V2ClientGroupRolePolicy]
-        let membershipRevision: UInt64?
-    }
-    var messageRemovalProposal: MessageRemovalProposal?
-    private(set) var messageRemovalPending: [V2MessageModerationPending] = []
-    private var removalPolicyIsCurrent = false
-    private var removalPageActive = false
-    private var removalGeneration = UUID()
-    private var removalIsPreparing = false
-    private var removalIsSaving = false
-    private var consumedRemovalProposalID: UUID?
-    var canManageMessages: Bool {
-        guard isGroupConversation, messageModerator != nil, !groupMemberDirectoryIsStale,
-              !isLoadingGroupMembers, removalPolicyIsCurrent, groupRolePolicyState.recovery == .ready, let roleName = groupActorRole else { return false }
-        let role: V2RoomMembershipRole = roleName == "群主" ? .owner : roleName == "管理员" ? .admin : .member
-        return V2GroupPermissionDefaults.allows(role: role, permission: .moderateMessages,
-            configured: groupRolePolicies.first(where: { $0.role == role })?.permissions)
-    }
-    func endMessageRemovalPage() {
-        removalPageActive = false; removalGeneration = UUID(); messageRemovalProposal = nil
-    }
-    func messageRemovalStatus(_ pending: V2MessageModerationPending) -> String {
-        if let receipt = pending.receipt {
-            switch receipt.outcome {
-            case .redacted, .alreadySatisfied: return "消息已被管理移除"
-            case .rejected: return "原移除操作被拒绝，请重新读取状态后确认"
-            case .closed: return "原移除操作已确认未执行"
-            }
-        }
-        if pending.work.execution == .expiredUnsubmitted { return "尚未提交的移除确认已过期" }
-        return pending.work.scheduling == .needsAttention ? "移除结果未知，已暂停核对" : "正在核对原消息移除操作"
-    }
-    func observeMessageRemoval() async {
-        guard let messageModerator, isGroupConversation else { return }
-        removalPageActive = true
-        removalGeneration = UUID()
-        let generation = removalGeneration
-        defer {
-            if removalGeneration == generation { removalPageActive = false; messageRemovalProposal = nil }
-        }
-        do {
-            for try await values in await messageModerator.updates() {
-                try Task.checkCancellation()
-                guard removalPageActive, removalGeneration == generation else { return }
-                messageRemovalPending = values.filter { $0.intent.roomID.rawValue == roomID }
-            }
-        } catch is CancellationError {} catch {
-            if removalPageActive, removalGeneration == generation { messageActionFeedback = "移除状态暂不可读，原操作仍保留。" }
-        }
-    }
-    func prepareMessageRemoval(_ message: V2ConversationMessageItem) async {
-        guard removalPageActive, !removalIsPreparing, !removalIsSaving, canManageMessages, !message.isWithdrawn, let messageModerator,
-              let room = try? RoomID(roomID), let id = try? MessageID(message.id) else { return }
-        removalIsPreparing = true
-        defer { removalIsPreparing = false }
-        messageRemovalProposal = nil
-        let generation = removalGeneration
-        let expires = ContinuousClock.now.advanced(by: .seconds(120))
-        let end = Date().addingTimeInterval(120)
-        do {
-            let baseline = try await messageModerator.baseline(roomID: room, messageID: id)
-            try Task.checkCancellation()
-            guard removalPageActive, removalGeneration == generation, canManageMessages, expires > .now else { return }
-            messageRemovalProposal = .init(id: UUID(), baseline: baseline, generation: generation, expires: expires, confirmedUntil: end,
-                policies: groupRolePolicies, membershipRevision: groupMemberRevision)
-        } catch is CancellationError {} catch {
-            if removalPageActive, removalGeneration == generation { messageActionFeedback = "无法读取当前消息管理基线。" }
-        }
-    }
-    func confirmMessageRemoval(_ proposal: MessageRemovalProposal) async {
-        guard let messageModerator, !removalIsSaving, consumedRemovalProposalID != proposal.id else { return }
-        guard removalPageActive, removalGeneration == proposal.generation, canManageMessages, proposal.expires > .now,
-              proposal.policies == groupRolePolicies, proposal.membershipRevision == groupMemberRevision else {
-            if removalPageActive { messageActionFeedback = "确认已过期或权限变化，请重新读取消息状态。" }; return
-        }
-        consumedRemovalProposalID = proposal.id
-        removalIsSaving = true
-        messageRemovalProposal = nil
-        defer { removalIsSaving = false }
-        let generation = removalGeneration
-        do {
-            _ = try await messageModerator.enqueue(baseline: proposal.baseline,
-                reason: .init("moderation_removal"), confirmedUntil: proposal.confirmedUntil)
-            guard !Task.isCancelled, removalPageActive, removalGeneration == generation else { return }
-            messageActionFeedback = "管理移除已保存，正在核对原操作。"
-        } catch is CancellationError {} catch {
-            if removalPageActive, removalGeneration == generation { messageActionFeedback = "无法保存管理移除确认。" }
-        }
-    }
-    func resumeMessageRemoval(_ id: UUID) async {
-        guard let messageModerator, messageRemovalPending.contains(where: { $0.work.id == id && $0.work.scheduling == .needsAttention }) else { return }
-        let generation = removalGeneration
-        do { try await messageModerator.resume(id: id) }
-        catch is CancellationError {} catch {
-            if removalPageActive, removalGeneration == generation { messageActionFeedback = "暂时无法继续核对原移除操作。" }
-        }
-    }
-
-    var pendingPinBaseline:V2PinnedMessageBaseline?
-    func pinInGroup(_ message: V2ConversationMessageItem) async {
-        guard isGroupConversation,!message.isWithdrawn,beginMessageAction(for:message) else { return }
-        defer { finishMessageAction(for:message) }
-        guard let groupMessagePinner else { messageActionFeedback="置顶消息暂不可用。";return }
-        do {
-            let baseline=try await groupMessagePinner.pinBaseline(roomID:roomID,messageID:message.id)
-            try Task.checkCancellation()
-            pendingPinBaseline=baseline
-        } catch is CancellationError {} catch { messageActionFeedback="无法读取最新置顶状态，请稍后重试。" }
-    }
-    func confirmPinInGroup(_ baseline:V2PinnedMessageBaseline) async {
-        guard let groupMessagePinner else { return }
-        pendingPinBaseline=nil
-        do {
-            _ = try await groupMessagePinner.setPinned(roomID:roomID,messageID:baseline.messageID.rawValue,isPinned:!baseline.isPinned,expectedRoomSequence:baseline.roomSequence)
-            messageActionFeedback="置顶确认已保存；两分钟内核对，状态变化或超时需重新确认。"
-        } catch is CancellationError {} catch { messageActionFeedback="无法保存置顶确认。" }
-    }
-
     func beginForwardSelection(with message: V2ConversationMessageItem? = nil) {
         isSelectingMessagesForForward = true
         if let message { toggleForwardSelection(for: message) }
@@ -2068,538 +1224,13 @@ final class V2ConversationDetailStore {
         }
     }
 
-    func saveGroupAnnouncement(_ body: String) async -> Bool {
-        guard isGroupConversation, !isSavingGroupAnnouncement else { return false }
-        guard let groupAnnouncementManager else {
-            messageActionFeedback = "群公告暂不可用。"
-            return false
-        }
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            messageActionFeedback = "群公告不能为空。"
-            return false
-        }
-        guard trimmed.lengthOfBytes(using: .utf8) <= V2GroupAnnouncementCommand.maximumUTF8Bytes else {
-            messageActionFeedback = "群公告不能超过 \(V2GroupAnnouncementCommand.maximumUTF8Bytes) 字节。"
-            return false
-        }
-        isSavingGroupAnnouncement = true
-        defer { isSavingGroupAnnouncement = false }
-        do {
-            switch try await groupAnnouncementManager.setAnnouncement(
-                roomID: roomID,
-                body: trimmed,
-                expectedRevision: groupAnnouncement?.revision ?? 0
-            ) {
-            case .accepted:
-                messageActionFeedback = "群公告已提交，正在同步。"
-                await refresh()
-                return true
-            case .queuedForRetry:
-                messageActionFeedback = "群公告确认已保存；两分钟内核对，超时需重新确认。"
-                return true
-            case .rejected(let code):
-                messageActionFeedback = "群公告被拒绝（\(code)）。"
-                return false
-            }
-        } catch is CancellationError {
-            return false
-        } catch {
-            messageActionFeedback = "无法保存群公告。"
-            return false
-        }
-    }
-
-    func loadGroupRolePolicies() async {
-        guard isGroupConversation, !isLoadingGroupRolePolicies else { return }
-        guard let groupRolePolicyReader else {
-            updateGroupRolePolicyState(.init(policies: [], recovery: .unavailable))
-            messageActionFeedback = "群权限策略暂不可用。"
-            return
-        }
-        removalPolicyIsCurrent = false
-        messageRemovalProposal = nil
-        rolePolicyReadGeneration &+= 1
-        let generation = rolePolicyReadGeneration
-        isLoadingGroupRolePolicies = true
-        defer { isLoadingGroupRolePolicies = false }
-        do {
-            let policies = try await groupRolePolicyReader.groupRolePolicyState(in: roomID)
-            try Task.checkCancellation()
-            guard generation == rolePolicyReadGeneration else { return }
-            updateGroupRolePolicyState(policies)
-            removalPolicyIsCurrent = policies.recovery == .ready
-        } catch is CancellationError {
-            return
-        } catch {
-            guard generation == rolePolicyReadGeneration else { return }
-            messageActionFeedback = "无法读取群权限策略。"
-        }
-    }
-
-    func retryGroupRolePolicyRecovery() async {
-        guard policyRecoveryAction != .requesting else { return }
-        guard let groupRolePolicyReader else {
-            updateGroupRolePolicyState(.init(policies: [], recovery: .unavailable))
-            return
-        }
-        switch groupRolePolicyState.recovery {
-        case .paused, .needed: break
-        default: return
-        }
-        rolePolicyReadGeneration &+= 1
-        let generation = rolePolicyReadGeneration
-        policyRecoveryAction = .requesting
-        do {
-            let state = try await groupRolePolicyReader.retryGroupRolePolicyRecovery(in: roomID)
-            try Task.checkCancellation()
-            if generation == rolePolicyReadGeneration { updateGroupRolePolicyState(state) }
-            policyRecoveryAction = .idle
-        } catch is CancellationError {
-            policyRecoveryAction = .idle
-        } catch {
-            policyRecoveryAction = generation == rolePolicyReadGeneration ? .failed : .idle
-        }
-    }
-
-    private func updateGroupRolePolicyState(_ state: V2ClientGroupRolePolicyState) {
-        if policyRecoveryAction == .failed, groupRolePolicyState.recovery != state.recovery {
-            policyRecoveryAction = .idle
-        }
-        groupRolePolicyState = state
-    }
-
-    func saveGroupRolePolicy(_ policy: V2ClientGroupRolePolicy, permissions: Set<V2GroupPermission>) async -> Bool {
-        guard !isSavingGroupRolePolicy, policy.role != .owner else { return false }
-        guard let groupRolePolicyChanger else {
-            messageActionFeedback = "群权限策略暂不可用。"
-            return false
-        }
-        isSavingGroupRolePolicy = true
-        defer { isSavingGroupRolePolicy = false }
-        do {
-            switch try await groupRolePolicyChanger.setPolicy(
-                roomID: roomID,
-                role: policy.role,
-                permissions: permissions,
-                expectedRevision: policy.revision
-            ) {
-            case .accepted:
-                messageActionFeedback = "群权限策略已提交，正在同步。"
-                await loadGroupRolePolicies()
-                return true
-            case .queuedForRetry:
-                messageActionFeedback = "群权限确认已保存；两分钟内核对，超时需重新确认。"
-                return true
-            case .rejected(let code):
-                messageActionFeedback = "群权限策略被拒绝（\(code)）。"
-                return false
-            }
-        } catch is CancellationError {
-            return false
-        } catch {
-            messageActionFeedback = "无法保存群权限策略。"
-            return false
-        }
-    }
-
     private func beginMessageAction(for message: V2ConversationMessageItem) -> Bool {
-        inFlightMessageActionIDs.insert(message.id).inserted
+        messageActions.begin(message.id)
     }
 
     private func finishMessageAction(for message: V2ConversationMessageItem) {
-        inFlightMessageActionIDs.remove(message.id)
+        messageActions.finish(message.id)
     }
 
-    private func invalidateGroupMemberDirectory() {
-        groupMemberDirectoryIsStale = true
-        groupMembers = []
-        hasEarlierGroupMembers = false
-        groupMemberRevision = nil
-        groupActorRole = nil
-        nextGroupMemberCursor = nil
-        canLoadMoreGroupMembers = false
-    }
 
-    func loadGroupMembers(reset: Bool = false, reason: GroupMemberRefreshReason = .userInitiated) async {
-        guard !Task.isCancelled else { return }
-        if reset {
-            groupMemberDirectoryIsStale = true
-            groupActorRole = nil
-            if reason == .authorizationChanged { invalidateGroupMemberDirectory() }
-            if isLoadingGroupMembers {
-                // Keep one network owner, but never publish a response that
-                // predates a requested refresh (for example a role change).
-                groupMemberReloadPending = true
-                return
-            }
-        }
-        guard !isLoadingGroupMembers else { return }
-        guard let groupMemberDirectory else {
-            groupMemberFeedback = "成员目录暂不可用。"
-            return
-        }
-        var cursor = reset ? nil : nextGroupMemberCursor
-        if !reset, cursor == nil, !groupMembers.isEmpty { return }
-        var revisionRestarts = 0
-        isLoadingGroupMembers = true
-        defer { isLoadingGroupMembers = false; groupMemberReloadPending = false }
-        while !Task.isCancelled {
-            if groupMemberReloadPending {
-                groupMemberReloadPending = false
-                cursor = nil
-                revisionRestarts = 0
-            }
-            do {
-                let page = try await groupMemberDirectory.members(in: roomID, cursor: cursor)
-                try Task.checkCancellation()
-                if groupMemberReloadPending { continue }
-                if cursor != nil, let loadedRevision = groupMemberRevision,
-                   loadedRevision != page.membershipRevision || groupActorRole != page.actorRole {
-                    invalidateGroupMemberDirectory()
-                    guard revisionRestarts == 0 else {
-                        groupMemberFeedback = "成员目录已变化，请刷新后重试。"
-                        return
-                    }
-                    revisionRestarts += 1
-                    cursor = nil
-                    continue
-                }
-                let known = cursor == nil ? Set<String>() : Set(groupMembers.map(\.id))
-                let incoming = Set(page.members.map(\.id))
-                guard incoming.count == page.members.count, known.isDisjoint(with: incoming),
-                      page.nextCursor == nil || page.nextCursor != cursor
-                else {
-                    invalidateGroupMemberDirectory()
-                    groupMemberFeedback = "成员目录返回了无效分页，请刷新后重试。"
-                    return
-                }
-                if cursor == nil {
-                    groupMembers = page.members
-                    hasEarlierGroupMembers = false
-                } else { groupMembers += page.members }
-                if groupMembers.count > 1_000 {
-                    groupMembers.removeFirst(groupMembers.count - 1_000)
-                    hasEarlierGroupMembers = true
-                }
-                groupMemberDirectoryIsStale = false
-                groupMemberRevision = page.membershipRevision
-                groupActorRole = page.actorRole
-                nextGroupMemberCursor = page.nextCursor
-                canLoadMoreGroupMembers = page.nextCursor != nil
-                groupMemberFeedback = nil
-                return
-            } catch is CancellationError {
-                return
-            } catch {
-                guard !Task.isCancelled else { return }
-                if groupMemberReloadPending { continue }
-                groupMemberDirectoryIsStale = true
-                groupActorRole = nil
-                if (error as? V2HTTPFailure)?.statusCode == 403
-                    || (error as? V2AuthSessionError) == .sessionInvalidated
-                    || (error as? V2AuthSessionError) == .unauthenticated { invalidateGroupMemberDirectory() }
-                if case V2RealtimeTransportError.server(let code, _, _, _) = error {
-                    if code == "REVISION_CONFLICT" {
-                        invalidateGroupMemberDirectory()
-                        if cursor != nil, revisionRestarts == 0 {
-                            revisionRestarts += 1
-                            cursor = nil
-                            continue
-                        }
-                    } else if code == "FORBIDDEN" || code == "NOT_FOUND" {
-                        invalidateGroupMemberDirectory()
-                    }
-                }
-                groupMemberFeedback = groupMembers.isEmpty
-                    ? "无法读取群成员，请检查网络后重试。"
-                    : "刷新失败，显示上次成员目录；刷新成功后可继续管理。"
-                return
-            }
-        }
-    }
-
-    var canAddGroupMembers: Bool {
-        !groupMemberDirectoryIsStale && !isLoadingGroupMembers && (groupActorRole == "群主" || groupActorRole == "管理员")
-    }
-
-    var canLeaveGroup: Bool {
-        !groupMemberDirectoryIsStale && !isLoadingGroupMembers && groupMemberRevision != nil
-            && (groupActorRole == "成员" || groupActorRole == "管理员")
-    }
-
-    private func canConfirmMembership(target: String, action: V2RoomMembershipAction) -> Bool {
-        if action == .add { return canAddGroupMembers }
-        if target == userID { return canLeaveGroup }
-        return groupMembers.first(where: { $0.id == target }).map(canRemoveGroupMember) ?? false
-    }
-
-    @discardableResult func leaveGroup() async -> Bool {
-        await changeGroupMembership(targetUserID: userID, action: .remove)
-    }
-
-    func canRemoveGroupMember(_ member: V2GroupMemberItem) -> Bool {
-        guard !groupMemberDirectoryIsStale, !isLoadingGroupMembers, member.id != userID, member.role != "群主" else { return false }
-        return groupActorRole == "群主" || groupActorRole == "管理员"
-    }
-
-    func canChangeGroupMemberRole(_ member: V2GroupMemberItem) -> Bool {
-        !groupMemberDirectoryIsStale && !isLoadingGroupMembers && groupActorRole == "群主" && member.id != userID && member.role != "群主"
-    }
-
-    func changeGroupMemberRole(_ member: V2GroupMemberItem, to role: V2RoomMembershipRole) async {
-        guard canChangeGroupMemberRole(member),
-              let expectedMembershipRevision = groupMemberRevision,
-              !isChangingGroupMembership,
-              let groupMemberRoleChanger
-        else { return }
-        let currentRole: V2RoomMembershipRole = member.role == "管理员" ? .admin : .member
-        guard currentRole != role else { return }
-        isChangingGroupMembership = true
-        defer { isChangingGroupMembership = false }
-        do {
-            switch try await groupMemberRoleChanger.setRole(
-                roomID: roomID,
-                userID: member.id,
-                role: role,
-                expectedMembershipRevision: expectedMembershipRevision
-            ) {
-            case .accepted:
-                groupMemberFeedback = "成员角色已提交，正在同步。"
-                await loadGroupMembers(reset: true, reason: .authorizationChanged)
-            case .queuedForRetry:
-                groupMemberFeedback = "角色确认已保存；两分钟内核对，超时需重新确认。"
-            case .rejected(let code):
-                groupMemberFeedback = "成员角色变更被拒绝（\(code)）。"
-            }
-        } catch is CancellationError {
-            return
-        } catch {
-            groupMemberFeedback = "无法保存成员角色变更。"
-        }
-    }
-
-    /// 禁言一名群成员。
-    ///
-    /// 审核保留独立的持久化命令与审计轨迹，而不复用普通成员移除；
-    /// 权限与目标资格仍由服务端在受理命令时裁决。
-    ///
-    /// - Parameters:
-    ///   - member: 目标成员。
-    ///   - duration: 禁言时长秒数。
-    private(set) var memberAdministrationPending:[V2MemberAdministrationPending]=[]
-    func observeMemberAdministration() async {
-        guard let manager=groupMemberMuter as? any V2MemberAdministrationManaging,let room=try? RoomID(roomID) else { return }
-        do {
-            for try await pending in await manager.administrationUpdates(roomID:room) {
-                try Task.checkCancellation()
-                let completedIDs = Set(memberAdministrationPending.compactMap { $0.work?.scheduling == .finished ? $0.work?.id : nil })
-                if pending.contains(where: { value in
-                    guard let work = value.work, work.scheduling == .finished,
-                          !completedIDs.contains(work.id) else { return false }
-                    return work.execution == .rejected || work.execution == .conflicted
-                }) {
-                    // A rejected authority/CAS attempt cannot keep an earlier
-                    // member editing baseline valid for the next user proposal.
-                    groupMemberDirectoryIsStale = true
-                }
-                memberAdministrationPending=pending
-            }
-        } catch is CancellationError {} catch { groupMemberFeedback="管理操作状态暂不可读，已保存的请求不会撤销。" }
-    }
-    func continueMemberAdministration(_ pending:V2MemberAdministrationPending) async {
-        guard let manager=groupMemberMuter as? any V2MemberAdministrationManaging else { return }
-        do {
-            if pending.work != nil { try await manager.resumeAdministration(id:pending.id) }
-            else {
-                guard let revision=groupMemberRevision,let member=groupMembers.first(where:{$0.id==pending.intent.targetUserID.rawValue}),canRemoveGroupMember(member) else {
-                    groupMemberFeedback="请先刷新成员与管理权限，再重新确认。";return
-                }
-                try await manager.reconfirmAdministration(id:pending.id,revision:revision)
-            }
-        } catch { groupMemberFeedback="无法继续；请刷新成员状态，或取消未提交的确认。" }
-    }
-    func discardMemberAdministration(_ pending:V2MemberAdministrationPending) async {
-        guard pending.work==nil,let manager=groupMemberMuter as? any V2MemberAdministrationManaging else { return }
-        do { try await manager.discardAdministration(id:pending.id) } catch { groupMemberFeedback="无法取消确认。" }
-    }
-
-    func muteGroupMember(_ member: V2GroupMemberItem, for duration: TimeInterval = 60 * 60) async {
-        guard !isLoadingGroupMembers, !isChangingGroupMembership, !isApplyingGroupModeration,
-              canRemoveGroupMember(member)
-        else { return }
-        guard duration > 0, let revision=groupMemberRevision, let groupMemberMuter else {
-            groupMemberFeedback = "禁言暂不可用。"
-            return
-        }
-        isApplyingGroupModeration = true
-        defer { isApplyingGroupModeration = false }
-        do {
-            let outcome = try await groupMemberMuter.muteMember(
-                roomID: roomID,
-                targetUserID: member.id,
-                muteUntil: Date().addingTimeInterval(duration),
-                reasonCode: try .init("ADMIN_ACTION"),
-                expectedMembershipRevision:revision
-            )
-            try Task.checkCancellation()
-            switch outcome {
-            case .accepted:
-                groupMemberFeedback = "禁言已提交，正在同步。"
-            case .queuedForRetry:
-                groupMemberFeedback = "禁言确认已保存；将在两分钟确认窗口内核对权限，超时需重新确认。"
-            case .rejected:
-                groupMemberFeedback = "无法完成群管理操作。"
-            }
-        } catch is CancellationError {
-            return
-        } catch {
-            groupMemberFeedback = "无法保存禁言请求。"
-        }
-    }
-
-    func removeGroupMemberByModerator(_ member: V2GroupMemberItem) async {
-        guard !isLoadingGroupMembers, !isChangingGroupMembership, !isApplyingGroupModeration,
-              canRemoveGroupMember(member)
-        else { return }
-        guard let revision=groupMemberRevision, let moderatedGroupMemberRemover else {
-            groupMemberFeedback = "管理员移除暂不可用。"
-            return
-        }
-        isApplyingGroupModeration = true
-        defer { isApplyingGroupModeration = false }
-        do {
-            let outcome = try await moderatedGroupMemberRemover.removeMemberByModerator(
-                roomID: roomID,
-                targetUserID: member.id,
-                reasonCode: try .init("ADMIN_ACTION"),
-                expectedMembershipRevision:revision
-            )
-            try Task.checkCancellation()
-            switch outcome {
-            case .accepted:
-                groupMemberFeedback = "管理员移除已提交，正在同步。"
-                await loadGroupMembers(reset: true, reason: .authorizationChanged)
-            case .queuedForRetry:
-                groupMemberFeedback = "移除确认已保存；将在两分钟确认窗口内核对权限，超时需重新确认。"
-            case .rejected:
-                groupMemberFeedback = "无法完成群管理操作。"
-            }
-        } catch is CancellationError {
-            return
-        } catch {
-            groupMemberFeedback = "无法保存管理员移除请求。"
-        }
-    }
-
-    private(set) var membershipPending:[V2MembershipPending]=[]
-    func observeMembership() async {
-        guard let manager=groupMembershipChanger as? any V2MembershipManaging,let room=try? RoomID(roomID) else { return }
-        var observed:Set<UUID>=[]
-        do {
-            for try await pending in await manager.membershipUpdates(roomID:room) {
-                try Task.checkCancellation();membershipPending=pending
-                let committed=Set(pending.filter{$0.work?.execution == .committed}.map(\.id))
-                let observedBefore = observed
-                let changed = !committed.subtracting(observedBefore).isEmpty
-                observed=committed
-                if changed {
-                    let selfExitCommitted = pending.contains {
-                        $0.work?.execution == .committed && $0.intent.action == .remove
-                            && $0.intent.targetUserID.rawValue == userID
-                            && !observedBefore.contains($0.id)
-                    }
-                    if selfExitCommitted {
-                        invalidateGroupMemberDirectory()
-                        groupMemberFeedback = "已退出群聊。"
-                    } else { await loadGroupMembers(reset:true,reason:.authorizationChanged) }
-                }
-            }
-        } catch is CancellationError {} catch { groupMemberFeedback="成员操作状态暂不可读，已保存的请求不会撤销。" }
-    }
-    func continueMembership(_ pending:V2MembershipPending) async {
-        guard let changer=groupMembershipChanger,let manager=changer as? any V2MembershipManaging else { return }
-        do {
-            if pending.work != nil { try await manager.resumeMembership(id:pending.id) }
-            else {
-                guard !groupMemberDirectoryIsStale,let revision=groupMemberRevision,
-                    canConfirmMembership(target: pending.intent.targetUserID.rawValue, action: pending.intent.action)
-                else { groupMemberFeedback="请先刷新成员与权限，再重新确认此操作。";return }
-                let confirmation=try changer.membershipConfirmation(roomID:roomID,action:pending.intent.action,expectedMembershipRevision:revision)
-                try await manager.reconfirmMembership(id:pending.id,confirmation:confirmation)
-            }
-        } catch { groupMemberFeedback="无法继续成员操作；请刷新权限，或取消未提交的确认。" }
-    }
-    func discardMembership(_ pending:V2MembershipPending) async {
-        guard pending.work==nil,let manager=groupMembershipChanger as? any V2MembershipManaging else { return }
-        do { try await manager.discardMembership(id:pending.id) } catch { groupMemberFeedback="无法取消成员确认。" }
-    }
-
-    @discardableResult func changeGroupMembership(targetUserID: String, action: V2RoomMembershipAction) async -> Bool {
-        guard !isLoadingGroupMembers, !isChangingGroupMembership, !isApplyingGroupModeration else {
-            return false
-        }
-        let input = targetUserID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty else {
-            groupMemberFeedback = action == .add ? "请输入成员公开 ID。" : "请输入成员。"
-            return false
-        }
-        guard !groupMemberDirectoryIsStale, let revision = groupMemberRevision else {
-            groupMemberFeedback = "请先刷新成员目录。"
-            return false
-        }
-        guard let groupMembershipChanger else {
-            groupMemberFeedback = "成员变更暂不可用。"
-            return false
-        }
-        guard canConfirmMembership(target: input, action: action) else {
-            groupMemberFeedback="当前成员权限不可用，请刷新后确认。";return false
-        }
-        isChangingGroupMembership = true
-        defer { isChangingGroupMembership = false }
-        do {
-            let confirmation=try groupMembershipChanger.membershipConfirmation(roomID:roomID,action:action,expectedMembershipRevision:revision)
-            let target: String
-            if action == .add {
-                guard let publicIdentityResolver else {
-                    groupMemberFeedback = "身份目录暂不可用，无法解析成员公开 ID。"
-                    return false
-                }
-                target = try await V2HTTPRequestDeadline.run(until:min(confirmation.deadline,.now.advanced(by:.seconds(15))),service:"accountAPI") { try await publicIdentityResolver.resolve(handle:input).userID.rawValue }
-                try Task.checkCancellation()
-            } else {
-                target = input
-            }
-            guard !groupMemberDirectoryIsStale,groupMemberRevision==revision else { groupMemberFeedback="成员版本已变化，请刷新后重新确认。";return false }
-            let outcome = try await groupMembershipChanger.changeMembership(targetUserID:target,confirmation:confirmation)
-            try Task.checkCancellation()
-            switch outcome {
-            case .accepted:
-                if action == .remove && target == userID {
-                    invalidateGroupMemberDirectory()
-                    groupMemberFeedback = "已退出群聊。"
-                } else {
-                    groupMemberFeedback = nil
-                    await loadGroupMembers(reset: true, reason: .authorizationChanged)
-                }
-            case .queuedForRetry:
-                groupMemberFeedback = action == .remove && target == userID
-                    ? "退出确认已保存；正在核对原操作结果，尚未确认退出。"
-                    : "成员确认已保存；两分钟窗口内核对权限，超时需重新确认。"
-            case .rejected(let code):
-                groupMemberFeedback = "成员变更被拒绝（\(code)），请刷新后重试。"
-                return false
-            }
-            return true
-        } catch is CancellationError {
-            return false
-        } catch {
-            groupMemberFeedback = "无法保存成员变更，当前输入已保留。"
-            return false
-        }
-    }
-}
-
-private enum V2ConversationMentionInputError: Error, Sendable {
-    case invalidInput
 }

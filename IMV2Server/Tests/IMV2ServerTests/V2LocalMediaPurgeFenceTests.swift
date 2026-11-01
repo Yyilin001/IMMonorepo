@@ -70,10 +70,9 @@ struct V2LocalMediaPurgeFenceTests {
         let upload = try await provider.issueUploadTarget(mediaID: id, contentType: "text/plain", byteCount: 3, expiresAt: now.addingTimeInterval(60))
         try await provider.storeUploadedObject(mediaID: id, targetURL: upload.url, contentType: "text/plain", bytes: bytes)
         let download = try await provider.issueDownloadTarget(mediaID: id, expiresAt: now.addingTimeInterval(60))
-        let object = try await provider.downloadedObject(mediaID: id, targetURL: download.url)
         try await provider.purge(mediaID: id)
         // Reconstruct the disk state after durable marker but before unlink.
-        try bytes.write(to: object.fileURL, options: .withoutOverwriting)
+        try bytes.write(to: root.appendingPathComponent(id.rawValue), options: .withoutOverwriting)
         await #expect(throws: V2LocalFilesystemMediaProviderError.objectUnavailable) {
             _ = try await provider.readDownloadedObject(mediaID: id, targetURL: download.url)
         }
@@ -84,6 +83,6 @@ struct V2LocalMediaPurgeFenceTests {
             _ = try await provider.issueDownloadTarget(mediaID: id, expiresAt: now.addingTimeInterval(60))
         }
         try await provider.purge(mediaID: id)
-        #expect(!FileManager.default.fileExists(atPath: object.fileURL.path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(id.rawValue).path))
     }
 }

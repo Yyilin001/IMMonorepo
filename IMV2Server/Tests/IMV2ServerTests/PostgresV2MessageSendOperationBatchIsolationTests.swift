@@ -86,12 +86,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await executor.execute(.sendOperation(invalid)) == .sendOperation(.receipt(rejection)))
                 let recovery = try V2MessageSendOperationRecoveryRequest(identity: invalid.identity,
                     fingerprint: invalid.fingerprint, domainFingerprint: invalid.command.fingerprint)
-                #expect(try await store.recover(recovery, token: token) == .unresolved)
+                #expect(try await store.recover(recovery, token: token) == .receipt(rejection))
                 #expect(try await executor.executeSendOperationBatch(batch) == results)
                 await batcher.shutdown()
             }
             #expect(try await count("im_v2.messages", on: sql) == 3)
-            #expect(try await count("im_v2.message_send_completions", on: sql) == 3)
+            #expect(try await count("im_v2.message_send_completions", on: sql) == 4)
             #expect(observer.operations == [replay.command.clientMessageID, before.command.clientMessageID, after.command.clientMessageID])
             let stages = metrics.sendOperationBatchMetricsSnapshot().stages
             #expect(stages.values.allSatisfy { $0.inFlight == 0 })
@@ -106,7 +106,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("batch content rejection leaves no result and completion failure rolls back success",
+    @Test("batch content rejection is permanent and result persistence failure rolls back the batch",
           arguments: [false, true])
     func durableSendBatchContentFailureRecovery(receiptWriteFails: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
@@ -143,10 +143,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 let query = try V2MessageSendOperationRecoveryRequest(identity: invalid.identity,
                     fingerprint: invalid.fingerprint, domainFingerprint: invalid.command.fingerprint)
-                #expect(try await store.recover(query, token: token) == .unresolved)
+                let recovered = try await store.recover(query, token: token)
+                if receiptWriteFails { #expect(recovered == .unresolved) }
+                else {
+                    guard case .receipt(let rejection) = recovered else { throw V2MessageOperationValidationError.invalidReceipt }
+                    #expect(rejection.outcome == .rejected(.invalidContent))
+                }
             }
             #expect(try await count("im_v2.messages", on: sql) == (receiptWriteFails ? 0 : 1))
-            #expect(try await count("im_v2.message_send_completions", on: sql) == (receiptWriteFails ? 0 : 1))
+            #expect(try await count("im_v2.message_send_completions", on: sql) == (receiptWriteFails ? 0 : 2))
         }
     }
 

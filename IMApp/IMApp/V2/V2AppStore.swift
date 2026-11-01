@@ -1155,6 +1155,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                     .init(kind: .groupAnnouncement) { try await realtime.groupCapabilityOperations.execute($0) },
                     .init(kind: .groupPermission) { try await realtime.groupCapabilityOperations.execute($0) },
                     .init(kind: .groupRole) { try await realtime.groupCapabilityOperations.execute($0) },
+                    .init(kind: .groupOwnership) { try await realtime.groupCapabilityOperations.execute($0) },
+                    .init(kind: .groupDissolution) { try await realtime.groupCapabilityOperations.execute($0) },
                     .init(kind:.strangerMessagePreference) { try await realtime.accountPreferences.execute($0) },
                     .init(kind:.userAddPreference) { try await realtime.accountPreferences.execute($0) },
                     .init(kind:.readReceiptPreference) { try await realtime.accountPreferences.execute($0) },

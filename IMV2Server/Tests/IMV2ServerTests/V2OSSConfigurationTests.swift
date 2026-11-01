@@ -31,9 +31,25 @@ struct V2OSSConfigurationTests {
         let values = ["IM_V2_RESOURCE_MODE": "enabled", "IM_V2_RESOURCE_STORAGE_BINDINGS_JSON": "[]",
                       "IM_V2_RESOURCE_WORK_DIRECTORY": "/tmp/resource-work", "IM_V2_RESOURCE_PUBLIC_BASE_URL": "https://media.example",
                       "IM_V2_RESOURCE_SIGNING_KEY_BASE64": Data(repeating: 1, count: 32).base64EncodedString(),
-                      "IM_V2_RESOURCE_MAXIMUM_BYTES": "1048576"]
+                      "IM_V2_RESOURCE_MAXIMUM_BYTES": "1048576",
+                      "IM_V2_RESOURCE_SCANNER": "clamav", "IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE": "/usr/bin/clamscan",
+                      "IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY": "/var/lib/clamav"]
         let runtime = try #require(try V2ResourceRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values)))
         #expect(runtime.maximumBytes == 1_048_576)
+        #expect(runtime.scanner == .clamAV(executable: URL(fileURLWithPath: "/usr/bin/clamscan"),
+            databaseDirectory: URL(fileURLWithPath: "/var/lib/clamav", isDirectory: true)))
+        for key in ["IM_V2_RESOURCE_SCANNER", "IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE", "IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY"] {
+            var incomplete = values
+            incomplete.removeValue(forKey: key)
+            #expect(throws: V2ResourceProviderError.configurationInvalid) {
+                _ = try V2ResourceRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(incomplete))
+            }
+        }
+        var fixture = values
+        fixture["IM_V2_RESOURCE_SCANNER"] = "eicar-fixture"
+        #expect(throws: V2ResourceProviderError.configurationInvalid) {
+            _ = try V2ResourceRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(fixture))
+        }
         var ambiguous = values
         ambiguous["IM_V2_LOCAL_MEDIA_MODE"] = "filesystem"
         #expect(throws: V2ResourceProviderError.configurationInvalid) {

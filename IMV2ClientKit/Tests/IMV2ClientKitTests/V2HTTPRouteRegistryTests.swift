@@ -45,6 +45,8 @@ struct V2HTTPRouteRegistryTests {
         }
         #expect(discovered == Set(V2NetworkEntryRegistry.sources.keys))
         for kind in V2OperationKind.allCases { #expect(!V2NetworkEntryRegistry.boundaries(for: kind).isEmpty) }
+        #expect(V2NetworkEntryRegistry.boundaries(for: .sendMessage) == [.tcp])
+        #expect(V2NetworkEntryRegistry.sources["V2ProtobufSyncTransport+MessageSendOperations.swift"] == [.tcp])
         let app = try String(contentsOf: try repositoryRoot().appending(path: "IMApp/IMApp/V2/V2AppStore.swift"), encoding: .utf8)
         let runtime = try String(contentsOf: try repositoryRoot().appending(path: "IMApp/IMApp/V2/V2AppRealtimeRuntime.swift"), encoding: .utf8)
         for source in [app, runtime] {

@@ -27,7 +27,7 @@ struct V2SessionRestorationTests {
         let restoration = V2SessionRestoration(workDuration: .seconds(5))
         let probe = RestoreProbe()
         let scene = Task { try await restoration.run { await probe.restore() } }
-        try await eventually { probe.calls == 1 }
+        await probe.waitForStart()
         let start = ContinuousClock.now
         await #expect(throws: V2SessionRestoration.Failure.deadlineReached) {
             try await restoration.run(until: .now.advanced(by: .milliseconds(50))) { await probe.restore() }
@@ -45,7 +45,7 @@ struct V2SessionRestorationTests {
         let restoration = V2SessionRestoration()
         let probe = RestoreProbe()
         let cancelled = Task { try await restoration.run { await probe.restore() } }
-        try await eventually { probe.calls == 1 }
+        await probe.waitForStart()
         let survivor = Task { try await restoration.run { await probe.restore() } }
         cancelled.cancel()
         await #expect(throws: CancellationError.self) { try await cancelled.value }
@@ -92,8 +92,15 @@ private final class RestoreProbe {
     var finished = false
     var cancelledOnExit = false
     private var continuation: CheckedContinuation<Void, Never>?
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    func waitForStart() async {
+        if calls > 0 { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
     func restore() async {
         calls += 1
+        startWaiter?.resume()
+        startWaiter = nil
         await withCheckedContinuation { continuation = $0 }
         cancelledOnExit = Task.isCancelled
         finished = true

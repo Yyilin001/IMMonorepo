@@ -63,9 +63,11 @@ struct V2ResourceStorageContractTests {
         let reference = try a.allocate()
         let payload = Data(repeating: 42, count: 180_000)
         let digest = Data(SHA256.hash(data: payload))
-        _ = try await a.write(reference, byteCount: Int64(payload.count), sha256: digest, bytes: stream(payload))
-        // A response may be lost after publication: same identity + bytes returns the same receipt.
-        _ = try await a.write(reference, byteCount: Int64(payload.count), sha256: digest, bytes: stream(payload))
+        // Concurrent same-identity writes serialize publication and replay the same receipt.
+        async let published = a.write(reference, byteCount: Int64(payload.count), sha256: digest, bytes: stream(payload))
+        async let replayed = a.write(reference, byteCount: Int64(payload.count), sha256: digest, bytes: stream(payload))
+        let receipts = try await (published, replayed)
+        #expect(receipts.0 == receipts.1)
         let registry = try V2ResourceStorageRegistry(storages: [a, b], defaultBinding: b.binding)
         let original = try registry.storage(for: reference.binding)
         #expect(try await original.inspect(reference).sha256 == digest)

@@ -106,14 +106,18 @@ final class V2ListViewport {
     ///   - scrollTo: 实际的滚动回调。
     func performRestoration(_ request: Restoration, scrollTo: (String) -> Void) async {
         await Task.yield()
-        for _ in 0..<8 {
+        // Native List can need more than eight layout turns when estimated
+        // heights change during window eviction. Bound elapsed time instead
+        // of abandoning a valid target after only 160 ms.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        repeat {
             guard !Task.isCancelled, restoration?.id == request.id else { return }
             scrollTo(request.itemID)
             do { try await Task.sleep(for: .milliseconds(20)) }
             catch { return }
             guard !Task.isCancelled, restoration?.id == request.id else { return }
             if containsVisibleRow(request.itemID) { break }
-        }
+        } while ContinuousClock.now < deadline
         didRequestRestoration(request)
     }
 

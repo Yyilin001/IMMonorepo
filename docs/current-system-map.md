@@ -33,13 +33,13 @@ App 的账户 HTTP clients 共享 `V2SessionHTTPAuthorization` 和账户 `V2HTTP
 
 远程设备撤销独立于本机退出凭据兑换：页面读取完整、最多 256 个目标的 120 秒 baseline，确认后先保存账户/当前设备绑定的 Keychain metadata，再由账户 activity 执行原 ID。重启或显式继续只核对/关闭原操作，不能刷新授权或扩大目标；页面离开仅解除观察。账号撤下会关闭旧 service 和页面写回围栏，原 journal/proof 保留。当前专属链路与最新关闭围栏待集中回归，不能据此宣称真机锁屏或端到端验收完成。
 
-protocol 43 的 `presencePublicationControl` 是保留容量的瞬时控制，ACK 有界，不进入持久业务重放。后台连接初始 publication mode 为 suppressed；前台只在当前策略允许时恢复发布，服务端持久 lease suppression 与当前隐私检查共同决定在线状态。此控制不修改账号长期偏好。
+`presencePublicationControl` 是保留容量的瞬时控制，ACK 有界，不进入持久业务重放。当前协议以[版本文件](../Protocol/im_realtime/v2/protocol_version.txt)为准。后台连接初始 publication mode 为 suppressed；前台只在当前策略允许时恢复发布，服务端持久 lease suppression 与当前隐私检查共同决定在线状态。此控制不修改账号长期偏好。
 
 ## 消息与同步事实链
 
 ```mermaid
 flowchart LR
-    C["App / ClientKit 持久领域意图与 operation work"] --> G["TCP / HTTPS send submit / recover"]
+    C["App / ClientKit 持久领域意图与 operation work"] --> G["TLS/TCP send submit / recover"]
     G --> V["RoomRef / Directory"]
     C --> L["TLS gateway 同步 / 查询 / 瞬时控制"]
     L --> V
@@ -59,7 +59,7 @@ flowchart LR
     C --> O["SQLite 有效活动排序与分页"]
 ```
 
-客户端先将命令写入本地 outbox；TCP 与 HTTPS 发送共用 RoomRef 和房间 Host，在 PostgreSQL 确认原子提交后返回接受结果。普通内存权限发送依靠房间顺序与在途退役边界；不逐条执行旧 activation SQL 写围栏。成功记录只有 `message_send_completions`，拒绝结果不持久化。完整边界见[当前发送与恢复合同](reviews/message-send-contract.md)。
+客户端先将命令写入本地 outbox；普通消息经 TLS/TCP 到达 RoomRef 和房间 Host，在 PostgreSQL 确认原子提交后返回接受结果。当前普通发送和恢复没有 HTTPS 后备入口。普通内存权限发送依靠房间顺序与在途退役边界；不逐条执行旧 activation SQL 写围栏。成功与明确拒绝、显式关闭共用 `message_send_completions` 的身份唯一键；终态永久保留，避免旧请求在重发后迟到提交。完整边界见[当前发送与恢复合同](reviews/message-send-contract.md)。
 Gateway 可托管房间或仅调用远端 Host；Account 的房间能力使用 caller-only 节点。寻址、租约、完整 token fence 和回收边界见[房间 Virtual Actor 合同](reviews/room-virtual-actor-contract.md)。
 私聊和群聊公共内容统一保存在房间日志，普通接受消息可由 message_row 承载，读取时与 room_events 合并。
 个人事件流保存成员变化、已读、偏好和单侧提示；公共消息不再按成员写入个人同步副本。

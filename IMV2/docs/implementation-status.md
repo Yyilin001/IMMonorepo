@@ -1,6 +1,6 @@
 # V2 当前实现与发布证据
 
-最后审阅：2026-09-30（本轮同步服务端消息链路与 current64；应用级弱网、protocol45 与远程撤销证据仍按各自检查点标注）
+当前合同核对：2026-11-01（协议、schema、普通发送入口与关键配置默认值；各专项验收仍以其实际运行记录为准）
 适用范围：当前 `IMV2Core`、`IMV2ClientKit`、`IMV2Server`、`IMApp` 与 `IMV2` 工具链。
 
 本文件只登记当前合同和可重复证据，不保留开发时间线。仓库内实现与本机测试通过不等于
@@ -22,29 +22,40 @@
 
 ## 当前账户网络收口边界
 
-账户 HTTP 生产注入复用账户 executor/scheduler 与认证 epoch，按可执行端点登记限制服务、请求/响应大小和绝对期限；同步、握手及 presence 瞬时控制仍走 TLS。消息发送由同一持久 work 在 TCP 与 HTTPS 间选择，默认优先已认证并支持该能力的长连接；结果未知时恢复原身份。其他领域 submit/recover 使用冻结身份和持久 work，特殊认证、Push 条件意图、本机退出和远程设备撤销各有专属恢复所有权，不能混为通用自动重放。
+账户 HTTP 生产注入复用账户 executor/scheduler 与认证 epoch，按可执行端点登记限制服务、请求/响应大小和绝对期限；同步、握手及 presence 瞬时控制仍走 TLS。普通消息提交和恢复由同一持久 work 经已认证并支持该能力的 TLS/TCP 长连接执行；结果未知时恢复原身份，当前没有 HTTPS 后备通道。其他领域 submit/recover 使用冻结身份和持久 work，特殊认证、Push 条件意图、本机退出和远程设备撤销各有专属恢复所有权，不能混为通用自动重放。
 
 远程设备撤销已接完整目标 baseline、固定原 ID 的 Keychain metadata、账户 activity、页面原操作观察及账号关闭围栏。原 proof 永久保留，baseline 有界并由 housekeeping 清理；本机 self-revoke 仍使用独立 capability 队列。在线发布 suppression 已接前后台连接和服务端 lease，长期偏好保持独立权威。最新业务与夹具正在集中收口；最新远程关闭围栏未运行验证，不将历史套件通过记录作为本批完整验收。
 
+## 关键配置默认值
+
+以下为[Gateway 配置解析器](../../IMV2Server/Sources/IMV2Server/V2GatewayRuntimeConfiguration.swift)在变量缺省时的行为，显式部署值可以覆盖；不能用能力代码存在推断生产已开启。
+
+| 环境变量 | 缺省值 | 当前作用 |
+| --- | --- | --- |
+| `IM_V2_MESSAGE_SEND_OPERATIONS_ENABLED` | `true` | 协商普通消息 TCP 提交和恢复能力；关闭不会启用 HTTPS 后备通道 |
+| `IM_V2_AUTHOR_PRESENTATIONS_ENABLED` | `false` | 作者资料临时补充通道须显式开启后再协商 |
+
+[当前合同检查](../../scripts/check_v2_protocol_documentation.py)核对本页协议/schema、上述默认值与[普通消息通道表](../../docs/reviews/message-send-contract.md#入口与身份)，并由现有必需门禁执行。实际 HTTP 挂载和客户端入口由网络登记测试校验；这些检查不替代真实部署验收。
+
 ## 当前兼容与 Schema 政策
 
-- protocol 54 的作者资料视图通过 137/138 独立启动，135/136 兴趣集合及 133/134 ACK 使用完整资料键；同一用户的群、关系、私聊与审批上下文独立鉴权和确认。服务端房间索引包括私聊读取解析出的权限房间。账号共享协调器已合并最多 16 个页面的可见兴趣；App 房间与列表页面均已接线，列表不附带普通房间消息订阅。公共资料、备注、关系、在线群昵称及权限变化已有失效来源，本次失效与本地容量验收已完成，见[可见作者集合合同](../../docs/reviews/author-presentation-interest-contract.md)。
+- protocol 55 的作者资料视图通过 137/138 独立启动，135/136 兴趣集合及 133/134 ACK 使用完整资料键；同一用户的群、关系、私聊与审批上下文独立鉴权和确认。服务端房间索引包括私聊读取解析出的权限房间。账号共享协调器已合并最多 16 个页面的可见兴趣；App 房间与列表页面均已接线，列表不附带普通房间消息订阅。公共资料、备注、关系、在线群昵称及权限变化已有失效来源，本次失效与本地容量验收已完成，见[可见作者集合合同](../../docs/reviews/author-presentation-interest-contract.md)。
 - 作者资料新增按 stream、view、批次和实际保留作者确认的帧 133/134，客户端与服务端按新协议配套升级；确认不替代授权。共享公开内容缓存与最多 100 键的多接收者批量读取已接入生产组装，权限逐接收者复核；真实 PostgreSQL 聚焦回归通过。可见作者变更、带版本拒绝、按较短许可提前续期及已确认资料读取前去重已接入。128 人、两个独立网关的 35 秒续期验收通过，未增加资料 HTTP 或公共资料回源；最新 release-24 已完成一万真实用户、四网关、120 秒续期及头像替换，资料 HTTP 尝试与响应均为零；真实故障/慢连接组合另以 200 用户通过，最新 Linux 七产品构建/加载与图片 worker、最终本地审计均通过。见[接收确认合同](../../docs/reviews/author-presentation-receipt-contract.md)、[批量读取合同](../../docs/reviews/author-presentation-read-contract.md)与[完整实施计划](../../docs/proposals/author-presentation-implementation.md)。
-- 按用户要求不考虑历史兼容；客户端和服务端仅支持当前协议，并显式协商 TCP 消息发送能力。HTTPS 发送保留为独立通道。数据库仍以当前 schema 和全新数据库为基线，不提供在线数据迁移。
-- protocol 54 已退役旧成员管理、群能力、社交、建群、私聊、消息审核以及 send/edit/withdraw/reaction/forward 写请求，原字段编号保留为 reserved，禁止复用；20/24/26/28/105 与无消费方的旧转发响应106已保留为 reserved；21/25/27/29 事实响应保留。该批源码和生成物收口后统一验证。新增在线状态发布抑制控制，后台连接默认抑制发布。当前 schema 为 current70，包含新领域 admission/永久回执与远程设备撤销专属恢复表。生产装配已有阶段编译记录；目前按用户要求先集中收口实现，本次消息发送升级新增完整操作合同而不复用退休字段；验证证据见[双通道实施记录](../../docs/reviews/message-send-dual-transport.md)，不以源码接线代替故障验收。
+- 按用户要求不考虑历史兼容；客户端和服务端仅支持当前协议，并显式协商 TCP 消息发送能力。普通消息提交和恢复已确定采用 TCP-only；HTTPS 仅预留后续扩展，当前没有自动后备通道。数据库仍以当前 schema 和全新数据库为基线，不提供在线数据迁移。
+- protocol 55 已退役旧成员管理、群能力、社交、建群、私聊、消息审核以及 send/edit/withdraw/reaction/forward 写请求，原字段编号保留为 reserved，禁止复用；20/24/26/28/105 与无消费方的旧转发响应106已保留为 reserved；21/25/27/29 事实响应保留。在线状态发布抑制控制与普通消息发送使用各自现行操作合同，后台连接默认抑制在线发布。数据库以本节唯一新环境建库合同为准，包含领域 admission/永久回执与远程设备撤销专属恢复表。消息提交、成功事实和恢复边界见[当前发送合同](../../docs/reviews/message-send-contract.md)，不以源码接线代替故障验收。
 - 当前设备房间确认命令使用帧 131/132，独立于前台房间订阅和心跳；协议低于 47 时编码与解码均拒绝。Gateway 使用已认证设备身份与有效房间投递授权校验，客户端仅在本地事务提交后上报。确认不授予权限、不推进客户端游标、不允许裁剪房间日志。已验证回环 TCP、生产 PostgreSQL 进度存储及未打开房间的多设备投递；真实发送事务、租约切换、签名远端 Actor 投递与 TCP 设备确认已接入同一夹具并通过；生产装配及进程故障恢复尚未完成验收。
 - 成员控制快照重放曾重复触发全目录扫描：100 次同一快照导致 101 次扫描（含初始化）。刷新条件已改为成员发现版本严格前进；相同快照及已满足的版本下限复用覆盖。成员事件现在贯穿触发器、journal 和 Actor 投影保留目标房间；Gateway 在快照版本与事件下限精确匹配时定向核对房间，缺失提示或快照超前时全量重建。生产增量端到端及并发故障验收仍未完成，见[增量改造核对](../../docs/reviews/account-membership-incremental-audit.md)。
 - 账户成员目录初始化由账户共享任务持有，多设备并发上线只扫描一次；最后一个设备退出时取消并排空任务。后台恢复在本地落盘后汇总设备确认，并在原有后台截止时间内批量发送。正式发送事务提交后不发送内存通知、更换激活租约再读取订阅源的 PostgreSQL 测试已通过；恢复出的真实正文随后通过生产签名 DistributedCluster 远端引用进入两个独立 Registry 和监听端口的 Gateway TCP，两个未订阅房间的设备均收到同一正文并分别持久化确认；两边分别拒绝撤销后的确认，且心跳仍正常。此组合夹具使用正式 PostgreSQL Gateway HMAC 认证器，令牌及设备记录由测试 SQL 准备，不覆盖账号登录和令牌签发。独立 ClusterSystem 通过真实 TCP 关联，但运行于同一测试进程；不等价于多 Gateway 进程故障演练或客户端 SQLite 落盘验收。
 - 在线成员容量已从默认 256 收敛到产品大群上限 100,000。Relay 在重建时每段最多发送 512 名成员；Gateway 按围栏及连续授权序列安装，最后一段前不授予投递权限。最大基线为 196 段，仍受默认 256 项授权队列约束；跨节点签名包上限保留 262,144 字节。513/5,000/100,000 人安装边界、缺段、重复成员、重放及 Relay 重建测试已通过；真实 DistributedCluster TCP 已验证 513 人签名分段基线。真实 PostgreSQL 大群快照已验证完整读取 100,000 名成员；实际设备与多进程故障恢复仍未验收，不宣称全容量部署验证完成。运行配置拒绝缺少全账户正文投递的旧 `local` 模式；单 Gateway 同样使用 Actor 路由，本地生产装配分支已删除。
-- protocol 54 移除消息发送恢复中的 `action` 字段，编号 4 保留为 reserved；同时移除发送回执的旧 `closed` 终态，编号 6 保留为 reserved。恢复仅查询已提交结果，未找到时保持 unresolved。客户端与服务端必须同步升级。
-- wire contract 为 protobuf protocol 54；生成物必须与
+- protocol 55 的发送恢复使用新字段 `action = 5`，区分查询 `query` 与持久关闭 `closeIfAbsent`；旧字段编号 4 仍保留为 reserved。明确业务拒绝与 `closedUnsubmitted` 均为永久结果，原编号不得再次提交；未知与临时限流仍沿用原编号恢复。客户端与服务端必须同步升级。
+- wire contract 为 protobuf protocol 55；生成物必须与
   [`Protocol/im_realtime/v2/im_v2.proto`](../../Protocol/im_realtime/v2/im_v2.proto) 一致。
-  protocol 54 包含显式协商的临时作者资料补充通道及按精确 nonce 结束补充的控制命令；资源读取、传输与页面消费已装配。服务端开关默认关闭，App 前台声明支持、后台不订阅；本地真实 ClientKit 万人及故障组合验收已完成，生产 CDN 与部署未验证，见[资源实施记录](../../docs/proposals/resource-system-implementation.md)。
+  protocol 55 包含显式协商的临时作者资料补充通道及按精确 nonce 结束补充的控制命令；资源读取、传输与页面消费已装配。服务端开关默认关闭，App 前台声明支持、后台不订阅；本地真实 ClientKit 万人及故障组合验收已完成，生产 CDN 与部署未验证，见[资源实施记录](../../docs/proposals/resource-system-implementation.md)。
   房间 continuation 表示已认证扫描到的序号，可越过不可见尾部；旧客户端严格相等校验不兼容，见[读取与游标合同](../../docs/reviews/message-mutation-read-contract.md)。
   私聊与群聊的公共内容统一以房间日志为权威副本，不再提供 fanout 兼容模式；个人事件流保存个人状态与单侧提示。
   新编辑携带接受身份与显式完整状态以跨越合法版本缺口，见[完整编辑合同](../../docs/reviews/message-edit-replacement-contract.md)。
 - PostgreSQL 新环境从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
-  `im-v2-current-76`；这是唯一新环境建库合同。个人状态事件 outbox 增加按用户 stream head 的扫描索引，避免同用户后续事件在前序事件仍待处理时提前领取。本人资料操作已分离原回执和当前快照，提交/关闭共锁，终态永久保留；字段与恢复路由见[本人资料合同](../../docs/proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)。本轮仅为该领域已实现范围，不表示应用级弱网 W0–W6 全部完成。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
+  `im-v2-current-80`；这是唯一新环境建库合同。资源发布同时登记暂存清理，由独立、有租约的 worker 回收单次与分片上传字节；失败与进程重启不丢失待办，见[分片与回收合同](../../docs/proposals/aliyun-oss-integration.md#分片续传与暂存回收)。公告清除使用空正文并保留递增版本，迟到修改不能恢复已清除的旧公告。个人状态事件 outbox 增加按用户 stream head 的扫描索引，避免同用户后续事件在前序事件仍待处理时提前领取。本人资料操作已分离原回执和当前快照，提交/关闭共锁，终态永久保留；字段与恢复路由见[本人资料合同](../../docs/proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)。本轮仅为该领域已实现范围，不表示应用级弱网 W0–W6 全部完成。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
   readiness 拒绝不符合当前结构的数据库；旧压测库须重建，不提供在线升级。
   schema65 在撤销事件分配 identity 前通过语句级事务锁串行化写入，保证两个消费者推进水位时不会遗漏晚提交的小序号。资源导入独立保存源释放确认与不可变关闭记录：终态但释放未确认的操作继续恢复，首次保留之前的取消也会阻止晚到的保留；已提交目标的后台收尾不依赖原设备仍有客户端权限。
   消息编辑的版本、序号和成员修订在同事务中保存至不可变 `message_edit_visibility`，独立于日志裁剪。摘要从有权查看的版本读取当前正文或历史正文，缺少必要历史正文时拒绝读取，不能回退到未授权的当前内容。
@@ -61,9 +72,10 @@
   当前 schema 包含 Push 会话与意图版本存储；Account HTTP 与 ClientKit 版本传输已接通，持久意图存储已加入 SQLite；自动执行器及 App 开关/退出接线已验证，真实网络和账号生命周期组合仍开放，见[Push 意图合同](../../docs/reviews/push-intent-contract.md)及[HTTP 合同](../../docs/reviews/push-intent-http-contract.md)、[本地持久状态合同](../../docs/reviews/push-intent-local-contract.md)、[自动执行器合同](../../docs/reviews/push-intent-reconciler-contract.md)、[App 合同](../../docs/reviews/push-intent-app-contract.md)及[认证隔离合同](../../docs/reviews/push-intent-auth-contract.md)。
 - ClientKit 主 SQLite 与派生搜索库分别有当前建库入口，当前批次不承诺历史 schema 兼容。
   消息、reaction、公告、角色权限、置顶效果及恢复调度迁移见修复记录；当前对象指纹由仓库 schema contract 检查维护；旧 173/5 计数不代表本批结构。
-  protocol 54 包含显式个人快照重建和当前角色权限基线读取；SQLite 持久保存个人重建意图，
+  protocol 55 包含显式个人快照重建和当前角色权限基线读取；SQLite 持久保存个人重建意图，
   角色权限已迁移为独立版本和显式空集合，恢复请求、完整观察点及本地栅栏已持久化；自动 runner 和 App 生命周期已接通，暂停反馈及显式重试入口已接通，真实链路及人工交互验收仍待完成，详见[状态与重试合同](../../docs/reviews/role-policy-recovery-ui-contract.md)、[执行器合同](../../docs/reviews/role-policy-recovery-runner-contract.md)、[恢复存储合同](../../docs/reviews/role-policy-recovery-store-contract.md)、[角色效果合同](../../docs/reviews/role-policy-effect-contract.md)、[个人基线恢复合同](../../docs/reviews/personal-snapshot-rebuild.md)及[权限基线合同](../../docs/reviews/group-policy-baseline-contract.md)。
 - 服务端置顶快照已按已知源序号排序并保留取消状态；客户端快照键已兼容等价 UUID 拼写。客户端置顶四路 reducer、持久摘要与受控迁移已实现，缺序号旧历史权威恢复和统一发布切换仍待完成，见[置顶快照合同](../../docs/reviews/pin-snapshot-contract.md)及[客户端效果合同](../../docs/reviews/pin-effect-contract.md)。
+- 群主转让与解散接入既有群能力 admission/永久回执；转让同时调整新旧群主角色，解散关闭全部成员、撤销邀请并结束待审批申请，个人同步保留离线退群通知。见[群生命周期合同](../../docs/reviews/group-capability-owner-fence-contract.md#群主转让与解散2026-11-01)。
 - 服务端成员角色快照已按目标成员版本比较并通过真实逆序分发/快照回归；逐成员离开/重入的持久状态和客户端统一消费仍待完成，见[成员角色快照合同](../../docs/reviews/member-role-snapshot-contract.md)。
 - 会话列表由客户端 SQLite 按有效活动时间排序后分页。服务端提供 UserRoomDirectoryList/Page、RoomSyncStateBatch/Result、RoomLatestVisibleBatch/Result 和账号级房间变更通知；旧 RoomSummaryList/Page 与活动排行恢复入口已删除。
   客户端 V2RoomRecoveryRunner/Engine 管理持久化恢复待办；重连、通知覆盖失效及低频完整性核对触发目录扫描，在线变化按房间合并处理。摘要不推进正文游标，后台执行有预算且不宣告完整追平。
@@ -75,19 +87,19 @@
 
 | 能力 | 当前实现 | 证据等级 | 仍需外部闭环 |
 | --- | --- | --- | --- |
-| TLS gateway 与协议 | TLS 1.3、protocol 54 协商、显式消息发送操作能力、帧/深度/队列/请求上限、原子设备会话认证、心跳与关闭 | 仓库内已实现；package 和本地 gateway 回归 | 生产证书轮换、入口拓扑与故障演练 |
-| 账户与设备凭据 | 独立 account service、固定参数 Argon2id 密码验证、跨副本限流、设备绑定 assertion、刷新/撤销/账号禁用 | 本机集成已验证 | WebAuthn RP verifier、challenge/counter store、生产 trusted-proxy 与审计审批 |
+| TLS gateway 与协议 | TLS 1.3、protocol 55 协商、显式消息发送操作能力、帧/深度/队列/请求上限、原子设备会话认证、心跳与关闭 | 仓库内已实现；package 和本地 gateway 回归 | 生产证书轮换、入口拓扑与故障演练 |
+| 账户与设备凭据 | 独立 account service、固定参数 Argon2id 密码验证、跨副本限流、设备绑定 assertion、刷新/撤销/账号禁用；当前交付使用密码与恢复码，Passkey 未纳入范围 | 本机集成已验证 | 账户服务 HTTPS、生产限流与 trusted-proxy 配置、审计审批；未来启用 Passkey 时另行完成 WebAuthn RP verifier、challenge/counter store 与真机凭据验收 |
 | 公开身份与联系人 | required account kind、绑定账户/设备且最长 60 秒的精确 handle 发现、本人资料字段 patch/不可变原回执与 query/close、关系/屏蔽、按上下文限期资料读取；成员/已读目录只返回标识和角色，资料另行授权 | 仓库内实现与分层证据见[资源实施记录](../../docs/proposals/resource-system-implementation.md)；旧目录资料字段与裸精确查询响应已退休，需协调升级 | 其余资料入口、真机离线、多语言与人工无障碍验收 |
-| 房间 Virtual Actor | RoomID 逻辑引用、持久 lease/activation fence、恢复与有界 FIFO/回收；前台和房间后台写入接入 | 本轮功能收口完成；真 PG、双 Host 分区/接管、单 owner 批查询与当前源码完整 Linux 回归（1529 tests / 264 suites）见[验证状态](../../docs/reviews/virtual-actor/README.md) | 相对性能按用户要求暂缓；首次未复现的测试进程停滞及诊断保留，不代表生产容量批准 |
+| 房间 Virtual Actor | RoomID 逻辑引用、有界 FIFO/回收；多数派持久归属与 epoch 围栏；独立 Supervisor 排除准确 Host incarnation 后接管，旧数据库租约已移除，见[当前合同](../../docs/reviews/room-virtual-actor-contract.md) | 当前冻结源码的三个 Linux arm64 Release 产品构建及多进程崩溃/数据库阻断/Supervisor 重启/代次回收演练通过，见[2026-11-01 证据](../../docs/verification/native-host-crash-20261101.json)；历史完整套件未重跑 | 单台隔离 Linux 虚拟机的实际进程与网络故障证据；生产多机拓扑、主机失效、真实 App/Gateway 全链路及容量验收仍开放 |
 | 私聊与普通群 | 公共内容统一房间日志；幂等命令、事务准入、按房间游标恢复；个人流承载个人状态 | PostgreSQL、ClientKit 与本机 TLS/App 分层证据见会话同步验收状态 | 全链路规模、故障与长稳态验收 |
 | 大群房间日志 | 公共内容使用房间日志；账号级变化通知与有界详细订阅分离，mention 仅作推送提示 | 仓库内覆盖与缓冲区回归 | 持续负载、故障与设备可见延迟报告 |
-| 群管理、邀请与审核 | 成员 seek pagination、角色权限、禁言、审计移除、公告、置顶、内容审核 lease 与受控 replay；审批式邀请链接、QR、撤销/次数/有效期、待审批分页与原子批准 | 仓库内已实现；域/HTTP/schema/Simulator 回归 | 真实双端邀请 E2E、链接滥用、生产密钥轮换、审核 provider、operator 访问与保留政策 |
+| 群管理、邀请与审核 | 成员 seek pagination、角色权限、群主转让、解散、禁言、审计移除、公告、置顶、内容审核 lease 与受控 replay；审批式邀请链接、QR、撤销/次数/有效期、待审批分页与原子批准 | 仓库内已实现；域/HTTP/schema/Simulator 回归 | 真实双端邀请 E2E、链接滥用、生产密钥轮换、审核 provider、operator 访问与保留政策 |
 | Sync 与 Snapshot V3 | per-user projection/checkpoint、statement-level checkpoint/effect capture、有界 artifact page、ACK-before-activate、独立 busy-drain compaction、retained floor、撤销设备清理 | 本机 PostgreSQL/ClientKit 故障回归 | 生产 replay window、存储阈值与长周期运行证据 |
 | ClientKit 本地状态 | Keychain 设备会话、安装绑定、当前 SQLite schema、持久化 outbox、搜索派生库、有界历史定位、事件授权与 delivery mode 分离；群邀请只经认证 no-store HTTPS 传输 | 本机 ClientKit 全量及 iOS 聚焦回归 | 受保护数据、重启和真机 Keychain 发布验收 |
-| 媒体 | 设备绑定上传/下载 grant、扫描/审核/清理 outbox；本地流式文件 provider 与 EICAR 夹具 | 本机集成已验证 | 生产对象存储、扫描器、CDN、multipart abort 与滥用测试 |
+| 媒体 | 设备绑定上传/下载 grant、扫描/审核/清理 outbox；本地与 OSS provider；生产资源模式强制 ClamAV，EICAR 夹具限显式本地测试模式 | OSS 已有历史真实云端证据；ClamAV 的 [macOS 记录](../../docs/verification/resource-scanner-clamav-20261101.json)与[隔离 Linux 记录](../../docs/verification/resource-scanner-clamav-linux-20261101.json)验证真实引擎和官方签名库；[Linux ext4 读取边界](../../docs/verification/local-media-linux-20261101.json)的 6 个定向方法通过 | 生产容器组装、服务账号/挂载权限、签名更新/恢复与资源预算、CDN、multipart abort、滥用和故障恢复测试 |
 | Push 与实时提示 | 加密 APNs endpoint、generic wake；schema 19 条件意图存储；NATS 只作为可丢失提示，PostgreSQL/cursor 保持正确性 | 版本意图 HTTP/客户端传输、持久状态、自动执行器及 App 设置/退出接线已验证 | B16 真实网络与账号生命周期组合验收、真实 APNs、NATS TLS/NKey、broker 指标与 soak/failover |
 | 用户分片 | 部署前固定逻辑桶到物理库映射；持久化 route/epoch 与当前归属栅栏；控制面个人投影按当前路由投递 | 静态路由的双 PostgreSQL 本机集成已有分层证据；不提供在线换桶 | 独立权限部署、网络分区与当前静态拓扑下的故障演练 |
-| 可观测与运维 | 低基数 metrics、paused work 告警、loopback operator、非破坏性 PostgreSQL 前后快照差值、host-local exporter、逻辑恢复 drill | 本机脚本与测试覆盖 | Alertmanager receiver、bastion/mTLS、WAL/PITR、RPO/RTO 演练 |
+| 可观测与运维 | 低基数 metrics、paused work 告警、loopback operator、非破坏性 PostgreSQL 前后快照差值、host-local exporter、逻辑恢复与物理备份/WAL 时间点恢复 drill | 本机脚本与测试覆盖；[时间点恢复证据](../../docs/verification/postgres-pitr-20261101.json)验证目标边界与恢复后写入 | Alertmanager receiver、bastion/mTLS、生产规模/跨区/密钥恢复、批准的 RPO/RTO 演练 |
 | iOS App | SwiftUI 状态、认证/同步、联系人、会话、群管理、邀请链接/QR/扫码/审批、媒体、Push 设置、离线 outbox；Swift 6 严格并发 | Simulator 构建、unit/UI 与本机双安装入口 | 真机签名、邀请双端、相机权限、APNs、完整 VoiceOver/Reduce Motion/对比度与发布验收 |
 
 ## 唯一本地总门禁
@@ -129,13 +141,13 @@ bash IMV2/scripts/test_v2_local_environment_contract.sh
 
 1. 选定生产部署平台，交付 account/gateway/operator/metrics 的最小权限部署、secret manager、
    TLS 轮换、数据库备份与回滚演练。
-2. 完成生产 WebAuthn、对象存储/扫描器、APNs 和 Alertmanager 接入。
+2. 完成当前密码认证、APNs 和 Alertmanager 的生产接入；对已实现的 OSS、ClamAV 适配完成当前部署验收。Passkey 不属于本轮交付要求。
 3. 在批准的普通聊天与热点群工作负载上测量 PostgreSQL/WAL、队列年龄、sync lag、连接池和
    拒绝行为，据此批准或下调 admission profile。
-4. 完成 WAL/PITR、RPO/RTO、gateway/worker/database kill 与 NATS 分区演练。
+4. 完成生产规模、跨区与密钥恢复的 WAL/PITR、批准的 RPO/RTO、gateway/worker/database kill 与 NATS 分区演练。
 5. 使用部署前确定的静态分片配置；在线数据迁移不纳入首版。
 
 开放风险及关闭条件以
 [`residual-risk-register.md`](10-operations/residual-risk-register.md) 为准。
 
-- 当前 schema current70 不再创建消息永久关闭表及触发器；消息恢复仅查询成功事实，未找到结果保持 unresolved。旧授权恢复也不再使用关闭记录推断中止。
+- 当前 schema 使用同一 `message_send_completions` 表永久保存成功、明确拒绝和显式关闭；单一身份唯一键串行裁定提交与关闭。普通查询未找到仍返回 unresolved，只有关闭事务确认后的回执可以证明旧编号未提交。

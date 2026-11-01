@@ -4,7 +4,7 @@ import IMV2Core
 
 @MainActor @Observable
 final class V2AccountSecurityStore {
-    enum State: Equatable { case editing, working, completed(String), failed(String) }
+    enum State: Equatable { case editing, working, completed(String), failed(String), outcomeUnknown(String) }
     var state: State = .editing
     private let client: V2PasswordLifecycleClient
     private let passwordChanged: @MainActor @Sendable () async -> Void
@@ -24,7 +24,9 @@ final class V2AccountSecurityStore {
                 : "密码已更新，全部设备已退出登录。请使用新密码登录，并重新设置恢复码。")
             if action != .recoveryCode { await passwordChanged() }
         } catch is CancellationError {
-            state = .editing
+            // Cancelling the page cannot undo a request already committed by
+            // the server. Keep the uncertainty without signing out a new session.
+            state = .outcomeUnknown(Self.verificationGuidance(for: action))
         } catch V2AccountAuthenticationError.rateLimited(let seconds) {
             state = .failed(seconds.map { "尝试过于频繁，请在 \($0) 秒后重试。" } ?? "尝试过于频繁，请稍后重试。")
         } catch V2AccountAuthenticationError.authenticationRejected {
@@ -38,8 +40,15 @@ final class V2AccountSecurityStore {
         } catch {
             // A response can be lost after commit. Never claim the mutation failed or
             // automatically repeat it with a different recovery code.
-            state = .failed("尚未确认操作结果。若修改或重置密码，请先尝试用新密码登录；若设置恢复码，请保留已保存的副本，稍后用同一码重试。")
+            state = .outcomeUnknown(Self.verificationGuidance(for: action))
         }
+    }
+
+    private static func verificationGuidance(for action: V2PasswordLifecycleAction) -> String {
+        if action == .recoveryCode {
+            return "恢复码可能已经启用。请保留刚才保存的副本，稍后用同一码重试；不要因请求中断而丢弃它。"
+        }
+        return "密码可能已经更新。请先用刚提交的新密码登录核验；若新密码被明确拒绝，再尝试原密码。关闭页面或取消请求不会撤回已经生效的修改。"
     }
 }
 
@@ -70,6 +79,12 @@ struct V2AccountSecurityView: View {
                     Text("找回账号").tag(V2PasswordLifecycleAction.recover)
                 }
                 .accessibilityIdentifier("v2.security.action")
+                Text("请在仍记得密码时设置离线恢复码。密码和恢复码都丢失后，将无法找回账号。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if action == .change {
+                    Button("设置离线恢复码") { action = .recoveryCode }
+                        .accessibilityIdentifier("v2.security.setup-recovery-code")
+                }
             }
             Section("身份验证") {
                 TextField("登录账号", text: $account)
@@ -136,6 +151,9 @@ struct V2AccountSecurityView: View {
                 case .working: ProgressView("正在处理…")
                 case .failed(let message), .completed(let message):
                     Text(message).accessibilityIdentifier("v2.security.feedback")
+                case .outcomeUnknown(let message):
+                    Text("结果尚未确认").font(.headline)
+                    Text(message).accessibilityIdentifier("v2.security.feedback")
                 case .editing: EmptyView()
                 }
             }
@@ -146,7 +164,11 @@ struct V2AccountSecurityView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() }.disabled(store.state == .working) } }
         .interactiveDismissDisabled(store.state == .working)
-        .onChange(of: action) { _, _ in current = ""; next = ""; confirmation = ""; code = ""; savedCode = false; store.state = .editing }
+        .onChange(of: action) { _, _ in
+            current = ""; next = ""; confirmation = ""; code = ""; savedCode = false
+            if case .outcomeUnknown = store.state { return }
+            store.state = .editing
+        }
         .onDisappear { operation?.cancel(); current = ""; next = ""; confirmation = ""; code = "" }
     }
     private var canSubmit: Bool {

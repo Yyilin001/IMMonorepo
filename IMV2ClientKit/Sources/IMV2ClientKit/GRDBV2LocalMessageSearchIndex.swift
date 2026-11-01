@@ -220,13 +220,18 @@ extension GRDBV2LocalSyncStore {
     ///
     /// - Parameter request: 搜索请求。
     /// - Returns: 搜索结果分页。
-    /// - Throws: 查询为空、条数越界、索引不可用或游标与范围不匹配时抛出
+    /// - Throws: 文本与筛选条件均为空、条数越界、索引不可用或游标与范围不匹配时抛出
     ///   ``V2MessageSearchError``；其余失败来自存储。
     public func searchMessages(_ request: V2MessageSearchRequest) throws -> V2MessageSearchPage {
         guard (1 ... 100).contains(request.limit) else { throw V2MessageSearchError.invalidPageSize }
         let tokenizer = V2CharacterGramTokenizer()
         let query = tokenizer.tokenize(request.query)
-        guard !query.unigrams.isEmpty || request.contentFilter != .all else {
+        let hasSenderFilter: Bool
+        switch request.scope {
+        case .sender: hasSenderFilter = true
+        case .allMessages, .room: hasSenderFilter = request.senderUserID != nil
+        }
+        guard !query.unigrams.isEmpty || request.contentFilter != .all || hasSenderFilter else {
             throw V2MessageSearchError.emptyQuery
         }
         let primaryState = try databasePool.read { db in

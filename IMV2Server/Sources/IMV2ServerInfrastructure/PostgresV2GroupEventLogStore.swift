@@ -304,7 +304,7 @@ struct GroupEventLogRow: Decodable {
 func groupEventProjectionKind(for eventType: String) -> String {
     switch eventType {
     case "room.created": "room"
-    case "membership_changed": "membership"
+    case "membership_changed", "group.ownership_transferred", "group.dissolved": "membership"
     case "member.muted", "room.frozen", "room.unfrozen": "moderation"
     case "message.reaction_changed": "message_reaction"
     case "message.pinned_changed", "group.announcement_changed", "group.role_permissions_changed", "group.member_role_changed", "group.avatar_changed", "group.nickname_changed": "group_capability"

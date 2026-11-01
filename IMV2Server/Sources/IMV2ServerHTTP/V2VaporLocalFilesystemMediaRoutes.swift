@@ -11,13 +11,11 @@ import _NIOFileSystem
 /// 生产环境建议改为对象存储原生边缘实现。
 public struct V2VaporLocalFilesystemMediaRoutes<Provider: V2LocalMediaByteServing>: Sendable {
     private let provider: Provider
-    private let fileIO: FileIO
     private let publicBaseURL: URL
     private let maximumUploadBytes: Int
 
     public init(
         provider: Provider,
-        fileIO: FileIO,
         publicBaseURL: URL,
         maximumUploadBytes: Int64
     ) throws {
@@ -29,7 +27,6 @@ public struct V2VaporLocalFilesystemMediaRoutes<Provider: V2LocalMediaByteServin
               maximumUploadBytes <= Int64(Int.max)
         else { throw V2VaporLocalFilesystemMediaRoutesError.invalidConfiguration }
         self.provider = provider
-        self.fileIO = fileIO
         self.publicBaseURL = publicBaseURL
         self.maximumUploadBytes = Int(maximumUploadBytes)
     }
@@ -118,26 +115,46 @@ public struct V2VaporLocalFilesystemMediaRoutes<Provider: V2LocalMediaByteServin
             } catch {
                 throw Abort(.serviceUnavailable)
             }
-            guard object.byteCount <= Int64(Int.max) else { throw Abort(.serviceUnavailable) }
-            let eTag = try await object.strongETag()
-            var downloadRequest = request
-            // Compare before FileIO parses Range: stale offsets may exceed the new
-            // object's length. FileIO's default validator is not a content hash.
-            if let validator = downloadRequest.headers[.ifRange], validator != eTag {
-                downloadRequest.headers[.range] = nil
+            guard object.byteCount >= 0, object.byteCount <= Int64(Int.max) else { throw Abort(.serviceUnavailable) }
+            let eTag: String
+            do { eTag = try await object.strongETag() }
+            catch is CancellationError { throw CancellationError() }
+            catch { throw Abort(.notFound) }
+            var headers = noStoreHeaders()
+            headers[.contentType] = "application/octet-stream"
+            headers[HTTPField.Name("X-Content-Type-Options")!] = "nosniff"
+            headers[.eTag] = eTag
+            headers[.acceptRanges] = "bytes"
+            let range: ResourceResponseRange
+            if let validator = request.headers[.ifRange], validator != eTag {
+                range = .full
+            } else {
+                range = resourceResponseRange(request.headers[.range], byteCount: object.byteCount)
             }
-            downloadRequest.headers[.ifNoneMatch] = nil
-            var response = try await fileIO.streamFile(
-                at: object.fileURL.path,
-                for: downloadRequest,
-                mediaType: .init(type: "application", subType: "octet-stream")
-            )
-            response.headers[.eTag] = eTag
-            for header in noStoreHeaders() {
-                response.headers[header.name] = header.value
+            let start: Int64, end: Int64, status: HTTPResponse.Status
+            switch range {
+            case .unsatisfiable:
+                headers[.contentRange] = "bytes */\(object.byteCount)"
+                return .init(status: .rangeNotSatisfiable, headers: headers)
+            case .full:
+                start = 0; end = object.byteCount; status = .ok
+            case .selected(let lower, let upper):
+                start = lower; end = upper; status = .partialContent
+                headers[.contentRange] = "bytes \(lower)-\(upper - 1)/\(object.byteCount)"
             }
-            response.headers[.contentType] = "application/octet-stream"
-            return response
+            return try .init(status: status, headers: headers, body: .init(stream: { writer in
+                var offset = start
+                while offset < end {
+                    try Task.checkCancellation()
+                    let limit = Int(min(65_536, end - offset))
+                    let bytes = try await object.readChunk(offset: offset, maximumBytes: limit)
+                    guard !bytes.isEmpty, bytes.count <= limit else {
+                        throw V2LocalFilesystemMediaProviderError.objectUnavailable
+                    }
+                    try await writer.write(bytes)
+                    offset += Int64(bytes.count)
+                }
+            }, count: Int(end - start)))
         }
     }
 

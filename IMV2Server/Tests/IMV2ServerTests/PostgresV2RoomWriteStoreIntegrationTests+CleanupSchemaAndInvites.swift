@@ -1044,7 +1044,44 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(saved.digest != code)
             #expect(saved.digest?.count == 64)
             #expect(saved.revision == 1)
-            try await lifecycle.changePassword(accountHandle: "lifecycle-user", currentPassword: firstPassword, newPassword: "replacement-password", deviceID: device)
+            struct LostChangeResponse: V2PasswordLifecycleManaging {
+                let base: V2PasswordLifecycleService
+                func changePassword(accountHandle: String, currentPassword: String, newPassword: String, deviceID: DeviceID) async throws {
+                    try await base.changePassword(accountHandle: accountHandle, currentPassword: currentPassword, newPassword: newPassword, deviceID: deviceID)
+                    // Commit succeeds, but the caller receives an unavailable
+                    // result. Neither the client nor a proxy may infer rollback.
+                    throw V2PasswordLifecycleError.unavailable
+                }
+                func setRecoveryCode(accountHandle: String, password: String, recoveryCode: String, deviceID: DeviceID) async throws {
+                    try await base.setRecoveryCode(accountHandle: accountHandle, password: password, recoveryCode: recoveryCode, deviceID: deviceID)
+                }
+                func resetPassword(accountHandle: String, recoveryCode: String, newPassword: String, deviceID: DeviceID) async throws {
+                    try await base.resetPassword(accountHandle: accountHandle, recoveryCode: recoveryCode, newPassword: newPassword, deviceID: deviceID)
+                }
+            }
+            let app = try Application(.testing)
+            V2PasswordLifecycleRoutes(service: LostChangeResponse(base: lifecycle)).register(on: app)
+            V2PasswordAccountRoutes(store: store, assertionIssuer: try .init(rawKey: Data(repeating: 43, count: 32)), passwords: worker,
+                loginAttemptLimiter: V2PostgresPasswordLoginAttemptLimiter(database: resources.database(.psql),
+                    policy: try .init(maximumFailures: 10, window: 60, lockout: 60))).register(on: app)
+            do {
+                try await app.testing { client in
+                    let response = try await client.send(.post, to: "v2/account-auth/password/change", beforeSend: { request in
+                        try request.content.encode(["accountHandle": "lifecycle-user", "deviceID": device.rawValue,
+                            "currentPassword": firstPassword, "newPassword": "replacement-password"])
+                    })
+                    #expect(response.status == .serviceUnavailable)
+                    let verificationDevice = UUID().uuidString
+                    for (password, status) in [(firstPassword, HTTPResponse.Status.unauthorized), ("replacement-password", .ok)] {
+                        let login = try await client.send(.post, to: "v2/account-auth/password/assertion", beforeSend: { request in
+                            try request.content.encode(V2PasswordAccountHTTPRequest(accountHandle: "lifecycle-user", password: password,
+                                deviceID: verificationDevice))
+                        })
+                        #expect(login.status == status)
+                    }
+                }
+                try await app.shutdown()
+            } catch { try? await app.shutdown(); throw error }
             await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
                 try await auth.authenticateSession(accessToken: tokens.accessToken, deviceID: device)
             }

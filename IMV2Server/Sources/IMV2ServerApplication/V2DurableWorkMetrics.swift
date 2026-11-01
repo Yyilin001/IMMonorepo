@@ -256,6 +256,9 @@ private func v2AggregateDurableWorkMetrics(
         messageProjectionStateInlineBodyEstimatedRows: sum(
             \.messageProjectionStateInlineBodyEstimatedRows
         ),
+        sendCompletionStorage: aggregateSendCompletionStorageMetrics(
+            snapshots.compactMap(\.sendCompletionStorage)
+        ),
         uncompactedProjectedRecords: sum(\.uncompactedProjectedRecords),
         pendingSyncRecordsAcrossDevices: sum(\.pendingSyncRecordsAcrossDevices),
         resetPendingDevices: sum(\.resetPendingDevices),
@@ -376,5 +379,40 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# HELP im_v2_revoked_device_projection_cleanup_events_pending Durable revocations awaiting user-shard capability cleanup.",
         "# TYPE im_v2_revoked_device_projection_cleanup_events_pending gauge",
         "im_v2_revoked_device_projection_cleanup_events_pending \(snapshot.pendingRevokedDeviceProjectionCleanupEvents)",
-    ].joined(separator: "\n") + "\n"
+    ].joined(separator: "\n") + "\n" + renderSendCompletionStorageMetrics(snapshot.sendCompletionStorage)
+}
+
+private func aggregateSendCompletionStorageMetrics(
+    _ sources: [V2SendCompletionStorageMetrics]
+) -> V2SendCompletionStorageMetrics? {
+    guard !sources.isEmpty else { return nil }
+    func sum(_ values: [Int]) -> Int {
+        values.reduce(0) { $0 > Int.max - $1 ? Int.max : $0 + $1 }
+    }
+    let estimates = sources.compactMap(\.estimatedRows)
+    return .init(estimatedRows: estimates.count == sources.count ? sum(estimates) : nil,
+                 heapBytes: sum(sources.map(\.heapBytes)), indexBytes: sum(sources.map(\.indexBytes)),
+                 totalBytes: sum(sources.map(\.totalBytes)))
+}
+
+private func renderSendCompletionStorageMetrics(_ value: V2SendCompletionStorageMetrics?) -> String {
+    guard let value else { return "" }
+    var lines = [
+        "# HELP im_v2_send_completions_estimate_available Whether all physical room owners have a planner row estimate.",
+        "# TYPE im_v2_send_completions_estimate_available gauge",
+        "im_v2_send_completions_estimate_available \(value.estimatedRows == nil ? 0 : 1)",
+        "# HELP im_v2_send_completions_relation_bytes Permanent send-result storage across physical room owners; total includes indexes, TOAST and auxiliary forks.",
+        "# TYPE im_v2_send_completions_relation_bytes gauge",
+        "im_v2_send_completions_relation_bytes{component=\"heap\"} \(value.heapBytes)",
+        "im_v2_send_completions_relation_bytes{component=\"indexes\"} \(value.indexBytes)",
+        "im_v2_send_completions_relation_bytes{component=\"total\"} \(value.totalBytes)",
+    ]
+    if let estimate = value.estimatedRows {
+        lines += [
+            "# HELP im_v2_send_completions_estimated_rows PostgreSQL planner estimate of permanent send results; not an exact count.",
+            "# TYPE im_v2_send_completions_estimated_rows gauge",
+            "im_v2_send_completions_estimated_rows \(estimate)",
+        ]
+    }
+    return lines.joined(separator: "\n") + "\n"
 }

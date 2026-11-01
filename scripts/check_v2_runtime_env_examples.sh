@@ -167,4 +167,15 @@ check_example "${repo_root}/IMV2Server/operator-replay.env.example" \
   IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL \
   IM_V2_USER_SHARD_STORES_JSON
 
+check_example "${repo_root}/IMV2Server/oss.env.example" \
+  IM_V2_RESOURCE_MODE \
+  IM_V2_RESOURCE_WORK_DIRECTORY \
+  IM_V2_RESOURCE_PUBLIC_BASE_URL \
+  IM_V2_RESOURCE_SIGNING_KEY_BASE64 \
+  IM_V2_RESOURCE_MAXIMUM_BYTES \
+  IM_V2_RESOURCE_STORAGE_BINDINGS_JSON \
+  IM_V2_RESOURCE_SCANNER \
+  IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE \
+  IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY
+
 printf 'V2 runtime environment examples declare every required variable.\n'

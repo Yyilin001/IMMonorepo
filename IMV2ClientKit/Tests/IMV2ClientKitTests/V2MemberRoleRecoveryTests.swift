@@ -323,6 +323,47 @@ struct V2MemberRoleRecoveryTests {
         try await store.close()
     }
 
+    @Test("ownership roles converge across room and personal sync; dissolution survives snapshot recovery", arguments: [true, false])
+    func groupLifecycleProjectionRecovery(personalFirst: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "group-lifecycle-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: .init(value: UUID()), userID: Self.viewer)
+        let grant = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(uuid: UUID()), projectionKind: "membership", payload: Self.membership(user: Self.viewer, action: "add", revision: 1))
+        _ = try await store.apply(.init(generation: 1, records: [grant], nextSyncToken: .init("grant"), receipt: .init("grant"), hasMore: false, capabilityProfile: "base"))
+        var payload: [String: Any] = ["event_type": "group.ownership_transferred", "action": "transfer", "room_id": Self.room.rawValue,
+            "owner_user_id": Self.member.rawValue, "previous_owner_user_id": Self.viewer.rawValue,
+            "actor_user_id": Self.viewer.rawValue, "membership_revision": 2, "room_sequence": 1,
+            "title": "Recovery", "capacity_class": "standard", "created_at_ms": 1000, "server_created_at_ms": 2000]
+        let data = try JSONSerialization.data(withJSONObject: payload), source = EventID(uuid: UUID())
+        let personal = try V2ClientSyncRecord(sequence: 2, sourceEventID: source, projectionKind: "membership", payload: data)
+        let page = try V2ClientGroupEventPage(roomID: Self.room, events: [.init(sourceEventID: source, roomSequence: 1, projectionKind: "membership", payload: data)], nextRoomSequence: 1, hasMore: false)
+        if personalFirst { _ = try await store.apply(.init(generation: 1, records: [personal], nextSyncToken: .init("transfer"), receipt: .init("transfer"), hasMore: false, capabilityProfile: "base")) }
+        _ = try await store.applyGroupEventPage(page)
+        if !personalFirst { _ = try await store.apply(.init(generation: 1, records: [personal], nextSyncToken: .init("transfer"), receipt: .init("transfer"), hasMore: false, capabilityProfile: "base")) }
+        #expect(try await store.roomProfile(roomID: Self.room)?.ownerUserID == Self.member)
+        let roles = try await store.databasePool.read { try String.fetchAll($0, sql: "SELECT role FROM v2_group_member_roles ORDER BY role") }
+        #expect(roles == ["member", "owner"])
+        let snapshotRecord = personalFirst ? personal : grant
+        let manifest = try await Self.importSnapshot(store, items: [.init(key: .init(projectionKind: "room", entityKey: Self.room.rawValue), sourceEventID: snapshotRecord.sourceEventID, sequence: snapshotRecord.sequence, payload: snapshotRecord.payload)])
+        try await store.prepareSnapshotActivation(manifest)
+        try await store.activateAcknowledgedSnapshot(manifest)
+        #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_group_member_roles") } == 2)
+        #expect(try await store.roomProfile(roomID: Self.room)?.ownerUserID == Self.member)
+        payload["event_type"] = "group.dissolved"; payload["action"] = "dissolve"
+        payload["actor_user_id"] = Self.member.rawValue; payload["previous_owner_user_id"] = Self.member.rawValue
+        payload["membership_revision"] = 3; payload["room_sequence"] = 2; payload["server_created_at_ms"] = 3000
+        let dissolution = try V2ClientSyncRecord(sequence: 11, sourceEventID: .init(uuid: UUID()), projectionKind: "membership", payload: JSONSerialization.data(withJSONObject: payload))
+        _ = try await store.apply(.init(generation: 2, records: [dissolution], nextSyncToken: .init("closed"), receipt: .init("closed"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.roomProfile(roomID: Self.room) == nil)
+        #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_group_member_roles") } == 0)
+        // A delayed grant must not resurrect a dissolved room.
+        let delayed = try V2ClientSyncRecord(sequence: 12, sourceEventID: grant.sourceEventID, projectionKind: "membership", payload: grant.payload)
+        _ = try await store.apply(.init(generation: 2, records: [delayed], nextSyncToken: .init("late"), receipt: .init("late"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.roomProfile(roomID: Self.room) == nil)
+        try await store.close()
+    }
+
     private static func importSnapshot(_ store: GRDBV2LocalSyncStore, items: [V2SnapshotProjectionItem]) async throws -> V2ClientSnapshotManifest {
         let projection = try V2SnapshotProjectionV3Page(items: items.sorted { $0.key < $1.key })
         let encoded = try V2SnapshotProjectionV3Codec.encode(projection)

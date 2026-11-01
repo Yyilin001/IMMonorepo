@@ -6,6 +6,39 @@ import Testing
 
 @Suite("Message send public work", .serialized)
 struct V2MessageSendWorkTests {
+    @Test("server-confirmed close of an expired unknown send releases its room quota")
+    func expiredUnknownSendClosesBeforeReleasingQuota() async throws {
+        let fixture = try SendWorkFixture(); defer { fixture.remove() }
+        let before = Date().addingTimeInterval(-90_000)
+        let intent = try fixture.intent("unknown original")
+        try await fixture.store.freezeMetadataSendIntent(intent, now: before)
+        try await fixture.store.handOffSendIntent(intent.id, now: before)
+        let work = try await fixture.head()
+        guard case .claimed(let submitting) = try await fixture.store.claimOperationWork(id: work.id,
+            ownerID: UUID(), action: .submit, now: before.addingTimeInterval(1)) else { throw V2OperationWorkError.invalidTransition }
+        try await fixture.store.deferOperationWork(submitting, until: .now, code: "UNKNOWN",
+            scheduling: .backingOff, nextAction: .reconcile)
+        for _ in 0..<199 { try await fixture.store.freezeMetadataSendIntent(fixture.intent("queued")) }
+        await #expect(throws: V2OperationWorkError.capacityExceeded) {
+            try await fixture.store.freezeMetadataSendIntent(fixture.intent("full before close"))
+        }
+        await #expect(throws: V2ResourceJournalError.conflict) {
+            try await fixture.store.abandonProvenUnsentSendIntent(intent.id)
+        }
+        let current = try #require(try await fixture.store.operationWork(id: work.id))
+        let claim = try await fixture.claim(current)
+        try await V2MessageSendOperationService(accountID: fixture.account, store: fixture.store,
+            client: ConfirmedCloseSendRemote()).execute(claim)
+        #expect(try await fixture.store.operationWork(id: work.id)?.execution == .rejected)
+        let replacement = try await fixture.store.replaceProvenUnsentSendIntent(intent.id)
+        let replacementIntent = try await fixture.store.databasePool.read {
+            try GRDBV2LocalSyncStore.readSendIntent(replacement, db: $0)
+        }
+        #expect(replacementIntent?.clientMessageID != intent.clientMessageID)
+        #expect(try await fixture.store.replaceProvenUnsentSendIntent(intent.id) == replacement)
+        try await fixture.store.close()
+    }
+
     @Test("sending restores an archived conversation and preserves pin and mute settings")
     func sendingRestoresArchivedConversation() async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
@@ -589,6 +622,17 @@ struct SendWorkFixture {
     }
     func remove() { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
 }
+private struct ConfirmedCloseSendRemote: V2MessageSendOperationClient {
+    func submit(_: V2MessageSendOperationCommand) throws -> V2MessageSendOperationRecoveryResult {
+        throw V2OperationWorkError.invalidTransition
+    }
+    func recover(_ request: V2MessageSendOperationRecoveryRequest) throws -> V2MessageSendOperationRecoveryResult {
+        #expect(request.action == .closeIfAbsent)
+        return .receipt(try .init(identity: request.identity, fingerprint: request.fingerprint,
+            outcome: .rejected(.closedUnsubmitted), resolvedAtMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000)))
+    }
+}
+
 actor SendWorkRemote:V2MessageSendOperationClient {
     private let failure: any Error
     init(failure: any Error = URLError(.networkConnectionLost)) { self.failure = failure }

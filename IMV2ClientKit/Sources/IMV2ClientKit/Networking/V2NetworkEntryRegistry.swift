@@ -57,8 +57,9 @@ public enum V2NetworkEntryRegistry {
         switch kind {
         case .withdrawMessage, .editMessage, .reaction, .forwardMessage,
              .profileUpdate, .contactAlias, .groupNickname, .groupInvite, .groupJoinRequest,
-             .groupJoinDecision, .mediaUpload, .groupAvatar, .memberMute, .moderatedMemberRemoval, .membership, .pinnedMessage, .groupAnnouncement, .groupPermission, .groupRole, .groupRoom, .relationship, .userBlock, .strangerMessagePreference, .userAddPreference, .readReceiptPreference, .liveActivityPreference, .directRoom, .moderation: [.accountHTTP]
-        case .sendMessage, .readReceipt, .conversationPreference, .messageFavorite: [.tcp, .accountHTTP]
+             .groupJoinDecision, .mediaUpload, .groupAvatar, .memberMute, .moderatedMemberRemoval, .membership, .pinnedMessage, .groupAnnouncement, .groupPermission, .groupRole, .groupOwnership, .groupDissolution, .groupRoom, .relationship, .userBlock, .strangerMessagePreference, .userAddPreference, .readReceiptPreference, .liveActivityPreference, .directRoom, .moderation: [.accountHTTP]
+        case .sendMessage: [.tcp]
+        case .readReceipt, .conversationPreference, .messageFavorite: [.tcp, .accountHTTP]
         }
     }
 }

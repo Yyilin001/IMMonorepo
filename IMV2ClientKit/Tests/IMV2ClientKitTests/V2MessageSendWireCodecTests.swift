@@ -27,9 +27,18 @@ struct V2MessageSendWireCodecTests {
         #expect(try decoded.identity == value.identity)
         #expect(try decoded.fingerprint == value.fingerprint)
         #expect(decoded.command.fingerprint == value.command.fingerprint)
-        let recovery = try V2MessageSendOperationRecoveryRequest(identity: value.identity, fingerprint: value.fingerprint,
-            domainFingerprint: value.command.fingerprint)
-        #expect(try V2MessageSendOperationWireCodec.decode(recovery: V2MessageSendOperationWireCodec.encode(recovery: recovery)) == recovery)
+        for action in [V2OperationRecoveryRequest.Action.query, .closeIfAbsent] {
+            let recovery = try V2MessageSendOperationRecoveryRequest(identity: value.identity, fingerprint: value.fingerprint,
+                domainFingerprint: value.command.fingerprint, action: action)
+            let encoded = V2MessageSendOperationWireCodec.encode(recovery: recovery)
+            #expect(try V2MessageSendOperationWireCodec.decode(recovery: encoded) == recovery)
+            #expect(try JSONDecoder().decode(V2MessageSendOperationRecoveryRequest.self, from: JSONEncoder().encode(recovery)) == recovery)
+            var invalidAction = encoded
+            invalidAction.action = .UNRECOGNIZED(99)
+            #expect(throws: V2MessageSendOperationWireCodecError.invalidField) {
+                try V2MessageSendOperationWireCodec.decode(recovery: invalidAction)
+            }
+        }
         var mutated = wire
         mutated.domainFingerprint[0] ^= 1
         #expect(throws: V2MessageSendOperationWireCodecError.fingerprintMismatch) {
@@ -45,8 +54,10 @@ struct V2MessageSendWireCodecTests {
             outcome: .accepted(.init(messageID: MessageID("message-1"), roomSequence: 9)), resolvedAtMilliseconds: 1_800_000_000_001)
         let rejected = try V2MessageSendOperationReceipt(identity: identity, fingerprint: fingerprint,
             outcome: .rejected(.directPolicyDenied), resolvedAtMilliseconds: 1_800_000_000_002)
+        let closed = try V2MessageSendOperationReceipt(identity: identity, fingerprint: fingerprint,
+            outcome: .rejected(.closedUnsubmitted), resolvedAtMilliseconds: 1_800_000_000_003)
         let hint = try V2MessageOperationRetryHint(identity: identity, fingerprint: fingerprint, reason: .rateLimited, retryAfterMilliseconds: 7_000)
-        let results: [V2MessageSendOperationRecoveryResult] = [.receipt(accepted), .receipt(rejected), .deferred(hint), .unresolved, .fingerprintConflict]
+        let results: [V2MessageSendOperationRecoveryResult] = [.receipt(accepted), .receipt(rejected), .receipt(closed), .deferred(hint), .unresolved, .fingerprintConflict]
         for result in results {
             #expect(try V2MessageSendOperationWireCodec.decode(result: V2MessageSendOperationWireCodec.encode(result: result)) == result)
         }

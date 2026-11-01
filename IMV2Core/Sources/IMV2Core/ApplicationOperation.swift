@@ -25,6 +25,8 @@ public enum V2OperationKind: String, CaseIterable, Codable, Sendable {
     case groupAnnouncement
     case groupPermission
     case groupRole
+    case groupOwnership
+    case groupDissolution
     case forwardMessage
     case profileUpdate
     case contactAlias
@@ -61,6 +63,8 @@ public enum V2OperationReference: Equatable, Codable, Sendable {
     case groupAnnouncement(GroupAnnouncementOperationID)
     case groupPermission(GroupPermissionOperationID)
     case groupRole(GroupRoleOperationID)
+    case groupOwnership(GroupOwnershipOperationID)
+    case groupDissolution(GroupDissolutionOperationID)
     case forwardMessage(MessageForwardOperationID)
     case profileUpdate(ProfileUpdateOperationID)
     case contactAlias(ContactAliasOperationID)
@@ -95,6 +99,8 @@ public enum V2OperationReference: Equatable, Codable, Sendable {
         case .groupAnnouncement: .groupAnnouncement
         case .groupPermission: .groupPermission
         case .groupRole: .groupRole
+        case .groupOwnership: .groupOwnership
+        case .groupDissolution: .groupDissolution
         case .forwardMessage: .forwardMessage
         case .profileUpdate: .profileUpdate
         case .contactAlias: .contactAlias
@@ -132,6 +138,8 @@ public enum V2OperationReference: Equatable, Codable, Sendable {
         case .groupAnnouncement(let id): id.rawValue
         case .groupPermission(let id): id.rawValue
         case .groupRole(let id): id.rawValue
+        case .groupOwnership(let id): id.rawValue
+        case .groupDissolution(let id): id.rawValue
         case .forwardMessage(let id): id.rawValue
         case .profileUpdate(let id): id.rawValue
         case .contactAlias(let id): id.rawValue
@@ -183,7 +191,7 @@ public struct V2OperationIdentity: Equatable, Codable, Sendable {
         case .forwardMessage:
             if case .account(let user) = scope { valid = user == accountID }
             else if case .room = scope { valid = true } else { valid = false }
-        case .sendMessage, .readReceipt, .membership, .moderation, .memberMute, .moderatedMemberRemoval, .conversationPreference, .groupAnnouncement, .groupPermission, .groupRole, .groupNickname, .groupInvite, .groupJoinRequest, .groupJoinDecision, .groupAvatar:
+        case .sendMessage, .readReceipt, .membership, .moderation, .memberMute, .moderatedMemberRemoval, .conversationPreference, .groupAnnouncement, .groupPermission, .groupRole, .groupOwnership, .groupDissolution, .groupNickname, .groupInvite, .groupJoinRequest, .groupJoinDecision, .groupAvatar:
             if case .room = scope { valid = true } else { valid = false }
         }
         guard valid else { throw V2OperationIdentityError.invalidScope }

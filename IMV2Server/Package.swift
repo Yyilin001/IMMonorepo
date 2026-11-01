@@ -342,6 +342,7 @@ let package = Package(
                 "IMV2ServerGateway",
                 "CIMV2Argon2",
                 "IMV2ServerHTTP",
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),

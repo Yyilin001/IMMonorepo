@@ -295,7 +295,7 @@ enum IMV2AccountServerApp {
                         let uploadProvider = try V2LocalFilesystemMediaProvider(rootDirectory: directory,
                             targetBaseURL: base, signingKey: resourceConfiguration.signingKey)
                         try await uploadProvider.prepare()
-                        let routes = try V2VaporLocalFilesystemMediaRoutes(provider: uploadProvider, fileIO: app.fileio,
+                        let routes = try V2VaporLocalFilesystemMediaRoutes(provider: uploadProvider,
                             publicBaseURL: base, maximumUploadBytes: resourceConfiguration.maximumBytes)
                         if isDefaultDirectory {
                             if !rootUploadRoutesRegistered { routes.register(on: app); rootUploadRoutesRegistered = true }
@@ -335,6 +335,7 @@ enum IMV2AccountServerApp {
                     executable: ProcessInfo.processInfo.environment["IMV2_RESOURCE_FFPROBE"].map { URL(fileURLWithPath: $0) } ?? V2LocalResourceMediaProbe.defaultExecutable,
                     temporaryDirectory: resourceConfiguration.rootDirectory.appendingPathComponent("media-processing"), maximumBytes: resourceConfiguration.maximumBytes)
                 try await mediaProbe.verifyReadiness()
+                let resourceScanner = try await V2ResourceScannerAssembly.build(configuration: resourceConfiguration)
                 let resourceService = try V2ResourceService(resolve: { home, usage, user, device in
                     try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
                 }, registry: resourceRegistry,
@@ -395,16 +396,18 @@ enum IMV2AccountServerApp {
                     }
                     let scanner = try V2MediaScanWorker(store: PostgresV2MediaScanStore(database: ownerDatabase),
                         provider: V2PlacementMediaScanner(database: ownerDatabase, registry: resourceRegistry,
-                            scanner: V2LocalResourceScanner(), variants: variants, mediaProbe: mediaProbe), leaseDuration: 300)
+                            scanner: resourceScanner, variants: variants, mediaProbe: mediaProbe), leaseDuration: 300)
                     let purger = try V2MediaPurgeWorker(store: PostgresV2MediaPurgeStore(database: ownerDatabase),
                         provider: V2PlacementMediaPurger(database: ownerDatabase, registry: resourceRegistry,
                             uploads: try V2BoundMediaProvider(database: ownerDatabase, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports)))
                     let retention = try V2MediaRetentionWorker(store: PostgresV2MediaRetentionStore(database: ownerDatabase))
                     let recovery = V2ResourceRecoveryWorker(database: ownerDatabase, service: resourceService)
+                    let stagingCleanup = V2ResourceStagingCleanupWorker(database: ownerDatabase, service: resourceService)
                     // Each durable queue owns its loop: a slow provider must not
                     // delay expiry, crash recovery, or deletion on the same owner.
                     let maintenance: [(String, @Sendable () async throws -> Void)] = [
                         ("resource_recovery", { try await recovery.runOnce(limit: 16) }),
+                        ("resource_staging_cleanup", { try await stagingCleanup.runOnce(limit: 16) }),
                         ("resource_import", { try await resourceImports.runOnce(ownerID: ownerID, limit: 16) }),
                         ("resource_scan", { _ = try await scanner.runOnce(limit: 16) }),
                         ("resource_retention", { _ = try await retention.runOnce(limit: 16) }),

@@ -1,0 +1,72 @@
+{
+  "date": "2026-11-01",
+  "host": "120.77.66.38",
+  "userDecision": "Discard old business data; use the fresh database. Old database retained for rollback.",
+  "activation": {
+    "status": "deployed-and-smoke-verified",
+    "protocol": 55,
+    "schema": "im-v2-current-80",
+    "previousDatabase": "im_author_6e72bca7_r2",
+    "database": "im_audit_557d0017",
+    "imageID": "sha256:cb56953426b8917eb4d590f7b79ed97d9d5bb2f2610467a7d1e84ce68436a082",
+    "oldDataMigration": false,
+    "oldDatabaseRetained": true,
+    "timersPreviouslyActive": [
+      "im-test-admission.timer",
+      "im-test-cert-renew.timer"
+    ],
+    "backupSHA256": "4f63b2d45101b52b8d948f7a6336d8a504f097f67ca9e04e7d5f9618776d5947",
+    "postgresContainerUnchanged": true,
+    "scannerOfficialSignatures": true,
+    "scannerUpdateTimerEnabled": true,
+    "services": [
+      {
+        "service": "placement-a",
+        "health": "healthy"
+      },
+      {
+        "service": "placement-b",
+        "health": "healthy"
+      },
+      {
+        "service": "placement-c",
+        "health": "healthy"
+      },
+      {
+        "service": "account",
+        "health": "healthy"
+      },
+      {
+        "service": "gateway",
+        "health": "healthy"
+      },
+      {
+        "service": "operator",
+        "health": "healthy"
+      }
+    ]
+  },
+  "functional": {
+    "status": "passed-public-https-and-tcp-smoke",
+    "protocol": 55,
+    "schema": "im-v2-current-80",
+    "accountsCreated": 2,
+    "httpsCertificateVerified": true,
+    "tcpTLS13Authenticated": true,
+    "directMessageAccepted": true,
+    "recipientRoomLogVerified": true,
+    "credentialsPrinted": false
+  },
+  "externalClientVerification": {
+    "httpsUnauthenticatedStatus": 401,
+    "httpsCertificateVerified": true,
+    "tcpTLSVersion": "TLSv1.3",
+    "tcpCertificateVerified": true
+  },
+  "runtimeVerification": "docs/verification/ecs-update-preparation-20261101.json",
+  "limits": [
+    "Single-node existing test deployment; not production mixed-load acceptance.",
+    "No historical data migration; only the two deployment smoke accounts and one message were created in the fresh database.",
+    "No physical-device acceptance performed."
+  ]
+}

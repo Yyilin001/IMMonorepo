@@ -45,7 +45,7 @@ struct V2RoomRefMessagingClientTests {
             Issue.record("A result query must not activate or call the room")
             throw V2RoomCallFailure.notAccepted(.unavailable)
         }
-        #expect(client.usesReadOnlySendRecovery)
+        #expect(client.usesDirectSendRecovery)
         #expect(try await client.recoverSendOperation(request) == .receipt(receipt))
     }
 

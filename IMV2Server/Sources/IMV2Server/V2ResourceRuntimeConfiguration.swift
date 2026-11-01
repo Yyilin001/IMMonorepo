@@ -4,16 +4,22 @@ import IMV2ServerContracts
 
 /// Shared resource edge settings; storage provider configuration is parsed separately.
 public struct V2ResourceRuntimeConfiguration: Sendable {
+    public enum Scanner: Sendable, Equatable {
+        case unsafeLocalFixture
+        case clamAV(executable: URL, databaseDirectory: URL)
+    }
     public let rootDirectory: URL
     public let publicBaseURL: URL
     public let signingKey: Data
     public let maximumBytes: Int64
+    public let scanner: Scanner
 
     public init?(environment: any V2RuntimeEnvironment) throws {
         guard let mode = environment.value(for: "IM_V2_RESOURCE_MODE") else {
             guard let local = try V2LocalFilesystemMediaRuntimeConfiguration(environment: environment) else { return nil }
             rootDirectory = local.rootDirectory; publicBaseURL = local.publicBaseURL
             signingKey = local.signingKey; maximumBytes = local.maximumBytes
+            scanner = .unsafeLocalFixture
             return
         }
         guard mode == "enabled", environment.value(for: "IM_V2_LOCAL_MEDIA_MODE") == nil,
@@ -25,9 +31,13 @@ public struct V2ResourceRuntimeConfiguration: Sendable {
               let encoded = environment.value(for: "IM_V2_RESOURCE_SIGNING_KEY_BASE64"),
               let key = Data(base64Encoded: encoded), key.count == 32,
               let rawMaximum = environment.value(for: "IM_V2_RESOURCE_MAXIMUM_BYTES"),
-              let maximum = Int64(rawMaximum), maximum > 0, maximum <= 256 * 1_024 * 1_024
+              let maximum = Int64(rawMaximum), maximum > 0, maximum <= 256 * 1_024 * 1_024,
+              environment.value(for: "IM_V2_RESOURCE_SCANNER") == "clamav",
+              let executable = environment.value(for: "IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE"), executable.hasPrefix("/"),
+              let database = environment.value(for: "IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY"), database.hasPrefix("/")
         else { throw V2ResourceProviderError.configurationInvalid }
         rootDirectory = URL(fileURLWithPath: directory, isDirectory: true).standardizedFileURL
         publicBaseURL = url; signingKey = key; maximumBytes = maximum
+        scanner = .clamAV(executable: URL(fileURLWithPath: executable), databaseDirectory: URL(fileURLWithPath: database, isDirectory: true))
     }
 }

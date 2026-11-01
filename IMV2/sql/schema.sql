@@ -522,7 +522,7 @@ CREATE TABLE im_v2.group_announcements (
     revision bigint NOT NULL,
     updated_by_user_id uuid NOT NULL,
     updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT group_announcements_body_check CHECK (((length(body) > 0) AND (octet_length(body) <= 4096))),
+    CONSTRAINT group_announcements_body_check CHECK ((octet_length(body) <= 4096)),
     CONSTRAINT group_announcements_revision_check CHECK ((revision > 0))
 );
 
@@ -1258,7 +1258,7 @@ CREATE INDEX room_events_accepted_membership_idx
     WHERE event_type = 'message.accepted';
 
 
--- A send's result outlives its editable/deletable content. Deliberately no
+-- A send's accepted or rejected result outlives its editable/deletable content. Deliberately no
 -- message/room foreign key or cascading delete: content retention must not
 -- make an acknowledged operation eligible for acceptance a second time.
 CREATE TABLE im_v2.message_send_completions (
@@ -1267,17 +1267,26 @@ CREATE TABLE im_v2.message_send_completions (
     client_message_id uuid NOT NULL,
     fingerprint_version smallint NOT NULL CHECK (fingerprint_version = 3),
     request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
-    message_id uuid NOT NULL,
-    event_id uuid NOT NULL,
-    room_sequence bigint NOT NULL CHECK (room_sequence > 0),
-    timeline_sequence bigint NOT NULL CHECK (timeline_sequence > 0),
-    accepted_membership_revision bigint NOT NULL CHECK (accepted_membership_revision >= 0),
+    message_id uuid,
+    event_id uuid,
+    room_sequence bigint CHECK (room_sequence > 0),
+    timeline_sequence bigint CHECK (timeline_sequence > 0),
+    accepted_membership_revision bigint CHECK (accepted_membership_revision >= 0),
     group_capacity_class text CHECK (group_capacity_class IN ('standard', 'large')),
     direct_recipient_user_id uuid,
     created_at timestamp with time zone NOT NULL,
     operation_fingerprint bytea CHECK (octet_length(operation_fingerprint) = 32),
     operation_resolved_at_ms bigint CHECK (operation_resolved_at_ms > 0),
+    rejection_code text CHECK (rejection_code IN ('expiredUnsubmitted', 'permissionDenied', 'roomNotFound', 'invalidContent', 'directPolicyDenied', 'closedUnsubmitted')),
     CHECK ((operation_fingerprint IS NULL) = (operation_resolved_at_ms IS NULL)),
+    CONSTRAINT message_send_completions_result_check CHECK (
+        (rejection_code IS NULL AND message_id IS NOT NULL AND event_id IS NOT NULL
+            AND room_sequence IS NOT NULL AND timeline_sequence IS NOT NULL AND accepted_membership_revision IS NOT NULL)
+        OR (rejection_code IS NOT NULL AND message_id IS NULL AND event_id IS NULL
+            AND room_sequence IS NULL AND timeline_sequence IS NULL AND accepted_membership_revision IS NULL
+            AND group_capacity_class IS NULL AND direct_recipient_user_id IS NULL
+            AND operation_fingerprint IS NOT NULL AND operation_resolved_at_ms IS NOT NULL)
+    ),
     PRIMARY KEY (room_id, sender_user_id, client_message_id)
 );
 
@@ -1784,6 +1793,7 @@ CREATE TABLE im_v2.rooms (
     room_sequence bigint DEFAULT 0 NOT NULL,
     membership_revision bigint DEFAULT 0 NOT NULL,
     capacity_profile_id text NOT NULL,
+    dissolved_at timestamp with time zone,
     frozen_at timestamp with time zone,
     frozen_by_user_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -1797,6 +1807,7 @@ CREATE TABLE im_v2.rooms (
     -- 已裁剪的历史下界：该序号之前的事件已按保留窗口删除，客户端游标低于它时
     -- 必须被显式告知"历史不完整"，而不是静默少几条。单调只增。
     log_trimmed_through_room_sequence bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT rooms_dissolved_check CHECK (dissolved_at IS NULL OR (room_kind='group' AND isfinite(dissolved_at) AND frozen_at IS NOT NULL)),
     CONSTRAINT rooms_check CHECK ((((frozen_at IS NULL) AND (frozen_by_user_id IS NULL)) OR ((frozen_at IS NOT NULL) AND (frozen_by_user_id IS NOT NULL)))),
     CONSTRAINT rooms_capacity_class_check CHECK ((capacity_class = ANY (ARRAY['standard'::text, 'large'::text]))),
     CONSTRAINT rooms_direct_capacity_class_check CHECK (((room_kind = 'group'::text) OR (capacity_class = 'standard'::text))),
@@ -1990,14 +2001,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-76'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-76'::text))
+    schema_id text DEFAULT 'im-v2-current-80'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-80'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-76');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-80');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2319,6 +2330,17 @@ CREATE TABLE im_v2.user_stranger_message_preferences (
     allows_stranger_messages boolean DEFAULT true NOT NULL,
     updated_at timestamp with time zone NOT NULL
 );
+
+CREATE FUNCTION im_v2.preserve_group_dissolution() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.dissolved_at IS NOT NULL AND NEW.dissolved_at IS DISTINCT FROM OLD.dissolved_at THEN
+        RAISE EXCEPTION 'a dissolved group cannot reopen';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER rooms_dissolution_immutable BEFORE UPDATE OF dissolved_at ON im_v2.rooms
+    FOR EACH ROW EXECUTE FUNCTION im_v2.preserve_group_dissolution();
 
 CREATE TABLE im_v2.user_state_event_outbox (
     source_room_id uuid,
@@ -3480,10 +3502,18 @@ CREATE TABLE im_v2.resource_upload_sessions (
     claim_token uuid,
     lease_expires_at timestamptz,
     retry_at timestamptz,
+    staging_cleanup_pending boolean NOT NULL DEFAULT false,
+    staging_cleanup_retry_at timestamptz NOT NULL DEFAULT now(),
+    staging_cleanup_claim_token uuid,
+    staging_cleanup_lease_expires_at timestamptz,
+    CHECK (NOT staging_cleanup_pending OR state = 'completed'),
+    CHECK ((staging_cleanup_claim_token IS NULL) = (staging_cleanup_lease_expires_at IS NULL)),
+    CHECK (staging_cleanup_pending OR staging_cleanup_claim_token IS NULL),
     UNIQUE(home_kind,home_id,actor_user_id,operation_id)
 );
 CREATE INDEX resource_upload_sessions_pending_idx ON im_v2.resource_upload_sessions(retry_at,session_id) WHERE state = 'finalizing';
 CREATE INDEX resource_upload_sessions_expiry_idx ON im_v2.resource_upload_sessions(expires_at,session_id) WHERE state IN ('created','uploading');
+CREATE INDEX resource_upload_sessions_staging_cleanup_idx ON im_v2.resource_upload_sessions(staging_cleanup_retry_at,session_id) WHERE staging_cleanup_pending;
 CREATE TABLE im_v2.resource_blob_placements (
     placement_id uuid PRIMARY KEY,
     media_id uuid NOT NULL REFERENCES im_v2.media_objects(media_id),
@@ -3761,14 +3791,14 @@ CREATE TRIGGER membership_operation_admissions_immutable BEFORE UPDATE OR DELETE
 CREATE TRIGGER membership_operation_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.membership_operation_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
 CREATE TABLE im_v2.group_capability_admissions (
  actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,room_id uuid NOT NULL,
- kind text NOT NULL CHECK(kind IN ('pinnedMessage','groupAnnouncement','groupPermission','groupRole')),
+ kind text NOT NULL CHECK(kind IN ('pinnedMessage','groupAnnouncement','groupPermission','groupRole','groupOwnership','groupDissolution')),
  admission jsonb NOT NULL CHECK(jsonb_typeof(admission)='object' AND octet_length(admission::text)<=65536),
  PRIMARY KEY(actor_user_id,operation_id)
 );
 CREATE TRIGGER group_capability_admissions_immutable BEFORE UPDATE OR DELETE ON im_v2.group_capability_admissions FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
 CREATE TABLE im_v2.group_capability_receipts (
  actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,room_id uuid NOT NULL,
- kind text NOT NULL CHECK(kind IN ('pinnedMessage','groupAnnouncement','groupPermission','groupRole')),
+ kind text NOT NULL CHECK(kind IN ('pinnedMessage','groupAnnouncement','groupPermission','groupRole','groupOwnership','groupDissolution')),
  receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=65536),
  PRIMARY KEY(actor_user_id,operation_id)
 );

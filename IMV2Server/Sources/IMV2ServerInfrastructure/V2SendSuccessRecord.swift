@@ -71,22 +71,30 @@ enum V2SendSuccessMetadata {
 
 enum V2SendOperationResponseError: Error { case directPolicyDenied }
 
-/// Minimal durable success facts, decoded as columns without response JSON.
-struct V2SendSuccessRow: Decodable, Sendable {
-    let messageID: UUID
-    let roomSequence: Int64
+/// One immutable accepted or rejected fact for each message identity.
+struct V2SendResultRow: Decodable, Sendable {
+    let messageID: UUID?
+    let roomSequence: Int64?
     let domainFingerprint: Data
     let fingerprintVersion: Int16
     let operationFingerprint: Data?
     let resolvedAt: Int64?
+    let rejectionCode: V2MessageSendOperationRejection?
+    init(messageID: UUID?, roomSequence: Int64?, domainFingerprint: Data, fingerprintVersion: Int16,
+         operationFingerprint: Data?, resolvedAt: Int64?, rejectionCode: V2MessageSendOperationRejection? = nil) {
+        self.messageID = messageID; self.roomSequence = roomSequence
+        self.domainFingerprint = domainFingerprint; self.fingerprintVersion = fingerprintVersion
+        self.operationFingerprint = operationFingerprint; self.resolvedAt = resolvedAt; self.rejectionCode = rejectionCode
+    }
     enum CodingKeys: String, CodingKey {
         case messageID = "message_id", roomSequence = "room_sequence"
         case domainFingerprint = "domain_fingerprint", fingerprintVersion = "fingerprint_version"
         case operationFingerprint = "operation_fingerprint", resolvedAt = "operation_resolved_at_ms"
+        case rejectionCode = "rejection_code"
     }
     static func decodeIfPresent(from decoder: any Decoder) throws -> Self? {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        guard try values.decodeIfPresent(UUID.self, forKey: .messageID) != nil else { return nil }
+        guard try values.decodeIfPresent(Data.self, forKey: .domainFingerprint) != nil else { return nil }
         return try Self(from: decoder)
     }
     func result(identity: V2OperationIdentity, fingerprint: V2OperationFingerprint,
@@ -98,7 +106,13 @@ struct V2SendSuccessRow: Decodable, Sendable {
             throw V2MessageOperationValidationError.invalidReceipt
         }
         guard operationFingerprint == fingerprint.digest else { return .fingerprintConflict }
-        guard roomSequence > 0, milliseconds > 0 else { throw V2MessageOperationValidationError.invalidReceipt }
+        guard milliseconds > 0 else { throw V2MessageOperationValidationError.invalidReceipt }
+        if let rejectionCode {
+            guard messageID == nil, roomSequence == nil else { throw V2MessageOperationValidationError.invalidReceipt }
+            return .receipt(try .init(identity: identity, fingerprint: fingerprint,
+                outcome: .rejected(rejectionCode), resolvedAtMilliseconds: UInt64(milliseconds)))
+        }
+        guard let messageID, let roomSequence, roomSequence > 0 else { throw V2MessageOperationValidationError.invalidReceipt }
         return .receipt(try .init(identity: identity, fingerprint: fingerprint,
             outcome: .accepted(.init(messageID: .init(uuid: messageID), roomSequence: UInt64(roomSequence))),
             resolvedAtMilliseconds: UInt64(milliseconds)))

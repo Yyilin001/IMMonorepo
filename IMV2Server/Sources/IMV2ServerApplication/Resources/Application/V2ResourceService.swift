@@ -138,7 +138,6 @@ public struct V2ResourceService: Sendable {
         }
         let claim = try await store.claimUploadFinalize(session: uuid(locator.sessionID), generation: input.generation, actor: uuid(actor), device: uuid(device), now: Date())
         if claim.phase == .completed {
-            if let multipart { try await multipart.abortParts(mediaID: request.mediaID, byteCount: request.byteCount, checksum: request.checksum) }
             return try session(claim, home: locator.home)
         }
         guard let transport = transports[claim.placement.binding] else { throw V2ResourceProviderError.configurationInvalid }
@@ -163,8 +162,21 @@ public struct V2ResourceService: Sendable {
         else { throw V2ResourceProviderError.integrityMismatch }
         let publisher = try await resolve(locator.home, request.usage, actor, device)
         try await publisher.publishUpload(claim, facts: facts, actor: uuid(actor), device: uuid(device), now: Date())
-        if let multipart { try await multipart.abortParts(mediaID: request.mediaID, byteCount: request.byteCount, checksum: request.checksum) }
+        // Publication atomically schedules durable staging cleanup. Its provider I/O
+        // must not turn an already completed upload into a failed finalize response.
         return try await status(locator, actor: actor, device: device)
+    }
+
+    /// Only the durable worker calls this for a claimed completed upload. Cleanup
+    /// uses the frozen binding/request and never touches its published placement.
+    package func cleanupStaging(request: V2ResourceUploadRequest, binding: V2StorageBinding) async throws {
+        guard let transport = transports[binding] else { throw V2ResourceProviderError.configurationInvalid }
+        if Self.sessionModes(transport).first(where: request.clientModes.contains) == .httpPartPut {
+            guard let multipart = transport as? any V2MultipartUploadTransport else { throw V2ResourceProviderError.configurationInvalid }
+            try await multipart.abortParts(mediaID: request.mediaID, byteCount: request.byteCount, checksum: request.checksum)
+        }
+        try Task.checkCancellation()
+        try await transport.abort(mediaID: request.mediaID)
     }
     public func cancel(_ input: V2ResourceUploadCancelRequest, actor: UserID, device: DeviceID) async throws -> V2ResourceUploadSession {
         let locator = input.locator

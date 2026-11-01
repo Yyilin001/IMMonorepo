@@ -25,7 +25,7 @@ struct V2SendSuccessRecordTests {
     @Test("Operation recovery requires the original fingerprint and resolution time", arguments: [0, 1, 2])
     func missingMetadataIsRejected(missing: Int) throws {
         let command = try command(), domain = try command.command.fingerprint
-        let row = V2SendSuccessRow(messageID: UUID(), roomSequence: 1,
+        let row = V2SendResultRow(messageID: UUID(), roomSequence: 1,
             domainFingerprint: domain.digest, fingerprintVersion: Int16(domain.version),
             operationFingerprint: missing == 1 ? try command.fingerprint.digest : nil,
             resolvedAt: missing == 2 ? 1_750_000_000_123 : nil)
@@ -37,7 +37,7 @@ struct V2SendSuccessRecordTests {
     @Test("Operation recovery preserves the committed time and rejects a changed deadline")
     func exactCommittedMetadata() throws {
         let command = try command(), domain = try command.command.fingerprint
-        let row = V2SendSuccessRow(messageID: UUID(), roomSequence: 7,
+        let row = V2SendResultRow(messageID: UUID(), roomSequence: 7,
             domainFingerprint: domain.digest, fingerprintVersion: Int16(domain.version),
             operationFingerprint: try command.fingerprint.digest, resolvedAt: 1_750_000_000_123)
         let result = try row.result(identity: command.identity, fingerprint: command.fingerprint, domain: domain)

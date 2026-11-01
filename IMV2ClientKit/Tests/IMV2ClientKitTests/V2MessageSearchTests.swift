@@ -332,6 +332,40 @@ struct V2MessageSearchTests {
         #expect(senderFiles.hits.map(\.messageID) == [fileMessage])
     }
 
+    @Test("sender-only search preserves room scope, media results and cursor ownership")
+    func senderOnlySearch() async throws {
+        let store = try makeStore()
+        let room = RoomID(uuid: UUID()), otherRoom = RoomID(uuid: UUID())
+        let sender = UserID(uuid: UUID()), otherSender = UserID(uuid: UUID())
+        let text = MessageID(uuid: UUID()), media = MessageID(uuid: UUID())
+        let elsewhere = MessageID(uuid: UUID())
+        try await applyRoomEvents(store, records: [
+            acceptedRoomEvent(sourceEvent: UUID().uuidString, roomID: room, senderID: sender,
+                messageID: text, roomSequence: 1, text: "hello", createdAtMilliseconds: 1_750_000_000_000),
+            mediaRoomEvent(sourceEvent: UUID().uuidString, roomID: room, senderID: sender,
+                messageID: media, roomSequence: 2, mediaID: UUID().uuidString, kind: "image"),
+            acceptedRoomEvent(sourceEvent: UUID().uuidString, roomID: room, senderID: otherSender,
+                messageID: .init(uuid: UUID()), roomSequence: 3, text: "other member", createdAtMilliseconds: 1_750_000_002_000),
+            acceptedRoomEvent(sourceEvent: UUID().uuidString, roomID: otherRoom, senderID: sender,
+                messageID: elsewhere, roomSequence: 1, text: "another room", createdAtMilliseconds: 1_750_000_003_000)
+        ])
+        try await store.rebuildMessageSearchIndex()
+        let first = try await store.searchMessages(.init(query: "", scope: .room(room), senderUserID: sender, limit: 1))
+        #expect(first.hits.map(\.messageID) == [media])
+        let cursor = try #require(first.nextCursor)
+        let second = try await store.searchMessages(.init(query: "", scope: .room(room), senderUserID: sender, limit: 1, cursor: cursor))
+        #expect(second.hits.map(\.messageID) == [text])
+        #expect(second.nextCursor == nil)
+        await #expect(throws: V2MessageSearchError.cursorDoesNotMatchScope) {
+            try await store.searchMessages(.init(query: "", scope: .room(room), senderUserID: otherSender, cursor: cursor))
+        }
+        let all = try await store.searchMessages(.init(query: "", scope: .sender(sender)))
+        #expect(Set(all.hits.map(\.messageID)) == [text, media, elsewhere])
+        await #expect(throws: V2MessageSearchError.emptyQuery) {
+            try await store.searchMessages(.init(query: "", scope: .room(room)))
+        }
+    }
+
     @Test("personal snapshot rebuilds search from retained room-log messages and removes absent rooms")
     func snapshotCommitReplacesTheSearchIndex() async throws {
         let store = try makeStore()

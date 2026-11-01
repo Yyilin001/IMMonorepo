@@ -28,6 +28,12 @@ public struct V2GroupCapabilityConfirmationWindow: Sendable {
         case .rolePermissions:
             operation = .groupPermission(.init(uuid: UUID()))
             scope = .room(roomID)
+        case .transferOwnership:
+            operation = .groupOwnership(.init(uuid: UUID()))
+            scope = .room(roomID)
+        case .dissolve:
+            operation = .groupDissolution(.init(uuid: UUID()))
+            scope = .room(roomID)
         case .memberRole:
             operation = .groupRole(.init(uuid: UUID()))
             scope = .room(roomID)

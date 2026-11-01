@@ -76,7 +76,7 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
         catch { throw V2ClientProjectionError.invalidMessagePayload }
         let normalizedTitle = payload.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (record.projectionKind == "room" && payload.eventType == "room.created")
-                || (record.projectionKind == "membership" && payload.eventType == "membership_changed"),
+                || (record.projectionKind == "membership" && ["membership_changed", "group.ownership_transferred", "group.dissolved"].contains(payload.eventType)),
               !normalizedTitle.isEmpty,
               normalizedTitle.utf8.count <= V2GroupCreationIntent.maximumTitleUTF8Bytes,
               !normalizedTitle.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),

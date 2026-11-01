@@ -272,7 +272,7 @@ OSS Bucket 私有；客户端只取得短期传输资格，不存 AccessKey。�
 
 - 本机：资源目录聚合逻辑身份，容量统计按物理文件去重；“清理副本”不删除消息、保留偏好或 OSS 正式对象。
 - 云端：业务绑定决定资源是否仍有引用；无绑定资源、上传暂存和衍生产物由服务端登记回收任务。执行前重新检查绑定和对象精确身份，保留可重试记录及 tombstone，迟到 finalize/worker 不得使已退役资源复活。
-- OSS lifecycle 只兜底明确隔离的暂存前缀及未来的未完成分片，不按正式对象年龄直接删除聊天附件。现有 PUT 模式无需虚构分片清理能力；以后增加 multipart 时，必须同时实现 uploadID、part receipts、complete、abort 和过期回收。
+- 当前 OSS 整文件与逐片 PUT 都依赖永久 tombstone 阻止迟到上传；禁止生命周期或外部 DELETE 清除这些 key。完成会话在发布事务内登记暂存回收，未完成会话由取消/到期 purge outbox 接管；逐片回收包含已上传和仍可能在途的所有片。若另行采用供应商 UploadId 协议，须独立实现其完成、中止和过期回收合同，不能混用两类暂存清理规则。详见[OSS 接入合同](aliyun-oss-integration.md#分片续传与暂存回收)。
 - 运维指标至少覆盖：未绑定资源字节、暂存最老年龄、回收失败数量、处理队列年龄、上传/ready/消息提交各阶段耗时。日志关联 operationID 和 mediaID，禁止输出签名 URL 或凭据。
 
 参考：[阿里云客户端直传](https://www.alibabacloud.com/help/en/oss/user-guide/uploading-objects-to-oss-directly-from-clients/)说明直传可避免业务服务器转发流量，也区分整文件签名 PUT 与分片方案；[OSS 分片上传](https://help.aliyun.com/zh/oss/user-guide/multipart-upload)列出分片操作及权限。当前 256 MiB 是项目 adapter 上限，不是 OSS 的平台最大值；图片限制还应服从服务端 `maximumImageBytes`。

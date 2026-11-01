@@ -216,6 +216,73 @@ struct V2ClientRuntimeTests {
         #expect(await recorder.count() == 2)
     }
 
+    @Test("a failed recovery child cancels and drains its siblings before stopping the connection")
+    func recoveryChildFailureStopsConnectionAfterSiblingDrain() async throws {
+        let session = try authenticatedSession()
+        let connection = RuntimeConnection(result: .success(session))
+        let sibling = RuntimeRecoveryProbe()
+        let activity = recoveryActivity(loops: [
+            { try await sibling.run() },
+            { await sibling.waitUntilStarted(); throw RuntimeFailure.failed },
+        ])
+        let runtime = V2ClientRuntime(connection: connection, activity: activity)
+        _ = try await runtime.start()
+
+        let cancelled = await waitForRecoveryCancellation([sibling])
+        #expect(cancelled)
+        #expect(await sibling.hasExited == false)
+        #expect(await runtime.currentState() == .running(session))
+        #expect(await runtime.lastBackgroundFailure() == nil)
+        await sibling.releaseCleanup()
+        if cancelled { await runtime.waitUntilStopped() }
+        // Also drains the original implementation after the bounded failure
+        // assertion, so a regression cannot leave the test process hanging.
+        await runtime.stop()
+
+        #expect(await sibling.hasExited)
+        #expect(await runtime.currentState() == .stopped)
+        #expect(await runtime.lastBackgroundFailure() as? RuntimeFailure == .failed)
+        #expect(await runtime.lastBackgroundFailureLoop() == .policy)
+        #expect(await connection.disconnectCount() >= 1)
+    }
+
+    @Test("parent cancellation drains recovery streams that finish normally and remains cancellation")
+    func cancelledRecoveryStreamsDrainWithoutReportingSuccess() async throws {
+        let first = RuntimeRecoveryProbe()
+        let second = RuntimeRecoveryProbe()
+        let activity = recoveryActivity(loops: [
+            { try await first.run(gracefulCancellation: true) },
+            { try await second.run(gracefulCancellation: true) },
+        ])
+        let task = Task { try await activity.runPolicyRecoveryLoop() }
+        await first.waitUntilStarted()
+        await second.waitUntilStarted()
+        task.cancel()
+        #expect(await waitForRecoveryCancellation([first, second]))
+        await first.releaseCleanup()
+        await second.releaseCleanup()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(await first.hasExited)
+        #expect(await second.hasExited)
+    }
+
+    private func recoveryActivity(loops: [@Sendable () async throws -> Void]) -> V2DefaultClientRuntimeActivity {
+        .init(syncEngine: AvailabilitySyncDriver(), availabilitySource: SleepingAvailabilityHints(),
+              heartbeatSender: NoopHeartbeatSender(), heartbeatInterval: .seconds(3_600),
+              policyRecoveryLoops: loops)
+    }
+
+    private func waitForRecoveryCancellation(_ probes: [RuntimeRecoveryProbe]) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline && !Task.isCancelled {
+            var allCancelled = true
+            for probe in probes where await probe.wasCancelled == false { allCancelled = false }
+            if allCancelled { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
     private func authenticatedSession() throws -> V2AuthenticatedClientSession {
         .init(
             userID: try .init("00000000-0000-0000-0000-000000000811"),
@@ -229,6 +296,43 @@ struct V2ClientRuntimeTests {
 
 private enum RuntimeFailure: Error, Equatable { case failed }
 private enum AvailabilityLoopStop: Error, Equatable { case finished }
+
+private struct SleepingAvailabilityHints: V2SyncAvailabilityHintSource {
+    func nextAvailabilityHint() async throws -> V2SyncAvailabilityHint {
+        try await Task.sleep(for: .seconds(3_600))
+        throw AvailabilityLoopStop.finished
+    }
+}
+
+private actor RuntimeRecoveryProbe {
+    private var started = false
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var cleanupReleased = false
+    private var cleanupWaiter: CheckedContinuation<Void, Never>?
+    private(set) var wasCancelled = false
+    private(set) var hasExited = false
+
+    func run(gracefulCancellation: Bool = false) async throws {
+        started = true
+        startWaiter?.resume(); startWaiter = nil
+        defer { hasExited = true }
+        do { try await Task.sleep(for: .seconds(3_600)) }
+        catch is CancellationError {
+            wasCancelled = true
+            if !cleanupReleased { await withCheckedContinuation { cleanupWaiter = $0 } }
+            if !gracefulCancellation { throw CancellationError() }
+        }
+    }
+
+    func waitUntilStarted() async {
+        if !started { await withCheckedContinuation { startWaiter = $0 } }
+    }
+
+    func releaseCleanup() {
+        cleanupReleased = true
+        cleanupWaiter?.resume(); cleanupWaiter = nil
+    }
+}
 
 private actor RuntimeConnection: V2RealtimeSessionConnecting {
     private let result: Result<V2AuthenticatedClientSession, Error>

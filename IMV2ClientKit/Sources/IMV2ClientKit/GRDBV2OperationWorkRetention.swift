@@ -56,7 +56,7 @@ extension GRDBV2LocalSyncStore {
                       SELECT 1 FROM v2_group_creation_operations p WHERE p.work_id=w.work_id))
                     OR (w.operation_kind='membership' AND EXISTS(
                       SELECT 1 FROM v2_membership_intents p WHERE p.work_id=w.work_id))
-                    OR (w.operation_kind IN ('pinnedMessage','groupAnnouncement','groupPermission','groupRole') AND EXISTS(
+                    OR (w.operation_kind IN ('pinnedMessage','groupAnnouncement','groupPermission','groupRole','groupOwnership','groupDissolution') AND EXISTS(
                       SELECT 1 FROM v2_group_capability_intents p WHERE p.work_id=w.work_id))
                     OR (w.operation_kind='sendMessage' AND EXISTS(
                       SELECT 1 FROM v2_message_send_operations m

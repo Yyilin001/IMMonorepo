@@ -754,7 +754,7 @@ private extension V2RoomRequest {
         case .groupCapabilitySubmit(let value):
             switch value.intent.action {
             case .rolePermissions: return false
-            case .memberRole: return true
+            case .memberRole, .transferOwnership, .dissolve: return true
             case .pin, .announcement: return nil
             }
         case .groupInvitationSubmit(let value):

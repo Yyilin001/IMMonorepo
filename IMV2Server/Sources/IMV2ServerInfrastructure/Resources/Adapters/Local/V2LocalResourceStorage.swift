@@ -18,8 +18,8 @@ public struct V2LocalResourceStorage: V2ObjectStorage {
         self.root = root.standardizedFileURL; self.binding = binding
     }
     static func stream(file: URL) async throws -> V2ResourceByteStream {
-        let reader = try await Task.detached(priority: .utility) { try LocalResourceReader(file: file) }.value
-        return .init { try await reader.next() }
+        let input = try await V2PinnedLocalMediaFile.blocking { try V2PinnedLocalMediaFile(file: file) }
+        return input.stream()
     }
     public func allocate(placementID: UUID = UUID()) throws -> V2StoredObjectReference {
         try .init(placementID: placementID, binding: binding, handle: Data(placementID.uuidString.lowercased().utf8))
@@ -32,25 +32,23 @@ public struct V2LocalResourceStorage: V2ObjectStorage {
     }
     public func inspect(_ reference: V2StoredObjectReference) async throws -> V2StoredObjectFacts {
         let file = try url(reference)
-        return try await Task.detached(priority: .utility) {
+        return try await V2PinnedLocalMediaFile.blocking {
             try Self.withLock(file) {
-                guard !FileManager.default.fileExists(atPath: file.appendingPathExtension("deleted").path),
-                      let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
-                      let size = attributes[.size] as? NSNumber else { throw V2ResourceProviderError.notFound }
-                let digest = try ForwardMediaFileIO.digest(file, byteCount: size.int64Value)
-                return try .init(reference: reference, byteCount: size.int64Value, sha256: digest)
+                try Self.requireNotDeleted(file)
+                let input = try Self.openResource(file)
+                return try .init(reference: reference, byteCount: input.byteCount, sha256: input.digest())
             }
-        }.value
+        }
     }
     public func read(_ reference: V2StoredObjectReference) async throws -> V2ResourceByteStream {
         let file = try url(reference)
-        let reader = try await Task.detached(priority: .utility) {
+        let input = try await V2PinnedLocalMediaFile.blocking {
             try Self.withLock(file) {
-                guard !FileManager.default.fileExists(atPath: file.appendingPathExtension("deleted").path) else { throw V2ResourceProviderError.notFound }
-                return try LocalResourceReader(file: file)
+                try Self.requireNotDeleted(file)
+                return try Self.openResource(file)
             }
-        }.value
-        return .init { try await reader.next() }
+        }
+        return input.stream()
     }
     public func write(_ reference: V2StoredObjectReference, byteCount: Int64, sha256: Data, bytes: V2ResourceByteStream) async throws -> V2StoredObjectFacts {
         guard byteCount > 0, sha256.count == 32 else { throw V2ResourceProviderError.integrityMismatch }
@@ -76,7 +74,11 @@ public struct V2LocalResourceStorage: V2ObjectStorage {
                     if FileManager.default.fileExists(atPath: file.path) {
                         guard (try? ForwardMediaFileIO.digest(file, byteCount: byteCount)) == sha256 else { throw V2ResourceProviderError.integrityMismatch }
                     } else {
-                        try FileManager.default.linkItem(at: temporary, to: file)
+                        // All publishers and deleters share this object lock. A same-directory
+                        // rename publishes one link without leaving a second alias after a crash.
+                        guard rename(temporary.path, file.path) == 0 else {
+                            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+                        }
                         try ForwardMediaFileIO.syncDirectory(file.deletingLastPathComponent())
                     }
                 }
@@ -102,29 +104,45 @@ public struct V2LocalResourceStorage: V2ObjectStorage {
             }
         }.value
     }
+    private static func openResource(_ file: URL) throws -> V2PinnedLocalMediaFile {
+        do { return try V2PinnedLocalMediaFile(file: file) }
+        catch is V2LocalFilesystemMediaProviderError { throw V2ResourceProviderError.notFound }
+    }
+    private static func requireNotDeleted(_ file: URL) throws {
+        var attributes = stat()
+        guard lstat(file.appendingPathExtension("deleted").path, &attributes) < 0 else {
+            throw V2ResourceProviderError.notFound
+        }
+        guard errno == ENOENT else { throw V2ResourceProviderError.temporarilyUnavailable }
+    }
     private static func withLock<T>(_ file: URL, body: () throws -> T) throws -> T {
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let fd = open(file.appendingPathExtension("lock").path, O_CREAT | O_RDWR, 0o600)
+        let directory = open(file.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { throw V2ResourceProviderError.temporarilyUnavailable }
+        defer { _ = close(directory) }
+        let fd = (file.lastPathComponent + ".lock").withCString { name in
+            let flags = O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+            let created = openat(directory, name, flags | O_CREAT | O_EXCL, 0o600)
+            guard created < 0 else { return created }
+            // Another publisher may create the permanent lock concurrently. Open
+            // that entry without creation; never replace it or follow a link.
+            guard errno == EEXIST || errno == ENOENT else { return Int32(-1) }
+            return openat(directory, name, flags)
+        }
         guard fd >= 0 else { throw V2ResourceProviderError.temporarilyUnavailable }
         defer { _ = close(fd) }
-        guard flock(fd, LOCK_EX) == 0 else { throw V2ResourceProviderError.temporarilyUnavailable }
+        var attributes = stat()
+        guard fstat(fd, &attributes) == 0, attributes.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              attributes.st_nlink == 1 else { throw V2ResourceProviderError.temporarilyUnavailable }
+        while flock(fd, LOCK_EX) != 0 {
+            guard errno == EINTR else { throw V2ResourceProviderError.temporarilyUnavailable }
+            try Task.checkCancellation()
+        }
         defer { _ = flock(fd, LOCK_UN) }
         return try body()
     }
 }
 
-private actor LocalResourceReader {
-    private let handle: FileHandle
-    init(file: URL) throws { handle = try FileHandle(forReadingFrom: file) }
-    deinit { try? handle.close() }
-    func next() async throws -> Data? {
-        let handle = self.handle
-        return try await Task.detached(priority: .utility) {
-            let value = try handle.read(upToCount: 65_536)
-            return value?.isEmpty == true ? nil : value
-        }.value
-    }
-}
 private actor LocalResourceWriter {
     private let file: URL
     private let handle: FileHandle

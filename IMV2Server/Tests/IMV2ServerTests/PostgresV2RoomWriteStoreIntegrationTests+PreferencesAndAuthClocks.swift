@@ -624,7 +624,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         }
                         guard case .receipt(let receipt) = try await store.submit(command, token: token, capacityProfile: profile, eventID: event), case .applied(let value) = receipt.outcome else { throw CancellationError() }
                         #expect(receipt.validates(command: command))
-                        switch value { case .pinned(_,_,let seq), .announcement(_,_,let seq), .rolePermissions(_,_,_,let seq), .memberRole(_,_,_,let seq): sequence = seq }
+                        sequence = value.roomSequence
                         proofEvent = nil
                     }
                     let date: Date?

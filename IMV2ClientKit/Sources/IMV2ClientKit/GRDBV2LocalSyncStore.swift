@@ -1264,6 +1264,20 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         let shadowPermissionRevisions = snapshotShadowTable(for: "v2_group_permission_revisions")
         // Preserve the independent room log for every currently authorized room.
 
+        // A personal snapshot may precede the independent room log. Preserve a
+        // newer owner only when its exact source is in that retained room log;
+        // an absent or unauthorized room in the snapshot cannot be resurrected.
+        try db.execute(sql: """
+            UPDATE \(shadowRooms) AS incoming
+            SET (source_event_id, owner_user_id, membership_revision) =
+                (live.source_event_id, live.owner_user_id, live.membership_revision)
+            FROM v2_room_profile_projections AS live
+            WHERE incoming.room_id=live.room_id AND incoming.is_group_event_authorized=1
+              AND live.is_group_event_authorized=1 AND live.membership_revision>incoming.membership_revision
+              AND EXISTS (SELECT 1 FROM v2_group_events AS event
+                  WHERE event.room_id=live.room_id AND event.source_event_id=live.source_event_id)
+            """)
+
         let authorizedRoomsSQL = """
                     SELECT room_id
                     FROM \(shadowRooms)
@@ -1454,7 +1468,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                     WHERE EXISTS (SELECT 1 FROM \(shadowRooms) AS room
                         WHERE room.room_id = live.room_id AND room.is_group_event_authorized = 1)
                        OR EXISTS (SELECT 1 FROM \(shadowMemberEffects) AS incoming
-                        WHERE incoming.source_event_id = live.source_event_id)
+                        WHERE (incoming.source_event_id = live.source_event_id AND incoming.user_id = live.user_id))
                 ) WHERE typeof(membership_revision) <> 'integer' OR membership_revision <= 0
                     OR typeof(projection_sequence) <> 'integer' OR projection_sequence <= 0
                     OR (room_sequence IS NOT NULL AND (typeof(room_sequence) <> 'integer' OR room_sequence <= 0))
@@ -1464,7 +1478,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             SELECT EXISTS (
                 SELECT 1 FROM v2_member_effects AS live
                 JOIN \(shadowRooms) AS room ON room.room_id = live.room_id AND room.is_group_event_authorized = 1
-                JOIN \(shadowMemberEffects) AS incoming ON incoming.source_event_id = live.source_event_id
+                JOIN \(shadowMemberEffects) AS incoming ON (incoming.source_event_id = live.source_event_id AND incoming.user_id = live.user_id)
                     OR (incoming.room_id = live.room_id AND incoming.user_id = live.user_id AND incoming.membership_revision = live.membership_revision)
                 WHERE incoming.source_event_id <> live.source_event_id OR incoming.canonical_digest <> live.canonical_digest
                     OR (incoming.room_sequence IS NOT NULL AND live.room_sequence IS NOT NULL AND incoming.room_sequence <> live.room_sequence)
@@ -1473,7 +1487,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         try copyRoomRows(table: "v2_member_effects", shadow: shadowMemberEffects)
         try db.execute(sql: """
             UPDATE \(shadowMemberEffects) SET room_sequence = (
-                SELECT live.room_sequence FROM v2_member_effects AS live WHERE live.source_event_id = \(shadowMemberEffects).source_event_id
+                SELECT live.room_sequence FROM v2_member_effects AS live WHERE live.source_event_id = \(shadowMemberEffects).source_event_id AND live.user_id = \(shadowMemberEffects).user_id
             ) WHERE room_sequence IS NULL
             """)
         // The merged source history, including removals and re-additions, is
@@ -1831,7 +1845,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         let payloadKey = try snapshotEntityKey(kind: item.key.projectionKind, sourceEventID: item.sourceEventID, object: object)
         guard payloadKey == item.key.entityKey else { throw V2ClientSyncError.snapshotProjectionConflict }
         let eventType = object["event_type"] as? String
-        let recordKind = item.key.projectionKind == "room" && eventType == "membership_changed"
+        let recordKind = item.key.projectionKind == "room" && ["membership_changed", "group.ownership_transferred", "group.dissolved"].contains(eventType)
             ? "membership"
             : item.key.projectionKind
         let record = try V2ClientSyncRecord(
@@ -2815,7 +2829,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
 
     public func blocks() throws -> [V2ClientUserBlockProjection] {
         try databasePool.read { db in
-            try Row.fetchAll(db, sql: "SELECT target_user_id, is_blocked, updated_at FROM v2_user_block_projections WHERE is_blocked = 1 ORDER BY target_user_id").map(Self.decodeBlockProjection)
+            try Row.fetchAll(db, sql: "SELECT target_user_id, target_handle, is_blocked, updated_at FROM v2_user_block_projections WHERE is_blocked = 1 ORDER BY target_user_id").map(Self.decodeBlockProjection)
         }
     }
 
@@ -3383,7 +3397,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     }
 
     private static func decodeBlockProjection(_ row: Row) throws -> V2ClientUserBlockProjection {
-        try .init(targetUserID: .init(row["target_user_id"] as String), isBlocked: row["is_blocked"], updatedAt: Date(timeIntervalSince1970: row["updated_at"] as Double))
+        try .init(targetUserID: .init(row["target_user_id"] as String),
+            targetHandle: (row["target_handle"] as String?).map(V2PublicHandle.init),
+            isBlocked: row["is_blocked"], updatedAt: Date(timeIntervalSince1970: row["updated_at"] as Double))
     }
 
     private static func applyMessage(_ record: V2ClientSyncRecord, expectedRoomID: RoomID, expectedRoomSequence: UInt64, db: Database) throws {
@@ -3478,15 +3494,19 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         catch { throw V2ClientProjectionError.invalidMessagePayload }
         let roomID = try RoomID(header.roomID)
         guard expectedRoomID == nil || expectedRoomID == roomID else { throw V2ClientProjectionError.invalidMessagePayload }
-        let memberEffect = record.projectionKind == "membership"
+        let isTransfer = header.eventType == "group.ownership_transferred", isDissolved = header.eventType == "group.dissolved"
+        let isLifecycle = isTransfer || isDissolved
+        let memberEffect = record.projectionKind == "membership" && !isLifecycle
             ? try V2LocalMemberEffect(record: record, expectedRoomID: expectedRoomID, expectedRoomSequence: expectedRoomSequence) : nil
         guard header.membershipRevision > 0,
-              header.eventType == (record.projectionKind == "room" ? "room.created" : "membership_changed") else {
+              header.eventType == (record.projectionKind == "room" ? "room.created" : "membership_changed") || (record.projectionKind == "membership" && isLifecycle) else {
             throw V2ClientProjectionError.invalidMessagePayload
         }
         let currentUserID: String? = try Row.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton = 1")?["user_id"]
         let affectedUser = try header.targetUserID.map(UserID.init)
-        if record.projectionKind == "membership" {
+        if isLifecycle {
+            guard header.action == (isTransfer ? "transfer" : "dissolve") else { throw V2ClientProjectionError.invalidMessagePayload }
+        } else if record.projectionKind == "membership" {
             guard affectedUser != nil, header.action == "add" || header.action == "remove" else {
                 throw V2ClientProjectionError.invalidMessagePayload
             }
@@ -3495,10 +3515,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         let prior = try Row.fetchOne(db, sql: "SELECT membership_revision, source_event_id, is_member FROM \(table) WHERE room_id = ?", arguments: [roomID.rawValue])
         let priorRevision = try prior.map { try effectInteger($0, "membership_revision") } ?? 0
         let priorIsMember: Bool = prior?["is_member"] ?? true
-        let isOwnEvent = record.projectionKind == "room" || affectedUser?.rawValue == currentUserID
+        // Transfer changes roles, not the viewer's membership grant.
+        let isOwnEvent = record.projectionKind == "room" || isDissolved || affectedUser?.rawValue == currentUserID
         var ownRevision = isOwnEvent ? header.membershipRevision : nil
         var ownSource = record.sourceEventID.rawValue
-        var isMember = header.action != "remove" || !isOwnEvent
+        var isMember = !isDissolved && (header.action != "remove" || !isOwnEvent)
         // Only snapshot state has an authoritative viewer revision carried across unrelated member changes.
         if case .snapshotShadow = target, let revision = header.viewerMembershipRevision {
             guard revision > 0, let member = header.viewerIsMember, let source = header.viewerMembershipSource else {
@@ -3525,6 +3546,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             if !priorIsMember { return }
         }
         if let memberEffect { try applyMemberEffect(memberEffect, target: target, db: db) }
+        if isTransfer {
+            for member in [V2LocalMemberEffect.OwnershipMember.previousOwner, .newOwner] {
+                try applyMemberEffect(V2LocalMemberEffect(record: record, ownershipMember: member,
+                    expectedRoomID: expectedRoomID, expectedRoomSequence: expectedRoomSequence), target: target, db: db)
+            }
+        }
         if ownRevision == nil {
             if let profile = try Row.fetchOne(db, sql: "SELECT membership_revision FROM \(target.table("v2_room_profile_projections")) WHERE room_id = ?", arguments: [roomID.rawValue]),
                try effectInteger(profile, "membership_revision") > header.membershipRevision { return }
@@ -3848,8 +3875,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     private static func applyMemberEffect(_ effect: V2LocalMemberEffect, target: ProjectionTableTarget, db: Database) throws {
         let effects = target.table("v2_member_effects")
         let roles = target.table("v2_group_member_roles")
-        if let prior = try Row.fetchOne(db, sql: "SELECT * FROM \(effects) WHERE source_event_id = ? OR (room_id = ? AND user_id = ? AND membership_revision = ?)",
-            arguments: [effect.source, effect.room, effect.user, effect.revision]) {
+        if let prior = try Row.fetchOne(db, sql: "SELECT * FROM \(effects) WHERE (source_event_id = ? AND user_id = ?) OR (room_id = ? AND user_id = ? AND membership_revision = ?)",
+            arguments: [effect.source, effect.user, effect.room, effect.user, effect.revision]) {
             let priorSequence = try optionalEffectInteger(prior, "room_sequence")
             _ = try effectInteger(prior, "projection_sequence")
             guard try effectInteger(prior, "membership_revision") == effect.revision,
@@ -3857,7 +3884,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                   (prior["canonical_digest"] as Data) == effect.digest,
                   priorSequence == nil || effect.roomSequence == nil || priorSequence == effect.roomSequence
             else { throw V2ClientProjectionError.invalidMessagePayload }
-            try db.execute(sql: "UPDATE \(effects) SET room_sequence = COALESCE(room_sequence, ?) WHERE source_event_id = ?", arguments: [effect.roomSequence, effect.source])
+            try db.execute(sql: "UPDATE \(effects) SET room_sequence = COALESCE(room_sequence, ?) WHERE source_event_id = ? AND user_id = ?", arguments: [effect.roomSequence, effect.source, effect.user])
         } else {
             try db.execute(sql: "INSERT INTO \(effects) (source_event_id, room_id, user_id, membership_revision, action, role, room_sequence, projection_sequence, canonical_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 arguments: [effect.source, effect.room, effect.user, effect.revision, effect.action, effect.role, effect.roomSequence, effect.projectionSequence, effect.digest])
@@ -3875,7 +3902,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         }
         guard try effectInteger(history, "latest") == effect.revision else { return }
         if let role = effect.role {
-            guard let stored = try Row.fetchOne(db, sql: "SELECT room_sequence, projection_sequence FROM \(effects) WHERE source_event_id = ?", arguments: [effect.source]) else {
+            guard let stored = try Row.fetchOne(db, sql: "SELECT room_sequence, projection_sequence FROM \(effects) WHERE source_event_id = ? AND user_id = ?", arguments: [effect.source, effect.user]) else {
                 throw V2ClientProjectionError.invalidMessagePayload
             }
             let projectionSequence = try effectInteger(stored, "projection_sequence")
@@ -3926,13 +3953,15 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     }
 
     private static func applyUserBlock(_ record: V2ClientSyncRecord, target tableTarget: ProjectionTableTarget = .live, db: Database) throws {
-        struct Payload: Decodable { let targetUserID: String; let isBlocked: Bool; let updatedAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case targetUserID = "target_user_id"; case isBlocked = "is_blocked"; case updatedAtMilliseconds = "updated_at_ms" } }
+        struct Payload: Decodable { let targetUserID: String; let targetHandle: String?; let isBlocked: Bool; let updatedAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case targetUserID = "target_user_id"; case targetHandle = "target_handle"; case isBlocked = "is_blocked"; case updatedAtMilliseconds = "updated_at_ms" } }
         let payload: Payload
         do { payload = try JSONDecoder().decode(Payload.self, from: record.payload) } catch { throw V2ClientSocialProjectionError.invalidPayload }
         let target: UserID
-        do { target = try .init(payload.targetUserID) } catch { throw V2ClientSocialProjectionError.invalidPayload }
+        let handle: V2PublicHandle?
+        do { target = try .init(payload.targetUserID); handle = try payload.targetHandle.map(V2PublicHandle.init) }
+        catch { throw V2ClientSocialProjectionError.invalidPayload }
         let table = tableTarget.table("v2_user_block_projections")
-        try db.execute(sql: "INSERT INTO \(table) (target_user_id, is_blocked, updated_at) VALUES (?, ?, ?) ON CONFLICT(target_user_id) DO UPDATE SET is_blocked = excluded.is_blocked, updated_at = excluded.updated_at", arguments: [target.rawValue, payload.isBlocked, Double(payload.updatedAtMilliseconds) / 1_000])
+        try db.execute(sql: "INSERT INTO \(table) (target_user_id, target_handle, is_blocked, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(target_user_id) DO UPDATE SET target_handle = excluded.target_handle, is_blocked = excluded.is_blocked, updated_at = excluded.updated_at", arguments: [target.rawValue, handle?.rawValue, payload.isBlocked, Double(payload.updatedAtMilliseconds) / 1_000])
     }
 
     private static func applyStrangerMessagePermission(_ record:V2ClientSyncRecord,target:ProjectionTableTarget = .live,db:Database) throws {
@@ -4342,23 +4371,24 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             let ownerUserID: String = existing["owner_user_id"]; let capacityClass: String = existing["capacity_class"]
             let membershipRevision = try storageInteger(existing, column: "membership_revision"); let createdAt: Double = existing["created_at"]
             let incomingRevision = try storageInteger(projection.membershipRevision)
-            guard title == projection.title, ownerUserID == projection.ownerUserID.rawValue,
+            guard title == projection.title,
                   capacityClass == projection.capacityClass.rawValue,
                   createdAt == projection.createdAt.timeIntervalSince1970
             else { throw V2ClientProjectionError.invalidMessagePayload }
             if membershipRevision > incomingRevision { return }
             if membershipRevision == incomingRevision {
-                guard sourceEventID == projection.sourceEventID.rawValue else { throw V2ClientProjectionError.invalidMessagePayload }
+                guard sourceEventID == projection.sourceEventID.rawValue, ownerUserID == projection.ownerUserID.rawValue else { throw V2ClientProjectionError.invalidMessagePayload }
             }
             try db.execute(
                 sql: """
                     UPDATE \(table)
                     SET source_event_id = ?,
+                        owner_user_id = ?,
                         membership_revision = ?,
                         is_group_event_authorized = 1
                     WHERE room_id = ?
                     """,
-                arguments: [projection.sourceEventID.rawValue, incomingRevision, projection.roomID.rawValue]
+                arguments: [projection.sourceEventID.rawValue, projection.ownerUserID.rawValue, incomingRevision, projection.roomID.rawValue]
             )
             return
         }

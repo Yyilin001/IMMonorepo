@@ -48,12 +48,12 @@ public struct V2GroupAnnouncementCommand: Equatable, Sendable {
     /// - Parameters:
     ///   - operationID: 本次公告修改的稳定身份。
     ///   - roomID: 目标群。
-    ///   - body: 非纯空白且最多 4096 个 UTF-8 字节的原始正文。
+    ///   - body: 最多 4096 个 UTF-8 字节的原始正文；空字符串明确清除公告，非空的纯空白正文无效。
     ///   - expectedRevision: 预期公告版本，允许零且不超过 Int64.max。
     ///
-    /// 正文裁剪后为空时抛出 emptyAnnouncement，原始字节数超限时抛出 announcementTooLarge，版本越界时抛出 outOfRange；保存正文原样，不裁剪或过滤内部控制字符。
+    /// 非空正文裁剪后为空时抛出 emptyAnnouncement，原始字节数超限时抛出 announcementTooLarge，版本越界时抛出 outOfRange；清除也保留并推进公告版本。
     public init(operationID: GroupAnnouncementOperationID, roomID: RoomID, body: String, expectedRevision: UInt64) throws {
-        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2GroupPermissionValidationError.emptyAnnouncement }
+        guard body.isEmpty || !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2GroupPermissionValidationError.emptyAnnouncement }
         guard body.lengthOfBytes(using: .utf8) <= Self.maximumUTF8Bytes else { throw V2GroupPermissionValidationError.announcementTooLarge }
         guard expectedRevision <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.operationID = operationID; self.roomID = roomID; self.body = body; self.expectedRevision = expectedRevision

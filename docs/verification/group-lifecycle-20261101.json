@@ -1,0 +1,76 @@
+{
+  "date": "2026-11-01",
+  "scope": "J26 群主转让与解散；只运行受影响的功能与恢复用例。",
+  "protocol_version": 55,
+  "tested_schema_id": "im-v2-current-80",
+  "server": {
+    "methods": 1,
+    "parameter_cases": 2,
+    "suites": 1,
+    "seconds": 1.723,
+    "result": "passed",
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-45a0f051/server.log",
+    "coverage": [
+      "普通群与大群容量模式各使用3名成员，验证原子转让、权限与成员版本校验、解散、原回执恢复。",
+      "解散撤销邀请、关闭待审批申请，禁止解除冻结、重新入群及迟到发送。",
+      "实际个人同步与快照投影：转让保留原成员加入版本；解散为所有成员生成可恢复的退群事实。"
+    ],
+    "source_manifest": "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-45a0f051/source-manifest.json",
+    "tested_source_unchanged": true
+  },
+  "client": {
+    "methods": 2,
+    "parameter_cases": 6,
+    "suites": 1,
+    "seconds": 2.424,
+    "result": "passed",
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-client-r5-20261101.log",
+    "coverage": [
+      "房间与个人同步先后顺序、重复事件和旧快照不会覆盖新群主及双方角色。",
+      "个人解散记录清理授权投影；迟到入群记录不能恢复已解散会话。",
+      "既有成员移除的4种版本场景。"
+    ]
+  },
+  "app": {
+    "methods": 2,
+    "parameter_cases": 5,
+    "suites": 1,
+    "seconds": 0.117,
+    "failed": 0,
+    "skipped": 0,
+    "result": "passed",
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-app-20261101.log",
+    "result_bundle": "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-app-20261101.xcresult",
+    "destination": "iPhone 17 / iOS 27.0 simulator",
+    "coverage": [
+      "群主权限、配置管理权限、确认页绑定成员版本；版本变化时拒绝旧确认，重新确认后创建正确操作。"
+    ],
+    "owned_simulator_removed": true
+  },
+  "schema_bootstrap": {
+    "result": "passed",
+    "seconds": 9.648,
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-schema-a4e30d44/schema.log",
+    "coverage": "schema80新库、漂移检测与导出恢复；新增解散不可逆触发器使应用触发器为65个、函数为42个。"
+  },
+  "owned_postgres_stopped_and_removed": true,
+  "log_sha256": {
+    "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-45a0f051/server.log": "5abbff7f74903a80d655baee02b3480d98393023e6074e460ee020a2e3bb58d5",
+    "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-schema-a4e30d44/schema.log": "94ecfc19f80694bf46138074fe8309cf3fe5b657eeb1cf1887476a776b7d65eb",
+    "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-client-r5-20261101.log": "83744e601bf11fd541a915d4c89898836b2fc315a9247962276fa35a53df3a93",
+    "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-app-20261101.log": "9a93e1e200b8ab742ad6d5e810a5fdc1dc0856808fa84f26e59015a966ed844f"
+  },
+  "prior_runs": "此前的编译错误、旧快照回退和建库数量断言失败均保留原日志；修正后只重跑受影响部分。未将失败或未执行计为通过。",
+  "limits": [
+    "未运行全量测试、满容量压测、真实TLS端到端或生产部署验收。",
+    "App验证是模拟器内的状态与操作测试；未做新增确认页的视觉验收或真机验收。",
+    "App测试后修正了共享客户端的旧快照恢复逻辑，该部分以最终ClientKit定向测试验证，未再次运行App全量构建。",
+    "当前新库直接使用schema80，不提供历史兼容迁移。"
+  ],
+  "static_checks": {
+    "protocol_schema_transport_documentation": "passed",
+    "document_links": "passed",
+    "document_structure": "passed",
+    "git_diff_check": "passed"
+  }
+}

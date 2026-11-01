@@ -364,8 +364,8 @@ public struct V2GatewayDomainCommandHandler:
         for envelope: IMV2Envelope
     ) -> V2DatabaseWorkClass? {
         guard envelope.body != nil else { return nil }
-        if case .messageSendOperationRecover = envelope.body,
-           messageCommands.messageSendOperations.usesReadOnlySendRecovery { return .interactiveRead }
+        if case .messageSendOperationRecover(let request) = envelope.body, request.action == .query,
+           messageCommands.messageSendOperations.usesDirectSendRecovery { return .interactiveRead }
         switch envelope.body {
         case .syncPull, .syncAck, .syncSnapshot, .snapshotPagePull, .snapshotAck:
             return .sync
@@ -396,7 +396,7 @@ public struct V2GatewayDomainCommandHandler:
     private func admissionOwner(for envelope: IMV2Envelope) -> V2GatewayAdmissionOwner {
         guard databaseWorkClass(for: envelope) != nil else { return .none }
         if case .messageSendOperationRecover = envelope.body,
-           messageCommands.messageSendOperations.usesReadOnlySendRecovery { return .gateway }
+           messageCommands.messageSendOperations.usesDirectSendRecovery { return .gateway }
         if roomCommandsHostAdmitted {
             switch envelope.body {
             case .recordReadReceipt,

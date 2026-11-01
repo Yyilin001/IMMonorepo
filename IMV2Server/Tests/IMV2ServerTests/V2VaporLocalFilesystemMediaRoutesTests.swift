@@ -36,7 +36,6 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
             V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             try V2VaporLocalFilesystemMediaRoutes(
                 provider: provider,
-                fileIO: app.fileio,
                 publicBaseURL: try #require(URL(string: "https://localhost:8443")),
                 maximumUploadBytes: 1_024
             ).register(on: app)
@@ -84,7 +83,6 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
             V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             try V2VaporLocalFilesystemMediaRoutes(
                 provider: provider,
-                fileIO: app.fileio,
                 publicBaseURL: try #require(URL(string: "https://localhost:8443")),
                 maximumUploadBytes: 131_072
             ).register(on: app)
@@ -153,7 +151,6 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
             V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             try V2VaporLocalFilesystemMediaRoutes(
                 provider: provider,
-                fileIO: app.fileio,
                 publicBaseURL: try #require(URL(string: "https://localhost:8443")),
                 maximumUploadBytes: 16_384
             ).register(on: app)
@@ -206,7 +203,6 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
             V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             try V2VaporLocalFilesystemMediaRoutes(
                 provider: provider,
-                fileIO: app.fileio,
                 publicBaseURL: try #require(URL(string: "https://localhost:8443")),
                 maximumUploadBytes: 1_024
             ).register(on: app)
@@ -236,7 +232,6 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
             V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             try V2VaporLocalFilesystemMediaRoutes(
                 provider: provider,
-                fileIO: app.fileio,
                 publicBaseURL: try #require(URL(string: "https://localhost:8443")),
                 maximumUploadBytes: 1_024
             ).register(on: app)

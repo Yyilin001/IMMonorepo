@@ -14,7 +14,7 @@ struct V2AccountSecurityStoreTests {
         await store.perform(.change, account: "account", current: "current-password", next: "replacement-password", code: "")
         #expect(signedOut == (status == 204))
         if status == 503 {
-            guard case .failed(let message) = store.state else { Issue.record("Expected uncertain outcome"); return }
+            guard case .outcomeUnknown(let message) = store.state else { Issue.record("Expected uncertain outcome"); return }
             #expect(message.contains("新密码"))
         }
     }
@@ -31,6 +31,19 @@ struct V2AccountSecurityStoreTests {
         await transport.finish()
         await task.value
         #expect(!signedOut)
+        guard case .outcomeUnknown(let message) = store.state else { Issue.record("Cancellation does not prove no commit"); return }
+        #expect(message.contains("不会撤回"))
+    }
+
+    @Test("uncertain recovery-code setup preserves the saved code guidance")
+    func recoveryCodeOutcomeUnknown() async throws {
+        let client = try V2PasswordLifecycleClient(baseURL: #require(URL(string: "https://account.invalid/password")),
+            transport: SecurityStoreTransport(status: 503))
+        let store = V2AccountSecurityStore(client: client, passwordChanged: { Issue.record("Code setup must not sign out") })
+        await store.perform(.recoveryCode, account: "account", current: "current-password", next: "", code: String(repeating: "a1", count: 32))
+        guard case .outcomeUnknown(let message) = store.state else { Issue.record("Expected uncertain outcome"); return }
+        #expect(message.contains("同一码重试") && message.contains("不要"))
+        #expect(!message.contains("新密码"))
     }
 }
 

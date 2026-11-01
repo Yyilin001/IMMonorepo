@@ -60,6 +60,8 @@ public struct PostgresV2GroupCapabilityOperationStore: Sendable {
                     _ = try milliseconds(boundTime)
                     let result:DomainResult
                     switch command.intent.action {
+                    case .transferOwnership, .dissolve:
+                        result = try map(await store.applyLifecycle(intent: command.intent, capacityProfile: capacityProfile, eventID: eventID, now: boundTime)) { $0 }
                     case .pin(let message,let desired,_):
                         let domain=try V2PinnedMessageCommand(operationID:.init(uuid:operation(command.identity)),roomID:command.intent.roomID,messageID:message,isPinned:desired)
                         result=try map(await store.setPinnedMessage(actorUserID:command.identity.accountID,command:domain,capacityProfile:capacityProfile,eventID:eventID,now:boundTime)) { .pinned(messageID:$0.messageID,isPinned:$0.isPinned,roomSequence:$0.roomSequence) }
@@ -114,9 +116,11 @@ public struct PostgresV2GroupCapabilityOperationStore: Sendable {
     private func authorize(_ intent:V2GroupCapabilityIntent,sql:any SQLDatabase) async throws -> V2GroupCapabilityRejection? {
         guard let state=try await fetchRoom(intent.roomID,sql:sql) else { return .roomNotFound }
         guard state.kind=="group" else { return .notGroupRoom }
+        guard state.dissolved_at == nil else { return .roomDissolved }
         guard let actor=try await member(intent.identity.accountID,room:intent.roomID,revision:state.membership_revision,sql:sql),let role=V2RoomMembershipRole(rawValue:actor.role) else { return .permissionDenied }
         let required:V2GroupPermission
-        switch intent.action { case .pin:required = .pinMessages;case .announcement:required = .manageAnnouncements;case .rolePermissions,.memberRole:required = .changeMemberRoles }
+        switch intent.action { case .pin:required = .pinMessages;case .announcement:required = .manageAnnouncements;case .rolePermissions,.memberRole:required = .changeMemberRoles;case .transferOwnership,.dissolve:
+            guard role == .owner else { return .permissionDenied };required = .changeMemberRoles }
         let permissions=try await v2ResolvedGroupPermissions(roomID:intent.roomID.uuidValue!,role:role,sql:sql)
         guard V2GroupPermissionDefaults.allows(role:role,permission:required,configured:permissions) else { return .permissionDenied }
         let current:UInt64
@@ -127,7 +131,8 @@ public struct PostgresV2GroupCapabilityOperationStore: Sendable {
         case .announcement:
             current=try unsigned(await sql.raw("SELECT revision FROM im_v2.group_announcements WHERE room_id=\(bind:intent.roomID.uuidValue!) FOR UPDATE").first(decoding:RevisionRow.self)?.revision ?? 0)
         case .rolePermissions:current=try unsigned(state.group_permission_revision)
-        case .memberRole(let target,_,_):
+        case .dissolve: current = try unsigned(state.membership_revision)
+        case .memberRole(let target,_,_), .transferOwnership(let target,_):
             guard let member=try await member(target,room:intent.roomID,revision:state.membership_revision,sql:sql) else { return .targetNotMember }
             guard member.role != "owner" else { return .permissionDenied }
             current=try unsigned(state.membership_revision)
@@ -135,7 +140,8 @@ public struct PostgresV2GroupCapabilityOperationStore: Sendable {
         return current==intent.action.observedRevision ? nil:.revisionChanged(currentRevision:current)
     }
     private func targetIncarnation(_ intent:V2GroupCapabilityIntent,sql:any SQLDatabase) async throws -> UInt64? {
-        guard case .memberRole(let target,_,_)=intent.action else { return nil }
+        let target: UserID
+        switch intent.action { case .memberRole(let user,_,_), .transferOwnership(let user,_): target = user; default: return nil }
         let state=try await roomState(intent.roomID,sql:sql)
         guard let value=try await member(target,room:intent.roomID,revision:state.membership_revision,sql:sql) else { throw V2GroupCapabilityExecutionError.corruptPersistence }
         return try unsigned(value.joined_revision)
@@ -187,13 +193,13 @@ public struct PostgresV2GroupCapabilityOperationStore: Sendable {
         try v2PersistenceMilliseconds(value, invalid: V2GroupCapabilityExecutionError.corruptPersistence)
     }
     private func unsigned(_ value:Int64) throws -> UInt64 { try v2PersistenceUnsigned(value, invalid: V2GroupCapabilityExecutionError.corruptPersistence) }
-    private func fetchRoom(_ room:RoomID,sql:any SQLDatabase) async throws -> RoomRow? { try await sql.raw("SELECT room_kind AS kind,room_sequence,membership_revision,group_permission_revision FROM im_v2.rooms WHERE room_id=\(bind:room.uuidValue!) FOR UPDATE").first(decoding:RoomRow.self) }
+    private func fetchRoom(_ room:RoomID,sql:any SQLDatabase) async throws -> RoomRow? { try await sql.raw("SELECT room_kind AS kind,room_sequence,membership_revision,group_permission_revision,dissolved_at FROM im_v2.rooms WHERE room_id=\(bind:room.uuidValue!) FOR UPDATE").first(decoding:RoomRow.self) }
     private func roomState(_ room:RoomID,sql:any SQLDatabase) async throws -> RoomRow { guard let state=try await fetchRoom(room,sql:sql) else { throw V2GroupCapabilitiesStoreError.roomNotFound };return state }
     private func member(_ user:UserID,room:RoomID,revision:Int64,sql:any SQLDatabase) async throws -> MemberRow? { try await sql.raw("SELECT role,joined_revision FROM im_v2.room_memberships WHERE room_id=\(bind:room.uuidValue!) AND user_id=\(bind:user.uuidValue!) AND joined_revision<=\(bind:revision) AND (left_revision IS NULL OR left_revision>\(bind:revision)) ORDER BY joined_revision DESC LIMIT 1 FOR UPDATE").first(decoding:MemberRow.self) }
     private func visibleMessage(_ message:MessageID,room:RoomID,actor:UserID,sql:any SQLDatabase) async throws -> MessageRow? { try await sql.raw("SELECT message.withdrawn_at FROM im_v2.messages AS message JOIN im_v2.rooms AS room ON room.room_id=message.room_id WHERE message.message_id=\(bind:message.uuidValue!) AND message.room_id=\(bind:room.uuidValue!) AND (\(v2ForwardSourceVisibility(actorID:actor.uuidValue!))) FOR UPDATE OF message").first(decoding:MessageRow.self) }
     private func pinnedState(_ message:MessageID,room:RoomID,sql:any SQLDatabase) async throws -> Bool { try await sql.raw("SELECT EXISTS(SELECT 1 FROM im_v2.room_pinned_messages WHERE room_id=\(bind:room.uuidValue!) AND message_id=\(bind:message.uuidValue!)) AS value").first(decoding:BoolRow.self)?.value ?? false }
     private struct PayloadRow:Decodable { let payload:String }
-    private struct RoomRow:Decodable { let kind:String;let room_sequence:Int64;let membership_revision:Int64;let group_permission_revision:Int64 }
+    private struct RoomRow:Decodable { let kind:String;let room_sequence:Int64;let membership_revision:Int64;let group_permission_revision:Int64;let dissolved_at:Date? }
     private struct MemberRow:Decodable { let role:String;let joined_revision:Int64 }
     private struct MessageRow:Decodable { let withdrawn_at:Date? }
     private struct RevisionRow:Decodable { let revision:Int64 }

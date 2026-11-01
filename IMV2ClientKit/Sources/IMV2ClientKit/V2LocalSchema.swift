@@ -220,15 +220,16 @@ extension GRDBV2LocalSyncStore {
             );
 
         CREATE TABLE v2_member_effects (
-                source_event_id TEXT PRIMARY KEY NOT NULL,
+                source_event_id TEXT NOT NULL,
                 room_id TEXT NOT NULL, user_id TEXT NOT NULL,
                 membership_revision INTEGER NOT NULL CHECK (membership_revision > 0),
                 action TEXT NOT NULL CHECK (action IN ('add', 'remove', 'role')),
-                role TEXT CHECK (role IN ('admin', 'member')),
+                role TEXT CHECK (role IN ('owner', 'admin', 'member')),
                 room_sequence INTEGER CHECK (room_sequence > 0),
                 projection_sequence INTEGER NOT NULL CHECK (projection_sequence > 0),
                 canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
                 CHECK ((action = 'role' AND role IS NOT NULL) OR (action <> 'role' AND role IS NULL)),
+                PRIMARY KEY (source_event_id, user_id),
                 UNIQUE (room_id, user_id, membership_revision)
             );
 
@@ -508,6 +509,7 @@ extension GRDBV2LocalSyncStore {
 
         CREATE TABLE v2_user_block_projections (
                 target_user_id TEXT PRIMARY KEY,
+                target_handle TEXT,
                 is_blocked INTEGER NOT NULL CHECK (is_blocked IN (0, 1)),
                 updated_at REAL NOT NULL
             );

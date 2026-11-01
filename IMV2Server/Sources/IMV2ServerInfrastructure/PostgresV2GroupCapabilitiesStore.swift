@@ -302,7 +302,76 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             return .applied(try .init(roomID: command.roomID, targetUserID: command.targetUserID, role: command.role, membershipRevision: v2PersistenceUnsigned(membershipRevision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), roomSequence: v2PersistenceUnsigned(committed.sequence, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState)))
         }
     }
+
+    /// One owner-fenced transaction changes the structural owner or closes the room,
+    /// together with its event and durable personal notifications for every current member.
+    func applyLifecycle(intent: V2GroupCapabilityIntent, capacityProfile: V2CapacityProfile,
+                        eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupCapabilityValue> {
+        guard usesCapabilityTransaction, let activationScope,
+              let room = intent.roomID.uuidValue, let actor = intent.identity.accountID.uuidValue
+        else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
+        return try await groupTransaction(database, withinTransaction: true, classifyCommitFailure: true) { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
+            try await activationScope.require([room], sql: sql)
+            let context = try await prepare(room: room, actor: actor, required: .owner, capacityProfile: capacityProfile, now: now, sql: sql)
+            guard context.room.membershipRevision >= 0,
+                  UInt64(context.room.membershipRevision) == intent.action.observedRevision,
+                  context.room.membershipRevision < Int64.max,
+                  let group = try await sql.raw("SELECT owner_user_id, title, created_at FROM im_v2.group_rooms WHERE room_id=\(bind: room) FOR UPDATE").first(decoding: GroupLifecycleMetadata.self),
+                  group.owner_user_id == actor
+            else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
+            let next = context.room.membershipRevision + 1
+            let newOwner: UUID
+            let eventType: String
+            let action: String
+            switch intent.action {
+            case .transferOwnership(let target, _):
+                guard let targetID = target.uuidValue, targetID != actor,
+                      let member = try await sql.raw("SELECT role, joined_revision FROM im_v2.room_memberships WHERE room_id=\(bind: room) AND user_id=\(bind: targetID) AND left_revision IS NULL FOR UPDATE").first(decoding: GroupMemberRow.self),
+                      member.role != .owner else { throw V2GroupCapabilitiesStoreError.targetNotMember }
+                newOwner = targetID; eventType = "group.ownership_transferred"; action = "transfer"
+            case .dissolve:
+                newOwner = actor; eventType = "group.dissolved"; action = "dissolve"
+            default: throw V2GroupCapabilitiesStoreError.corruptPersistenceState
+            }
+            try requireCapabilityDeadline()
+            let committed = try await commit(room: room, context: context, actor: actor, eventID: eventID,
+                eventType: eventType, payload: groupPayload([
+                    "event_type": eventType, "room_id": room.uuidString, "actor_user_id": actor.uuidString,
+                    "action": action, "membership_revision": next, "owner_user_id": newOwner.uuidString,
+                    "previous_owner_user_id": actor.uuidString, "title": group.title,
+                    "capacity_class": context.room.capacityClass.rawValue,
+                    "created_at_ms": try v2GatewayMilliseconds(group.created_at)
+                ]), now: now, sql: sql)
+            // Capture the recipients before closing/replacing their intervals. One set-based
+            // insertion keeps offline clients and snapshots recoverable after the permission cut.
+            try await sql.raw("""
+                INSERT INTO im_v2.user_state_event_outbox
+                    (source_event_id,user_id,projection_kind,payload,created_at,next_attempt_at,source_room_id)
+                SELECT event.event_id,member.user_id,'membership',event.payload,event.created_at,event.created_at,event.room_id
+                FROM im_v2.room_events event JOIN im_v2.room_memberships member ON member.room_id=event.room_id
+                WHERE event.event_id=\(bind: committed.eventID) AND member.left_revision IS NULL
+                """).run()
+            if action == "transfer" {
+                try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=\(bind: next) WHERE room_id=\(bind: room) AND user_id IN (\(bind: actor),\(bind: newOwner)) AND left_revision IS NULL").run()
+                try await sql.raw("INSERT INTO im_v2.room_memberships(room_id,user_id,role,joined_revision) VALUES (\(bind: room),\(bind: actor),'member',\(bind: next)),(\(bind: room),\(bind: newOwner),'owner',\(bind: next))").run()
+                try await sql.raw("UPDATE im_v2.group_rooms SET owner_user_id=\(bind: newOwner) WHERE room_id=\(bind: room)").run()
+                try await sql.raw("UPDATE im_v2.rooms SET membership_revision=\(bind: next) WHERE room_id=\(bind: room)").run()
+                return .applied(.ownershipTransferred(previousOwnerUserID: intent.identity.accountID, ownerUserID: .init(uuid: newOwner), membershipRevision: UInt64(next), roomSequence: UInt64(committed.sequence)))
+            }
+            try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=\(bind: next) WHERE room_id=\(bind: room) AND left_revision IS NULL").run()
+            try await sql.raw("UPDATE im_v2.rooms SET membership_revision=\(bind: next), dissolved_at=\(bind: now), frozen_at=\(bind: now), frozen_by_user_id=\(bind: actor) WHERE room_id=\(bind: room)").run()
+            try await sql.raw("UPDATE im_v2.room_admission SET eligible_member_count=0 WHERE room_id=\(bind: room)").run()
+            try await sql.raw("UPDATE im_v2.group_invite_links SET state='revoked',revoked_by_user_id=\(bind: actor),revoked_at=\(bind: now),revocation_operation_id=\(bind: UUID(uuidString: intent.identity.operation.rawOperationID)!) WHERE room_id=\(bind: room) AND state='active'").run()
+            // Resolve outstanding applications so their control-plane quota recovery can finish.
+            try await sql.raw("UPDATE im_v2.group_join_requests SET state='rejected',decision_operation_id=gen_random_uuid(),decided_by_user_id=\(bind: actor),decided_at=\(bind: now),updated_at=\(bind: now) WHERE room_id=\(bind: room) AND state='pending'").run()
+            return .applied(.dissolved(membershipRevision: UInt64(next), roomSequence: UInt64(committed.sequence)))
+        }
+    }
+
 }
+
+private struct GroupLifecycleMetadata: Decodable { let owner_user_id: UUID; let title: String; let created_at: Date }
 
 private struct GroupIDs { let actor: UUID; let operation: UUID; let room: UUID; let target: UUID? }
 private func groupIDs<Tag: V2IdentifierTag>(_ actor: UserID, _ operation: V2Identifier<Tag>, _ room: RoomID) throws -> GroupIDs {

@@ -1200,37 +1200,34 @@ struct V2AppRealtimeRuntime {
                 try await authSession.requireAuthenticatedEpoch(authEpoch)
                 try await roomCatchUpWorker.run(userID: credentials.userID)
             },
-            policyRecoveryLoop: {
+            policyRecoveryLoops: [
                 // A fresh loop owner per authenticated connection prevents an
                 // old cancelled read from owning the replacement session.
-                try await withThrowingTaskGroup(of:Void.self) {group in
-                    group.addTask {try await V2RolePolicyRecoveryRunner(store:localStore,transport:transport).run()}
-                    group.addTask {
-                        try await V2MessageSendNetworkRecoveryRunner(store: localStore, accountID: actorUserID) {
-                            guard let session = await connection.messageSendSession(), session.accountID == actorUserID else { return false }
-                            try await authSession.requireAuthenticatedEpoch(authEpoch)
-                            return true
-                        }.run()
+                { try await V2RolePolicyRecoveryRunner(store: localStore, transport: transport).run() },
+                {
+                    try await V2MessageSendNetworkRecoveryRunner(store: localStore, accountID: actorUserID) {
+                        guard let session = await connection.messageSendSession(), session.accountID == actorUserID else { return false }
+                        try await authSession.requireAuthenticatedEpoch(authEpoch)
+                        return true
+                    }.run()
+                },
+                {
+                    let loop = UUID()
+                    await coverage.begin(loop)
+                    for await value in await connection.realtimeCoverageChanges() {
+                        guard !Task.isCancelled else { break }
+                        await coverage.receive(value, loop: loop, account: actorUserID)
                     }
-                    group.addTask {
-                        let loop = UUID()
-                        await coverage.begin(loop)
-                        for await value in await connection.realtimeCoverageChanges() {
-                            guard !Task.isCancelled else { break }
-                            await coverage.receive(value, loop: loop, account: actorUserID)
-                        }
-                        await coverage.end(loop)
+                    await coverage.end(loop)
+                },
+                {
+                    for try await policy in localStore.publicationPolicyUpdates() {
+                        try Task.checkCancellation()
+                        try await transport.setPresencePublicationMode(policy.allowsOnlinePresence ? .allowWhenAuthorized:.suppressed)
                     }
-                    group.addTask {
-                        for try await policy in localStore.publicationPolicyUpdates() {
-                            try Task.checkCancellation()
-                            try await transport.setPresencePublicationMode(policy.allowsOnlinePresence ? .allowWhenAuthorized:.suppressed)
-                        }
-                    }
-                    group.addTask { try await transport.runDeviceRoomProgressReports() }
-                    try await group.waitForAll()
-                }
-            }
+                },
+                { try await transport.runDeviceRoomProgressReports() }
+            ]
         )
         runtime = .init(connection: coordinator, activity: activity)
         self.projectionChangeNotifier = projectionChangeNotifier

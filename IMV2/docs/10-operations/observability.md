@@ -169,6 +169,33 @@ retained floor 删除的增量历史。独立 housekeeping 只在首方重试窗
 总 relation size 超过 10 GiB 且持续 30 分钟后触发，上线前必须按磁盘预算重新校准，禁止由
 sync-log compactor 跳过上述引用条件顺手删除。
 
+## 永久发送成功记录的容量与保留
+
+当前 schema80 的同一结果表同时保存成功、明确拒绝和显式关闭；本节总行数及存储指标包含三者。此前 schema78 的样本只插入成功结果，不能用其单行成本替代当前部署的混合结果基线。
+
+`message_send_completions` 与上述可轮转 operation ledger 分开管理。它保存发送成功事实，当前禁止覆盖和删除；房间消息正文、同步日志或客户端任务的保留期都不能作为该表的清理期限。容量不足时不能删除成功事实、关闭不可变触发器或把结果查询的 `unresolved` 当成已失败。
+
+Gateway 在配置的房间归属库 URL 去重后采集 `PostgresV2SendCompletionMetricsSource`，包括控制库；部署须避免同一物理库配置多个别名。指标汇总全部这些库，标签只有固定的存储组成，不含房间、用户或操作身份。`im_v2_send_completions_relation_bytes{component="heap"|"indexes"|"total"}` 分别表示主数据文件、索引及包含 TOAST/辅助文件的总大小；**total 已包含另外两项，不能三项相加**。它们来自关系大小查询，不读取消息行。函数口径见 [PostgreSQL 大小函数](https://www.postgresql.org/docs/16/functions-admin.html#FUNCTIONS-ADMIN-DBSIZE)。
+
+`im_v2_send_completions_estimated_rows` 是 `pg_class.reltuples` 的估算；任一归属库尚无估算时不输出该行数，并将 `im_v2_send_completions_estimate_available` 置为 `0`，容量字节仍可用。估算存在不代表实时或准确，见 [PostgreSQL pg_class](https://www.postgresql.org/docs/16/catalog-pg-class.html)。表缺失、类型变化或数据库失败会使整组 durable-work unavailable；缓存可继续呈现上次完整快照，并明确标记 last-known-good/age，不能把它当成当前增长证据。
+
+同一覆盖范围的多个 Gateway 都报告全局聚合值，告警用 `max`，不能跨副本求和。`IMV2SendCompletionStorageHigh` 模板在总量超过 10 GiB 持续 30 分钟时告警；这是待部署校准的初值，不是已批准容量或自动准入限制。全局合计也不能证明每个物理库仍有磁盘余量，运维需按库盘点、按存储卷保留恢复和索引维护空间。不同环境/覆盖范围的指标必须分开聚合。
+
+每日在固定时间对每个物理库运行[只读诊断 SQL](../../sql/diagnostics/operation-ledger-capacity.sql)，连接信息由 `PGSERVICE` 与受保护的 passfile 提供，不写入日志或命令参数中的 URL：
+
+```sh
+PGSERVICE=your-physical-owner psql -X -w -v ON_ERROR_STOP=1 \
+  -f IMV2/sql/diagnostics/operation-ledger-capacity.sql
+```
+
+诊断事务为 READ ONLY，单语句预算五秒。应返回发送、编辑和回应三种 ledger；缺项或命令失败时该次盘点不完整。保存观测时间、关系大小、插入计数、分析时间、数据库统计重置时间及部署/物理库标识。只有确认期间没有单表统计重置、恢复、迁移或重建，且计数单调时，才用 `插入计数差 / 实际间隔天数` 估算每日新增记录，用各类字节差观察增长；行数估算变化不能当成精确发送数。关系测量与累计统计不是同一时刻的业务快照。总字节也可能因索引重建而下降，不能由此证明成功事实已安全回收。
+
+SQL 另输出一次 `pg_stat_wal`。这是**整个 PostgreSQL 集群**的 WAL，不是单表或单库写入成本，同一集群的多个库不能重复相加。比较 WAL 计数必须保持同一集群、相同统计重置点且没有恢复/重置；统计有刷新延迟，崩溃恢复也可能重置，见 [PostgreSQL 累计统计](https://www.postgresql.org/docs/16/monitoring-stats.html)。实际预算应同时覆盖全部业务写入、复制、归档、备份及峰值。
+
+2026-11-01 的[隔离存储样本](../../../docs/verification/send-completion-capacity-20261101.json)使用 PostgreSQL 16.13、schema78 和 10,000 条合成成功记录。一次批量 INSERT 后，堆增加 2,564,096 字节、索引增加 933,888 字节，总量增加 3,522,560 字节；语句 WAL 为 4,270,780 字节，隔离集群 LSN 前进 4,293,424 字节。仅作线性示例，若每日新增一百万条且保持相同形态，总关系增长约 336 MiB/日、批量语句 WAL 约 407 MiB/日。该样本没有经过真实消息发送，未覆盖逐消息提交、其他业务表、生产索引填充、checkpoint 或复制，不能当作生产预测、吞吐或 SLO 验收。定向验证包括只读采集、未知估算、缺失归属库、聚合与告警持续时间；生产每日增长仍待现场记录。
+
+保留处置顺序为：按实际增长与批准预算设置预警 → 扩容或在已授权部署流程中限制新增写入 → 保留原身份恢复能力。任何归档/GC 方案必须先建立服务端强制的旧身份关闭边界，覆盖全部入口、迟到和在途提交；还要定义归档期间的结果查询、转发授权等依赖，证明正文删除后旧成功操作不会再次获准。当前没有这些证明，成功表继续永久保留，不能直接套用普通 ledger 的保留天数。
+
 ## 隐私与基数约束
 
 以下数据不得出现在此遥测边界的日志字段或指标标签中：room/user/device/message
@@ -213,6 +240,7 @@ loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/
 | `IMV2SnapshotBuildFailures` | failed artifact 大于 `0`，5 分钟 | warning | 按 failure code 调查尺寸/编码/存储，再确认过期清理 |
 | `IMV2ProjectionGCBacklog` | closed-version estimate 超过 1,000,000，30 分钟 | warning | 检查活跃 building baseline 和 GC cadence |
 | `IMV2SyncCompactionBacklog` | projected-retained 差值超过 10,000,000，30 分钟 | warning | 检查未过期 capability、低 cursor reset 与 compactor cadence |
+| `IMV2SendCompletionStorageHigh` | 发送成功表总关系大小超过 10 GiB，30 分钟（上线前按预算校准） | warning | 按物理库确认增长与磁盘余量，扩容或按部署流程限制新增写入；不得删除成功事实 |
 | `IMV2DeviceRevocationBacklog` | 任一 gateway 的未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 调查 worker、数据库与连接关闭；不得 replay 或忽略该事件 |
 | `IMV2RevokedDeviceProjectionCleanupBacklog` | 集群分片清理未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 检查 route fence、当前/fallback user store 与 tombstone 写入；不得手工推进 cursor |
 

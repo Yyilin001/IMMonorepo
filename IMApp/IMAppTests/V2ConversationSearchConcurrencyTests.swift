@@ -114,6 +114,30 @@ struct V2ConversationSearchConcurrencyTests {
         #expect(store.hits.map(\.messageID) == [expected.messageID])
     }
 
+    @Test("只按成员筛选会查询，并在索引就绪后自动刷新")
+    func senderOnlySearchRefreshesWhenIndexBecomesReady() async throws {
+        let expected = hit("member message")
+        let client = IndexStateSearchClient(hit: expected)
+        let store = V2ConversationSearchStore(searcher: client, scope: .room(expected.roomID))
+        store.filterToSender(expected.senderUserID)
+        await store.search()
+        #expect(store.state == .indexing)
+        let observer = Task { await store.observeIndexState() }
+        await client.waitForSubscription()
+        await client.makeReady()
+        await client.finishUpdates()
+        await observer.value
+        #expect(store.state == .loaded)
+        #expect(store.hits == [expected])
+        let request = try #require(await client.lastRequest)
+        #expect(request.query.isEmpty && request.contentFilter == .all)
+        #expect(request.senderUserID == expected.senderUserID)
+        #expect(request.scope == .room(expected.roomID))
+        store.clearSenderFilter()
+        await store.search()
+        #expect(store.state == .idle && store.hits.isEmpty)
+    }
+
     @Test("重复游标停止分页，不发布该页，也不再发相同请求")
     func stalledCursorStopsPagination() async throws {
         let first = hit("first"), inconsistent = hit("inconsistent page")
@@ -333,8 +357,10 @@ private actor IndexStateSearchClient: V2ConversationMessageSearching, V2Conversa
     private var ready = false
     private var continuation: AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error>.Continuation?
     private var subscriptionWaiter: CheckedContinuation<Void, Never>?
+    private(set) var lastRequest: V2MessageSearchRequest?
     init(hit: V2MessageSearchHit) { self.hit = hit }
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
+        lastRequest = request
         guard ready else { throw V2MessageSearchError.indexUnavailable(.building) }
         return .init(hits: [hit], nextCursor: nil)
     }

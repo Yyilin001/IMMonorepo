@@ -222,8 +222,10 @@ package struct V2PostgresSocialRelationshipPersistence: Sendable {
         try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), 'relationship', jsonb_build_object('target_user_id', \(bind: targetID)::text, 'state', \(bind: state.rawValue), 'requested_by_user_id', \(bind: requestedBy)::text, 'updated_at_ms', \(bind: updatedAtMilliseconds)), \(bind: now))").run()
     }
 
+    // This identifier belongs only to the blocker's own durable record. It is
+    // not a profile grant and is never published to the blocked user.
     private func appendBlockProjection(userID: UUID, sequence: Int64, targetID: UUID, isBlocked: Bool, sourceEventID: UUID, updatedAtMilliseconds: Int64, now: Date, sql: any SQLDatabase) async throws {
-        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), 'user_block', jsonb_build_object('target_user_id', \(bind: targetID)::text, 'is_blocked', \(bind: isBlocked), 'updated_at_ms', \(bind: updatedAtMilliseconds)), \(bind: now))").run()
+        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: userID), \(bind: sequence), \(bind: sourceEventID), 'user_block', jsonb_build_object('target_user_id', \(bind: targetID)::text, 'target_handle', (SELECT public_handle FROM im_v2.public_user_profiles WHERE user_id=\(bind: targetID)), 'is_blocked', \(bind: isBlocked), 'updated_at_ms', \(bind: updatedAtMilliseconds)), \(bind: now))").run()
     }
 
     /// 按 UUID 顺序预留每个用户的序号区间。

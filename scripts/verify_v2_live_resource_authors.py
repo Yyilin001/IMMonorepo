@@ -322,6 +322,11 @@ def main():
         for required in ('BUCKET', 'REGION', 'ACCESS_KEY_ID', 'ACCESS_KEY_SECRET'):
             if not os.environ.get('IM_V2_OSS_' + required):
                 parser.error('missing OSS runtime configuration: ' + required)
+        if os.environ.get('IM_V2_RESOURCE_SCANNER') != 'clamav':
+            parser.error('OSS native acceptance requires IM_V2_RESOURCE_SCANNER=clamav')
+        for required in ('CLAMSCAN_EXECUTABLE', 'CLAMAV_DATABASE_DIRECTORY'):
+            if not os.environ.get('IM_V2_RESOURCE_' + required, '').startswith('/'):
+                parser.error('missing absolute scanner path: IM_V2_RESOURCE_' + required)
     if args.nickname_directory_only and (args.slow_resource or args.extended_acceptance):
         parser.error('--nickname-directory-only cannot combine with other scenario modes')
     if sys.platform != 'darwin':
@@ -636,6 +641,9 @@ def main():
                     for config_key in list(shared):
                         if config_key.startswith('IM_V2_LOCAL_MEDIA_'): shared.pop(config_key)
                     shared.update(IM_V2_RESOURCE_MODE='enabled',
+                        IM_V2_RESOURCE_SCANNER='clamav',
+                        IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE=os.environ['IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE'],
+                        IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY=os.environ['IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY'],
                         IM_V2_RESOURCE_MAXIMUM_BYTES='268435456',
                         IM_V2_RESOURCE_WORK_DIRECTORY=str(private / 'resource-work'),
                         IM_V2_RESOURCE_PUBLIC_BASE_URL=base_url,

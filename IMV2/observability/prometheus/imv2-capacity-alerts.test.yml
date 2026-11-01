@@ -1,0 +1,34 @@
+rule_files:
+  - imv2-alerts.yml
+evaluation_interval: 1m
+tests:
+  - name: gateway replicas report the same global capacity
+    interval: 1m
+    input_series:
+      - series: 'im_v2_send_completions_relation_bytes{component="total",instance="gateway-a"}'
+        values: '6442450944+0x35'
+      - series: 'im_v2_send_completions_relation_bytes{component="total",instance="gateway-b"}'
+        values: '6442450944+0x35'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: IMV2SendCompletionStorageHigh
+        exp_alerts: []
+  - name: sustained capacity excess waits for the full hold period
+    interval: 1m
+    input_series:
+      - series: 'im_v2_send_completions_relation_bytes{component="total",instance="gateway-a"}'
+        values: '11811160064+0x35'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: IMV2SendCompletionStorageHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: IMV2SendCompletionStorageHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              owner: im-v2-platform-oncall
+              service: im-v2
+            exp_annotations:
+              summary: IM V2 permanent send-result storage exceeded 10 GiB
+              runbook: IMV2/docs/10-operations/observability.md

@@ -223,7 +223,7 @@ extension GRDBV2LocalSyncStore {
                 invitationRecoveryOnly = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_invitation_operation_intents WHERE work_id=? AND command IS NULL AND preparation_state='frozen')", arguments: [id.uuidString]) == true
             }
             let closeSensitiveAdmission = !work.submissionStarted
-                && [.moderation, .memberMute, .moderatedMemberRemoval, .membership, .groupRoom, .groupInvite, .groupJoinRequest, .groupJoinDecision, .relationship, .userBlock, .strangerMessagePreference, .userAddPreference, .readReceiptPreference, .liveActivityPreference, .pinnedMessage, .groupAnnouncement, .groupPermission, .groupRole].contains(work.identity.kind)
+                && [.moderation, .memberMute, .moderatedMemberRemoval, .membership, .groupRoom, .groupInvite, .groupJoinRequest, .groupJoinDecision, .relationship, .userBlock, .strangerMessagePreference, .userAddPreference, .readReceiptPreference, .liveActivityPreference, .pinnedMessage, .groupAnnouncement, .groupPermission, .groupRole, .groupOwnership, .groupDissolution].contains(work.identity.kind)
                 && (work.admissionDeadline.map { $0 <= now } ?? false)
             let action: V2OperationWorkAction = closeSensitiveAdmission || invitationRecoveryOnly ? .reconcile : action
             if !work.submissionStarted, !closeSensitiveAdmission, !invitationRecoveryOnly, let deadline = work.admissionDeadline, deadline <= now {

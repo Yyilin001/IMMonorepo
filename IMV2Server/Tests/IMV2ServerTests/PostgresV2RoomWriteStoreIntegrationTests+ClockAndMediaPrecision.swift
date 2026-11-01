@@ -211,7 +211,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let committed = try await snapshot()
             let completedLease = V2MediaScanLease(mediaID: media, claimToken: token, attempt: 1)
             for date in [Date(timeIntervalSince1970: .nan), Date(timeIntervalSince1970: .infinity), now.addingTimeInterval(60)] {
-                try await store.complete(completedLease, result: passed ? .failed : .passed, now: date)
+                await #expect(throws: V2MediaScanWorkerError.leaseLost) {
+                    try await store.complete(completedLease, result: passed ? .failed : .passed, now: date)
+                }
                 #expect(try await snapshot() == committed)
             }
         }
@@ -1737,7 +1739,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             let initial = try await snapshot()
-            try await apply(lease, at: now)
+            if !live && (action == "pass" || action == "fail") {
+                await #expect(throws: V2MediaScanWorkerError.leaseLost) { try await apply(lease, at: now) }
+            } else {
+                try await apply(lease, at: now)
+            }
             if live {
                 let expectedState = action == "pass" ? "available" : (action == "fail" ? "failed" : "scanning")
                 let expectedJob = action == "retry" ? "pending" : (action == "pause" ? "paused" : "completed")
@@ -1749,7 +1755,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(replacement.claimToken != lease.claimToken)
                 let reclaimed = try await snapshot()
                 // Even a formerly valid timestamp cannot authorize the replaced token.
-                try await apply(lease, at: baseline)
+                if action == "pass" || action == "fail" {
+                    await #expect(throws: V2MediaScanWorkerError.leaseLost) { try await apply(lease, at: baseline) }
+                } else {
+                    try await apply(lease, at: baseline)
+                }
                 #expect(try await snapshot() == reclaimed)
                 try await scans.complete(replacement, result: .passed, now: epoch.addingTimeInterval(2))
                 #expect(try await uploads.status(session: upload.sessionID, actor: senderUUID, device: device.uuidValue!).mediaState == "available")

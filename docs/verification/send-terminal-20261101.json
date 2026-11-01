@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-01",
+  "decision": "明确业务拒绝永久关闭旧消息编号；用户重发新编号。断线、超时和限流沿用原编号恢复。",
+  "protocol_version": 55,
+  "tested_schema_id": "im-v2-current-79",
+  "server": {
+    "tests": 12,
+    "suites": 4,
+    "seconds": 4.221,
+    "postgres_integration_methods": 5,
+    "result": "passed",
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/send-terminal-0d7fd59e/server.log"
+  },
+  "client": {
+    "tests": 4,
+    "suites": 2,
+    "seconds": 0.287,
+    "result": "passed",
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/send-terminal-client-20261101.log"
+  },
+  "schema_bootstrap": {
+    "result": "passed",
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/send-terminal-0d7fd59e/schema.log"
+  },
+  "race_evidence": "真实提交等待另一个事务插入的同一编号唯一键；关闭先提交后，原请求不能提交消息，恢复返回 closedUnsubmitted。",
+  "source_manifest": "build/reports/2026-11-01-feature-audit/repair-logs/send-terminal-0d7fd59e/source-manifest.json",
+  "tested_source_unchanged": true,
+  "owned_database_stopped_and_removed": true,
+  "log_sha256": {
+    "build/reports/2026-11-01-feature-audit/repair-logs/send-terminal-0d7fd59e/server.log": "c083f7f3c0d9b8cf68fbe4b1fab2237a1fa52e32094ed81107e4b040e80eea9c",
+    "build/reports/2026-11-01-feature-audit/repair-logs/send-terminal-0d7fd59e/schema.log": "94ecfc19f80694bf46138074fe8309cf3fe5b657eeb1cf1887476a776b7d65eb",
+    "build/reports/2026-11-01-feature-audit/repair-logs/send-terminal-client-20261101.log": "54d35e5752853966056e51f9ab4715693de44d4357f29dfcddb36a2c2cea4a92"
+  },
+  "limits": [
+    "未运行全量测试。此批证据对应 schema79；后续 J26 将新库 schema 升至80。",
+    "上线环境与容量验收仍独立开放。"
+  ],
+  "schema80_regression": {
+    "methods": 3,
+    "parameter_cases": 10,
+    "result": "passed",
+    "log": "build/reports/2026-11-01-feature-audit/repair-logs/group-lifecycle-6c6394a1/server.log",
+    "scope": "仅更新永久拒绝合同后的三个既有测试；原提交/关闭竞争证据对应schema79。"
+  }
+}

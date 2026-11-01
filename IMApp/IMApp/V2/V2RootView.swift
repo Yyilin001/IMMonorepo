@@ -324,6 +324,8 @@ struct V2SignInView: View {
                         TextField("显示名称", text: $displayName)
                             .accessibilityIdentifier("v2.identity.display-name")
                             .v2InputSurface()
+                        Text("请妥善保存密码。注册后可在“我的 → 账号安全”设置离线恢复码；密码和恢复码都丢失后，将无法找回账号。")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                     Button(mode == .register ? "注册" : "登录") {
                         guard canSubmitPasswordAction else {

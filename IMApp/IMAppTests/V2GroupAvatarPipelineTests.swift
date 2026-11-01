@@ -3,6 +3,7 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 import Testing
+import Synchronization
 import UIKit
 @testable import IMApp
 
@@ -32,13 +33,16 @@ struct V2GroupAvatarPipelineTests {
         let f = try await GroupPipelineFixture(seedCache: false)
         defer { try? FileManager.default.removeItem(at: f.root) }
         await f.reader.withholdFirstPlan()
-        await f.reader.shortenFirstLease(to: 0.15, refreshDelay: .milliseconds(300))
-        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let clock = Mutex(ContinuousClock.now)
+        await f.reader.shortenFirstLease(to: 1, beforeRefresh: { clock.withLock { $0 += .seconds(2) } })
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root])
+        let pipeline = f.pipeline(thumbnails, now: { clock.withLock { $0 } })
         let page = try await pipeline.groups.activate(roomID: f.presentation.state.roomID)
         _ = try await pipeline.groups.presentation(for: page)
         let original = try #require(try await pipeline.groups.authorizationDeadline(for: page))
         let snapshot = try await pipeline.groupSnapshot(activation: page, pixels: 16)
-        #expect(original <= .now && snapshot.deadline > .now)
+        let now = clock.withLock { $0 }
+        #expect(original <= now && snapshot.deadline > now)
         #expect(snapshot.image != nil && snapshot.avatarRetryAt == nil)
         #expect(snapshot.deadline <= (try await pipeline.groups.avatarReadGrant(for: page)?.deadline ?? original))
         #expect(await f.reader.calls == 2)
@@ -133,12 +137,12 @@ private struct GroupPipelineFixture {
             await seeded.release()
         } else { cachedFile = root.appendingPathComponent("not-seeded") }
     }
-    func pipeline(_ thumbnails: V2LocalMediaThumbnailCache) -> V2AvatarPipeline {
+    func pipeline(_ thumbnails: V2LocalMediaThumbnailCache, now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) -> V2AvatarPipeline {
         let groups = V2GroupAvatarPresentationRepository(actorUserID: presentation.actorUserID, deviceID: presentation.deviceID,
-            reader: reader, minimumRevision: { _ in 0 })
+            reader: reader, minimumRevision: { _ in 0 }, now: now)
         let profiles = V2ProfilePresentationRepository(actorUserID: presentation.actorUserID, deviceID: presentation.deviceID,
             reader: NoGroupByteIO())
-        return .init(profiles: profiles, groups: groups, files: files.downloader, thumbnails: thumbnails)
+        return .init(profiles: profiles, groups: groups, files: files.downloader, thumbnails: thumbnails, now: now)
     }
 }
 
@@ -147,16 +151,16 @@ private actor GroupPipelineReader: V2GroupAvatarPresentationReading {
     var calls = 0, denied = false
     private var omitFirstPlan = false
     private var firstLifetime: TimeInterval?
-    private var refreshDelay: Duration = .zero
-    func shortenFirstLease(to seconds: TimeInterval, refreshDelay: Duration) {
-        firstLifetime = seconds; self.refreshDelay = refreshDelay
+    private var beforeRefresh: @Sendable () -> Void = {}
+    func shortenFirstLease(to seconds: TimeInterval, beforeRefresh: @escaping @Sendable () -> Void) {
+        firstLifetime = seconds; self.beforeRefresh = beforeRefresh
     }
     func withholdFirstPlan() { omitFirstPlan = true }
     init(value: V2GroupAvatarPresentation) { self.value = value }
     func deny() { denied = true }
     func readGroupAvatar(roomID: RoomID) async throws -> V2GroupAvatarPresentation {
         calls += 1
-        if calls > 1 && refreshDelay > .zero { try await Task.sleep(for: refreshDelay) }
+        if calls > 1 { beforeRefresh() }
         if denied { throw V2GroupAvatarReadError.forbidden }
         if (calls == 1 && omitFirstPlan) || firstLifetime != nil {
             return try .init(actorUserID: value.actorUserID, deviceID: value.deviceID, state: value.state,
