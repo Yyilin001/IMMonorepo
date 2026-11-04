@@ -55,6 +55,8 @@ enum Schema {
         }
         guard try db.string("PRAGMA journal_mode=WAL") == "wal" else { throw SearchIndexError.unsupportedCapability("WAL") }
         try db.execute("PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=1000")
+        // 由可写连接先访问主库，建立新 WAL 库的共享内存，随后只读连接即可读取空索引。
+        _ = try db.integer("PRAGMA main.user_version")
         // 不依赖 compile_options 猜测能力：在实际链接的 SQLite 上执行位置匹配探针。
         try db.execute("CREATE VIRTUAL TABLE temp.capability_probe USING fts5(tokens,tokenize='ascii',detail=full)")
         defer { try? db.execute("DROP TABLE temp.capability_probe") }

@@ -1265,10 +1265,10 @@ extension V2LiveResourceAuthorTests {
             let searchStore = try GRDBV2LocalSyncStore(databaseURL: searchDirectory.appendingPathComponent("search.sqlite"),
                 installationBinding: .init(value: UUID()), userID: viewer.userID)
             _ = try await searchStore.applyGroupEventPage(history)
-            try await searchStore.prepareMessageSearchIndex()
-            while try await searchStore.processPendingMessageSearchIndexJobs() > 0 { try Task.checkCancellation() }
-            #expect(try await searchStore.searchMessages(.init(query: "Acceptance edited", scope: .room(room))).hits.map(\.messageID) == [sent.messageID])
-            #expect(try await searchStore.searchMessages(.init(query: "Acceptance original", scope: .room(room))).hits.isEmpty)
+            try await searchStore.messageSearch.prepareMessageSearchIndex()
+            while try await searchStore.messageSearch.processPendingMessageSearchIndexJobs() > 0 { try Task.checkCancellation() }
+            #expect(try await searchStore.messageSearch.searchMessages(.init(query: "Acceptance edited", scope: .room(room))).hits.map(\.messageID) == [sent.messageID])
+            #expect(try await searchStore.messageSearch.searchMessages(.init(query: "Acceptance original", scope: .room(room))).hits.isEmpty)
             let targetRoom = try await seedRoom(fixture, viewer: viewer.userID, author: author.userID)
             let forwarding = try V2HTTPForwardPlanOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
             let forward = try V2ForwardPlanOperationCommand(actorUserID: author.userID,
@@ -1294,8 +1294,8 @@ extension V2LiveResourceAuthorTests {
             let withdrawalPayloads = after.events.compactMap { try? JSONSerialization.jsonObject(with: $0.payload) as? [String: Any] }
             #expect(withdrawalPayloads.contains { $0["event_type"] as? String == "message.withdrawn" })
             _ = try await searchStore.applyGroupEventPage(after)
-            while try await searchStore.processPendingMessageSearchIndexJobs() > 0 { try Task.checkCancellation() }
-            #expect(try await searchStore.searchMessages(.init(query: "Acceptance edited", scope: .room(room))).hits.isEmpty)
+            while try await searchStore.messageSearch.processPendingMessageSearchIndexJobs() > 0 { try Task.checkCancellation() }
+            #expect(try await searchStore.messageSearch.searchMessages(.init(query: "Acceptance edited", scope: .room(room))).hits.isEmpty)
             try await searchStore.close()
             print("Live acceptance: real TLS history to SQLite search; edit removes old text and withdrawal removes search hit.")
             await reader.disconnect(); await socket.disconnect()

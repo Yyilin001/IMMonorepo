@@ -62,13 +62,17 @@ final class AdmissionGate: @unchecked Sendable {
 }
 
 /// 一个进程/实例独占本索引。锁文件保留，避免 unlink 后其他实例锁到不同 inode。
-final class StoreLease: Sendable {
+public final class SearchIndexWriteLease: Sendable {
     private let descriptor: Int32
-    init(path: String) throws {
-        let descriptor = Darwin.open(path + ".lock", O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    public init(path: String) throws {
+        guard !path.isEmpty, !path.utf8.contains(0) else { throw SearchIndexError.invalidArgument("invalid index path") }
+        let descriptor = Darwin.open(path + ".lock", O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else { throw SearchIndexError.invalidArgument("cannot create store lock") }
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            Darwin.close(descriptor); throw SearchIndexError.alreadyOpen
+            let code = errno
+            Darwin.close(descriptor)
+            if code == EWOULDBLOCK { throw SearchIndexError.alreadyOpen }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
         self.descriptor = descriptor
     }

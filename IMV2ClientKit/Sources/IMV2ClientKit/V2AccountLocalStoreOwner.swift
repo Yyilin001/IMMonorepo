@@ -62,7 +62,7 @@ public actor V2AccountLocalStoreOwner {
         if let current, current.scope == scope, current.readOnly { return current.store }
         if let current { try await current.store.close(); self.current = nil }
         let store = try GRDBV2LocalSyncStore(localReadOnlyDatabaseURL: permit.databaseURL,
-            installationBinding: permit.installationBinding, userID: permit.identity.userID)
+            installationBinding: permit.installationBinding, userID: permit.identity.userID, storageScope: scope)
         current = (scope, store, true)
         return store
     }
@@ -124,7 +124,7 @@ public actor V2AccountLocalStoreOwner {
         if let current { try await current.store.close(); self.current = nil }
         try prepareRootIfNeeded()
         let scope = try await catalog(for: accountID).openScope(accountID: accountID)
-        let store = try await bootstrapper.open(databaseURL: scope.database.primary, userID: accountID)
+        let store = try await bootstrapper.open(databaseURL: scope.database.primary, userID: accountID, storageScope: scope)
         current = (scope, store, false)
         return store
     }

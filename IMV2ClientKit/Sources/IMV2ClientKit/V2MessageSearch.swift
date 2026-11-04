@@ -43,15 +43,27 @@ public struct V2MessageSearchCursor: Equatable, Sendable {
 
     /// 存储层游标。
     let storage: Storage
-    /// 筛选条件指纹。
-    ///
-    /// 续页只在筛选集合完全一致时有效，否则用户切换成员或媒体类别后，
-    /// 客户端可能静默跳过或重复记录。
-    let filterFingerprint: String
+    /// 与查询结果成员身份有关的字段，逐项比较，避免字符串拼接歧义。
+    struct Context: Equatable, Sendable {
+        let storageIncarnation: UUID?
+        let instance: UUID
+        let generation: Int64
+        let scope: V2MessageSearchScope
+        let content: V2MessageSearchContentFilter
+        let sender: UserID?
+        let tokens: String
+    }
+
+    let context: Context
+    /// 首屏读事务中可见的最后一次索引提交。
+    let watermark: Int64
 }
 
 /// 消息搜索请求。
 public struct V2MessageSearchRequest: Equatable, Sendable {
+    public static let previewCharacterCount = 120
+    /// 列表可只请求首个命中片段内的高亮。
+    public let previewHighlights: Bool
     /// 查询文本。
     public let query: String
     /// 搜索范围。
@@ -80,8 +92,10 @@ public struct V2MessageSearchRequest: Equatable, Sendable {
         contentFilter: V2MessageSearchContentFilter = .all,
         senderUserID: UserID? = nil,
         limit: Int = 50,
-        cursor: V2MessageSearchCursor? = nil
+        cursor: V2MessageSearchCursor? = nil,
+        previewHighlights: Bool = false
     ) {
+        self.previewHighlights = previewHighlights
         self.query = query
         self.scope = scope
         self.contentFilter = contentFilter
@@ -235,6 +249,8 @@ public enum V2MessageSearchError: Error, Equatable, Sendable {
     case invalidPageSize
     /// 索引当前不可用，附带其状态。
     case indexUnavailable(V2MessageSearchIndexState)
-    /// 游标与本次搜索范围或筛选不匹配。
+    case closed
+    case readOnly
+    /// 游标属于别的实例、索引代次或筛选条件。
     case cursorDoesNotMatchScope
 }

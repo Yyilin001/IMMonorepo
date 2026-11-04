@@ -1589,7 +1589,7 @@ struct V2MessageSearchView: View {
         let contextStart = text.index(match.lowerBound, offsetBy: -12, limitedBy: text.startIndex) ?? text.startIndex
         let preceding = text[contextStart..<match.lowerBound]
         let start = preceding.lastIndex(where: \.isNewline).map { text.index(after: $0) } ?? contextStart
-        let end = text.index(match.lowerBound, offsetBy: 120, limitedBy: text.endIndex) ?? text.endIndex
+        let end = text.index(match.lowerBound, offsetBy: V2MessageSearchRequest.previewCharacterCount, limitedBy: text.endIndex) ?? text.endIndex
         let window = NSRange(start..<end, in: text)
         let excerpt = String(text[start..<end])
         var result = AttributedString(excerpt)

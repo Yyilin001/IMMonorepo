@@ -208,8 +208,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private var accountRuntime: V2AccountRuntime?
     @ObservationIgnored private var backgroundSync: V2BackgroundSyncRunner?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
-    @ObservationIgnored private var messageSearchIndexTask: Task<Void, Never>?
-    @ObservationIgnored private var messageSearchLocalStore: GRDBV2LocalSyncStore?
+    @ObservationIgnored private var authenticatedLocalStore: GRDBV2LocalSyncStore?
     @ObservationIgnored private var realtimeAttemptGate = V2RealtimeAttemptGate()
     @ObservationIgnored private var authenticationAttemptGate = V2AuthenticationAttemptGate()
     @ObservationIgnored private var signOutAttemptGate = V2SignOutAttemptGate()
@@ -276,7 +275,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             groupInvitationStore = nil
             realtimeRuntime = nil; realtimeCoverage = nil
             realtimeTask = nil
-            messageSearchIndexTask = nil
             return
         }
         if let dependencies = localRestorationDependencies {
@@ -291,7 +289,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             conversationStore = nil; contactsStore = nil; privacySettingsStore = nil
             userBlockSettingsStore = nil; publicIdentitySettingsStore = nil; pushWakeSettingsStore = nil
             deviceSessionsStore = nil; groupInvitationStore = nil
-            realtimeRuntime = nil; realtimeCoverage = nil; realtimeTask = nil; messageSearchIndexTask = nil
+            realtimeRuntime = nil; realtimeCoverage = nil; realtimeTask = nil
             return
         }
         do {
@@ -361,7 +359,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             groupInvitationStore = nil
             realtimeRuntime = nil; realtimeCoverage = nil
             realtimeTask = nil
-            messageSearchIndexTask = nil
         } catch {
             configuration = nil
             authSession = nil
@@ -860,8 +857,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let oldAvatarPipeline = avatarPipeline
         avatarPipeline = nil
         mediaThumbnailCache = nil
-        let indexer = messageSearchIndexTask
-        let localStore = messageSearchLocalStore
+        let localStore = authenticatedLocalStore
         let pushSettings = pushWakeSettingsStore
         let closingDownloader = mediaCacheDownloader
         let closingUploader = accountAttachmentUploader
@@ -873,9 +869,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         resourceManagement = nil
         accountAttachmentUploader = nil
         accountAttachmentStager = nil
-        indexer?.cancel()
-        messageSearchIndexTask = nil
-        messageSearchLocalStore = nil
+        authenticatedLocalStore = nil
         // Hide account-owned views before awaits; their late results cannot
         // be presented in the next account's view hierarchy.
         route = .launching
@@ -888,6 +882,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let closingDeviceSessions = deviceSessionsStore
         deviceSessionsStore = nil
         groupInvitationStore = nil
+        await localStore?.messageSearch.close()
+        await closingOfflineStore?.messageSearch.close()
         await closingDeviceSessions?.close()
         await closingProfiles?.close()
         await oldAvatarPipeline?.close()
@@ -898,7 +894,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         await closingBackgroundSync?.stop()
         await closingAccountRuntime?.suspendRealtime()
         await closingRealtimeRuntime?.stop()
-        await indexer?.value
         do {
             // The account database and unknown operation journal survive sign-out.
             // Keep canonical originals and recovery facts. Importers must drain
@@ -1310,7 +1305,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             deviceSessionsStore = deviceSessions
             groupInvitationStore = groupInvitations
             self.makeGroupAvatarManagement = makeGroupAvatarManagement
-            messageSearchLocalStore = localStore
+            authenticatedLocalStore = localStore
             accountAccessMode = .authenticated
             route = .signedIn(userID: userID.rawValue)
             authenticationObserver.start(session: authSession, epoch: authEpoch) { [weak self] change in
@@ -1366,7 +1361,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             recordAccountWorkSnapshot(localStore: localStore, owner: realtime.accountRuntime)
             guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true,
                   accountAttachmentUploader === realtime.attachmentUploader, isApplicationActive else { return }
-            startMessageSearchIndexing(localStore: localStore)
+            await localStore.messageSearch.startIndexing()
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true,
+                  accountAttachmentUploader === realtime.attachmentUploader, isApplicationActive else { return }
             await conversations.refresh()
             guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
             await realtime.accountRuntime.startActivity(id: "activatePushWake") {
@@ -1408,8 +1405,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         deviceRevocationObservation?.cancel()
         registrationCancellationTask?.cancel()
         registrationCancellationObservation?.cancel()
-        messageSearchIndexTask?.cancel()
-        messageSearchIndexTask = nil
+        await authenticatedLocalStore?.messageSearch.stopIndexing()
+        guard !isApplicationActive else { return }
         await stopRealtime()
     }
 
@@ -1438,10 +1435,12 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
               let realtimeRuntime,
               let conversationStore
         else { return }
-        if let messageSearchLocalStore {
-            startMessageSearchIndexing(localStore: messageSearchLocalStore)
-        }
         let activationGeneration = authenticationAttemptGate.generation
+        if let authenticatedLocalStore {
+            await authenticatedLocalStore.messageSearch.startIndexing()
+            guard isApplicationActive, authenticationAttemptGate.matchesCurrentGeneration(activationGeneration),
+                  self.authenticatedLocalStore === authenticatedLocalStore else { return }
+        }
         await conversationStore.refresh()
         guard isApplicationActive, authenticationAttemptGate.matchesCurrentGeneration(activationGeneration) else { return }
         await pushWakeSettingsStore?.activate()
@@ -1648,20 +1647,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                       self.authenticationAttemptGate.matchesCurrentGeneration(generation),
                       self.accountAccessMode == .authenticated else { return }
                 Logger(subsystem: "IMApp", category: "AccountWorkDiagnostics").debug("Work snapshot unavailable")
-            }
-        }
-    }
-
-    private func startMessageSearchIndexing(localStore: GRDBV2LocalSyncStore) {
-        messageSearchIndexTask?.cancel()
-        messageSearchIndexTask = Task { [localStore] in
-            do {
-                try await localStore.runMessageSearchIndexer()
-            } catch is CancellationError {
-                return
-            } catch {
-                // The search UI reports persistent state. A derived-index
-                // failure must never interrupt authenticated messaging.
             }
         }
     }

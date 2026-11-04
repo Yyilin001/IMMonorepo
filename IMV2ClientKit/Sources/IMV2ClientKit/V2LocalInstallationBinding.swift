@@ -177,7 +177,11 @@ public actor V2LocalStoreBootstrapper {
     ///
     /// 无绑定时先清理数据库文件再保存新标记；损坏或永久失效时先删除绑定再重建。
     /// 数据库绑定不匹配时使用同一设备标记清理重开一次，第二次失败直接传播，不无限重建。
-    public func open(databaseURL: URL, userID: UserID? = nil) async throws -> GRDBV2LocalSyncStore {
+    public func open(databaseURL: URL, userID: UserID? = nil, storageScope: V2AccountStorageScope? = nil) async throws -> GRDBV2LocalSyncStore {
+        if let storageScope {
+            guard storageScope.accountID == userID, storageScope.database.primary.standardizedFileURL == databaseURL.standardizedFileURL
+            else { throw V2AccountStorageError.scopeMismatch }
+        }
         var binding: V2LocalInstallationBinding
         do {
             if let existing = try await bindingStore.load() {
@@ -205,13 +209,13 @@ public actor V2LocalStoreBootstrapper {
         }
 
         do {
-            return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding, userID: userID)
+            return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding, userID: userID, storageScope: storageScope)
         } catch V2ClientLocalStorageError.installationBindingMismatch {
             // Existing device anchor plus a non-matching database is an import
             // or restore, not a migratable cache. Recreate once with the same
             // device anchor; a second failure is surfaced to the caller.
             try eraseDatabaseArtifacts(at: databaseURL)
-            return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding, userID: userID)
+            return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding, userID: userID, storageScope: storageScope)
         }
     }
 

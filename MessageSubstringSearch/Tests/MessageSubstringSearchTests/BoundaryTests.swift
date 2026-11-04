@@ -5,6 +5,7 @@ import Testing
 @Test func invalidConfigurationCannotOverflowQueryBudgetOrTruncatePath() async throws {
     var config = SearchConfiguration(path: "invalid\0path", scopeID: "a", sourceEpoch: "1")
     await #expect(throws: SearchIndexError.self) { try await SearchIndex.open(config) }
+    #expect(throws: SearchIndexError.self) { try SearchIndexWriteLease(path: config.path) }
     config.path = "/tmp/unused-search-index.sqlite"
     config.maximumQueryCharacters = .max; config.chunkCharacters = .max
     await #expect(throws: SearchIndexError.self) { try await SearchIndex.open(config) }

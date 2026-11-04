@@ -37,9 +37,9 @@ struct V2LocalSchemaContractTests {
         }
         let primaryFingerprint = try schemaFingerprint(in: primary)
         // One canonical baseline includes durable account-local display facts.
-        #expect(primaryFingerprint == 0x3b50fc2200c895b6)
-        #expect(try schemaObjectCount(in: search) == 5)
-        #expect(try schemaFingerprint(in: search) == 0xeddb_d300_a26a_f2ba)
+        #expect(primaryFingerprint == 0x3c3f_f48c_6904_1c62)
+        #expect(try schemaObjectCount(in: search) == 6)
+        #expect(try schemaFingerprint(in: search) == 0xc865_0994_a5ba_24a3)
 
         #expect(try schemaObjectExists(named: "v2_message_char_fts", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_message_char_fts", in: search))

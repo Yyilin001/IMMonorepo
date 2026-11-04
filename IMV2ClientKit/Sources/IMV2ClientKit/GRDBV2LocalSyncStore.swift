@@ -104,11 +104,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     /// 搜索使用刻意独立可写的派生数据库。
     ///
     /// 这样可以避免全文检索维护与 `databasePool` 中的权威同步投影写入相互争用。
-    let messageSearchDatabasePool: DatabasePool
+    public nonisolated let messageSearch: V2MessageSearchService
+    let messageSearchDatabasePool: DatabasePool?
     let databaseURL: URL
     let messageSearchDatabaseURL: URL
 
-    init(databaseURL: URL, installationBinding: V2LocalInstallationBinding, userID: UserID? = nil) throws {
+    init(databaseURL: URL, installationBinding: V2LocalInstallationBinding, userID: UserID? = nil, storageScope: V2AccountStorageScope? = nil) throws {
         self.databaseURL = databaseURL
         let directory = databaseURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -127,19 +128,25 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             try databasePool.write { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
             try Self.migrator.migrate(databasePool)
             try databasePool.read { try Self.validateCurrentResourceSchema($0) }
-            let searchPool = try DatabasePool(path: messageSearchDatabaseURL.path, configuration: configuration)
-            openedSearchPool = searchPool
-            try searchPool.write { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
-            try Self.messageSearchMigrator.migrate(searchPool)
             try databasePool.write { db in
                 try Self.establishInstallationBinding(installationBinding, userID: userID, db: db)
+                // 待建索引任务只是一种派生状态；直接从消息重建，不迁移旧任务。
+                if try !db.columns(in: "v2_message_search_jobs").contains(where: { $0.name == "job_id" }) {
+                    try db.execute(sql: "DROP TABLE v2_message_search_jobs")
+                    try db.execute(sql: Self.searchJobsSchema)
+                    try Self.invalidateSearch(db)
+                }
             }
+            let searchPool = try Self.openSearchDatabase(url: messageSearchDatabaseURL, primary: databasePool, configuration: configuration)
+            openedSearchPool = searchPool
             try Self.applyBackupExclusion(databaseURL: databaseURL)
             try Self.applyBackupExclusion(databaseURL: messageSearchDatabaseURL)
             messageSearchDatabasePool = searchPool
+            messageSearch = try V2MessageSearchService(primary: databasePool, search: searchPool, writable: true, scope: storageScope)
             let hub = projectionChangeHub
             try databasePool.write { db in
                 db.add(transactionObserver: V2ProjectionTransactionObserver(hub: hub), extent: .databaseLifetime)
+                db.add(transactionObserver: V2SearchCommitObserver(path: databaseURL.path), extent: .databaseLifetime)
             }
         } catch {
             // Bootstrap may erase an untrusted installation after this throws.
@@ -152,7 +159,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
 
     /// Opens only an existing, previously bound database. No migration, repair,
     /// search indexing, directory creation, binding write or presentation lease restoration.
-    init(localReadOnlyDatabaseURL databaseURL: URL, installationBinding: V2LocalInstallationBinding, userID: UserID) throws {
+    init(localReadOnlyDatabaseURL databaseURL: URL, installationBinding: V2LocalInstallationBinding, userID: UserID, storageScope: V2AccountStorageScope? = nil) throws {
         self.databaseURL = databaseURL
         messageSearchDatabaseURL = V2LocalDatabaseArtifacts(primary: databaseURL).search
         var configuration = Configuration()
@@ -167,12 +174,19 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                 }
                 try Self.validateCurrentResourceSchema(db)
             }
-            // The required stored property remains read-only too. If no derived search
-            // file exists, it points at the primary file; offline UI does not run search.
-            let searchURL = FileManager.default.fileExists(atPath: messageSearchDatabaseURL.path)
-                ? messageSearchDatabaseURL : databaseURL
-            messageSearchDatabasePool = try DatabasePool(path: searchURL.path, configuration: configuration)
+            // 离线授权只打开就绪且版本和代次匹配的派生库；缺失或损坏时仍可读取账号消息。
+            var search: DatabasePool?
+            if try primary.read({ try Self.readMessageSearchIndexState(db: $0) == .ready }),
+               FileManager.default.fileExists(atPath: messageSearchDatabaseURL.path),
+               let existing = try? DatabasePool(path: messageSearchDatabaseURL.path, configuration: configuration) {
+                let generation = try primary.read { try Self.messageSearchIndexGeneration(db: $0) }
+                if (try? existing.read { try Self.searchPublicationMatches($0, generation: generation) }) == true {
+                    search = existing
+                } else { try existing.close() }
+            }
+            messageSearchDatabasePool = search
             databasePool = primary
+            messageSearch = try V2MessageSearchService(primary: primary, search: search, writable: false, scope: storageScope)
         } catch { try? primary.close(); throw error }
     }
 
@@ -182,10 +196,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     /// 包括仍持有该存储的滞后工作；任何错误都必须阻止调用方删除数据库文件。
     deinit { projectionChangeHub.finish() }
 
-    public func close() throws {
+    public func close() async throws {
+        await messageSearch.close()
         try databasePool.close()
         projectionChangeHub.finish()
-        try messageSearchDatabasePool.close()
+        try messageSearchDatabasePool?.close()
     }
 
     /// 在数据库重新打开后重申并校验「仅本机、不参与设备备份」策略。
@@ -5044,13 +5059,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
 
 
 
-    enum V2MessageSearchRebuildOutcome {
-        case advanced(Int64)
-        case finished
-        case restartRequired
-    }
-
-
     private static let migrator: DatabaseMigrator = {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("createCurrentV2Schema") { db in
@@ -5086,29 +5094,38 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         return migrator
     }()
 
+    static let searchDatabaseSchema = """
+            CREATE TABLE v2_search_documents (
+                message_id TEXT PRIMARY KEY,
+                message_revision INTEGER NOT NULL CHECK (message_revision > 0),
+                generation INTEGER NOT NULL CHECK (generation > 0),
+                room_id TEXT NOT NULL,
+                room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),
+                sender_user_id TEXT NOT NULL,
+                indexed_commit INTEGER NOT NULL CHECK (indexed_commit > 0),
+                job_id TEXT,
+                media_presentations TEXT NOT NULL,
+                server_created_at REAL NOT NULL
+            );
+            CREATE INDEX v2_search_documents_room_order_idx
+                ON v2_search_documents (room_id, room_sequence DESC, message_id DESC);
+            CREATE INDEX v2_search_documents_global_order_idx
+                ON v2_search_documents (server_created_at DESC, message_id DESC);
+            CREATE INDEX v2_search_documents_sender_order_idx
+                ON v2_search_documents (sender_user_id, server_created_at DESC, message_id DESC);
+            CREATE TABLE v2_search_publication (
+                singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+                generation INTEGER NOT NULL CHECK (generation>0),
+                commit_sequence INTEGER NOT NULL CHECK (typeof(commit_sequence)='integer' AND commit_sequence>=0)
+            );
+            INSERT INTO v2_search_publication VALUES (1,1,0);
+            \(messageFTSSchema);
+        """
+
     static let messageSearchMigrator: DatabaseMigrator = {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("createCurrentV2MessageSearchSchema") { db in
-            try db.execute(sql: """
-                CREATE TABLE v2_search_documents (
-                    message_id TEXT PRIMARY KEY,
-                    message_revision INTEGER NOT NULL CHECK (message_revision > 0),
-                    generation INTEGER NOT NULL CHECK (generation > 0),
-                    room_id TEXT NOT NULL,
-                    room_sequence INTEGER NOT NULL CHECK (room_sequence > 0),
-                    sender_user_id TEXT NOT NULL,
-                    text_body TEXT NOT NULL,
-                    media_presentations TEXT NOT NULL,
-                    server_created_at REAL NOT NULL
-                );
-                CREATE INDEX v2_search_documents_room_order_idx
-                    ON v2_search_documents (room_id, room_sequence DESC, message_id DESC);
-                CREATE INDEX v2_search_documents_global_order_idx
-                    ON v2_search_documents (server_created_at DESC, message_id DESC);
-                CREATE INDEX v2_search_documents_sender_order_idx
-                    ON v2_search_documents (sender_user_id, server_created_at DESC, message_id DESC);
-                \(messageFTSSchema);
-            """)
+            try db.execute(sql: searchDatabaseSchema)
         }
         return migrator
     }()

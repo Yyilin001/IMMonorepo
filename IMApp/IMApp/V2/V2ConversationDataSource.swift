@@ -295,7 +295,7 @@ actor V2GRDBConversationDataSource: V2GroupDirectoryReading, V2DiscoveredConvers
     }
 
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
-        try await localStore.searchMessages(request)
+        try await localStore.messageSearch.searchMessages(request)
     }
 
     func searchConversationContext(roomID: RoomID) async throws -> V2ClientConversationLookupContext? {
@@ -303,11 +303,11 @@ actor V2GRDBConversationDataSource: V2GroupDirectoryReading, V2DiscoveredConvers
     }
 
     func messageSearchIndexUpdates() async -> AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error> {
-        localStore.messageSearchIndexUpdates()
+        await localStore.messageSearch.messageSearchIndexUpdates()
     }
 
     func messageSearchIndexProgress() async throws -> V2MessageSearchIndexProgress {
-        try await localStore.messageSearchIndexProgress()
+        try await localStore.messageSearch.messageSearchIndexProgress()
     }
 
     func favoriteMessages(

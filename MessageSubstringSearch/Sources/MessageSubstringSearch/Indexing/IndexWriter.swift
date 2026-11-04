@@ -16,7 +16,7 @@ actor IndexWriter {
     nonisolated var unownedExecutor: UnownedSerialExecutor { executor.asUnownedSerialExecutor() }
     let configuration: SearchConfiguration
     private var database: SQLiteConnection?
-    private var lease: StoreLease?
+    private var lease: SearchIndexWriteLease?
     private var pump: Task<Void, Never>?
     private var metrics = IndexMetrics()
     private var fault: (@Sendable (FaultPoint) throws -> Void)?
@@ -24,7 +24,7 @@ actor IndexWriter {
     private var db: SQLiteConnection { get throws { guard let database else { throw SearchIndexError.closed }; return database } }
 
     func initialize() throws -> SQLiteCapabilities {
-        let lease = try StoreLease(path: configuration.path)
+        let lease = try SearchIndexWriteLease(path: configuration.path)
         let database = try SQLiteConnection(path: configuration.path, cacheCapacity: configuration.statementCacheCapacity)
         try Schema.open(database, configuration: configuration)
         self.lease = lease; self.database = database

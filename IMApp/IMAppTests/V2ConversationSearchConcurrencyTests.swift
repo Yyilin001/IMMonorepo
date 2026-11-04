@@ -159,7 +159,7 @@ struct V2ConversationSearchConcurrencyTests {
         await store.search()
         let loading = Task { await store.loadMore() }
         await client.waitForPage()
-        let original = V2MessageSearchCursor(storage: .global(createdAt: first.createdAt, messageID: first.messageID), filterFingerprint: "query")
+        let original = V2MessageSearchCursor(storage: .global(createdAt: first.createdAt, messageID: first.messageID), context: testSearchContext("query"), watermark: 1)
         await client.finishPage(.init(hits: [inconsistent], nextCursor: original))
         await loading.value
         #expect(store.state == .loaded)
@@ -303,7 +303,7 @@ private actor SearchPageBarrier: V2ConversationMessageSearching, V2ConversationM
     init(first: V2MessageSearchHit) { self.first = first }
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
         guard request.cursor != nil else {
-            let cursor = V2MessageSearchCursor(storage: .global(createdAt: first.createdAt, messageID: first.messageID), filterFingerprint: request.query)
+            let cursor = V2MessageSearchCursor(storage: .global(createdAt: first.createdAt, messageID: first.messageID), context: testSearchContext(request.query), watermark: 1)
             return .init(hits: [first], nextCursor: cursor)
         }
         pageCalls += 1
@@ -396,4 +396,9 @@ private actor IndexStateSearchClient: V2ConversationMessageSearching, V2Conversa
         continuation?.yield(.init(state: .ready, generation: 1, indexVersion: 1))
     }
     func finishUpdates() { continuation?.finish() }
+}
+
+private func testSearchContext(_ query: String) -> V2MessageSearchCursor.Context {
+    .init(storageIncarnation: nil, instance: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, generation: 1,
+          scope: .allMessages, content: .all, sender: nil, tokens: query)
 }

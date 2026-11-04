@@ -144,6 +144,8 @@ final class SQLiteConnection {
         catch { try? execute("ROLLBACK"); throw error }
     }
     func controlled<T>(_ control: OperationControl, _ body: () throws -> T) throws -> T {
+        // 同一快照和操作可同时用于首屏候选与正文。外层负责恢复 SQLite 的进度回调。
+        if self.control === control { try control.check(); return try body() }
         guard let handle else { throw SearchIndexError.closed }
         self.control = control
         let pointer = Unmanaged.passUnretained(control).toOpaque()

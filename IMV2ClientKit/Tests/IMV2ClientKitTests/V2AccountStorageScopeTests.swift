@@ -22,7 +22,7 @@ struct V2AccountStorageScopeTests {
         let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let scope = try await catalog.openScope(accountID: .init("account-a"))
         let store = try GRDBV2LocalSyncStore(databaseURL: scope.database.primary, installationBinding: .init(value: UUID()))
-        try await store.messageSearchDatabasePool.write { db in
+        try await #require(store.messageSearchDatabasePool).write { db in
             try db.execute(sql: "CREATE TABLE erase_probe (body TEXT)")
             try db.execute(sql: "INSERT INTO erase_probe VALUES ('old private body')")
         }
@@ -38,7 +38,7 @@ struct V2AccountStorageScopeTests {
         #expect(!FileManager.default.fileExists(atPath: scope.backgroundDirectory.path))
         await #expect(throws: DatabaseError.self) { _ = try await store.cursor() }
         await #expect(throws: DatabaseError.self) {
-            try await store.messageSearchDatabasePool.write { db in try db.execute(sql: "INSERT INTO erase_probe VALUES ('late old write')") }
+            try await #require(store.messageSearchDatabasePool).write { db in try db.execute(sql: "INSERT INTO erase_probe VALUES ('late old write')") }
         }
         #expect(!FileManager.default.fileExists(atPath: scope.directory.path))
     }
@@ -50,22 +50,19 @@ struct V2AccountStorageScopeTests {
         let catalog = V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes"))
         let scope = try await catalog.openScope(accountID: .init("account-a"))
         let store = try GRDBV2LocalSyncStore(databaseURL: scope.database.primary, installationBinding: .init(value: UUID()))
-        let updates = store.messageSearchIndexUpdates()
+        let updates = await store.messageSearch.messageSearchIndexUpdates()
         let observer = Task {
             for try await _ in updates { try Task.checkCancellation() }
         }
-        let indexer = Task { try await store.runMessageSearchIndexer() }
-        var iterator = store.messageSearchIndexUpdates().makeAsyncIterator()
+        await store.messageSearch.startIndexing()
+        var iterator = await store.messageSearch.messageSearchIndexUpdates().makeAsyncIterator()
         while let snapshot = try await iterator.next(), snapshot.state != .ready {}
         try await catalog.retire(scope)
-        indexer.cancel()
-        observer.cancel()
-        _ = await indexer.result
-        _ = await observer.result
         try await catalog.completeCleanup(scope) { try await store.close() }
+        _ = await observer.result
         try await catalog.completeCleanup(scope) { Issue.record("completed cleanup must not close again") }
         #expect(!FileManager.default.fileExists(atPath: scope.directory.path))
-        await #expect(throws: DatabaseError.self) { try await store.prepareMessageSearchIndex() }
+        await #expect(throws: V2MessageSearchError.closed) { try await store.messageSearch.prepareMessageSearchIndex() }
     }
 
     @Test("failed close retains the marker and files until process restart")

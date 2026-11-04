@@ -78,30 +78,43 @@ enum CharacterTokenizer {
         return TokenizedText(tokens: tokens, ranges: ranges, sourceBytes: sourceBytes)
     }
 
-    static func matchingRanges(in text: TokenizedText, query: [String], maximum: Int = 100,
-                               check: () throws -> Void) throws -> [TextRange] {
-        guard !query.isEmpty, text.tokens.count >= query.count else { return [] }
-        // KMP 保证长重复文本和高频查询的高亮匹配不退化成 O(n*m)。
-        var failure = Array(repeating: 0, count: query.count), j = 0
-        if query.count > 1 {
-            for i in 1..<query.count {
-                while j > 0 && query[i] != query[j] { j = failure[j - 1] }
-                if query[i] == query[j] { j += 1 }
-                failure[i] = j
-            }
+}
+
+/// KMP 的失败表只取决于查询。整页文档共用此值，每个字段单独保存匹配进度。
+struct TokenPattern: Sendable {
+    let tokens: [String]
+    private let failure: [Int]
+
+    init(_ tokens: [String]) {
+        self.tokens = tokens
+        var table = Array(repeating: 0, count: tokens.count)
+        var matched = 0
+        for index in tokens.indices.dropFirst() {
+            while matched > 0 && tokens[index] != tokens[matched] { matched = table[matched - 1] }
+            if tokens[index] == tokens[matched] { matched += 1 }
+            table[index] = matched
         }
-        j = 0
-        var results: [TextRange] = []
+        failure = table
+    }
+
+    func consume(_ token: String, matched: inout Int) -> Bool {
+        while matched > 0 && token != tokens[matched] { matched = failure[matched - 1] }
+        if token == tokens[matched] { matched += 1 }
+        guard matched == tokens.count else { return false }
+        matched = failure[matched - 1]
+        return true
+    }
+
+    func ranges(in text: TokenizedText, check: () throws -> Void) throws -> [TextRange] {
+        guard !tokens.isEmpty, text.tokens.count >= tokens.count else { return [] }
+        var matched = 0, results: [TextRange] = []
         for i in text.tokens.indices {
             if i.isMultiple(of: 128) { try check() }
-            while j > 0 && text.tokens[i] != query[j] { j = failure[j - 1] }
-            if text.tokens[i] == query[j] { j += 1 }
-            if j == query.count {
-                let first = text.ranges[i - j + 1], last = text.ranges[i]
+            if consume(text.tokens[i], matched: &matched) {
+                let first = text.ranges[i - tokens.count + 1], last = text.ranges[i]
                 let match = TextRange(location: first.location, length: last.location + last.length - first.location)
                 if results.last != match { results.append(match) }
-                if results.count == maximum { break }
-                j = failure[j - 1]
+                if results.count == 100 { break }
             }
         }
         return results

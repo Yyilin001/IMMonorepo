@@ -192,3 +192,71 @@ func ids(_ index: SearchIndex, _ text: String, group: String? = nil) async throw
     let pair = try SubstringSearchText("\r\n")
     #expect(try pair.matchingRanges(in: "a\r\nb") == [.init(location: 1, length: 2)])
 }
+
+@Test func previewMatchesTheVisiblePartOfFullUnicodeResults() throws {
+    let complex = "👩🏽‍💻㍻Ｆｆﬃㅂㅏ\r\n"
+    for prefix in [0, 157, 158, 159, 160, 161, 318, 319] {
+        let text = String(repeating: "x", count: prefix) + String(repeating: complex, count: 90)
+        for needle in ["f", "ff", "ffi", "바", "平成", "👩🏽‍💻", "\r\n", "x👩🏽‍💻", "x" + complex, String(repeating: "x", count: 200)] {
+            let pattern = try SubstringSearchText(needle)
+            let full = try pattern.matchingRanges(in: text)
+            for width in [1, 8, 120] {
+                let expected = full.prefix { range in
+                    guard let first = full.first else { return false }
+                    let start = String.Index(utf16Offset: first.location, in: text)
+                    let end = text.index(start, offsetBy: width, limitedBy: text.endIndex) ?? text.endIndex
+                    return range.location < end.utf16Offset(in: text)
+                }
+                #expect(try pattern.previewRanges(in: text, characterCount: width) == Array(expected))
+            }
+        }
+    }
+}
+
+@Test func lazyPagesKeepOriginalCapAcrossEditsAndBackdatedInsertions() async throws {
+    try await withIndex(configure: { $0.maximumResults = 6 }) { index in
+        try await insert(index, (1...9).map { document(String($0), "match", time: Int64($0 / 2)) })
+        let request = SearchRequest("match", pageSize: 2)
+        let first = try await index.search(request)
+        #expect(first.hits.map { $0.document.id } == ["9", "8"])
+        #expect(first.resultsTruncated)
+        let cursor = try #require(first.nextCursor)
+        try await insert(index, [document("new", "match", time: 2), document("7", "match", version: 2, time: 2)])
+        _ = try await index.enqueue([.init(eventID: "remove", operation: .delete(documentID: "5", version: 2))])
+        _ = try await index.processPending()
+        let next = try await index.search(request, after: cursor)
+        #expect(next.hits.map { $0.document.id } == ["6", "4"])
+        #expect(next.nextCursor == nil)
+        #expect(next.resultsTruncated)
+        #expect(try await index.search(request, after: cursor).hits.map { $0.document.id } == ["6", "4"])
+    }
+}
+
+@Test func firstSearchOnEmptyStoreHasNoContinuation() async throws {
+    try await withIndex { index in
+        let page = try await index.search(.init("词"))
+        #expect(page.hits.isEmpty)
+        #expect(page.nextCursor == nil)
+        #expect(!page.resultsTruncated)
+    }
+}
+
+@Test func idleSnapshotReleasesWALWithoutAnotherSearch() async throws {
+    try await withIndex(configure: { $0.snapshotLifetimeSeconds = 0.1 }) { index in
+        try await insert(index, (1...8).map { document(String($0), "match") })
+        let request = SearchRequest("match", pageSize: 1)
+        let first = try await index.search(request)
+        let cursor = try #require(first.nextCursor)
+        try await insert(index, [document("new", "match")])
+        let checker = try SQLiteConnection(path: index.configuration.path)
+        defer { try? checker.close() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        var busy = try checker.integer("PRAGMA wal_checkpoint(TRUNCATE)")
+        while busy != 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+            busy = try checker.integer("PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+        #expect(busy == 0)
+        await #expect(throws: SearchIndexError.staleCursor) { try await index.search(request, after: cursor) }
+    }
+}

@@ -71,7 +71,7 @@ final class V2ConversationSearchStore {
             return
         }
         state = .loading
-        let request = V2MessageSearchRequest(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter)
+        let request = V2MessageSearchRequest(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter, previewHighlights: true)
         do {
             try await Task.sleep(for: .milliseconds(200))
             try Task.checkCancellation()
@@ -113,7 +113,7 @@ final class V2ConversationSearchStore {
         paginationFailure = nil
         defer { if paginationOperation == operation { paginationOperation = nil } }
         let requestGeneration = generation
-        let request = V2MessageSearchRequest(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter, cursor: cursor)
+        let request = V2MessageSearchRequest(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter, cursor: cursor, previewHighlights: true)
         do {
             let page = try await searcher.searchMessages(request)
             try Task.checkCancellation()

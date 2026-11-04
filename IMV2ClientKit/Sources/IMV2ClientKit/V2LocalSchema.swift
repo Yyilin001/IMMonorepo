@@ -110,6 +110,18 @@ extension GRDBV2LocalSyncStore {
         )
         """
 
+    static let searchJobsSchema = """
+        CREATE TABLE v2_message_search_jobs (
+                job_id TEXT NOT NULL,
+                message_id TEXT PRIMARY KEY,
+                expected_message_revision INTEGER NOT NULL CHECK (expected_message_revision > 0),
+                generation INTEGER NOT NULL CHECK (generation > 0),
+                enqueued_at REAL NOT NULL
+            );
+        CREATE INDEX v2_message_search_jobs_generation_idx
+                ON v2_message_search_jobs (generation, enqueued_at, message_id);
+        """
+
     static let currentSchemaSQL = """
         CREATE VIRTUAL TABLE v2_contact_profile_search USING fts5(
                 display_unigrams,
@@ -312,12 +324,7 @@ extension GRDBV2LocalSyncStore {
                 PRIMARY KEY (message_id, actor_user_id, reaction)
             );
 
-        CREATE TABLE v2_message_search_jobs (
-                message_id TEXT PRIMARY KEY,
-                expected_message_revision INTEGER NOT NULL CHECK (expected_message_revision > 0),
-                generation INTEGER NOT NULL CHECK (generation > 0),
-                enqueued_at REAL NOT NULL
-            );
+        \(searchJobsSchema)
 
         CREATE TABLE v2_message_search_state (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -552,8 +559,7 @@ extension GRDBV2LocalSyncStore {
         CREATE INDEX v2_message_reactions_message_idx
                 ON v2_message_reactions (message_id, reaction, actor_user_id);
 
-        CREATE INDEX v2_message_search_jobs_generation_idx
-                ON v2_message_search_jobs (generation, enqueued_at, message_id);
+
 
         CREATE INDEX v2_moderation_projections_room_idx
             ON v2_moderation_projections (room_id, server_created_at, source_event_id);

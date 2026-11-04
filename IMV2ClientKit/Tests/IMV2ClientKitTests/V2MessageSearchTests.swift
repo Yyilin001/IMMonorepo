@@ -19,9 +19,9 @@ struct V2MessageSearchTests {
             try await applyRoomEvents(store, records: [acceptedRoomEvent(sourceEvent: UUID().uuidString,
                 roomID: room, senderID: sender, messageID: message, roomSequence: 1,
                 text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)])
-            try await store.rebuildMessageSearchIndex()
+            try await store.messageSearch.rebuildMessageSearchIndex()
             let primary = await store.databasePool
-            let pool = location.hasPrefix("document-") ? await store.messageSearchDatabasePool : primary
+            let pool = location.hasPrefix("document-") ? try #require(await store.messageSearchDatabasePool) : primary
             let table: String, column: String
             switch location {
             case "state-generation": table = "v2_message_search_state"; column = "generation"
@@ -41,7 +41,7 @@ struct V2MessageSearchTests {
                 return old
             }
             if location.hasPrefix("primary-") || location == "job-revision" {
-                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.processPendingMessageSearchIndexJobs() }
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.messageSearch.processPendingMessageSearchIndexJobs() }
                 #expect(try await primary.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_message_search_jobs") } == 1)
                 if location == "primary-revision" {
                     await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
@@ -50,12 +50,12 @@ struct V2MessageSearchTests {
                 }
             }
             if location.hasPrefix("state-") {
-                var updates = store.messageSearchIndexUpdates().makeAsyncIterator()
+                var updates = await store.messageSearch.messageSearchIndexUpdates().makeAsyncIterator()
                 await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await updates.next() }
             }
             if location != "primary-sequence" && location != "job-revision" {
                 for scope: V2MessageSearchScope in [.room(room), .allMessages, .sender(sender)] {
-                    await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.searchMessages(.init(query: "boundary", scope: scope)) }
+                    await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.messageSearch.searchMessages(.init(query: "boundary", scope: scope)) }
                 }
             }
             try await pool.read { db in
@@ -65,14 +65,14 @@ struct V2MessageSearchTests {
             }
             if location.hasPrefix("document-") {
                 // Only the derived index is replaced by a normal rebuild.
-                try await store.rebuildMessageSearchIndex()
+                try await store.messageSearch.rebuildMessageSearchIndex()
             } else {
                 try await pool.write { db in try db.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [original]) }
                 if location.hasPrefix("primary-") || location == "job-revision" {
-                    #expect(try await store.processPendingMessageSearchIndexJobs() == 1)
+                    #expect(try await store.messageSearch.processPendingMessageSearchIndexJobs() == 1)
                 }
             }
-            #expect(try await store.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
+            #expect(try await store.messageSearch.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
             try await store.close()
         } catch { try? await store.close(); throw error }
     }
@@ -98,13 +98,13 @@ struct V2MessageSearchTests {
                 await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await applyRoomEvents(store, records: [record]) }
                 #expect(try await store.cursor() == nil)
                 #expect(try await store.events().isEmpty)
-                try await store.rebuildMessageSearchIndex()
-                #expect(try await store.searchMessages(.init(query: "boundary", scope: .allMessages)).hits.isEmpty)
+                try await store.messageSearch.rebuildMessageSearchIndex()
+                #expect(try await store.messageSearch.searchMessages(.init(query: "boundary", scope: .allMessages)).hits.isEmpty)
             } else {
                 try await applyRoomEvents(store, records: [record])
-                try await store.rebuildMessageSearchIndex()
+                try await store.messageSearch.rebuildMessageSearchIndex()
                 for scope: V2MessageSearchScope in [.room(room), .allMessages, .sender(sender)] {
-                    let result = try await store.searchMessages(.init(query: "boundary", scope: scope))
+                    let result = try await store.messageSearch.searchMessages(.init(query: "boundary", scope: scope))
                     #expect(result.hits.map(\.messageID) == [message])
                     #expect(result.hits.map(\.roomSequence) == [sequence])
                 }
@@ -127,8 +127,8 @@ struct V2MessageSearchTests {
             try await applyRoomEvents(store, records: [acceptedRoomEvent(sourceEvent: UUID().uuidString,
                 roomID: room, senderID: sender, messageID: message, roomSequence: 1,
                 text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)])
-            try await store.rebuildMessageSearchIndex()
-            let pool = await store.messageSearchDatabasePool
+            try await store.messageSearch.rebuildMessageSearchIndex()
+            let pool = try #require(await store.messageSearchDatabasePool)
             try await pool.write { db in
                 // Model a damaged derived file; normal writes keep CHECK constraints enabled.
                 try db.execute(sql: "PRAGMA ignore_check_constraints = ON")
@@ -137,11 +137,11 @@ struct V2MessageSearchTests {
             }
             for scope: V2MessageSearchScope in [.room(room), .allMessages, .sender(sender)] {
                 await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-                    try await store.searchMessages(.init(query: "boundary", scope: scope))
+                    try await store.messageSearch.searchMessages(.init(query: "boundary", scope: scope))
                 }
             }
-            try await store.rebuildMessageSearchIndex()
-            let recovered = try await store.searchMessages(.init(query: "boundary", scope: .room(room)))
+            try await store.messageSearch.rebuildMessageSearchIndex()
+            let recovered = try await store.messageSearch.searchMessages(.init(query: "boundary", scope: .room(room)))
             #expect(recovered.hits.map(\.messageID) == [message])
             #expect(recovered.hits.map(\.roomSequence) == [1])
             try await store.close()
@@ -162,7 +162,7 @@ struct V2MessageSearchTests {
             try await applyRoomEvents(store, records: [acceptedRoomEvent(sourceEvent: UUID().uuidString,
                 roomID: room, senderID: sender, messageID: message, roomSequence: 1,
                 text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)])
-            try await store.rebuildMessageSearchIndex()
+            try await store.messageSearch.rebuildMessageSearchIndex()
             let pool = await store.databasePool
             let original = try await pool.read { try GRDBV2LocalSyncStore.messageSearchIndexGeneration(db: $0) }
             try await pool.write { db in
@@ -172,28 +172,28 @@ struct V2MessageSearchTests {
             }
             if generation <= 0 {
                 await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-                    try await store.searchMessages(.init(query: "boundary", scope: .room(room)))
+                    try await store.messageSearch.searchMessages(.init(query: "boundary", scope: .room(room)))
                 }
-                var updates = store.messageSearchIndexUpdates().makeAsyncIterator()
+                var updates = await store.messageSearch.messageSearchIndexUpdates().makeAsyncIterator()
                 await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await updates.next() }
             } else {
                 #expect(try await pool.read { try GRDBV2LocalSyncStore.messageSearchIndexGeneration(db: $0) } == generation)
-                var updates = store.messageSearchIndexUpdates().makeAsyncIterator()
+                var updates = await store.messageSearch.messageSearchIndexUpdates().makeAsyncIterator()
                 #expect(try await updates.next()?.generation == UInt64(generation))
             }
             if generation <= 0 || generation == Int64.max {
-                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.rebuildMessageSearchIndex() }
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.messageSearch.rebuildMessageSearchIndex() }
                 #expect(try await pool.read { try Int64.fetchOne($0, sql: "SELECT generation FROM v2_message_search_state") } == generation)
             } else {
-                try await store.rebuildMessageSearchIndex()
+                try await store.messageSearch.rebuildMessageSearchIndex()
                 #expect(try await pool.read { try GRDBV2LocalSyncStore.messageSearchIndexGeneration(db: $0) } == generation + 1)
-                #expect(try await store.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
+                #expect(try await store.messageSearch.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
             }
             try await pool.write { db in
                 try db.execute(sql: "UPDATE v2_message_search_state SET generation = ?", arguments: [original])
             }
-            try await store.rebuildMessageSearchIndex()
-            #expect(try await store.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
+            try await store.messageSearch.rebuildMessageSearchIndex()
+            #expect(try await store.messageSearch.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
             try await store.close()
         } catch {
             try? await store.close()
@@ -204,15 +204,15 @@ struct V2MessageSearchTests {
     @Test("index observation includes current state and the completed rebuild generation")
     func indexObservationTracksRebuild() async throws {
         let store = try makeStore()
-        var updates = store.messageSearchIndexUpdates().makeAsyncIterator()
+        var updates = await store.messageSearch.messageSearchIndexUpdates().makeAsyncIterator()
         let initial = try #require(try await updates.next())
         #expect(initial.state == .building)
-        try await store.rebuildMessageSearchIndex()
+        try await store.messageSearch.rebuildMessageSearchIndex()
         var latest = try #require(try await updates.next())
         if latest.state == .building { latest = try #require(try await updates.next()) }
         #expect(latest.state == .ready)
         #expect(latest.generation > initial.generation)
-        var alreadyReady = store.messageSearchIndexUpdates().makeAsyncIterator()
+        var alreadyReady = await store.messageSearch.messageSearchIndexUpdates().makeAsyncIterator()
         #expect(try await alreadyReady.next()?.state == .ready)
     }
 
@@ -245,34 +245,34 @@ struct V2MessageSearchTests {
                 acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000a23", roomID: roomB, senderID: senderB, messageID: third, roomSequence: 1, text: "你好吗", createdAtMilliseconds: 1_750_000_002_000)
             ]
         )
-        #expect(try await store.messageSearchIndexState() == .building)
-        try await store.rebuildMessageSearchIndex()
-        #expect(try await store.messageSearchIndexState() == .ready)
+        #expect(try await store.messageSearch.messageSearchIndexState() == .building)
+        try await store.messageSearch.rebuildMessageSearchIndex()
+        #expect(try await store.messageSearch.messageSearchIndexState() == .ready)
 
-        let single = try await store.searchMessages(.init(query: "好", scope: .room(roomA)))
+        let single = try await store.messageSearch.searchMessages(.init(query: "好", scope: .room(roomA)))
         #expect(single.hits.map(\.messageID) == [second, first])
 
-        let phrase = try await store.searchMessages(.init(query: "好啊", scope: .room(roomA)))
+        let phrase = try await store.messageSearch.searchMessages(.init(query: "好啊", scope: .room(roomA)))
         #expect(phrase.hits.map(\.messageID) == [second, first])
 
-        let nonContiguous = try await store.searchMessages(.init(query: "你啊", scope: .allMessages))
+        let nonContiguous = try await store.messageSearch.searchMessages(.init(query: "你啊", scope: .allMessages))
         #expect(nonContiguous.hits.isEmpty)
 
-        let senderOnly = try await store.searchMessages(.init(query: "你好", scope: .sender(senderA)))
+        let senderOnly = try await store.messageSearch.searchMessages(.init(query: "你好", scope: .sender(senderA)))
         #expect(senderOnly.hits.map(\.messageID) == [second, first])
 
-        let firstPage = try await store.searchMessages(.init(query: "你好", scope: .room(roomA), limit: 1))
+        let firstPage = try await store.messageSearch.searchMessages(.init(query: "你好", scope: .room(roomA), limit: 1))
         #expect(firstPage.hits.map(\.messageID) == [second])
         let cursor = try #require(firstPage.nextCursor)
-        let secondPage = try await store.searchMessages(.init(query: "你好", scope: .room(roomA), limit: 1, cursor: cursor))
+        let secondPage = try await store.messageSearch.searchMessages(.init(query: "你好", scope: .room(roomA), limit: 1, cursor: cursor))
         #expect(secondPage.hits.map(\.messageID) == [first])
         #expect(secondPage.nextCursor == nil)
         await #expect(throws: V2MessageSearchError.cursorDoesNotMatchScope) {
-            try await store.searchMessages(.init(query: "好啊", scope: .room(roomA), limit: 1, cursor: cursor))
+            try await store.messageSearch.searchMessages(.init(query: "好啊", scope: .room(roomA), limit: 1, cursor: cursor))
         }
-        try await store.rebuildMessageSearchIndex()
+        try await store.messageSearch.rebuildMessageSearchIndex()
         await #expect(throws: V2MessageSearchError.cursorDoesNotMatchScope) {
-            try await store.searchMessages(.init(query: "你好", scope: .room(roomA), limit: 1, cursor: cursor))
+            try await store.messageSearch.searchMessages(.init(query: "你好", scope: .room(roomA), limit: 1, cursor: cursor))
         }
     }
 
@@ -285,25 +285,25 @@ struct V2MessageSearchTests {
         try await applyRoomEvents(store, records: [
             acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000b11", roomID: roomID, senderID: senderID, messageID: messageID, roomSequence: 1, text: "旧文本", createdAtMilliseconds: 1_750_000_000_000)
         ])
-        try await store.rebuildMessageSearchIndex()
+        try await store.messageSearch.rebuildMessageSearchIndex()
 
         try await applyRoomEvents(store, records: [
             editedRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000b12", roomID: roomID, messageID: messageID, revision: 2, text: "新文本")
         ])
-        #expect(try await store.messageSearchIndexProgress().isCatchingUp)
+        #expect(try await store.messageSearch.messageSearchIndexProgress().isCatchingUp)
         // The old document may still be physically present in V2Search, but
         // revision validation against V2.sqlite must hide it immediately.
-        #expect(try await store.searchMessages(.init(query: "旧文", scope: .room(roomID))).hits.isEmpty)
-        _ = try await store.processPendingMessageSearchIndexJobs()
-        #expect(try await store.searchMessages(.init(query: "旧文", scope: .room(roomID))).hits.isEmpty)
-        #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.map(\.messageID) == [messageID])
+        #expect(try await store.messageSearch.searchMessages(.init(query: "旧文", scope: .room(roomID))).hits.isEmpty)
+        _ = try await store.messageSearch.processPendingMessageSearchIndexJobs()
+        #expect(try await store.messageSearch.searchMessages(.init(query: "旧文", scope: .room(roomID))).hits.isEmpty)
+        #expect(try await store.messageSearch.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.map(\.messageID) == [messageID])
 
         try await applyRoomEvents(store, records: [
             tombstoneRecord(sequence: 3, sourceEvent: "00000000-0000-0000-0000-000000000b13", roomID: roomID, messageID: messageID, revision: 3)
         ])
-        #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
-        _ = try await store.processPendingMessageSearchIndexJobs()
-        #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
+        #expect(try await store.messageSearch.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
+        _ = try await store.messageSearch.processPendingMessageSearchIndexJobs()
+        #expect(try await store.messageSearch.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
         let persistedMessages = try await store.messages(in: roomID)
         let localTombstone = try #require(persistedMessages.first)
         #expect(localTombstone.isWithdrawn)
@@ -325,11 +325,11 @@ struct V2MessageSearchTests {
             mediaRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000d21", roomID: roomID, senderID: imageSender, messageID: imageMessage, roomSequence: 1, mediaID: "00000000-0000-0000-0000-000000000d31", kind: "image"),
             mediaRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000d22", roomID: roomID, senderID: fileSender, messageID: fileMessage, roomSequence: 2, mediaID: "00000000-0000-0000-0000-000000000d32", kind: "file")
         ])
-        try await store.rebuildMessageSearchIndex()
+        try await store.messageSearch.rebuildMessageSearchIndex()
 
-        let images = try await store.searchMessages(.init(query: "", scope: .room(roomID), contentFilter: .image))
+        let images = try await store.messageSearch.searchMessages(.init(query: "", scope: .room(roomID), contentFilter: .image))
         #expect(images.hits.map(\.messageID) == [imageMessage])
-        let senderFiles = try await store.searchMessages(.init(query: "", scope: .room(roomID), contentFilter: .media, senderUserID: fileSender))
+        let senderFiles = try await store.messageSearch.searchMessages(.init(query: "", scope: .room(roomID), contentFilter: .media, senderUserID: fileSender))
         #expect(senderFiles.hits.map(\.messageID) == [fileMessage])
     }
 
@@ -350,20 +350,20 @@ struct V2MessageSearchTests {
             acceptedRoomEvent(sourceEvent: UUID().uuidString, roomID: otherRoom, senderID: sender,
                 messageID: elsewhere, roomSequence: 1, text: "another room", createdAtMilliseconds: 1_750_000_003_000)
         ])
-        try await store.rebuildMessageSearchIndex()
-        let first = try await store.searchMessages(.init(query: "", scope: .room(room), senderUserID: sender, limit: 1))
+        try await store.messageSearch.rebuildMessageSearchIndex()
+        let first = try await store.messageSearch.searchMessages(.init(query: "", scope: .room(room), senderUserID: sender, limit: 1))
         #expect(first.hits.map(\.messageID) == [media])
         let cursor = try #require(first.nextCursor)
-        let second = try await store.searchMessages(.init(query: "", scope: .room(room), senderUserID: sender, limit: 1, cursor: cursor))
+        let second = try await store.messageSearch.searchMessages(.init(query: "", scope: .room(room), senderUserID: sender, limit: 1, cursor: cursor))
         #expect(second.hits.map(\.messageID) == [text])
         #expect(second.nextCursor == nil)
         await #expect(throws: V2MessageSearchError.cursorDoesNotMatchScope) {
-            try await store.searchMessages(.init(query: "", scope: .room(room), senderUserID: otherSender, cursor: cursor))
+            try await store.messageSearch.searchMessages(.init(query: "", scope: .room(room), senderUserID: otherSender, cursor: cursor))
         }
-        let all = try await store.searchMessages(.init(query: "", scope: .sender(sender)))
+        let all = try await store.messageSearch.searchMessages(.init(query: "", scope: .sender(sender)))
         #expect(Set(all.hits.map(\.messageID)) == [text, media, elsewhere])
         await #expect(throws: V2MessageSearchError.emptyQuery) {
-            try await store.searchMessages(.init(query: "", scope: .room(room)))
+            try await store.messageSearch.searchMessages(.init(query: "", scope: .room(room)))
         }
     }
 
@@ -376,7 +376,7 @@ struct V2MessageSearchTests {
         try await applyRoomEvents(store, records: [
             acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000c04", roomID: oldRoomID, senderID: oldSenderID, messageID: oldMessageID, roomSequence: 1, text: "快照前文本", createdAtMilliseconds: 1_750_000_000_000)
         ])
-        try await store.rebuildMessageSearchIndex()
+        try await store.messageSearch.rebuildMessageSearchIndex()
 
         let snapshotRoomID = try RoomID("00000000-0000-0000-0000-000000000c11")
         let snapshotSenderID = try UserID("00000000-0000-0000-0000-000000000c12")
@@ -386,8 +386,8 @@ struct V2MessageSearchTests {
                 senderID: snapshotSenderID, messageID: snapshotMessageID, roomSequence: 7,
                 text: "保留房间文本", createdAtMilliseconds: 1_750_000_100_000)
         ])
-        try await store.rebuildMessageSearchIndex()
-        #expect(try await store.searchMessages(.init(query: "文本", scope: .allMessages)).hits.count == 2)
+        try await store.messageSearch.rebuildMessageSearchIndex()
+        #expect(try await store.messageSearch.searchMessages(.init(query: "文本", scope: .allMessages)).hits.count == 2)
         let reset = try V2ClientResetRequired(snapshotID: .init("message-search-snapshot"), generation: 2,
             baseSequence: 1, expiresAt: .distantFuture)
         let page = try V2SnapshotProjectionV3Page(items: [.init(
@@ -430,14 +430,14 @@ struct V2MessageSearchTests {
             payload: encodedPage
         ), for: manifest)
         try await store.prepareSnapshotActivation(manifest)
-        #expect(try await store.searchMessages(.init(query: "快照前", scope: .allMessages)).hits.map(\.messageID) == [oldMessageID])
+        #expect(try await store.messageSearch.searchMessages(.init(query: "快照前", scope: .allMessages)).hits.map(\.messageID) == [oldMessageID])
         try await store.activateAcknowledgedSnapshot(manifest)
 
-        #expect(try await store.messageSearchIndexState() == .building)
-        try await store.rebuildMessageSearchIndex()
-        #expect(try await store.messageSearchIndexState() == .ready)
-        #expect(try await store.searchMessages(.init(query: "快照前", scope: .allMessages)).hits.isEmpty)
-        #expect(try await store.searchMessages(.init(query: "保留房间", scope: .room(snapshotRoomID))).hits.map(\.messageID) == [snapshotMessageID])
+        #expect(try await store.messageSearch.messageSearchIndexState() == .building)
+        try await store.messageSearch.rebuildMessageSearchIndex()
+        #expect(try await store.messageSearch.messageSearchIndexState() == .ready)
+        #expect(try await store.messageSearch.searchMessages(.init(query: "快照前", scope: .allMessages)).hits.isEmpty)
+        #expect(try await store.messageSearch.searchMessages(.init(query: "保留房间", scope: .room(snapshotRoomID))).hits.map(\.messageID) == [snapshotMessageID])
     }
 
     @Test("an unacknowledged search job survives restart and replaces stale text")
@@ -451,16 +451,16 @@ struct V2MessageSearchTests {
         try await applyRoomEvents(first, records: [
             acceptedRoomEvent(sourceEvent: "00000000-0000-0000-0000-000000000e11", roomID: roomID, senderID: senderID, messageID: messageID, roomSequence: 1, text: "初始文本", createdAtMilliseconds: 1_750_000_000_000)
         ])
-        try await first.rebuildMessageSearchIndex()
+        try await first.messageSearch.rebuildMessageSearchIndex()
         try await applyRoomEvents(first, records: [
             editedRecord(sequence: 2, sourceEvent: "00000000-0000-0000-0000-000000000e12", roomID: roomID, messageID: messageID, revision: 2, text: "恢复后的文本")
         ])
 
         let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        #expect(try await restarted.messageSearchIndexProgress().isCatchingUp)
-        _ = try await restarted.processPendingMessageSearchIndexJobs()
-        #expect(try await restarted.searchMessages(.init(query: "恢复后", scope: .room(roomID))).hits.map(\.messageID) == [messageID])
-        #expect(try await restarted.searchMessages(.init(query: "初始文", scope: .room(roomID))).hits.isEmpty)
+        #expect(try await restarted.messageSearch.messageSearchIndexProgress().isCatchingUp)
+        _ = try await restarted.messageSearch.processPendingMessageSearchIndexJobs()
+        #expect(try await restarted.messageSearch.searchMessages(.init(query: "恢复后", scope: .room(roomID))).hits.map(\.messageID) == [messageID])
+        #expect(try await restarted.messageSearch.searchMessages(.init(query: "初始文", scope: .room(roomID))).hits.isEmpty)
     }
 
     private func makeStore() throws -> GRDBV2LocalSyncStore {
@@ -470,7 +470,7 @@ struct V2MessageSearchTests {
         )
     }
 
-    private func applyRoomEvents(_ store: GRDBV2LocalSyncStore, records: [V2ClientSyncRecord]) async throws {
+    func applyRoomEvents(_ store: GRDBV2LocalSyncStore, records: [V2ClientSyncRecord]) async throws {
         struct Scope: Decodable { let room_id: String }
         for record in records {
             let room = try RoomID(JSONDecoder().decode(Scope.self, from: record.payload).room_id)
@@ -499,7 +499,7 @@ struct V2MessageSearchTests {
         )
     }
 
-    private func editedRecord(sequence: UInt64, sourceEvent: String, roomID: RoomID, messageID: MessageID, revision: UInt64, text: String) throws -> V2ClientSyncRecord {
+    func editedRecord(sequence: UInt64, sourceEvent: String, roomID: RoomID, messageID: MessageID, revision: UInt64, text: String) throws -> V2ClientSyncRecord {
         try .init(
             sequence: sequence,
             sourceEventID: .init(sourceEvent),
@@ -535,7 +535,7 @@ struct V2MessageSearchTests {
         )
     }
 
-    private func tombstoneRecord(sequence: UInt64, sourceEvent: String, roomID: RoomID, messageID: MessageID, revision: UInt64) throws -> V2ClientSyncRecord {
+    func tombstoneRecord(sequence: UInt64, sourceEvent: String, roomID: RoomID, messageID: MessageID, revision: UInt64) throws -> V2ClientSyncRecord {
         try .init(
             sequence: sequence,
             sourceEventID: .init(sourceEvent),
@@ -567,7 +567,7 @@ extension V2MessageSearchTests {
         try await primary.write { db in
             try db.execute(sql: "UPDATE v2_message_search_state SET index_version = ?, state = 'ready'", arguments: [previousVersion])
         }
-        let search = await legacy.messageSearchDatabasePool
+        let search = try #require(await legacy.messageSearchDatabasePool)
         try await search.write { db in
             try db.execute(sql: "DROP TABLE v2_message_char_fts")
             try db.execute(sql: "CREATE VIRTUAL TABLE v2_message_char_fts USING fts5(room_scope,sender_scope,unigrams,bigrams)")
@@ -575,17 +575,54 @@ extension V2MessageSearchTests {
         try await legacy.close()
 
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        #expect(try await store.messageSearchIndexState() == .building)
+        #expect(try await store.messageSearch.messageSearchIndexState() == .building)
         await #expect(throws: V2MessageSearchError.indexUnavailable(.building)) {
-            try await store.processPendingMessageSearchIndexJobs()
+            try await store.messageSearch.processPendingMessageSearchIndexJobs()
         }
-        try await store.prepareMessageSearchIndex()
+        try await store.messageSearch.prepareMessageSearchIndex()
         for (query, original) in [("abc", "ＡＢＣ"), ("fi", "ﬃ"), ("👩🏽‍💻", "👩🏽‍💻")] {
-            let page = try await store.searchMessages(.init(query: query, scope: .room(room)))
+            let page = try await store.messageSearch.searchMessages(.init(query: query, scope: .room(room)))
             let hit = try #require(page.hits.first)
             #expect(hit.matchRanges == [(hit.text as NSString).range(of: original)])
         }
-        #expect(try await store.searchMessages(.init(query: "👩")).hits.isEmpty)
+        #expect(try await store.messageSearch.searchMessages(.init(query: "👩")).hits.isEmpty)
+        try await store.close()
+    }
+}
+
+extension V2MessageSearchTests {
+    @Test("索引器排空启动积压，随后处理空闲时提交的消息并返回预览高亮")
+    func committedWorkWakesIdleIndexer() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "V2.sqlite"), installationBinding: .init(value: UUID()))
+        let room = RoomID(uuid: UUID()), sender = UserID(uuid: UUID())
+        let body = "ＡＢＣ" + String(repeating: "间", count: 256) + "abc"
+        func submit(_ sequence: UInt64) async throws {
+            let record = try acceptedRoomEvent(sourceEvent: UUID().uuidString, roomID: room, senderID: sender,
+                messageID: .init(uuid: UUID()), roomSequence: sequence, text: body, createdAtMilliseconds: 1_750_000_000_000)
+            try await applyRoomEvents(store, records: [record])
+        }
+        try await store.messageSearch.prepareMessageSearchIndex()
+        try await submit(1)
+        await store.messageSearch.startIndexing()
+        for expected in 1...2 {
+            if expected == 2 {
+                try await Task.sleep(for: .milliseconds(30))
+                try await submit(2)
+            }
+            let deadline = ContinuousClock.now + .seconds(3)
+            var page = try await store.messageSearch.searchMessages(.init(query: "abc", scope: .room(room), previewHighlights: true))
+            while page.hits.count < expected && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+                page = try await store.messageSearch.searchMessages(.init(query: "abc", scope: .room(room), previewHighlights: true))
+            }
+            try #require(page.hits.count == expected)
+            #expect(page.hits.allSatisfy { $0.matchRanges == [NSRange(location: 0, length: 3)] })
+        }
+        let full = try await store.messageSearch.searchMessages(.init(query: "abc", scope: .room(room)))
+        #expect(full.hits.allSatisfy { $0.matchRanges.count == 2 })
+        await store.messageSearch.stopIndexing()
         try await store.close()
     }
 }

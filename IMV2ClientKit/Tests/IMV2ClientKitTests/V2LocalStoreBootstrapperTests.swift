@@ -17,7 +17,7 @@ struct V2LocalStoreBootstrapperTests {
         let store = try await bootstrapper.open(databaseURL: url, userID: .init("binding-user"))
 
         #expect(try await savedDurableMessages(in: store).isEmpty)
-        #expect(try await store.messageSearchDatabasePool.read { db in try !db.tableExists("imported_search_probe") })
+        #expect(try await #require(store.messageSearchDatabasePool).read { db in try !db.tableExists("imported_search_probe") })
         #expect(try await bindingStore.load() == replacement)
     }
 
@@ -32,7 +32,7 @@ struct V2LocalStoreBootstrapperTests {
         let store = try await bootstrapper.open(databaseURL: url, userID: .init("binding-user"))
 
         #expect(try await savedDurableMessages(in: store).isEmpty)
-        #expect(try await store.messageSearchDatabasePool.read { db in try !db.tableExists("imported_search_probe") })
+        #expect(try await #require(store.messageSearchDatabasePool).read { db in try !db.tableExists("imported_search_probe") })
         #expect(try await bindingStore.load() == trusted)
     }
 
@@ -71,7 +71,7 @@ struct V2LocalStoreBootstrapperTests {
         try await persistDurableMessage(in: store,
             roomID: .init("00000000-0000-0000-0000-000000000609"),
             clientMessageID: .init("00000000-0000-0000-0000-000000000610"), text: "untrusted")
-        try await store.messageSearchDatabasePool.write { db in
+        try await #require(store.messageSearchDatabasePool).write { db in
             try db.execute(sql: "CREATE TABLE imported_search_probe (body TEXT)")
             try db.execute(sql: "INSERT INTO imported_search_probe VALUES ('untrusted search body')")
         }
