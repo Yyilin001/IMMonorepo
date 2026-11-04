@@ -173,19 +173,36 @@ END $$;
 -- Transition-table aggregation captures every INSERT writer, including COPY
 -- and fast append, while locking/updating each affected room only once per statement.
 CREATE OR REPLACE FUNCTION im_v2.capture_realtime_messages_heads() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE head record;
 BEGIN
- INSERT INTO im_v2.realtime_dirty_room_heads(room_id,partition_id,room_sequence,owner_epoch,room_control_version)
- SELECT h.room_id,im_v2.realtime_topic_partition('roomEvents',h.room_id::text),h.room_sequence,
-        r.owner_epoch,coalesce(v.version,0)
- FROM (SELECT room_id,max(room_sequence) AS room_sequence FROM new_realtime_rows WHERE accepted_event_storage='message_row' GROUP BY room_id) h
- JOIN im_v2.rooms r USING(room_id)
- LEFT JOIN im_v2.realtime_control_versions v ON v.topic_kind='roomEvents' AND v.topic_id=h.room_id::text
- ORDER BY h.room_id
- ON CONFLICT(room_id) DO UPDATE SET
-  room_sequence=greatest(im_v2.realtime_dirty_room_heads.room_sequence,EXCLUDED.room_sequence),
-  owner_epoch=greatest(im_v2.realtime_dirty_room_heads.owner_epoch,EXCLUDED.owner_epoch),
-  room_control_version=greatest(im_v2.realtime_dirty_room_heads.room_control_version,EXCLUDED.room_control_version),
-  revision=im_v2.realtime_dirty_room_heads.revision+1,pending=true;
+ -- Sort before taking dirty-head locks, including multi-room INSERT/COPY.
+ FOR head IN
+  SELECT h.room_id,h.room_sequence,r.owner_epoch,coalesce(v.version,0) AS control_version
+  FROM (SELECT room_id,max(room_sequence) AS room_sequence FROM new_realtime_rows
+        WHERE accepted_event_storage='message_row' GROUP BY room_id) h
+  JOIN im_v2.rooms r USING(room_id)
+  LEFT JOIN im_v2.realtime_control_versions v ON v.topic_kind='roomEvents' AND v.topic_id=h.room_id::text
+  ORDER BY h.room_id
+ LOOP
+  -- The partition is immutable. Existing heads need neither hashing nor an INSERT attempt.
+  UPDATE im_v2.realtime_dirty_room_heads SET
+   room_sequence=greatest(room_sequence,head.room_sequence),
+   owner_epoch=greatest(owner_epoch,head.owner_epoch),
+   room_control_version=greatest(room_control_version,head.control_version),
+   revision=revision+1,pending=true
+  WHERE room_id=head.room_id;
+  IF NOT FOUND THEN
+   -- Concurrent first writers still converge under the unique room key.
+   INSERT INTO im_v2.realtime_dirty_room_heads(room_id,partition_id,room_sequence,owner_epoch,room_control_version)
+   VALUES(head.room_id,im_v2.realtime_topic_partition('roomEvents',head.room_id::text),
+          head.room_sequence,head.owner_epoch,head.control_version)
+   ON CONFLICT(room_id) DO UPDATE SET
+    room_sequence=greatest(im_v2.realtime_dirty_room_heads.room_sequence,EXCLUDED.room_sequence),
+    owner_epoch=greatest(im_v2.realtime_dirty_room_heads.owner_epoch,EXCLUDED.owner_epoch),
+    room_control_version=greatest(im_v2.realtime_dirty_room_heads.room_control_version,EXCLUDED.room_control_version),
+    revision=im_v2.realtime_dirty_room_heads.revision+1,pending=true;
+  END IF;
+ END LOOP;
  RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS realtime_journal_capture ON im_v2.room_events;

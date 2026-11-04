@@ -1,0 +1,7 @@
+# Opt-in capacity-test profile for the measured 8-GiB host.
+# Pair with allocator.override.yml. This file changes resource limits only.
+# Use 4g-message-write.conf separately to set the measured 1536-MiB buffer pool.
+services:
+  postgres:
+    mem_limit: 4g
+    memswap_limit: 5g

@@ -57,30 +57,81 @@ public struct PostgresV2RoomLatestVisibleStore: V2RoomLatestVisibleReading {
                     SELECT message_id FROM fast
                     UNION ALL
                     SELECT fallback.message_id FROM (
+                        -- Seek one visible head per distinct revision and storage kind.
+                        -- Compare heads by room sequence, never by revision; no history is truncated.
                         WITH authorized AS MATERIALIZED (
                             SELECT candidate.message_id, candidate.room_sequence
                             FROM \(unsafeRaw: schema).room_memberships AS history
                             CROSS JOIN LATERAL (
-                                SELECT message.message_id, message.room_sequence
-                                FROM \(unsafeRaw: schema).messages AS message
-                                WHERE message.room_id = history.room_id
-                                  AND message.accepted_event_storage = 'message_row'
-                                  AND message.withdrawn_at IS NULL
-                                  AND message.accepted_membership_revision >= history.joined_revision
-                                  AND message.accepted_membership_revision <= COALESCE(history.left_revision - 1, 9223372036854775807)
-                                  AND message.room_sequence <= room.room_sequence
+                                (WITH RECURSIVE revision_heads AS (
+                                    (SELECT message.message_id, message.room_sequence,
+                                               message.accepted_membership_revision AS revision
+                                        FROM \(unsafeRaw: schema).messages AS message
+                                        WHERE message.room_id = history.room_id
+                                          AND message.accepted_event_storage = 'message_row'
+                                          AND message.withdrawn_at IS NULL
+                                          AND message.room_sequence <= room.room_sequence
+                                          AND message.accepted_membership_revision >= history.joined_revision
+                                          AND message.accepted_membership_revision <= COALESCE(history.left_revision - 1, 9223372036854775807)
+                                        ORDER BY message.accepted_membership_revision ASC, message.room_sequence DESC, message.message_id DESC LIMIT 1)
+                                    UNION ALL
+                                    SELECT next_head.* FROM revision_heads
+                                    CROSS JOIN LATERAL (
+                                        SELECT message.message_id, message.room_sequence,
+                                               message.accepted_membership_revision AS revision
+                                        FROM \(unsafeRaw: schema).messages AS message
+                                        WHERE message.room_id = history.room_id
+                                          AND message.accepted_event_storage = 'message_row'
+                                          AND message.withdrawn_at IS NULL
+                                          AND message.room_sequence <= room.room_sequence
+                                          AND message.accepted_membership_revision >= history.joined_revision
+                                          AND message.accepted_membership_revision <= COALESCE(history.left_revision - 1, 9223372036854775807)
+                                          AND message.accepted_membership_revision > revision_heads.revision
+                                        ORDER BY message.accepted_membership_revision ASC, message.room_sequence DESC, message.message_id DESC LIMIT 1
+                                    ) AS next_head
+                                ) SELECT message_id, room_sequence FROM revision_heads)
                                 UNION ALL
-                                SELECT message.message_id, message.room_sequence
-                                FROM \(unsafeRaw: schema).room_events AS event
-                                JOIN \(unsafeRaw: schema).messages AS message
-                                  ON message.room_id = event.room_id AND message.room_sequence = event.room_sequence
-                                 AND lower(event.payload->>'message_id') = message.message_id::text
-                                 AND message.accepted_event_storage = 'room_event'
-                                 AND message.withdrawn_at IS NULL
-                                WHERE event.room_id = history.room_id AND event.event_type = 'message.accepted'
-                                  AND event.committed_membership_revision >= history.joined_revision
-                                  AND event.committed_membership_revision <= COALESCE(history.left_revision - 1, 9223372036854775807)
-                                  AND event.room_sequence <= room.room_sequence
+                                (WITH RECURSIVE revision_heads AS (
+                                    (SELECT message.message_id, message.room_sequence,
+                                               event.committed_membership_revision AS revision
+                                        FROM \(unsafeRaw: schema).room_events AS event
+                                        CROSS JOIN LATERAL (
+                                            SELECT message.message_id, message.room_sequence
+                                            FROM \(unsafeRaw: schema).messages AS message
+                                            WHERE message.room_id = event.room_id AND message.room_sequence = event.room_sequence
+                                              AND lower(event.payload->>'message_id') = message.message_id::text
+                                              AND message.accepted_event_storage = 'room_event'
+                                              AND message.withdrawn_at IS NULL
+                                            OFFSET 0
+                                        ) AS message
+                                        WHERE event.room_id = history.room_id AND event.event_type = 'message.accepted'
+                                          AND event.room_sequence <= room.room_sequence
+                                          AND event.committed_membership_revision >= history.joined_revision
+                                          AND event.committed_membership_revision <= COALESCE(history.left_revision - 1, 9223372036854775807)
+                                        ORDER BY event.committed_membership_revision ASC, event.room_sequence DESC, message.message_id DESC LIMIT 1)
+                                    UNION ALL
+                                    SELECT next_head.* FROM revision_heads
+                                    CROSS JOIN LATERAL (
+                                        SELECT message.message_id, message.room_sequence,
+                                               event.committed_membership_revision AS revision
+                                        FROM \(unsafeRaw: schema).room_events AS event
+                                        CROSS JOIN LATERAL (
+                                            SELECT message.message_id, message.room_sequence
+                                            FROM \(unsafeRaw: schema).messages AS message
+                                            WHERE message.room_id = event.room_id AND message.room_sequence = event.room_sequence
+                                              AND lower(event.payload->>'message_id') = message.message_id::text
+                                              AND message.accepted_event_storage = 'room_event'
+                                              AND message.withdrawn_at IS NULL
+                                            OFFSET 0
+                                        ) AS message
+                                        WHERE event.room_id = history.room_id AND event.event_type = 'message.accepted'
+                                          AND event.room_sequence <= room.room_sequence
+                                          AND event.committed_membership_revision >= history.joined_revision
+                                          AND event.committed_membership_revision <= COALESCE(history.left_revision - 1, 9223372036854775807)
+                                          AND event.committed_membership_revision > revision_heads.revision
+                                        ORDER BY event.committed_membership_revision ASC, event.room_sequence DESC, message.message_id DESC LIMIT 1
+                                    ) AS next_head
+                                ) SELECT message_id, room_sequence FROM revision_heads)
                             ) AS candidate
                             WHERE history.room_id = room.room_id AND history.user_id = \(bind: actor)
                         ) SELECT message_id FROM authorized

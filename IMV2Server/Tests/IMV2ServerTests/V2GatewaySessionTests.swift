@@ -10,6 +10,47 @@ import Testing
 struct V2GatewaySessionTests {
     private let protocolVersion = UInt8(IMV2ProtocolVersion.current)
 
+    enum SessionEnd: CaseIterable { case close, revoke, expire }
+
+    @Test("queued sends and recovery recheck the session before execution",
+          arguments: SessionEnd.allCases, [false, true])
+    func validatedSendChecksSession(end: SessionEnd, recovery: Bool) async throws {
+        let clock = SessionClock(Date(timeIntervalSince1970: 10))
+        let expiry = Date(timeIntervalSince1970: 20)
+        let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 2),
+            authenticator: GatewayAuthFake(userID: try .init("user-a"), expiresAt: expiry),
+            capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission(), now: { clock.now })
+        let deviceID = UUID().uuidString
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello.deviceID = deviceID
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.supportsMessageSendOperations = true
+        _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
+        var auth = IMV2Envelope()
+        auth.requestID = 2
+        auth.protocolVersion = UInt32(protocolVersion)
+        auth.authenticate.deviceID = deviceID
+        auth.authenticate.accessToken = "opaque"
+        _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(auth, frameVersion: protocolVersion))
+        var request = IMV2Envelope()
+        request.requestID = 3
+        request.protocolVersion = UInt32(protocolVersion)
+        if recovery { request.messageSendOperationRecover = .init() } else { request.messageSendOperation = .init() }
+        let frame = try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion)
+        let send = try await session.validateMessageSendDispatch(V2GatewayInboundFrame(frame))
+        let expected: V2GatewaySessionError
+        switch end {
+        case .close: await session.close(); expected = .unsupportedCommand
+        case .revoke: await session.revokeDevice(); expected = .unsupportedCommand
+        case .expire: clock.now = expiry; expected = .sessionExpired
+        }
+        await #expect(throws: expected) {
+            _ = try await send.execute(handler: GatewayCommandFake(), originatingConnectionID: UUID())
+        }
+    }
+
     @Test("authenticated heartbeats and business dispatch never repeat credential authentication")
     func steadyStateDoesNotReauthenticate() async throws {
         let auth = CountingSessionAuthenticator()

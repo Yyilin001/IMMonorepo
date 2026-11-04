@@ -63,6 +63,56 @@ struct PostgresV2RoomSubscriptionSourceTests {
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func compactHistoryUsesBoundedIndexAndMergesRoomOrder() async throws {
+        try await withSubscriptionSourceDatabase { database, sql, schema, activations in
+            let room = UUID(), user = UUID()
+            try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id,room_sequence) VALUES(\(bind: room),'source','standard',10002)").run()
+            try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room),\(bind: user),0)").run()
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: schema).messages
+                    (message_id,room_id,room_sequence,timeline_sequence,sender_user_id,client_message_id,
+                     text_body,created_at,accepted_event_id,accepted_event_storage,accepted_membership_revision)
+                SELECT gen_random_uuid(),\(bind: room),n,n,\(bind: user),gen_random_uuid(),
+                    'history',now(),gen_random_uuid(),'message_row',0
+                FROM generate_series(1,10000) n
+                """).run()
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: schema).room_events
+                    (event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at)
+                VALUES (gen_random_uuid(),\(bind: room),10001,'member.muted','{}'::jsonb,0,now()),
+                       (gen_random_uuid(),\(bind: room),10002,'message.accepted','{}'::jsonb,0,now())
+                """).run()
+            try await sql.raw("ANALYZE \(unsafeRaw: schema).messages").run()
+            try await sql.raw("ANALYZE \(unsafeRaw: schema).room_events").run()
+            let (activation, lifetime) = try await activations.activate(RoomID(uuid: room))
+            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, lifetime: lifetime, schema: schema)
+            for (after, limit, expected) in [(Int64(0),64,Array(Int64(1)...64)),(9998,4,[9999,10000,10001,10002]),(10000,2,[10001,10002])] {
+                let query = source.readQuery(room: room, users: [user], after: after, limit: limit)
+                let rows = try await sql.raw(query).all()
+                #expect(try rows.map { try $0.decode(column: "room_sequence", as: Int64.self) } == expected)
+                let encoded = try #require(try await sql.raw("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) \(query)").first())
+                    .decode(column: "QUERY PLAN", as: String.self)
+                let roots = try #require(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [[String: Any]])
+                var foundIndex = false
+                func check(_ node: [String: Any]) {
+                    if node["Index Name"] as? String == "messages_room_log_candidates_idx",
+                       (node["Actual Loops"] as? Int ?? 0) > 0 {
+                        foundIndex = true
+                        #expect((node["Actual Rows"] as? Int ?? 0) <= limit)
+                    }
+                    if node["Relation Name"] as? String == "messages",
+                       (node["Actual Loops"] as? Int ?? 0) > 0 {
+                        #expect((node["Actual Rows"] as? Int ?? 0) <= limit)
+                    }
+                    for child in node["Plans"] as? [[String: Any]] ?? [] { check(child) }
+                }
+                check(try #require(roots.first?["Plan"] as? [String: Any]))
+                #expect(foundIndex)
+            }
+        }
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func largeGroupSnapshotIncludesEveryTrackedOnlineMember() async throws {
         try await withSubscriptionSourceDatabase { database, sql, schema, activations in
             let room = RoomID(uuid: UUID())

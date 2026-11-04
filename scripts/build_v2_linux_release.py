@@ -175,7 +175,7 @@ def main():
     parser.add_argument("--scratch-path", type=Path, default=ROOT / f".build-linux-glibc-{VERSION}")
     parser.add_argument("--output", type=Path, default=ROOT / "build/native-linux-release")
     parser.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 1))
-    parser.add_argument("--product", action="append", choices=PRODUCTS)
+    parser.add_argument("--product", action="append", choices=(*PRODUCTS, "IMV2GatewayLoadGenerator"))
     parser.add_argument("--check", action="store_true", help="Check compiler and SDK without building")
     args = parser.parse_args()
     if platform.system() != "Darwin" or platform.machine() != "arm64":

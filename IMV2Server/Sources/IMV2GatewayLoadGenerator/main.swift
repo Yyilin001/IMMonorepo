@@ -148,6 +148,8 @@ private struct LoadConfiguration: Sendable {
     let credentialsPath: String
     let reportPath: String
     let connections: Int
+    let localBindAddress: String?
+    let bindInterfaceIndex: UInt32?
     let localPortBase: Int?
     let excludedLocalPorts: Set<Int>
     let rampPerSecond: Int
@@ -227,10 +229,30 @@ private struct LoadConfiguration: Sendable {
         self.credentialsPath = credentialsPath
         self.reportPath = reportPath
         port = try Self.integer(values["--port"] ?? "443", range: 1...65_535)
+        if let expected = try? SocketAddress(ipAddress: serverName, port: port) {
+            guard let actual = try? SocketAddress(ipAddress: host, port: port), actual == expected else {
+                throw LoadError.invalidArguments
+            }
+        }
         // This is a generator-side guard, not the Gateway admission limit.
         // A mixed-source 10k run assigns 8k connections to one isolated load
         // worker, so allow one worker to own the full validated test scale.
         connections = try Self.integer(values["--connections"] ?? "100", range: 1...10_000)
+        localBindAddress = values["--local-bind-address"]
+        if let localBindAddress, (try? SocketAddress(ipAddress: localBindAddress, port: 0)) == nil {
+            throw LoadError.invalidArguments
+        }
+        if let interface = values["--bind-interface"] {
+            #if canImport(Darwin)
+            let index = if_nametoindex(interface)
+            guard index != 0 else { throw LoadError.invalidArguments }
+            bindInterfaceIndex = index
+            #else
+            throw LoadError.invalidArguments
+            #endif
+        } else {
+            bindInterfaceIndex = nil
+        }
         if let value = values["--local-port-base"] {
             localPortBase = try Self.integer(value, range: 1_024...(65_536 - LocalSourcePortAllocator.span))
         } else {
@@ -312,10 +334,10 @@ private struct LoadConfiguration: Sendable {
             guard let runID = UUID(uuidString: requestedRun), let scenario,
                   let boot = try? String(contentsOfFile: "/proc/sys/kernel/random/boot_id", encoding: .utf8),
                   let domain = UUID(uuidString: boot.trimmingCharacters(in: .whitespacesAndNewlines)),
-                  roomLogReads, messageBytes >= 128,
+                  roomLogReads, peerTopology == .pairs, targetsPerConnection == 1, messageBytes >= 128,
                   scenario.phases.allSatisfy({ V2LoadVisibilityStamp(clockDomain: domain, runID: runID,
                       scheduledNanoseconds: UInt64.max, cohort: $0.name)?.text(byteCount: visibilityMessageBytes) != nil })
-            else { throw LoadError.invalidScenario("visibility measurement needs Linux boot clock, scenario, room reads and >=128-byte messages") }
+            else { throw LoadError.invalidScenario("visibility measurement needs paired peers, Linux boot clock, scenario, room reads and >=128-byte messages") }
             visibilityRunID = runID
             visibilityClockDomain = domain
         } else {
@@ -676,6 +698,8 @@ private final class LoadStatistics: @unchecked Sendable {
         var authenticated = 0
         var failed = 0
         var connectionFailuresByError: [String: Int] = [:]
+        var clientFailuresByKind: [String: Int] = [:]
+        var clientCapacityRecoveries = 0
         var active = 0
         var peakActive = 0
         var disconnected = 0
@@ -782,8 +806,19 @@ private final class LoadStatistics: @unchecked Sendable {
         }
     }
     func recordProtocolFailure(_ error: Error) {
-        guard case .unexpectedServerResponse(let code, let messageType, _)? = error as? LoadError else { return }
-        lock.withLock { state.protocolFailuresByKindAndCode["\(messageType):\(code ?? "NONE")", default: 0] += 1 }
+        if case .unexpectedServerResponse(let code, let messageType, _)? = error as? LoadError {
+            lock.withLock { state.protocolFailuresByKindAndCode["\(messageType):\(code ?? "NONE")", default: 0] += 1 }
+        } else {
+            // A fixed category prevents untrusted error text from growing report keys.
+            recordClientFailure(kind: error is V2LoadRoomAcceptedSequences.Failure
+                ? "accepted_sequence_capacity" : "local_decode_or_state")
+        }
+    }
+    func recordClientFailure(kind: String) {
+        lock.withLock { state.clientFailuresByKind[kind, default: 0] += 1 }
+    }
+    func recordClientCapacityRecovery() {
+        lock.withLock { state.clientCapacityRecoveries += 1 }
     }
     func recordAuthenticated(milliseconds: Double) {
         lock.withLock {
@@ -1343,6 +1378,7 @@ private struct LoadRun: Sendable {
         var terminalError: Error?
         var scenarioPhases: [ScenarioPhaseReport] = []
         var scenarioDrain: ScenarioDrainReport?
+        var receiverDrain: ReceiverDrainReport?
         var recoveryBurstReport: RecoveryBurstReport?
         var checkpointWorker: RealtimeCheckpointWorker?
 
@@ -1460,6 +1496,8 @@ private struct LoadRun: Sendable {
                     channels: slots.compactMap(\.channel),
                     maximumSeconds: scenario.completionDrainSeconds ?? 10
                 )
+                receiverDrain = await drainReceiverCompletion(channels: slots.compactMap(\.channel),
+                    statistics: statistics, maximumSeconds: scenario.completionDrainSeconds ?? 10)
                 if scenario.requiresSteadyStateDrain == true {
                     let maximumQueued = scenario.maximumSteadyStateQueuedMessages ?? 0
                     if let stalled = scenarioPhases.first(where: {
@@ -1470,7 +1508,8 @@ private struct LoadRun: Sendable {
                             queued: stalled.queuedScenarioMessagesAtEnd,
                             maximumQueued: maximumQueued,
                             sent: stalled.messagesSent,
-                            acknowledged: stalled.messagesAcknowledged
+                            acknowledged: stalled.messagesAcknowledged,
+                            overflowed: stalled.scenarioMessageQueueOverflowed
                         )
                     }
                     guard scenarioDrain?.drained == true else {
@@ -1514,12 +1553,23 @@ private struct LoadRun: Sendable {
             ($0.connectionIndex, $0.roomID) < ($1.connectionIndex, $1.roomID)
         }
         let connectionCoverageSnapshots = finalConnectionSnapshots.map(\.coverage).sorted { $0.connectionIndex < $1.connectionIndex }
+        if terminalError == nil {
+            if !statistics.snapshot().clientFailuresByKind.isEmpty {
+                terminalError = LoadError.clientMeasurementFailure
+            } else if let receiverDrain, !receiverDrain.drained {
+                terminalError = LoadError.receiverCompletionTimedOut
+            } else if configuration.benchmarkWireVersion >= 46,
+                      connectionCoverageSnapshots.count != configuration.connections
+                        || !connectionCoverageSnapshots.allSatisfy(\.passed) {
+                terminalError = LoadError.requiredCoverageMissing
+            }
+        }
         await close(channels: slots.compactMap(\.channel))
         await directRoomTasks.closeAndDrain()
         eventLoopLagMetrics.stop()
         let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, messageSendCohorts: statistics.messageSendCohorts(), receiverVisibility: statistics.visibilityReport(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, messageSendCohorts: statistics.messageSendCohorts(), receiverVisibility: statistics.visibilityReport(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, receiverDrain: receiverDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -1545,8 +1595,8 @@ private struct LoadRun: Sendable {
         let eventLoop = group.next()
         let localAddress: SocketAddress?
         do {
-            if let localSourcePorts {
-                localAddress = try SocketAddress(ipAddress: "127.0.0.1", port: localSourcePorts.allocate())
+            if localSourcePorts != nil || configuration.localBindAddress != nil {
+                localAddress = try SocketAddress(ipAddress: configuration.localBindAddress ?? "127.0.0.1", port: localSourcePorts?.allocate() ?? 0)
             } else {
                 localAddress = nil
             }
@@ -1562,7 +1612,9 @@ private struct LoadRun: Sendable {
                 attempt?.install(channel)
                 return channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandler(
-                        NIOSSLClientHandler(context: sslContext, serverHostname: configuration.serverName)
+                        NIOSSLClientHandler(context: sslContext, serverHostname:
+                            (try? SocketAddress(ipAddress: configuration.serverName, port: configuration.port)) == nil
+                                ? configuration.serverName : nil)
                     )
                     try channel.pipeline.syncOperations.addHandler(
                         LoadConnectionHandler(
@@ -1596,6 +1648,11 @@ private struct LoadRun: Sendable {
                     )
                 }
             }
+        #if canImport(Darwin)
+        if let index = configuration.bindInterfaceIndex {
+            _ = bootstrap.channelOption(.ipOption(NIOBSDSocket.Option(rawValue: IP_BOUND_IF)), value: Int32(index))
+        }
+        #endif
         if let localAddress {
             // REUSEPORT permits different workers to bind concurrently before
             // their sockets have distinct connected four-tuples. REUSEADDR alone
@@ -1909,6 +1966,26 @@ private struct LoadRun: Sendable {
         )
     }
 
+    private func drainReceiverCompletion(channels: [Channel], statistics: LoadStatistics,
+                                         maximumSeconds: Int) async -> ReceiverDrainReport {
+        let started = NIODeadline.now(), deadline = started + .seconds(Int64(maximumSeconds))
+        while true {
+            let state = statistics.snapshot()
+            let observed = statistics.visibilityReport().cohorts.values.reduce(0) { $0 + $1.count }
+            let snapshots = await snapshotConnectionCursors(channels: channels)
+            let covered = configuration.benchmarkWireVersion < 46 || (
+                snapshots.count == configuration.connections && snapshots.allSatisfy { $0.coverage.passed })
+            let complete = (configuration.visibilityRunID == nil || V2LoadCompletionPolicy.receiverComplete(
+                sent: state.messagesSent, acknowledged: state.messagesAcknowledged, observed: observed)) && covered
+            if complete || NIODeadline.now() >= deadline {
+                return .init(drained: complete, durationMilliseconds: Int((NIODeadline.now() - started).millisecondsDouble),
+                    sent: state.messagesSent, acknowledged: state.messagesAcknowledged,
+                    observed: observed, visibilityRequired: configuration.visibilityRunID != nil, coveragePassed: covered)
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+    }
+
     private func scenarioPendingMessages(channels: [Channel]) async -> ScenarioPendingMessages {
         guard let first = channels.first else { return .zero }
         let futures = channels.map { channel -> EventLoopFuture<ScenarioPendingMessages> in
@@ -2186,7 +2263,7 @@ private struct LoadRun: Sendable {
 
     private func printScenarioProgress(phase: String, second: Int, statistics: LoadStatistics) {
         let snapshot = statistics.snapshot()
-        print("scenario phase=\(phase) second=\(second) active=\(snapshot.active) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) room_event_local_echoes=\(snapshot.roomEventLocalEchoesApplied) room_event_local_echo_gaps=\(snapshot.roomEventLocalEchoGapsDetected) room_event_pulls=\(snapshot.roomEventPullsSent) room_event_records=\(snapshot.roomEventRecordsReceived) read_receipts_ack=\(snapshot.readReceiptsAcknowledged) read_receipts_coalesced=\(snapshot.readReceiptsCoalesced) sync_records=\(snapshot.syncRecordsReceived) room_sync_state_success_rooms=\(snapshot.roomSyncStateBatch.successfulRooms) room_sync_state_retry_rooms=\(snapshot.roomSyncStateBatch.retryRooms) room_sync_state_unavailable_rooms=\(snapshot.roomSyncStateBatch.unavailableRooms) room_latest_visible_success_rooms=\(snapshot.roomLatestVisibleBatch.successfulRooms) room_latest_visible_retry_rooms=\(snapshot.roomLatestVisibleBatch.retryRooms) room_latest_visible_unavailable_rooms=\(snapshot.roomLatestVisibleBatch.unavailableRooms) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
+        print("scenario phase=\(phase) second=\(second) active=\(snapshot.active) messages_scheduled=\(snapshot.scenarioMessagesScheduled) messages_sent=\(snapshot.messagesSent) messages_queued=\(snapshot.queuedScenarioMessages) messages_overflowed=\(snapshot.scenarioMessageQueueOverflowed) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) room_event_local_echoes=\(snapshot.roomEventLocalEchoesApplied) room_event_local_echo_gaps=\(snapshot.roomEventLocalEchoGapsDetected) room_event_pulls=\(snapshot.roomEventPullsSent) room_event_records=\(snapshot.roomEventRecordsReceived) read_receipts_ack=\(snapshot.readReceiptsAcknowledged) read_receipts_coalesced=\(snapshot.readReceiptsCoalesced) sync_records=\(snapshot.syncRecordsReceived) room_sync_state_success_rooms=\(snapshot.roomSyncStateBatch.successfulRooms) room_sync_state_retry_rooms=\(snapshot.roomSyncStateBatch.retryRooms) room_sync_state_unavailable_rooms=\(snapshot.roomSyncStateBatch.unavailableRooms) room_latest_visible_success_rooms=\(snapshot.roomLatestVisibleBatch.successfulRooms) room_latest_visible_retry_rooms=\(snapshot.roomLatestVisibleBatch.retryRooms) room_latest_visible_unavailable_rooms=\(snapshot.roomLatestVisibleBatch.unavailableRooms) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
     }
 
     private func startWorkloads(channels: [Channel]) async throws {
@@ -2245,6 +2322,16 @@ private struct ScenarioReadReceiptEvent: Sendable {}
 private struct ScenarioRoomSyncStateBatchEvent: Sendable {}
 private struct ScenarioRoomLatestVisibleBatchEvent: Sendable {}
 
+private struct ReceiverDrainReport: Encodable {
+    let drained: Bool
+    let durationMilliseconds: Int
+    let sent: Int
+    let acknowledged: Int
+    let observed: Int
+    let visibilityRequired: Bool
+    let coveragePassed: Bool
+}
+
 private struct ScenarioPendingMessages: Sendable, Equatable, Encodable {
     var queued: Int
     var inFlight: Int
@@ -2296,6 +2383,7 @@ private struct RequestedScopeCoverageSnapshot: Encodable, Sendable {
     let state: String
     let highWatermark: UInt64?
     let appliedCursor: UInt64
+    let requiresAppliedCursor: Bool
     let passed: Bool
     let reason: String?
     let observedAtUnixMilliseconds: Int64?
@@ -2683,7 +2771,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "a05cad5099147d927bf981bdec2526a2a0fd83bfb6d09b99eed1548b62d82b7c"
+    static let algorithmSourceSHA256 = "c572002c809492252a14851baef9e40fcd389b3f47762eb0029f7311f6d9a2c6"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     // Keep the load operation inside the server's 24-hour admission ceiling even
@@ -3584,7 +3672,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             return .init(scope: scope, scopeID: id, scopeGeneration: observed?.generation,
                 revision: observed?.revision, state: observed?.state ?? "missing",
                 highWatermark: observed?.highWatermark, appliedCursor: cursor,
-                passed: observed.map { $0.state == "ready" && cursor >= $0.highWatermark } ?? false,
+                requiresAppliedCursor: scope == "room" || syncReads,
+                passed: observed.map { V2LoadCompletionPolicy.scopePassed(ready: $0.state == "ready",
+                    requiresAppliedCursor: scope == "room" || syncReads,
+                    appliedCursor: cursor, highWatermark: $0.highWatermark) } ?? false,
                 reason: observed?.reason, observedAtUnixMilliseconds: observed?.observedAtUnixMilliseconds,
                 lastReadyAtUnixMilliseconds: observed?.lastReadyAtUnixMilliseconds,
                 lastReadyGeneration: observed?.lastReadyGeneration)
@@ -3682,6 +3773,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             after: roomEventCursors[roomID, default: 0], at: NIODeadline.now().uptimeNanoseconds, source: source)
         visibilityObservations[roomID] = observed
         statistics.recordVisibilityEvent(String(describing: result))
+        if result == .capacityExceeded || result == .conflictingBody {
+            statistics.recordClientFailure(kind: result == .capacityExceeded
+                ? "visibility_capacity" : "visibility_conflicting_body")
+        }
     }
 
     private func drainAcceptedRoomSequences(roomID: String, through cursor: UInt64) -> UInt64 {
@@ -4034,11 +4129,19 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 if roomLogReads {
                     let cursor = roomEventCursors[roomID, default: 0]
                     var known = roomEventAcceptedSequences[roomID] ?? .init()
-                    let progress = try known.accepted(accepted.roomSequence, after: cursor)
-                    if known.pendingCount == 0 { roomEventAcceptedSequences.removeValue(forKey: roomID) }
-                    else { roomEventAcceptedSequences[roomID] = known }
-                    roomEventCursors[roomID] = drainAcceptedRoomSequences(roomID: roomID, through: progress.cursor)
-                    for _ in 0..<progress.appliedAcceptedCount { statistics.recordRoomEventLocalEchoApplied() }
+                    switch known.record(accepted.roomSequence, after: cursor) {
+                    case .accepted(let progress):
+                        if known.pendingCount == 0 { roomEventAcceptedSequences.removeValue(forKey: roomID) }
+                        else { roomEventAcceptedSequences[roomID] = known }
+                        roomEventCursors[roomID] = drainAcceptedRoomSequences(roomID: roomID, through: progress.cursor)
+                        for _ in 0..<progress.appliedAcceptedCount { statistics.recordRoomEventLocalEchoApplied() }
+                    case .recoveryRequired(let highWatermark):
+                        statistics.recordClientCapacityRecovery()
+                        roomEventAcceptedSequences[roomID] = known
+                        // No cursor advancement and no fabricated visibility sample.
+                        try acceptRoomRecoveryTarget(roomID: roomID, highWatermark: highWatermark,
+                            context: context, recordMetadataGap: false)
+                    }
                     cancelRoomEventRecoveryGraceIfCaughtUp(roomID: roomID)
                     if accepted.roomSequence > cursor, cursor < .max, accepted.roomSequence > cursor + 1 {
                         // Retain this validated receipt until its predecessors
@@ -4780,6 +4883,8 @@ private struct LoadReport: Encodable {
     let authenticated: Int
     let failed: Int
     let connectionFailuresByError: [String: Int]
+    let clientFailuresByKind: [String: Int]
+    let clientCapacityRecoveries: Int
     let peakActive: Int
     let disconnected: Int
     let plannedReconnects: Int
@@ -4854,6 +4959,7 @@ private struct LoadReport: Encodable {
     let messageSendCohorts: [String: MessageSendCohortReport]
     let scenarioPhases: [ScenarioPhaseReport]
     let scenarioDrain: ScenarioDrainReport?
+    let receiverDrain: ReceiverDrainReport?
     let roomCursorSnapshots: [RoomCursorSnapshot]
     let connectionCoverageSnapshots: [ConnectionCoverageSnapshot]
     let coverageProofRequired: Bool
@@ -4862,7 +4968,7 @@ private struct LoadReport: Encodable {
     let terminalError: String?
     let recoveryBurst: RecoveryBurstReport?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, messageSendCohorts: [String: MessageSendCohortReport], receiverVisibility: ReceiverVisibilityReport, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], connectionCoverageSnapshots: [ConnectionCoverageSnapshot], recoveryBurst: RecoveryBurstReport?) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, messageSendCohorts: [String: MessageSendCohortReport], receiverVisibility: ReceiverVisibilityReport, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, receiverDrain: ReceiverDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], connectionCoverageSnapshots: [ConnectionCoverageSnapshot], recoveryBurst: RecoveryBurstReport?) {
         self.receiverVisibility = receiverVisibility
         self.recoveryBurst = recoveryBurst
         self.connectionCoverageSnapshots = connectionCoverageSnapshots
@@ -4921,6 +5027,8 @@ private struct LoadReport: Encodable {
         attempted = state.attempted
         authenticated = state.authenticated
         failed = state.failed
+        clientFailuresByKind = state.clientFailuresByKind
+        clientCapacityRecoveries = state.clientCapacityRecoveries
         connectionFailuresByError = state.connectionFailuresByError
         peakActive = state.peakActive
         disconnected = state.disconnected
@@ -4997,6 +5105,7 @@ private struct LoadReport: Encodable {
         }
         self.messageSendCohorts = messageSendCohorts
         self.scenarioPhases = scenarioPhases
+        self.receiverDrain = receiverDrain
         self.scenarioDrain = scenarioDrain
         self.roomCursorSnapshots = roomCursorSnapshots
         scenarioPostDrainHoldSeconds = configuration.scenario?.postDrainHoldSeconds
@@ -5292,7 +5401,8 @@ private enum LoadError: Error, CustomStringConvertible {
     case workloadFailureGuardTriggered(failed: Int, attempted: Int)
     case roomWarmupTimedOut(opened: Int, required: Int)
     case scenarioStartBarrierFailure(String)
-    case scenarioPhaseNotDrained(phase: String, queued: Int, maximumQueued: Int, sent: Int, acknowledged: Int)
+    case scenarioPhaseNotDrained(phase: String, queued: Int, maximumQueued: Int, sent: Int, acknowledged: Int, overflowed: Int)
+    case receiverCompletionTimedOut, requiredCoverageMissing, clientMeasurementFailure
     case scenarioCompletionDrainTimedOut(queued: Int, inFlight: Int)
 
     var description: String {
@@ -5317,8 +5427,11 @@ private enum LoadError: Error, CustomStringConvertible {
         case .workloadFailureGuardTriggered(let failed, let attempted): return "workload failure guard triggered: \(failed)/\(attempted)"
         case .roomWarmupTimedOut(let opened, let required): return "room warmup timed out: opened \(opened)/\(required)"
         case .scenarioStartBarrierFailure(let reason): return "scenario start barrier failed: \(reason)"
-        case .scenarioPhaseNotDrained(let phase, let queued, let maximumQueued, let sent, let acknowledged):
-            return "scenario phase did not sustain its offered rate: phase=\(phase) queued=\(queued) maximum_queued=\(maximumQueued) sent=\(sent) acknowledged=\(acknowledged)"
+        case .receiverCompletionTimedOut: return "receiver completion timed out; delivery observations or required coverage are incomplete"
+        case .requiredCoverageMissing: return "required coverage proof did not pass"
+        case .clientMeasurementFailure: return "client measurement failed; inspect clientFailuresByKind"
+        case .scenarioPhaseNotDrained(let phase, let queued, let maximumQueued, let sent, let acknowledged, let overflowed):
+            return "scenario phase did not sustain its offered rate: phase=\(phase) queued=\(queued) maximum_queued=\(maximumQueued) sent=\(sent) acknowledged=\(acknowledged) overflowed=\(overflowed)"
         case .scenarioCompletionDrainTimedOut(let queued, let inFlight):
             return "scenario completion drain timed out: queued=\(queued) in_flight=\(inFlight)"
         }

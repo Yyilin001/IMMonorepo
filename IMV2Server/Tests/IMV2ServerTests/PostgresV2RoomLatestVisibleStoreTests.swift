@@ -124,6 +124,74 @@ struct PostgresV2RoomLatestVisibleStoreTests {
         }
     }
 
+    @Test("fallback keeps revision heads rather than all authorized messages", arguments: ["message_row", "room_event", "mixed"])
+    func largeAuthorizedHistoryPlan(storage: String) async throws {
+        try await withUserEventDatabase { db, sql, schema in
+            let user = UUID(), room = UUID()
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id,membership_revision,room_sequence)
+                VALUES (\(bind: room),'room-a','standard',3,10000)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision,left_revision)
+                VALUES (\(bind: room),\(bind: user),1,2),(\(bind: room),\(bind: user),3,NULL)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: schema).messages
+                    (message_id,room_id,room_sequence,timeline_sequence,sender_user_id,client_message_id,
+                     text_body,created_at,accepted_event_storage,accepted_event_id,accepted_membership_revision)
+                SELECT gen_random_uuid(),\(bind: room),n,n,\(bind: user),gen_random_uuid(),
+                    'interval-' || n::text,now(),'message_row',gen_random_uuid(),
+                    CASE WHEN n <= 9000 THEN 1 ELSE 2 END
+                FROM generate_series(1,10000) AS n
+                """).run()
+            if storage != "message_row" {
+                try await sql.raw("""
+                    INSERT INTO \(unsafeRaw: schema).room_events
+                        (event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at)
+                    SELECT accepted_event_id,room_id,room_sequence,'message.accepted',
+                        jsonb_build_object('message_id',message_id::text),accepted_membership_revision,created_at
+                    FROM \(unsafeRaw: schema).messages
+                    WHERE \(bind: storage) = 'room_event' OR room_sequence % 2 = 0
+                    """).run()
+                try await sql.raw("""
+                    UPDATE \(unsafeRaw: schema).messages SET accepted_event_storage = 'room_event',
+                        accepted_event_id = NULL, accepted_membership_revision = NULL
+                    WHERE \(bind: storage) = 'room_event' OR room_sequence % 2 = 0
+                    """).run()
+                try await sql.raw("ANALYZE \(unsafeRaw: schema).room_events").run()
+            }
+            for table in ["rooms", "room_memberships", "messages"] {
+                try await sql.raw("ANALYZE \(unsafeRaw: schema).\(unsafeRaw: table)").run()
+            }
+            let store = try PostgresV2RoomLatestVisibleStore(database: db, schema: schema)
+            let result = try await store.latestVisible(roomIDs: [.init(uuid: room)], actorUserID: .init(uuid: user))
+            guard case .snapshot(let snapshot)? = result[.init(uuid: room)] else {
+                Issue.record("missing rejoined member snapshot"); return
+            }
+            #expect(snapshot.latest?.sequence == 9000)
+            #expect(snapshot.membershipRevision == 3)
+            let query = PostgresV2RoomLatestVisibleStore.latestVisibleQuery(schema: schema, ids: [room], actor: user)
+            let plan = try await sql.raw("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) \(query)").all()
+                .map { try $0.decode(column: "QUERY PLAN", as: String.self) }.joined(separator: "\n")
+            print("ROOM_RECOVERY_REVISION_HEADS_PLAN storage=\(storage) messages=10000 visible=9000 invisible_tail=1000\n\(plan)")
+            #expect(snapshot.latest?.preview == "interval-9000")
+            let jsonPlan = try #require(try await sql.raw("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) \(query)").first())
+                .decode(column: "QUERY PLAN", as: String.self)
+            let roots = try #require(JSONSerialization.jsonObject(with: Data(jsonPlan.utf8)) as? [[String: Any]])
+            func check(_ node: [String: Any]) {
+                if let relation = node["Relation Name"] as? String,
+                   ["messages", "room_events"].contains(relation),
+                   (node["Actual Loops"] as? Int ?? 0) > 0 {
+                    #expect((node["Actual Rows"] as? Int ?? 0) <= 16)
+                    #expect((node["Rows Removed by Filter"] as? Int ?? 0) <= 16)
+                }
+                for child in node["Plans"] as? [[String: Any]] ?? [] { check(child) }
+            }
+            check(try #require(roots.first?["Plan"] as? [String: Any]))
+        }
+    }
+
     @Test("summary plans account for long histories outside the viewer membership interval", arguments: ["message_row", "room_event", "mixed"])
     func invisibleHistoryPlan(storage: String) async throws {
         try await withUserEventDatabase { db, sql, schema in

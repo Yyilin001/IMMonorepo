@@ -24,6 +24,16 @@ public struct V2LoadRoomAcceptedSequences: Sendable {
         }
         return applied(through: cursor)
     }
+    public enum Admission: Sendable {
+        case accepted(Progress)
+        case recoveryRequired(through: UInt64)
+    }
+    /// Retaining an ACK is an optimization, never permission to skip a peer body.
+    /// At capacity keep the bounded buffer and recover the missing prefix by pull.
+    public mutating func record(_ sequence: UInt64, after cursor: UInt64) -> Admission {
+        do { return .accepted(try accepted(sequence, after: cursor)) }
+        catch { return .recoveryRequired(through: sequence) }
+    }
     public mutating func applied(through cursor: UInt64) -> Progress {
         pending = pending.filter { $0 > cursor }
         var current = cursor, count = 0

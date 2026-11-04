@@ -598,7 +598,7 @@ public actor V2GatewayByteStream {
                           await session.authenticatedIdentity() == registeredIdentity else {
                         throw V2GatewaySessionError.unsupportedCommand
                     }
-                    try await session.validateMessageSendDispatch(frame)
+                    let send = try await session.validateMessageSendDispatch(frame)
                     guard messageSendTasks[frame.requestID] == nil else {
                         throw V2GatewaySessionError.unsupportedCommand
                     }
@@ -638,16 +638,15 @@ public actor V2GatewayByteStream {
                         var hasExecutionSlot = true
                         do {
                             let startedAt = ContinuousClock.now
-                            let exchange = try await session.receive(
-                                frame, handler: handler, originatingConnectionID: connectionID)
+                            let response = try await send.execute(handler: handler, originatingConnectionID: connectionID)
                             sendTrace?.record("gateway_to_result_ready", from: startedAt)
                             guard canRespondToMessageSend() else { throw CancellationError() }
                             let writeStartedAt = ContinuousClock.now
-                            try exchange.wireResponse.validate(limits: frameLimits)
+                            try response.validate(limits: frameLimits)
                             // 先释放业务名额，再让 ACK 对客户端可见。慢写仍受总任务和字节预算约束。
                             messageSendExecutingRequests -= 1
                             hasExecutionSlot = false
-                            try await concurrentMessageSendRespond(exchange.wireResponse)
+                            try await concurrentMessageSendRespond(response)
                             sendTrace?.record("result_ready_to_ack_write", from: writeStartedAt)
                         } catch {
                             closeAfterMessageSendFailure()

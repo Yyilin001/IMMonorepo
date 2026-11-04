@@ -151,8 +151,10 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
                         m.accepted_membership_revision
                  FROM \(unsafeRaw: schema).messages m
                  WHERE m.room_id = \(bind: room) AND m.accepted_event_storage = 'message_row'
-                   AND m.room_sequence > \(bind: after)
-                 ORDER BY m.room_sequence LIMIT \(bind: limit))
+                   -- message_row has a validated room_sequence = timeline_sequence fence.
+                   -- Seek the existing partial index; keep the returned room cursor unchanged.
+                   AND m.timeline_sequence > \(bind: after)
+                 ORDER BY m.timeline_sequence LIMIT \(bind: limit))
             ), event AS MATERIALIZED (
                 SELECT *, CASE WHEN event_type IN ('membership_changed', 'group.member_role_changed','group.ownership_transferred','group.dissolved')
                                THEN (payload->>'membership_revision')::bigint

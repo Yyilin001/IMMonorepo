@@ -455,9 +455,21 @@ public actor V2GatewaySession {
         negotiatedMessageSendOperations && currentAuthenticatedConnection() != nil
     }
 
+    /// Binds the decoded request to the session that validated its wire shape.
+    struct ValidatedMessageSend: Sendable {
+        fileprivate let session: V2GatewaySession
+        fileprivate let frame: V2GatewayInboundFrame
+        fileprivate let envelope: IMV2Envelope
+
+        func execute(handler: any V2GatewayCommandHandler, originatingConnectionID: UUID) async throws -> V2GatewayOutboundFrame {
+            try await session.receiveAuthenticated(frame, envelope: envelope, handler: handler,
+                originatingConnectionID: originatingConnectionID).frame
+        }
+    }
+
     /// Validate a send before the connection owner reserves a concurrent slot.
     /// Over-capacity requests still have to satisfy authentication and wire shape.
-    func validateMessageSendDispatch(_ frame: V2GatewayInboundFrame) throws {
+    func validateMessageSendDispatch(_ frame: V2GatewayInboundFrame) throws -> ValidatedMessageSend {
         guard terminalGate.isActive(),
               case .authenticated(let version, _) = state.phase,
               frame.version == version,
@@ -474,7 +486,8 @@ public actor V2GatewaySession {
         }
         switch (frame.command, envelope.body) {
         case (.messageSendOperation, .messageSendOperation),
-             (.messageSendOperationRecover, .messageSendOperationRecover): break
+             (.messageSendOperationRecover, .messageSendOperationRecover):
+            return ValidatedMessageSend(session: self, frame: frame, envelope: envelope)
         default: throw V2GatewaySessionError.unsupportedCommand
         }
     }

@@ -1,0 +1,7 @@
+# Opt-in for the measured 8-GiB capacity-test host, after checking host headroom.
+# Resource allowance only: keep the measured 1536-MiB shared_buffers setting.
+# The 6g value is a combined RAM+swap limit; the test host has no swap.
+services:
+  postgres:
+    mem_limit: 5g
+    memswap_limit: 6g

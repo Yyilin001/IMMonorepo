@@ -97,7 +97,7 @@ public enum V2RealtimeJournalSchemaReadiness {
             SELECT NOT EXISTS(SELECT 1 FROM (VALUES
                     ('realtime_topic_partition','77a3422e4f7dcd0100366a6c4b850dc7'),
                     ('capture_realtime_room_events_heads','77ab90c14e37f5c1e45fc77e4c956ad5'),
-                    ('capture_realtime_messages_heads','932e8761ec89980ce1894e150e0d823f'),
+                    ('capture_realtime_messages_heads','7520812f6e8aef33156021adb72807e1'),
                     ('capture_realtime_change','9ac9e0b999285c37e8d169a676c33cfb')
                 ) expected(function_name,source_hash)
                 WHERE NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
