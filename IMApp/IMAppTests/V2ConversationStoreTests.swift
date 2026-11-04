@@ -8,6 +8,34 @@ import UIKit
 
 @MainActor
 struct V2ConversationStoreTests {
+    @Test func confirmedOutgoingImageRendersPendingPixelsBeforeDownload() throws {
+        let store = V2ConversationDetailStore(environment: .init(userID: UserID(uuid: UUID()).rawValue,
+            projections: .init(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []))),
+            context: .init(roomID: RoomID(uuid: UUID()).rawValue, kind: .group))
+        let media = V2MediaReference(mediaID: .init(uuid: UUID()))
+        let descriptor = try V2MediaPresentation(mediaID: media.mediaID, kind: .image, contentType: "image/png", byteCount: 100)
+        let pixels = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { ctx in
+            UIColor.red.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        }
+        store.rememberOutgoingPreview(pixels, for: media.mediaID)
+        func centerIsRed(outgoing: Bool) throws -> Bool {
+            let message = V2ConversationMessageItem(id: UUID().uuidString, revision: 1, text: "", media: [media],
+                mediaPresentations: [descriptor], createdAt: .now, isOutgoing: outgoing, isWithdrawn: false)
+            let renderer = ImageRenderer(content: V2ConversationMediaAttachmentRow(store: store, message: message,
+                media: media, presentation: descriptor, index: 0).frame(width: 240, height: 240))
+            let frame = try #require(renderer.cgImage)
+            var rgba: [UInt8] = [0, 0, 0, 0]
+            return try rgba.withUnsafeMutableBytes { bytes in
+                let ctx = try #require(CGContext(data: bytes.baseAddress, width: 1, height: 1, bitsPerComponent: 8,
+                    bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                ctx.draw(frame, in: CGRect(x: -(frame.width / 2), y: -(frame.height / 2), width: frame.width, height: frame.height))
+                return bytes[0] > 220 && bytes[1] < 40 && bytes[2] < 40
+            }
+        }
+        #expect(try centerIsRed(outgoing: true))
+        #expect(try !centerIsRed(outgoing: false))
+    }
+
     @Test func firstImageTimelineAndLaterSafeAreaLayoutKeepTheWholeLastRowVisible() async throws {
         await V2UITestWindowOwnership.acquire()
         defer { V2UITestWindowOwnership.release() }

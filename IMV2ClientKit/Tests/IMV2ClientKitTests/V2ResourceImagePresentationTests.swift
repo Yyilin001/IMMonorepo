@@ -74,7 +74,7 @@ struct V2ResourceImagePresentationTests {
             }
         }
         let job = UUID()
-        let request = try V2ResourceUploadRequest(operationID: .init(uuid: job), mediaID: .init(uuid: job),
+        let request = try V2ResourceUploadRequest(operationID: .init(uuid: job), mediaID: .init(uuid: UUID()),
             usage: .messageAttachment(room), contentType: asset.contentType.value, byteCount: asset.byteCount,
             checksum: asset.checksum, displayName: asset.displayName, clientImageDimensions: dimensions)
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()), text: "",
@@ -83,6 +83,7 @@ struct V2ResourceImagePresentationTests {
         let pending = try await store.pendingResourceSendSnapshot(in: room, page: 0)
         #expect(pending.localImages[intent.id]?.map(\.dimensions) == [dimensions])
         #expect(pending.localImages[intent.id]?.map(\.jobID) == [job])
+        #expect(pending.localImages[intent.id]?.map(\.mediaID) == [request.mediaID])
         await files.close(); try await store.close()
         let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: user)
         let restored = try await reopened.resourceFileJournal().localAsset(asset.id)

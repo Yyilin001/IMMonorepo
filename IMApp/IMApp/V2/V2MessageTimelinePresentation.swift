@@ -1,3 +1,4 @@
+import IMV2Core
 import MessagingUI
 import Observation
 import SwiftUI
@@ -174,6 +175,7 @@ struct V2PendingMessageRow: View {
     let pending: V2DurableConversationSendService.Pending
     let retry: () -> Void
     let cancel: () -> Void
+    var rememberImage: (@MainActor (UIImage, MediaID) -> Void)? = nil
     var borrowImage: (@MainActor (UUID) async throws -> V2ResourceFileLease)? = nil
 
     var body: some View {
@@ -186,7 +188,7 @@ struct V2PendingMessageRow: View {
                     }
                     if !pending.images.isEmpty {
                         ForEach(pending.images, id: \.jobID) { image in
-                            V2PendingImagePreview(image: image, borrow: borrowImage)
+                            V2PendingImagePreview(image: image, remember: rememberImage, borrow: borrowImage)
                         }
                     }
                     ForEach(0..<max(0, pending.total - pending.images.count), id: \.self) { _ in
@@ -214,6 +216,7 @@ struct V2PendingMessageRow: View {
 
 private struct V2PendingImagePreview: View {
     let image: V2PendingResourceSendSnapshot.LocalImage
+    let remember: (@MainActor (UIImage, MediaID) -> Void)?
     let borrow: (@MainActor (UUID) async throws -> V2ResourceFileLease)?
     @Environment(\.v2MediaThumbnailCache) private var cache
     @State private var thumbnail: UIImage?
@@ -235,10 +238,13 @@ private struct V2PendingImagePreview: View {
             guard let borrow else { return }
             do {
                 let lease = try await borrow(image.jobID)
-                let result = await cache?.thumbnail(fileURL: lease.fileURL, maximumPixelSize: 2048)
+                let result = await cache?.thumbnail(fileURL: lease.fileURL, maximumPixelSize: 1280)
                 await lease.release()
                 guard !Task.isCancelled else { return }
-                thumbnail = result?.image
+                if let pixels = result?.image {
+                    remember?(pixels, image.mediaID)
+                    thumbnail = pixels
+                }
             } catch { }
         }
     }

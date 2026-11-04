@@ -144,6 +144,9 @@ struct V2ConversationMediaAttachmentRow: View {
                     V2ConversationImageAvailabilityPlaceholder(availability: .retry,
                         download: { Task { await store.loadImagePreview(media, from: message) } })
                         .accessibilityIdentifier(identifier)
+                } else if message.isOutgoing, !message.isWithdrawn,
+                          let pixels = store.outgoingPreview(for: media.mediaID) {
+                    V2ZoomableConversationImage(image: pixels, loadOriginal: { await store.originalImage(media, from: message) })
                 } else {
                     V2ConversationMediaPlaceholder().accessibilityLabel("正在加载缩略图")
                 }

@@ -18,6 +18,7 @@ public struct V2PreparingResourceSendPresentation: Sendable {
 public struct V2PendingResourceSendSnapshot: Sendable {
     public struct LocalImage: Hashable, Sendable {
         public let jobID: UUID
+        public let mediaID: MediaID
         public let dimensions: V2LocalResourceImageDimensions
     }
     public let preparing: [V2PreparingResourceSendPresentation]
@@ -73,7 +74,7 @@ extension GRDBV2LocalSyncStore {
             if !ids.isEmpty {
                 let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
                 let rows = try Row.fetchAll(db, sql: """
-                    SELECT d.intent_id,j.job_id,a.pixel_width,a.pixel_height
+                    SELECT d.intent_id,j.job_id,j.media_id,a.pixel_width,a.pixel_height
                     FROM v2_send_intent_dependencies d
                     JOIN v2_resource_transfer_jobs j USING(job_id)
                     JOIN v2_resource_local_assets a ON a.asset_id=j.local_asset_id
@@ -82,7 +83,7 @@ extension GRDBV2LocalSyncStore {
                     """, arguments: StatementArguments(ids.map(\.uuidString)))
                 for row in rows {
                     guard let intent = UUID(uuidString: row["intent_id"]), let job = UUID(uuidString: row["job_id"]) else { throw V2ResourceJournalError.invalidRecord }
-                    images[intent, default: []].append(.init(jobID: job, dimensions: try .init(width: row["pixel_width"], height: row["pixel_height"])))
+                    images[intent, default: []].append(.init(jobID: job, mediaID: try .init(row["media_id"]), dimensions: try .init(width: row["pixel_width"], height: row["pixel_height"])))
                 }
             }
             return .init(preparing: preparing, submitted: Array(submitted.prefix(200)), hasNext: submitted.count > 200, localImages: images)

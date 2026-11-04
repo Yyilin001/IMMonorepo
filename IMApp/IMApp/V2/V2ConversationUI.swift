@@ -2022,6 +2022,7 @@ struct V2ConversationDetailView: View {
                                             V2PendingMessageRow(pending: pending,
                                                 retry: { Task { await store.composer.retryResourceSend(pending.id) } },
                                                 cancel: { Task { await store.composer.cancelResourceSend(pending.id) } },
+                                                rememberImage: store.rememberOutgoingPreview,
                                                 borrowImage: { try await store.composer.borrowPendingImage(jobID: $0) })
                                             }
                                 }

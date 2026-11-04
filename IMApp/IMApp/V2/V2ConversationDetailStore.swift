@@ -522,12 +522,13 @@ final class V2ConversationDetailStore {
         previous: [V2ConversationMessageItem],
         refreshed: [V2ConversationMessageItem]
     ) async {
-        guard let cache = mediaDownloader as? any V2ConversationMediaCacheDiscarding else { return }
+        let cache = mediaDownloader as? any V2ConversationMediaCacheDiscarding
         let withdrawnIDs = Set(refreshed.lazy.filter(\.isWithdrawn).map(\.id))
         for message in previous where !message.isWithdrawn && withdrawnIDs.contains(message.id) {
             for media in message.media {
                 guard !Task.isCancelled else { return }
-                await cache.discard(media)
+                outgoingPreviews.removeObject(forKey: media.mediaID.rawValue as NSString)
+                await cache?.discard(media)
             }
         }
     }
@@ -877,6 +878,23 @@ final class V2ConversationDetailStore {
         }
     }
 
+    // Owned by this conversation; pending and confirmed rows have different lifetimes.
+    @ObservationIgnored private let outgoingPreviews: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.totalCostLimit = 24 * 1024 * 1024
+        cache.countLimit = 32
+        return cache
+    }()
+
+    func rememberOutgoingPreview(_ image: UIImage, for mediaID: MediaID) {
+        guard let pixels = image.cgImage else { return }
+        outgoingPreviews.setObject(image, forKey: mediaID.rawValue as NSString, cost: pixels.bytesPerRow * pixels.height)
+    }
+
+    func outgoingPreview(for mediaID: MediaID) -> UIImage? {
+        outgoingPreviews.object(forKey: mediaID.rawValue as NSString)
+    }
+
     private var retainedImagePreviewBytes: Int {
         initialImagePreviews.values.reduce(0) { $0 + ($1.image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0) }
     }
@@ -914,6 +932,7 @@ final class V2ConversationDetailStore {
             // thumbnail cache handle older rows without retaining the whole history.
             retainImagePreview(image, for: media.mediaID)
             imagePreviewStates[media.mediaID] = .downloaded(file)
+            outgoingPreviews.removeObject(forKey: media.mediaID.rawValue as NSString)
         } catch is CancellationError {
             if imagePreviewRequestIDs[media.mediaID] == requestID { imagePreviewStates[media.mediaID] = nil }
         } catch {
