@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import CryptoKit
 import Synchronization
@@ -36,42 +37,63 @@ public struct V2BackgroundResultInbox: Sendable {
             if !replacing {
                 guard try entries().count < 128 else { throw V2BackgroundTransferError.capacityExceeded }
             }
-            var published = false
-            do {
-                try data.write(to:file,options:.atomic)
-                published = true
-                try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:file.path)
-                try protectionWriter.apply(.untilFirstAuthentication,to:file)
-                let output=try FileHandle(forWritingTo:file);defer {try? output.close()};try output.synchronize()
-                try V2ResourceDirectoryIO.synchronize(directory)
-            } catch {
-                // A failed atomic write cannot justify deleting a pre-existing
-                // receipt or an unexpected directory at the destination.
-                if published { try? removeRegular(file) }
-                throw error
-            }
+            let staged = directory.appendingPathComponent(UUID().uuidString + ".tmp")
+            defer { try? FileManager.default.removeItem(at: staged) }
+            try data.write(to: staged, options: .withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staged.path)
+            try protectionWriter.apply(.untilFirstAuthentication, to: staged)
+            let output = try FileHandle(forWritingTo: staged)
+            defer { try? output.close() }
+            try output.synchronize()
+            guard rename(staged.path, file.path) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+            // A directory sync error leaves the fully prepared receipt in place.
+            try V2ResourceDirectoryIO.synchronize(directory)
         }
     }
     public func results() throws -> [V2BackgroundTransferResult] {
         try Self.io.withLock { _ in
             try requireOwnedDirectories()
-            return try entries().sorted { $0.lastPathComponent < $1.lastPathComponent }.map { file in
-                let input = try FileHandle(forReadingFrom: file)
-                defer { try? input.close() }
-                let data = try input.read(upToCount: 2049) ?? Data()
-                guard !data.isEmpty, data.count <= 2048,
-                      let result = try? JSONDecoder().decode(V2BackgroundTransferResult.self, from: data),
-                      result.mappingID.uuidString == file.deletingPathExtension().lastPathComponent else {
-                    throw V2BackgroundTransferError.mappingConflict
-                }
-                return result
+            return try entries().sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap {
+                try readReceipt(at: $0)
             }
         }
+    }
+
+    func result(for id: UUID) throws -> V2BackgroundTransferResult? {
+        try Self.io.withLock { _ in
+            try requireOwnedDirectories()
+            do { return try readReceipt(at: resultURL(id)) }
+            catch V2ResourceStorageError.unsafeFile { return nil }
+        }
+    }
+
+    private func readReceipt(at file: URL) throws -> V2BackgroundTransferResult? {
+        guard try exists(file, type: .typeRegular) else { return nil }
+        let input = try FileHandle(forReadingFrom: file)
+        defer { try? input.close() }
+        let data = try input.read(upToCount: 2049) ?? Data()
+        guard data.count <= 2048,
+              let result = try? JSONDecoder().decode(V2BackgroundTransferResult.self, from: data),
+              result.mappingID.uuidString == file.deletingPathExtension().lastPathComponent else {
+            // Only the journal/driver may establish completion. Missing evidence
+            // goes through their existing reconciliation and retry path.
+            try removeRegular(file)
+            return nil
+        }
+        return result
     }
     public func remove(_ id:UUID) throws {
         try Self.io.withLock { _ in
             try requireOwnedDirectories()
             try removeRegular(resultURL(id))
+        }
+    }
+    /// Reconciliation ignores invalid leaf entries, just like discovery. Never follow or unlink them.
+    func discardReceipt(for id: UUID) throws {
+        try Self.io.withLock { _ in
+            try requireOwnedDirectories()
+            do { try removeRegular(resultURL(id)) }
+            catch V2ResourceStorageError.unsafeFile { return }
         }
     }
     private func resultURL(_ id: UUID) -> URL { directory.appendingPathComponent(id.uuidString + ".result") }
@@ -95,10 +117,15 @@ public struct V2BackgroundResultInbox: Sendable {
             guard scanned < 256 else { throw V2BackgroundTransferError.capacityExceeded }
             scanned += 1
             guard file.pathExtension == "result" else { continue }
-            guard files.count < 128 else { throw V2BackgroundTransferError.capacityExceeded }
+            // Ignore unsafe entries during discovery. Direct access still rejects them.
+            guard file.resolvingSymlinksInPath().path == file.standardizedFileURL.path,
+                  try FileManager.default.attributesOfItem(atPath: file.path)[.type] as? FileAttributeType == .typeRegular else { continue }
             guard let id = UUID(uuidString: file.deletingPathExtension().lastPathComponent),
-                  id.uuidString == file.deletingPathExtension().lastPathComponent else { throw V2BackgroundTransferError.mappingConflict }
-            guard try exists(file, type: .typeRegular) else { throw V2BackgroundTransferError.mappingConflict }
+                  id.uuidString == file.deletingPathExtension().lastPathComponent else {
+                try removeRegular(file)
+                continue
+            }
+            guard files.count < 128 else { throw V2BackgroundTransferError.capacityExceeded }
             files.append(file)
         }
         return files

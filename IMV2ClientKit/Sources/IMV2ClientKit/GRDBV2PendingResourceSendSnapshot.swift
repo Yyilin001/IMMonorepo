@@ -32,8 +32,7 @@ extension GRDBV2LocalSyncStore {
     /// or remove a row between dependency lookups. Payload blobs stay in the journal.
     public func pendingResourceSendSnapshot(in roomID: RoomID, page: Int, now: Date = Date()) throws -> V2PendingResourceSendSnapshot {
         guard page >= 0, page <= Int.max / 200 - 1 else { throw V2ResourceJournalError.invalidRecord }
-        return try databasePool.write { db in
-            try Self.settleAcceptedSendPresentations(roomID: roomID.rawValue, db: db)
+        return try databasePool.read { db in
             let preparing: [V2PreparingResourceSendPresentation]
             if page == 0 {
                 preparing = try Row.fetchAll(db, sql: """

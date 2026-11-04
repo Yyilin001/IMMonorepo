@@ -56,32 +56,30 @@ public actor V2RealtimeSessionCoordinator: V2RealtimeSessionConnecting {
         } else {
             let id = UUID()
             let task = Task { [authSession, connection, supportedCapabilityProfiles] in
-                var credentialEpoch: V2AuthSessionEpoch?
-                var attemptedAccessToken: String?
                 do {
-                    let credentials = try await authSession.realtimeCredentials()
-                    credentialEpoch = credentials.sessionEpoch
-                    attemptedAccessToken = credentials.accessToken
-                    let established = try await connection.connectAndAuthenticate(
-                        accessToken: credentials.accessToken,
-                        deviceID: credentials.deviceID,
-                        supportedCapabilityProfiles: supportedCapabilityProfiles
-                    )
-                    if let credentialEpoch { try await authSession.requireAuthenticatedEpoch(credentialEpoch) }
-                    guard established.userID == credentials.userID,
-                          established.deviceID == credentials.deviceID
-                    else {
+                    var credentials = try await authSession.realtimeCredentials()
+                    guard let epoch = credentials.sessionEpoch else { throw V2AuthSessionError.sessionInvalidated }
+                    func handshake(_ credentials: V2ClientRealtimeCredentials) async throws -> V2AuthenticatedClientSession {
+                        try Task.checkCancellation()
+                        return try await connection.connectAndAuthenticate(accessToken: credentials.accessToken,
+                            deviceID: credentials.deviceID, supportedCapabilityProfiles: supportedCapabilityProfiles)
+                    }
+                    let established: V2AuthenticatedClientSession
+                    do { established = try await handshake(credentials) }
+                    catch V2TLSFrameConnectionError.authenticationFailed {
+                        try await authSession.refreshAfterAccessTokenRejection(ifCurrent: epoch,
+                            rejectedAccessToken: credentials.accessToken, deviceID: credentials.deviceID)
+                        credentials = try await authSession.realtimeCredentials()
+                        guard credentials.sessionEpoch == epoch else { throw V2AuthSessionError.sessionInvalidated }
+                        established = try await handshake(credentials)
+                    }
+                    try await authSession.requireAuthenticatedEpoch(epoch)
+                    guard established.userID == credentials.userID, established.deviceID == credentials.deviceID else {
                         await connection.disconnect()
                         throw V2RealtimeSessionCoordinatorError.identityMismatch
                     }
                     return established
                 } catch V2AuthSessionError.unauthenticated {
-                    // Refresh/restore can conclusively end the session before
-                    // a socket is opened. Use the same app-facing transition.
-                    throw V2RealtimeSessionCoordinatorError.authenticationRequired
-                } catch let error as V2TLSFrameConnectionError where error == .authenticationFailed {
-                    guard let credentialEpoch else { throw V2AuthSessionError.sessionInvalidated }
-                    try await authSession.handleTerminalRejection(ifCurrent: credentialEpoch, rejectedAccessToken: attemptedAccessToken)
                     throw V2RealtimeSessionCoordinatorError.authenticationRequired
                 }
             }

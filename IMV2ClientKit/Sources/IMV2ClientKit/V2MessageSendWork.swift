@@ -86,15 +86,15 @@ extension GRDBV2LocalSyncStore {
         """
 
     /// A one-way presentation marker; it never changes execution or delivery state.
-    static func settleAcceptedSendPresentations(roomID: String, db: Database) throws {
+    private static func settleAcceptedSendPresentation(identityKey: String, db: Database) throws {
         try db.execute(sql: """
             UPDATE v2_message_send_operations AS m SET accepted_projection_observed=1,projection_observed_snapshot_id=NULL
-            WHERE m.room_id=? AND m.accepted_message_id IS NOT NULL AND m.accepted_projection_observed=0
+            WHERE m.work_id=(SELECT work_id FROM v2_operation_work WHERE identity_key=?) AND m.accepted_projection_observed=0
               AND (EXISTS(SELECT 1 FROM v2_message_projections p WHERE p.message_id=m.accepted_message_id
                     AND p.room_id=m.room_id AND p.room_sequence=m.accepted_room_sequence)
                 OR EXISTS(SELECT 1 FROM v2_message_tombstones t WHERE t.message_id=m.accepted_message_id AND t.room_id=m.room_id)
                 )
-            """, arguments: [roomID])
+            """, arguments: [identityKey])
     }
 
     static func prepareAcceptedSendSnapshotEvidence(snapshotID: String, workID: String? = nil, db: Database) throws {
@@ -124,7 +124,7 @@ extension GRDBV2LocalSyncStore {
                 try db.execute(sql: "UPDATE v2_message_send_operations SET accepted_message_id=?,accepted_room_sequence=? WHERE work_id=(SELECT work_id FROM v2_operation_work WHERE identity_key=?)",
                     arguments: [acceptance.messageID.rawValue,sequence,identity.storageKey])
                 // A projection may have arrived before the send receipt.
-                try Self.settleAcceptedSendPresentations(roomID: command.command.roomID.rawValue, db: db)
+                try Self.settleAcceptedSendPresentation(identityKey: identity.storageKey, db: db)
                 // Receipt installation may race the interval between shadow
                 // preparation and ACK activation. Attach this one receipt to
                 // the already prepared snapshot evidence in the same write.

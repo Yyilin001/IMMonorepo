@@ -109,7 +109,7 @@ public struct V2SessionHTTPAuthorization: Sendable,
                     try await scheduler.withPermit(.init(service: "authentication", priority: .critical, kind: .authentication), deadline: deadline) { _ in
                         try await V2HTTPRequestDeadline.$authenticationAdmission.withValue(scheduler) {
                             do {
-                                try await session.refreshAfterHTTPUnauthorized(ifCurrent: epoch,
+                                try await session.refreshAfterAccessTokenRejection(ifCurrent: epoch,
                                     rejectedAccessToken: String(authorization.dropFirst(7)), deviceID: device)
                             } catch {
                                 await session.drainHTTPAuthorizationWork(ifCurrent: epoch)
@@ -119,7 +119,7 @@ public struct V2SessionHTTPAuthorization: Sendable,
                     }
                 } else {
                     do {
-                        try await session.refreshAfterHTTPUnauthorized(ifCurrent: epoch,
+                        try await session.refreshAfterAccessTokenRejection(ifCurrent: epoch,
                             rejectedAccessToken: String(authorization.dropFirst(7)), deviceID: device)
                     } catch {
                         await session.drainHTTPAuthorizationWork(ifCurrent: epoch)

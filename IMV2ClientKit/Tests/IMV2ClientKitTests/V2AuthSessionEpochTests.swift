@@ -105,7 +105,8 @@ struct V2AuthSessionEpochTests {
         _ = try await session.refresh()
         #expect(await session.currentEpoch() == epoch)
         await wire.release()
-        await #expect(throws: V2AuthSessionError.sessionInvalidated) { try await connect.value }
+        await #expect(throws: V2TLSFrameConnectionError.authenticationFailed) { try await connect.value }
+        #expect(await wire.tokens == [a.accessToken, refreshed.accessToken])
         #expect(await store.record?.credentials == refreshed)
     }
 
@@ -195,12 +196,16 @@ private actor EpochRefresh: V2AuthTransport {
     func refresh(_ request: V2RefreshRequest) -> V2AuthCredentials { response }
 }
 private actor EpochRejectedConnection: V2RealtimeConnection {
+    private(set) var tokens: [String] = []
     private var entered = false
     private var waiter: CheckedContinuation<Void, Never>?
     private var observer: CheckedContinuation<Void, Never>?
     func connectAndAuthenticate(accessToken: String, deviceID: DeviceID, supportedCapabilityProfiles: Set<String>) async throws -> V2AuthenticatedClientSession {
-        entered = true; observer?.resume(); observer = nil
-        await withCheckedContinuation { waiter = $0 }
+        tokens.append(accessToken)
+        if !entered {
+            entered = true; observer?.resume(); observer = nil
+            await withCheckedContinuation { waiter = $0 }
+        }
         throw V2TLSFrameConnectionError.authenticationFailed
     }
     func disconnect() {}

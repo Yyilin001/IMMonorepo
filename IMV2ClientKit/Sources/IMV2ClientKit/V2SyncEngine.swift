@@ -47,22 +47,20 @@ public actor V2SyncEngine: V2SyncDriving {
     ///   - store: 保存同步状态的本地存储。
     ///   - capabilityProfile: 非空能力配置；只检查去除首尾空白后是否为空，保存及比较仍使用原始字符串。
     ///   - maxRecords: 每次增量拉取的记录上限，必须大于零。
-    ///   - operationGate: 写入同一存储的多个同步引擎应共享的操作门。
     ///
     /// 非法记录上限或空能力配置触发前置条件失败。初始化不发起网络或数据库工作。
     public init(
         transport: any V2ClientSyncTransport,
         store: any V2LocalSyncStore,
         capabilityProfile: String,
-        maxRecords: Int = 500,
-        operationGate: V2SyncOperationGate = .init()
+        maxRecords: Int = 500
     ) {
         precondition(maxRecords > 0 && !capabilityProfile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         self.transport = transport
         self.store = store
         self.capabilityProfile = capabilityProfile
         self.maxRecords = maxRecords
-        self.operationGate = operationGate
+        self.operationGate = store.operationGate
     }
 
     deinit {

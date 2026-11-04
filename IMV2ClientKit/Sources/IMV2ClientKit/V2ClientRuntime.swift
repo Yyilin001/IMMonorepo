@@ -108,6 +108,8 @@ public actor V2ClientRuntime {
     private var policyRecoveryTask: Task<Void, Never>?
     private var stopWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
+    var waitingForStopCount: Int { stopWaiters.count }
+
     /// 注入认证连接和握手后的业务活动，不立即启动任务。
     ///
     /// - Parameters:
@@ -202,8 +204,13 @@ public actor V2ClientRuntime {
             startBackgroundTasks(for: attempt.generation, connectionID: session.connectionID)
             return session
         case .failure(let error):
-            state = .stopped
-            await connection.disconnect()
+            let draining = Task { [connection] in
+                await connection.disconnect()
+                stopAttempt = nil
+            }
+            stopAttempt = draining
+            publishStopped()
+            await draining.value
             throw error
         }
     }
@@ -236,16 +243,15 @@ public actor V2ClientRuntime {
         roomSubscriptionTask = nil
         policyRecoveryTask?.cancel()
         policyRecoveryTask = nil
-        state = .stopped
-        resumeStopWaiters()
+        publishStopped()
         let draining = Task { [connection] in
             await connection.disconnect()
             _ = await starting?.result
             for loop in ownedLoops { await loop.value }
+            stopAttempt = nil
         }
         stopAttempt = draining
         await draining.value
-        stopAttempt = nil
     }
 
     /// 为当前代创建权限恢复、房间订阅／追赶、同步提示和心跳任务。
@@ -323,8 +329,7 @@ public actor V2ClientRuntime {
         roomSubscriptionTask = nil
         policyRecoveryTask?.cancel()
         policyRecoveryTask = nil
-        state = .stopped
-        resumeStopWaiters()
+        publishStopped()
         await connection.disconnect()
     }
 
@@ -334,7 +339,8 @@ public actor V2ClientRuntime {
     }
 
     /// 摘除并恢复当前登记的全部停止等待者，每个 continuation 最多恢复一次。
-    private func resumeStopWaiters() {
+    private func publishStopped() {
+        state = .stopped
         let waiters = stopWaiters.values
         stopWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters { waiter.resume() }

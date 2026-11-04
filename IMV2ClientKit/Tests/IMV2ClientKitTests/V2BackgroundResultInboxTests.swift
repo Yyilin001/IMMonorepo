@@ -15,6 +15,36 @@ struct V2BackgroundResultInboxTests {
         #expect(try inbox.results().isEmpty)
     }
 
+    @Test func failedReplacementPreservesPreviousReceipt() throws {
+        struct FailingProtection: V2ResourceFileProtectionWriting {
+            func apply(_ protection: V2ResourceFileProtection, to file: URL) throws {
+                if try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+            }
+        }
+        let f = try Fixture(); defer { f.remove() }
+        let inbox = try f.inbox()
+        try inbox.write(f.result())
+        let failing = try V2BackgroundResultInbox(root: f.owned, sessionID: f.session, protectionWriter: FailingProtection())
+        #expect(throws: CocoaError.self) { try failing.write(f.result(status: 503)) }
+        #expect(try inbox.results() == [f.result()])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: inbox.directory.path) == [f.resultFile.lastPathComponent])
+    }
+
+    @Test(arguments: [false, true])
+    func invalidLeafCannotBlockReconciliation(isDirectory: Bool) throws {
+        let f = try Fixture(); defer { f.remove() }
+        let inbox = try f.inbox(), good = f.result(mapping: UUID())
+        if isDirectory { try FileManager.default.createDirectory(at: f.resultFile, withIntermediateDirectories: false) }
+        else { try FileManager.default.createSymbolicLink(at: f.resultFile, withDestinationURL: f.external) }
+        try inbox.write(good)
+        #expect(try inbox.result(for: f.mapping) == nil)
+        try inbox.discardReceipt(for: f.mapping)
+        #expect(try inbox.results() == [good])
+        #expect(FileManager.default.fileExists(atPath: f.resultFile.path))
+    }
+
     @Test func aSessionDirectorySymlinkCannotRedirectTheCallbackWrite() throws {
         let f = try Fixture(); defer { f.remove() }
         try FileManager.default.createSymbolicLink(at: f.sessionDirectory, withDestinationURL: f.external)
@@ -42,7 +72,8 @@ struct V2BackgroundResultInboxTests {
         let inbox = try f.inbox(), original = try JSONEncoder().encode(f.result(status: 418))
         try original.write(to: f.externalResult)
         try FileManager.default.createSymbolicLink(at: f.resultFile, withDestinationURL: f.externalResult)
-        #expect(throws: V2ResourceStorageError.unsafeFile) { try action.perform(on: inbox, result: f.result()) }
+        if case .read = action { #expect(try inbox.results().isEmpty) }
+        else { #expect(throws: V2ResourceStorageError.unsafeFile) { try action.perform(on: inbox, result: f.result()) } }
         #expect((try? Data(contentsOf: f.externalResult)) == original)
     }
 
@@ -62,7 +93,16 @@ struct V2BackgroundResultInboxTests {
         let inbox = try f.inbox()
         let name = useAnotherID ? UUID().uuidString : "not-a-mapping"
         try JSONEncoder().encode(f.result()).write(to: f.sessionDirectory.appending(path: name + ".result"))
-        #expect(throws: V2BackgroundTransferError.mappingConflict) { _ = try inbox.results() }
+        let other = f.result(mapping: UUID())
+        try inbox.write(f.result())
+        try inbox.write(other)
+        let corrupt = UUID()
+        try Data([0xff]).write(to: f.sessionDirectory.appending(path: corrupt.uuidString + ".result"))
+        #expect(try inbox.result(for: other.mappingID) == other)
+        #expect(FileManager.default.fileExists(atPath: f.sessionDirectory.appending(path: corrupt.uuidString + ".result").path))
+        #expect(try inbox.results().map(\.mappingID).sorted() == [f.mapping, other.mappingID].sorted())
+        #expect(try inbox.result(for: corrupt) == nil)
+        #expect(!FileManager.default.fileExists(atPath: f.sessionDirectory.appending(path: name + ".result").path))
     }
 
     @Test func scanningUnrelatedEntriesIsBounded() throws {

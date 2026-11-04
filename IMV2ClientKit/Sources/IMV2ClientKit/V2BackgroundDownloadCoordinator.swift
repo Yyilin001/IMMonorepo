@@ -167,7 +167,7 @@ public actor V2BackgroundDownloadCoordinator {
         // apparently unfinished job whose sole completion marker was deleted.
         if try await store.retireBackgroundDownload(id: file.jobID, mappingID: file.mappingID, accountID: accountID, outcome: .completed) {
             try await discardSource(file.mappingID)
-            try inbox.remove(file.mappingID)
+            try inbox.discardReceipt(for: file.mappingID)
         } else if try await store.backgroundDownloadIsCompleted(id: file.jobID, accountID: accountID) == false {
             throw CancellationError()
         }
@@ -196,7 +196,7 @@ public actor V2BackgroundDownloadCoordinator {
             let actual = await driver.tasks()
             await driver.cancelAndDrain(actual.filter { $0.mappingID == task.id }.map(\.identifier))
             guard !closed, try await store.retireBackgroundDownload(id: jobID, mappingID: task.id, accountID: accountID, outcome: .completed) else { throw CancellationError() }
-            try await discardSource(task.id); try inbox.remove(task.id)
+            try await discardSource(task.id); try inbox.discardReceipt(for: task.id)
             await release(task.id); notify(jobID)
             await lease.release()
         } catch { await lease.release(); throw error }
@@ -410,7 +410,7 @@ public actor V2BackgroundDownloadCoordinator {
                     // query. A completion can arrive between them: re-read
                     // after observing absence, or a successful download would
                     // be retried and its real receipt discarded as an orphan.
-                    let result = try inbox.results().first { $0.mappingID == task.id }
+                    let result = try inbox.result(for: task.id)
                     if result == nil {
                         let firstMissing = awaitingReceipt[task.id] ?? now()
                         awaitingReceipt[task.id] = firstMissing
@@ -433,7 +433,7 @@ public actor V2BackgroundDownloadCoordinator {
                     }
                     _ = try await store.finishBackgroundDownloadTask(id: job.id, mappingID: task.id, sessionID: task.sessionID,
                         identifier: task.identifier, success: success, accountID: accountID)
-                    try inbox.remove(task.id)
+                    try inbox.discardReceipt(for: task.id)
                     if !success { try await discardSource(task.id); wake() }
                     await release(task.id); notify(job.id)
                 }
@@ -457,7 +457,7 @@ public actor V2BackgroundDownloadCoordinator {
                 if let task {
                     let actual = await driver.tasks()
                     await driver.cancelAndDrain(actual.filter { $0.mappingID == task.id }.map(\.identifier))
-                    try inbox.remove(task.id)
+                    try inbox.discardReceipt(for: task.id)
                     try await discardSource(task.id)
                     await release(task.id)
                 }
@@ -477,7 +477,7 @@ public actor V2BackgroundDownloadCoordinator {
                     // never retire its mapping/permit using that stale absence.
                     let latestTasks = await driver.tasks()
                     await driver.cancelAndDrain(latestTasks.filter { $0.mappingID == task.id }.map(\.identifier))
-                    await release(task.id); try inbox.remove(task.id)
+                    await release(task.id); try inbox.discardReceipt(for: task.id)
                     try await discardSource(task.id)
                 }
                 _ = try await store.retireBackgroundDownload(id: job.id, mappingID: task?.id, accountID: accountID, outcome: .cancelled)
@@ -487,7 +487,7 @@ public actor V2BackgroundDownloadCoordinator {
                 // raw-source retirement. Do not reserve a second publication.
                 if ownedReservations[task.id] == nil, try await files.backgroundDownloadWasPublished(task) {
                     _ = try await store.retireBackgroundDownload(id: job.id, mappingID: task.id, accountID: accountID, outcome: .completed)
-                    try inbox.remove(task.id)
+                    try inbox.discardReceipt(for: task.id)
                 } else {
                     do {
                         let reservation = try await ensureReservation(task)
@@ -495,7 +495,7 @@ public actor V2BackgroundDownloadCoordinator {
                     } catch {
                         try await discardSource(task.id)
                         _ = try await store.retireBackgroundDownload(id: job.id, mappingID: task.id, accountID: accountID, outcome: .failed(.unavailable))
-                        try inbox.remove(task.id)
+                        try inbox.discardReceipt(for: task.id)
                     }
                 }
                 notify(job.id)
@@ -503,7 +503,7 @@ public actor V2BackgroundDownloadCoordinator {
             }
         }
         for receipt in receipts where mappings[receipt.mappingID] == nil && !creating.contains(receipt.mappingID) {
-            try inbox.remove(receipt.mappingID)
+            try inbox.discardReceipt(for: receipt.mappingID)
         }
         let current = try await store.backgroundDownloads(accountID: accountID)
         let retained = Set(current.compactMap { job -> UUID? in

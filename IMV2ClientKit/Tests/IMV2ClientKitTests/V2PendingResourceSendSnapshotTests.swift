@@ -11,8 +11,9 @@ struct V2PendingResourceSendSnapshotTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let room = RoomID(uuid: UUID()), otherRoom = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
+        let binding = V2LocalInstallationBinding(value: UUID())
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "local.sqlite"),
-            installationBinding: .init(value: UUID()), userID: user)
+            installationBinding: binding, userID: user)
         let uploadID = UUID()
         let upload = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
             usage: .messageAttachment(room), contentType: "image/png", byteCount: 3,
@@ -65,5 +66,10 @@ struct V2PendingResourceSendSnapshotTests {
         #expect(other.preparing.isEmpty)
         #expect(other.submitted.map(\.id) == [otherIntent.id])
         try await store.close()
+        let offline = try GRDBV2LocalSyncStore(localReadOnlyDatabaseURL: directory.appending(path: "local.sqlite"),
+            installationBinding: binding, userID: user)
+        #expect(try await offline.pendingResourceSendSnapshot(in: room, page: 0).submitted == submitted.submitted)
+        #expect(try await offline.submittedSendIntents(in: room) == submitted.submitted)
+        try await offline.close()
     }
 }

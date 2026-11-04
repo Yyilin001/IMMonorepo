@@ -29,6 +29,26 @@ struct V2RealtimeSessionCoordinatorTests {
         #expect(await connection.attempts() == [.init(accessToken: successor.accessToken, deviceID: successor.deviceID, profiles: ["standard"])])
     }
 
+    @Test(arguments: [false, true])
+    func gatewayExpiryRefreshesOnceOrPreservesOfflineSession(refreshUnavailable: Bool) async throws {
+        let now = Date()
+        let old = try credentials(access: "old", refresh: "valid", expiry: now.addingTimeInterval(1))
+        let fresh = try credentials(access: "fresh", refresh: "rotated", expiry: now.addingTimeInterval(600))
+        let store = RealtimeCredentialStore(record: .init(credentials: old))
+        let auth = V2AuthSession(credentialStore: store, transport: RealtimeRefreshTransport(result:
+            refreshUnavailable ? .failure(URLError(.notConnectedToInternet)) : .success(fresh)), now: { now })
+        let wire = RecordingRealtimeConnection(result: .success(session(for: fresh)), rejectedToken: "old")
+        let coordinator = V2RealtimeSessionCoordinator(authSession: auth, connection: wire, supportedCapabilityProfiles: ["standard"])
+        if refreshUnavailable {
+            await #expect(throws: URLError.self) { try await coordinator.connect() }
+            #expect(await store.record()?.credentials == old)
+            #expect(await wire.attempts().map(\.accessToken) == ["old"])
+        } else {
+            #expect(try await coordinator.connect() == session(for: fresh))
+            #expect(await wire.attempts().map(\.accessToken) == ["old", "fresh"])
+        }
+    }
+
     @Test("terminal gateway rejection clears credentials and requires re-authentication")
     func terminalGatewayRejectionClearsSession() async throws {
         let now = Date(timeIntervalSince1970: 1_750_001_100)
@@ -163,10 +183,14 @@ private actor RecordingRealtimeConnection: V2RealtimeConnection {
     private var recordedAttempts: [Attempt] = []
     private var disconnections = 0
 
-    init(result: Result<V2AuthenticatedClientSession, Error>) { self.result = result }
+    private let rejectedToken: String?
+    init(result: Result<V2AuthenticatedClientSession, Error>, rejectedToken: String? = nil) {
+        self.result = result; self.rejectedToken = rejectedToken
+    }
 
     func connectAndAuthenticate(accessToken: String, deviceID: DeviceID, supportedCapabilityProfiles: Set<String>) throws -> V2AuthenticatedClientSession {
         recordedAttempts.append(.init(accessToken: accessToken, deviceID: deviceID, profiles: supportedCapabilityProfiles))
+        if accessToken == rejectedToken { throw V2TLSFrameConnectionError.authenticationFailed }
         return try result.get()
     }
 

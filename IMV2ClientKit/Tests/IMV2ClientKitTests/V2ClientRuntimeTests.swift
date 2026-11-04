@@ -101,6 +101,45 @@ struct V2ClientRuntimeTests {
         #expect(await connection.disconnectCount() == 2)
     }
 
+    @Test(.timeLimit(.minutes(1))) func failedHandshakeWakesRegisteredStopWaiter() async throws {
+        let connection = BlockingRuntimeConnection(session: try authenticatedSession(), fails: true)
+        let runtime = V2ClientRuntime(connection: connection, activity: BlockingRuntimeActivity())
+        let start = Task { try await runtime.start() }
+        await connection.waitForConnect()
+        let waiter = Task { await runtime.waitUntilStopped() }
+        while await runtime.waitingForStopCount == 0 { await Task.yield() }
+        await connection.release()
+        await #expect(throws: RuntimeFailure.failed) { _ = try await start.value }
+        await waiter.value
+        #expect(await runtime.waitingForStopCount == 0)
+    }
+
+    @Test(.timeLimit(.minutes(1))) func stopJoinsFailedHandshakeDisconnect() async throws {
+        actor SlowDisconnect: V2RealtimeSessionConnecting {
+            var gate: CheckedContinuation<Void, Never>?
+            var finished = false
+            func connect() throws -> V2AuthenticatedClientSession { throw RuntimeFailure.failed }
+            func disconnect() async {
+                await withCheckedContinuation { gate = $0 }
+                finished = true
+            }
+            func release() { gate?.resume(); gate = nil }
+        }
+        let wire = SlowDisconnect()
+        let runtime = V2ClientRuntime(connection: wire, activity: BlockingRuntimeActivity())
+        let start = Task { try await runtime.start() }
+        while await wire.gate == nil { await Task.yield() }
+        #expect(await runtime.currentState() == .stopped)
+        let stopping = Task {
+            await runtime.stop()
+            return await wire.finished
+        }
+        for _ in 0..<100 { await Task.yield() }
+        await wire.release()
+        #expect(await stopping.value)
+        await #expect(throws: RuntimeFailure.failed) { _ = try await start.value }
+    }
+
     @Test("backgrounding during a handshake prevents initial sync")
     func stopDuringHandshakeCancelsPostHandshakeWork() async throws {
         let connection = BlockingRuntimeConnection(session: try authenticatedSession())
@@ -352,9 +391,13 @@ private actor BlockingRuntimeConnection: V2RealtimeSessionConnecting {
     private var releaseWaiter: CheckedContinuation<Void, Never>?
     private var released = false
 
-    init(session: V2AuthenticatedClientSession) { self.session = session }
+    private let fails: Bool
+    init(session: V2AuthenticatedClientSession, fails: Bool = false) {
+        self.session = session
+        self.fails = fails
+    }
 
-    func connect() async -> V2AuthenticatedClientSession {
+    func connect() async throws -> V2AuthenticatedClientSession {
         connections += 1
         didConnectWaiter?.resume()
         didConnectWaiter = nil
@@ -364,6 +407,7 @@ private actor BlockingRuntimeConnection: V2RealtimeSessionConnecting {
                 else { releaseWaiter = continuation }
             }
         }
+        if fails { throw RuntimeFailure.failed }
         return session
     }
 

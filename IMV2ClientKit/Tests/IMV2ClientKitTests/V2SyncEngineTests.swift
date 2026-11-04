@@ -15,8 +15,8 @@ struct V2SyncEngineTests {
                 "target_user_id": UUID().uuidString, "revision": 1]))
         let wire = BusySyncTestWire(record: record)
         let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: UInt8(IMV2ProtocolVersion.current))
-        let gate = V2SyncOperationGate()
-        let engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base", operationGate: gate)
+        let gate = store.operationGate
+        let engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
         let call = Task { try await engine.synchronizeOnce() }
         do {
             try await wire.waitForACK()
@@ -576,14 +576,13 @@ struct V2SyncEngineTests {
     @Test("a background deadline while queued cannot close or cancel the foreground sync")
     func backgroundDeadlinePreservesForegroundOwner() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
-        let gate = V2SyncOperationGate()
         let foregroundWire = BoundedSyncProbe(results: [.ready(try boundedSyncBatch(1, hasMore: false))], blocksFirstPull: true)
-        let foreground = V2SyncEngine(transport: foregroundWire, store: store, capabilityProfile: "base", operationGate: gate)
+        let foreground = V2SyncEngine(transport: foregroundWire, store: store, capabilityProfile: "base")
         let owner = Task { try await foreground.synchronizeOnce() }
         await foregroundWire.waitForBlockedPull()
         let backgroundWire = BoundedSyncProbe(results: [])
         let connection = BoundedSyncConnection()
-        let runner = V2BackgroundSyncRunner(connection: connection, syncEngine: .init(transport: backgroundWire, store: store, capabilityProfile: "base", operationGate: gate), budget: .init(workDuration: .milliseconds(100)))
+        let runner = V2BackgroundSyncRunner(connection: connection, syncEngine: .init(transport: backgroundWire, store: store, capabilityProfile: "base"), budget: .init(workDuration: .milliseconds(100)))
         await #expect(throws: V2BackgroundSyncError.deadlineReached) { try await runner.run() }
         #expect(await backgroundWire.tokens.isEmpty)
         #expect(await connection.disconnects == 1)
@@ -670,10 +669,10 @@ struct V2SyncEngineTests {
     @Test("two engines sharing a store serialize cycles and a queued cancellation leaves the owner running")
     func sharedSyncOwnershipAndQueuedCancellation() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
-        let gate = V2SyncOperationGate()
+        let gate = store.operationGate
         let transport = BoundedSyncProbe(results: try [1, 2].map { .ready(try boundedSyncBatch($0, hasMore: false)) }, blocksFirstPull: true)
-        let foreground = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base", operationGate: gate)
-        let background = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base", operationGate: gate)
+        let foreground = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
+        let background = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
         let owner = Task { try await foreground.synchronizeOnce() }
         await transport.waitForBlockedPull()
         let queued = Task { try await background.synchronizeIncrementally(maximumPages: 4) }

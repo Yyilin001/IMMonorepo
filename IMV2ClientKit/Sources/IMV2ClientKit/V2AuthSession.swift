@@ -612,11 +612,11 @@ public actor V2AuthSession {
         return credentials
     }
 
-    /// 处理业务 HTTP 401，仅当代际、设备及被拒绝令牌仍对应当前记录时刷新。
+    /// 处理 HTTP 或实时握手的访问令牌拒绝，仅当代际、设备及被拒绝令牌仍对应当前记录时刷新。
     ///
     /// 旧令牌的迟到响应直接返回，不能触发下一次轮换；共享刷新前后均检查任务取消及代际。
     /// - Throws: 任务取消、代际失效、无凭证、设备不匹配或轮换错误。
-    func refreshAfterHTTPUnauthorized(ifCurrent epoch: V2AuthSessionEpoch,
+    func refreshAfterAccessTokenRejection(ifCurrent epoch: V2AuthSessionEpoch,
                                       rejectedAccessToken: String, deviceID: DeviceID) async throws {
         try Task.checkCancellation()
         try requireCurrentEpoch(epoch)

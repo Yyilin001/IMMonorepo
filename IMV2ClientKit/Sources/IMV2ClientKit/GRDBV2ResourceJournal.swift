@@ -208,8 +208,7 @@ extension GRDBV2LocalSyncStore {
     }
     public func submittedSendIntents(in roomID:RoomID,limit:Int=64,offset:Int=0) throws -> [V2SubmittedSendIntent] {
         guard (1...256).contains(limit), offset >= 0, offset <= Int.max - limit else { throw V2ResourceJournalError.invalidRecord }
-        return try databasePool.write { db in
-            try Self.settleAcceptedSendPresentations(roomID: roomID.rawValue, db: db)
+        return try databasePool.read { db in
             return try Self.readSubmittedSendIntents(in: roomID, limit: limit, offset: offset, db: db)
         }
     }

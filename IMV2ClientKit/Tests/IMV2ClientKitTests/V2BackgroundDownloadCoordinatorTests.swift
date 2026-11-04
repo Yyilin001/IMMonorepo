@@ -264,6 +264,7 @@ struct V2BackgroundDownloadCoordinatorTests {
         try await f.driver.waitForResume()
         #expect(await f.driver.durableBeforeResume)
         #expect(await f.scheduler.snapshot().active == 1)
+        try Data([0xff]).write(to: f.inbox.directory.appending(path: UUID().uuidString + ".result"))
         try await f.driver.finish()
         let file = try await request.value
         #expect(try Data(contentsOf: file.fileURL) == Fixture.bytes)

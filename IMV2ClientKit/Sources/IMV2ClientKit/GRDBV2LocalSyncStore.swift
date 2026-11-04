@@ -95,6 +95,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     /// 全部本地命令仓储共用的 actor 级连接池。
     ///
     /// 扩展方法保持 actor 边界，同时让各个持久化队列各自位于独立源文件中。
+    public nonisolated let operationGate = V2SyncOperationGate()
     var commandTimeAnchor: V2ServerTimeAnchor?
     public func useCommandTimeAnchor(_ anchor: V2ServerTimeAnchor) { commandTimeAnchor = anchor }
 

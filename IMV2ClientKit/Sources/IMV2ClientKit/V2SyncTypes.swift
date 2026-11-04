@@ -390,6 +390,8 @@ public extension V2ClientSyncTransport {
 /// 实现负责验证代际、连续水位、回执及快照完整性。增量应用原子保存投影和能力；快照通过私有表分阶段导入，
 /// 服务端确认后才激活。共享此存储的同步引擎还需共用操作门，覆盖跨方法的异步流程。
 public protocol V2LocalSyncStore: Sendable {
+    /// All synchronization engines for this store share this permit.
+    var operationGate: V2SyncOperationGate { get }
     /// 持久化完整快照重建请求，供后续同步周期读取；不在此下载快照。
     ///
     /// - Throws: 本地存储错误。

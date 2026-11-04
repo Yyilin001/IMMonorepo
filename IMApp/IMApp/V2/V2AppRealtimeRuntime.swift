@@ -1105,11 +1105,10 @@ struct V2AppRealtimeRuntime {
         let profileRepository = V2ProfileRepository(store: localStore,
             reader: V2ProfileProjectionReader(presentations: profilePresentations))
         self.profileRepository = profileRepository
-        let syncOwnership = V2SyncOperationGate()
-        let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base", operationGate: syncOwnership)
+        let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base")
         let backgroundConnection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits, workScheduler: accountRuntime.scheduler, workService: "realtime-background")
         let backgroundTransport = V2ProtobufSyncTransport(wire: backgroundConnection, protocolVersion: UInt8(IMV2ProtocolVersion.current))
-        let backgroundPersonalSync = V2SyncEngine(transport: backgroundTransport, store: localStore, capabilityProfile: "base", maxRecords: 100, operationGate: syncOwnership)
+        let backgroundPersonalSync = V2SyncEngine(transport: backgroundTransport, store: localStore, capabilityProfile: "base", maxRecords: 100)
         let backgroundRecovery = V2RoomRecoveryRunner(
             engine: V2RoomRecoveryEngine(transport: backgroundTransport, latestVisible: backgroundTransport, store: localStore,
                 groupEvents: V2GroupEventSyncEngine(transport: backgroundTransport, store: localStore, pageSize: 100),

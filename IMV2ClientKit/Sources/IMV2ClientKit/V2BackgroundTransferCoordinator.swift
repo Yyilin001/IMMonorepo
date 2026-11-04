@@ -274,7 +274,7 @@ public actor V2BackgroundTransferCoordinator {
                     await driver.cancelAndDrain([task.identifier])
                 }
                 _ = try await store.completeBackgroundMapping(mapping, result: nil)
-                try inbox.remove(mapping.id)
+                try inbox.discardReceipt(for: mapping.id)
                 try await files.releaseBackgroundUploadSource(id: mapping.sourceToken, sessionID: sessionID)
                 ownedSources.remove(mapping.sourceToken); completedSources.insert(mapping.sourceToken)
                 await releasePermit(mapping.id)
@@ -289,7 +289,7 @@ public actor V2BackgroundTransferCoordinator {
                 if try await store.completeBackgroundMapping(mapping,result:receipt) {
                     diagnostics?.record(V2BackgroundTransferMetric(result:receipt))
                 }
-                try inbox.remove(mapping.id)
+                try inbox.discardReceipt(for: mapping.id)
                 await releasePermit(mapping.id)
                 try await files.releaseBackgroundUploadSource(id:mapping.sourceToken,sessionID:sessionID)
                 ownedSources.remove(mapping.sourceToken);completedSources.insert(mapping.sourceToken)
@@ -309,7 +309,7 @@ public actor V2BackgroundTransferCoordinator {
                 } else if task.suspended { try await driver.resume(task.identifier) }
             }
         }
-        for result in receipts where byID[result.mappingID]==nil { try inbox.remove(result.mappingID) }
+        for result in receipts where byID[result.mappingID]==nil { try inbox.discardReceipt(for: result.mappingID) }
         let retained=Set(mappings.map(\.sourceToken)).subtracting(completedSources).union(creating)
         if try await files.reconcileBackgroundUploadSources(sessionID:sessionID,retained:retained) {
             // Continue bounded reclamation on the account loop; orphan buildup

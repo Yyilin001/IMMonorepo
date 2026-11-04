@@ -259,6 +259,7 @@ struct V2BackgroundTransferTests {
         let originalUse=try await files.borrowSelection(original.id)
         _ = try await files.makeBackgroundUploadSource(from:originalUse,sessionID:sessionID,id:mapping.sourceToken,range:.init(lowerBound:0,upperBound:3))
         await originalUse.release()
+        try Data([0xff]).write(to: inbox.directory.appending(path: UUID().uuidString + ".result"))
         if hasReceipt { try inbox.write(.init(mappingID:mapping.id,taskIdentifier:7,statusCode:200,errorCode:nil,sentBytes:4,originDigest:"origin",receivedBytes:2)) }
         let driver=BackgroundDriver(tasks:lockedCompletion ? [.init(identifier:7,mappingID:mapping.id)] : []),scheduler=V2AccountWorkScheduler()
         let diagnostics=V2NetworkDiagnostics()
@@ -509,7 +510,9 @@ private final class BackgroundProtectionRecorder:V2ResourceFileProtectionWriting
 
 private struct RejectResultProtection:V2ResourceFileProtectionWriting {
     func apply(_ protection:V2ResourceFileProtection,to file:URL) throws {
-        if file.pathExtension=="result" { throw V2BackgroundTransferError.protectedDataUnavailable }
+        if try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+            throw V2BackgroundTransferError.protectedDataUnavailable
+        }
     }
 }
 
