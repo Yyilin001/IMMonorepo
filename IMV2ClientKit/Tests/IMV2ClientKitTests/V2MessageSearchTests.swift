@@ -218,12 +218,12 @@ struct V2MessageSearchTests {
 
     @Test("character grams preserve exact contiguous-substring semantics")
     func characterGrams() {
-        let tokens = V2CharacterGramTokenizer().tokenize("你好啊")
+        let tokens = V2ContactSearchTokenizer().tokenize("你好啊")
 
         #expect(tokens.unigrams.count == 3)
         #expect(tokens.bigrams.count == 2)
         #expect(tokens.normalized == "你好啊")
-        #expect(V2CharacterGramTokenizer.normalize("ＡＢＣ") == "abc")
+        #expect(V2ContactSearchTokenizer.normalize("ＡＢＣ") == "abc")
     }
 
     @Test("single, multi-character, scoped, and paged searches are exact")
@@ -301,6 +301,7 @@ struct V2MessageSearchTests {
         try await applyRoomEvents(store, records: [
             tombstoneRecord(sequence: 3, sourceEvent: "00000000-0000-0000-0000-000000000b13", roomID: roomID, messageID: messageID, revision: 3)
         ])
+        #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
         _ = try await store.processPendingMessageSearchIndexJobs()
         #expect(try await store.searchMessages(.init(query: "新文", scope: .room(roomID))).hits.isEmpty)
         let persistedMessages = try await store.messages(in: roomID)
@@ -480,7 +481,7 @@ struct V2MessageSearchTests {
         }
     }
 
-    private func acceptedRoomEvent(sourceEvent: String, roomID: RoomID, senderID: UserID, messageID: MessageID, roomSequence: UInt64, text: String, createdAtMilliseconds: Int64) throws -> V2ClientSyncRecord {
+    func acceptedRoomEvent(sourceEvent: String, roomID: RoomID, senderID: UserID, messageID: MessageID, roomSequence: UInt64, text: String, createdAtMilliseconds: Int64) throws -> V2ClientSyncRecord {
         try .init(
             sequence: roomSequence,
             sourceEventID: .init(sourceEvent),
@@ -547,5 +548,44 @@ struct V2MessageSearchTests {
                 "message_revision": revision
             ])
         )
+    }
+}
+
+extension V2MessageSearchTests {
+    @Test("切换文本索引格式后按新代次重建，并将兼容字符命中映射回原文", arguments: [1, 2])
+    func rebuildForSubstringFormat(previousVersion: Int) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "V2.sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID())
+        let room = RoomID(uuid: UUID())
+        let legacy = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        try await applyRoomEvents(legacy, records: [acceptedRoomEvent(sourceEvent: UUID().uuidString, roomID: room,
+            senderID: .init(uuid: UUID()), messageID: .init(uuid: UUID()), roomSequence: 1,
+            text: "👩🏽‍💻 ＡＢＣ ﬃ", createdAtMilliseconds: 1_750_000_000_000)])
+        let primary = await legacy.databasePool
+        try await primary.write { db in
+            try db.execute(sql: "UPDATE v2_message_search_state SET index_version = ?, state = 'ready'", arguments: [previousVersion])
+        }
+        let search = await legacy.messageSearchDatabasePool
+        try await search.write { db in
+            try db.execute(sql: "DROP TABLE v2_message_char_fts")
+            try db.execute(sql: "CREATE VIRTUAL TABLE v2_message_char_fts USING fts5(room_scope,sender_scope,unigrams,bigrams)")
+        }
+        try await legacy.close()
+
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        #expect(try await store.messageSearchIndexState() == .building)
+        await #expect(throws: V2MessageSearchError.indexUnavailable(.building)) {
+            try await store.processPendingMessageSearchIndexJobs()
+        }
+        try await store.prepareMessageSearchIndex()
+        for (query, original) in [("abc", "ＡＢＣ"), ("fi", "ﬃ"), ("👩🏽‍💻", "👩🏽‍💻")] {
+            let page = try await store.searchMessages(.init(query: query, scope: .room(room)))
+            let hit = try #require(page.hits.first)
+            #expect(hit.matchRanges == [(hit.text as NSString).range(of: original)])
+        }
+        #expect(try await store.searchMessages(.init(query: "👩")).hits.isEmpty)
+        try await store.close()
     }
 }

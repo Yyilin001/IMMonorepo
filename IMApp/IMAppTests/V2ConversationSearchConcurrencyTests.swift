@@ -7,6 +7,18 @@ import Testing
 @MainActor
 @Suite("V2 search continuation ownership", .timeLimit(.minutes(1)))
 struct V2ConversationSearchConcurrencyTests {
+    @Test("长消息展示命中片段，强调原文的全角字符")
+    func matchingExcerptPreservesSourceText() {
+        let body = String(repeating: "历史消息。", count: 50) + "\n👩🏽‍💻 ＡＢＣ"
+        var result = V2MessageSearchHit(messageID: .init(uuid: UUID()), roomID: .init(uuid: UUID()),
+            roomSequence: 1, senderUserID: .init(uuid: UUID()), text: body, createdAt: .distantPast)
+        result.matchRanges = [(body as NSString).range(of: "ＡＢＣ")]
+        let excerpt = V2MessageSearchView.highlightedBody(result)
+        #expect(String(excerpt.characters) == "…👩🏽‍💻 ＡＢＣ")
+        let emphasized = excerpt.runs.filter { $0.inlinePresentationIntent == .stronglyEmphasized }
+        #expect(emphasized.map { String(excerpt[$0.range].characters) } == ["ＡＢＣ"])
+    }
+
     @Test("重复加载只发一页并按消息 ID 去重")
     func paginationIsSingleFlightAndDeduplicated() async throws {
         let first = hit("first"), second = hit("second")

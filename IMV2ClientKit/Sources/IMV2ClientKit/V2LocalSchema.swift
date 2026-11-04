@@ -862,7 +862,7 @@ extension GRDBV2LocalSyncStore {
 
         INSERT INTO v2_message_search_state
             (singleton, index_version, state, generation)
-        VALUES (1, 1, 'building', 1);
+        VALUES (1, \(messageSearchIndexVersion), 'building', 1);
         \(roomLatestVisibleTriggersSQL)
         \(roomLatestVisibleListTriggersSQL)
         """

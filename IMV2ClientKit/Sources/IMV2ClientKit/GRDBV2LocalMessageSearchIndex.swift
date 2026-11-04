@@ -1,12 +1,21 @@
 import Foundation
 import GRDB
 import IMV2Core
+import MessageSubstringSearch
 
 /// 搜索索引是 `V2Search.sqlite` 中的可替换本地投影。
 ///
 /// 持久化任务由主 V2 数据库持有，使搜索写入在进程崩溃后可安全重放，
 /// 同时把全文检索工作从同步写入路径上移开。
 extension GRDBV2LocalSyncStore {
+    static let messageSearchIndexVersion = 3
+
+    static let messageFTSSchema = """
+        CREATE VIRTUAL TABLE v2_message_char_fts USING fts5(
+            room_scope, sender_scope, tokens, tokenize = 'ascii', detail = full, columnsize = 0
+        )
+        """
+
     public nonisolated func messageSearchIndexUpdates() -> AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error> {
         let pool = databasePool
         return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
@@ -19,7 +28,7 @@ extension GRDBV2LocalSyncStore {
                         else { throw V2ClientProjectionError.invalidMessagePayload }
                         guard let version = Int(exactly: try Self.searchInteger(row, "index_version")) else { throw V2ClientProjectionError.invalidMessagePayload }
                         return V2MessageSearchIndexSnapshot(
-                            state: version == V2CharacterGramTokenizer.version ? state : .building,
+                            state: version == Self.messageSearchIndexVersion ? state : .building,
                             generation: generation, indexVersion: version
                         )
                     }.removeDuplicates()
@@ -54,7 +63,8 @@ extension GRDBV2LocalSyncStore {
                 return try Self.beginMessageSearchIndexRebuild(db: db)
             }
             try await messageSearchDatabasePool.write { db in
-                try db.execute(sql: "DELETE FROM v2_message_char_fts")
+                try db.execute(sql: "DROP TABLE v2_message_char_fts")
+                try db.execute(sql: Self.messageFTSSchema)
                 try db.execute(sql: "DELETE FROM v2_search_documents")
             }
 
@@ -155,7 +165,13 @@ extension GRDBV2LocalSyncStore {
     public func processPendingMessageSearchIndexJobs(limit: Int = 64) async throws -> Int {
         guard (1 ... 256).contains(limit) else { throw V2MessageSearchError.invalidPageSize }
         let jobs = try await databasePool.read { db in
-            let currentGeneration = try Self.messageSearchIndexGeneration(db: db)
+            guard let state = try Row.fetchOne(db, sql: "SELECT generation, index_version FROM v2_message_search_state WHERE singleton = 1") else {
+                throw V2ClientProjectionError.invalidMessagePayload
+            }
+            guard try Self.searchInteger(state, "index_version") == Self.messageSearchIndexVersion else {
+                throw V2MessageSearchError.indexUnavailable(.building)
+            }
+            let currentGeneration = try Self.searchInteger(state, "generation")
             return try Row.fetchAll(
                 db,
                 sql: """
@@ -224,14 +240,13 @@ extension GRDBV2LocalSyncStore {
     ///   ``V2MessageSearchError``；其余失败来自存储。
     public func searchMessages(_ request: V2MessageSearchRequest) throws -> V2MessageSearchPage {
         guard (1 ... 100).contains(request.limit) else { throw V2MessageSearchError.invalidPageSize }
-        let tokenizer = V2CharacterGramTokenizer()
-        let query = tokenizer.tokenize(request.query)
+        let query = try SubstringSearchText(request.query)
         let hasSenderFilter: Bool
         switch request.scope {
         case .sender: hasSenderFilter = true
         case .allMessages, .room: hasSenderFilter = request.senderUserID != nil
         }
-        guard !query.unigrams.isEmpty || request.contentFilter != .all || hasSenderFilter else {
+        guard !query.isEmpty || request.contentFilter != .all || hasSenderFilter else {
             throw V2MessageSearchError.emptyQuery
         }
         let primaryState = try databasePool.read { db in
@@ -249,7 +264,7 @@ extension GRDBV2LocalSyncStore {
               let raw: String = row["state"],
               let state = V2MessageSearchIndexState(storageValue: raw)
         else { throw V2ClientProjectionError.invalidMessagePayload }
-        return version == V2CharacterGramTokenizer.version ? state : .building
+        return version == Self.messageSearchIndexVersion ? state : .building
     }
 
     static func messageSearchIndexGeneration(db: Database) throws -> Int64 {
@@ -266,13 +281,9 @@ extension GRDBV2LocalSyncStore {
         try db.execute(sql: "DELETE FROM v2_message_search_jobs")
         try db.execute(
             sql: "UPDATE v2_message_search_state SET index_version = ?, state = 'building', generation = ? WHERE singleton = 1",
-            arguments: [V2CharacterGramTokenizer.version, nextGeneration]
+            arguments: [Self.messageSearchIndexVersion, nextGeneration]
         )
         return nextGeneration
-    }
-
-    static func resetMessageSearchIndex(db: Database) throws {
-        _ = try beginMessageSearchIndexRebuild(db: db)
     }
 
     static func finishMessageSearchIndexRebuild(generation: Int64, db: Database) throws {
@@ -372,13 +383,12 @@ extension GRDBV2LocalSyncStore {
             arguments: [document.messageID, document.revision, document.generation, document.roomID, document.roomSequence, document.senderUserID, document.text, document.mediaPresentations, document.createdAt]
         )
         guard !document.text.isEmpty else { return }
-        let tokens = V2CharacterGramTokenizer().tokenize(document.text)
-        guard !tokens.unigrams.isEmpty else { return }
+        let tokens = try SubstringSearchText(document.text).encodedPhrase
         guard let rowID: Int64 = try Row.fetchOne(db, sql: "SELECT rowid FROM v2_search_documents WHERE message_id = ?", arguments: [document.messageID])?["rowid"]
         else { throw V2ClientProjectionError.invalidMessagePayload }
         try db.execute(
-            sql: "INSERT INTO v2_message_char_fts (rowid, room_scope, sender_scope, unigrams, bigrams) VALUES (?, ?, ?, ?, ?)",
-            arguments: [rowID, V2CharacterGramTokenizer.scopeToken(prefix: "r", identifier: document.roomID), V2CharacterGramTokenizer.scopeToken(prefix: "s", identifier: document.senderUserID), tokens.unigrams.joined(separator: " "), tokens.bigrams.joined(separator: " ")]
+            sql: "INSERT INTO v2_message_char_fts (rowid, room_scope, sender_scope, tokens) VALUES (?, ?, ?, ?)",
+            arguments: [rowID, v2SearchToken(prefix: "r", text: document.roomID), v2SearchToken(prefix: "s", text: document.senderUserID), tokens]
         )
     }
 
@@ -393,9 +403,9 @@ extension GRDBV2LocalSyncStore {
         let generation: Int64
     }
 
-    private static func searchMessages(_ request: V2MessageSearchRequest, query: V2CharacterGramTokenizer.Tokens, generation: Int64, primaryDatabasePool: DatabasePool, db: Database) throws -> V2MessageSearchPage {
+    private static func searchMessages(_ request: V2MessageSearchRequest, query: SubstringSearchText, generation: Int64, primaryDatabasePool: DatabasePool, db: Database) throws -> V2MessageSearchPage {
         let match = messageSearchMatch(scope: request.scope, query: query)
-        let filterFingerprint = searchFilterFingerprint(request, generation: generation)
+        let filterFingerprint = searchFilterFingerprint(request, query: query, generation: generation)
         var cursor = try validatedSearchCursor(request.cursor, for: request.scope, filterFingerprint: filterFingerprint)
         var scanCursor = cursor
         var hits: [V2MessageSearchHit] = []
@@ -419,21 +429,20 @@ extension GRDBV2LocalSyncStore {
             guard !rows.isEmpty else { return .init(hits: hits, nextCursor: nil) }
             scannedCount += rows.count
             let candidates = try rows.map(searchCandidate)
-            let exactCandidates = candidates.filter { candidate in
-                query.characterCount == 0 ||
-                    V2CharacterGramTokenizer.normalize(candidate.hit.text).range(of: query.normalized) != nil
-            }
             let currentMessageIDs = try currentSearchCandidateIDs(
-                exactCandidates,
+                candidates,
                 generation: generation,
                 primaryDatabasePool: primaryDatabasePool
             )
             for (candidateIndex, candidate) in candidates.enumerated() {
                 let candidateCursor = searchCursor(for: candidate.hit, scope: request.scope, filterFingerprint: filterFingerprint)
                 scanCursor = candidateCursor
-                guard query.characterCount == 0 || V2CharacterGramTokenizer.normalize(candidate.hit.text).range(of: query.normalized) != nil else { continue }
                 guard currentMessageIDs.contains(candidate.hit.messageID.rawValue) else { continue }
-                hits.append(candidate.hit)
+                let ranges = query.isEmpty ? [] : try query.matchingRanges(in: candidate.hit.text)
+                guard query.isEmpty || !ranges.isEmpty else { continue }
+                var hit = candidate.hit
+                hit.matchRanges = ranges
+                hits.append(hit)
                 cursor = candidateCursor
                 if hits.count == request.limit {
                     let mayHaveMore = candidateIndex < candidates.count - 1 || rows.count == fetchLimit
@@ -483,16 +492,15 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
-    private static func messageSearchMatch(scope: V2MessageSearchScope, query: V2CharacterGramTokenizer.Tokens) -> String? {
+    private static func messageSearchMatch(scope: V2MessageSearchScope, query: SubstringSearchText) -> String? {
         var clauses: [String] = []
         switch scope {
-        case .room(let roomID): clauses.append("room_scope : " + V2CharacterGramTokenizer.scopeToken(prefix: "r", identifier: roomID.rawValue))
+        case .room(let roomID): clauses.append("room_scope : " + v2SearchToken(prefix: "r", text: roomID.rawValue))
         case .allMessages: break
-        case .sender(let userID): clauses.append("sender_scope : " + V2CharacterGramTokenizer.scopeToken(prefix: "s", identifier: userID.rawValue))
+        case .sender(let userID): clauses.append("sender_scope : " + v2SearchToken(prefix: "s", text: userID.rawValue))
         }
-        if query.characterCount == 0 { return nil }
-        if query.characterCount == 1 { clauses.append("unigrams : " + query.unigrams[0]) }
-        else { clauses.append("bigrams : \"" + query.bigrams.joined(separator: " ") + "\"") }
+        if query.isEmpty { return nil }
+        clauses.append("tokens : \"\(query.encodedPhrase)\"")
         return clauses.joined(separator: " AND ")
     }
 
@@ -569,13 +577,13 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
-    private static func searchFilterFingerprint(_ request: V2MessageSearchRequest, generation: Int64) -> String {
+    private static func searchFilterFingerprint(_ request: V2MessageSearchRequest, query: SubstringSearchText, generation: Int64) -> String {
         let scope: String = switch request.scope {
         case .room(let roomID): "room:\(roomID.rawValue)"
         case .allMessages: "all"
         case .sender(let userID): "sender:\(userID.rawValue)"
         }
-        let query = Data(V2CharacterGramTokenizer.normalize(request.query).utf8).base64EncodedString()
-        return "v\(V2CharacterGramTokenizer.version)|g\(generation)|\(scope)|\(request.contentFilter.rawValue)|\(request.senderUserID?.rawValue ?? "")|\(query)"
+        let queryKey = Data(query.encodedPhrase.utf8).base64EncodedString()
+        return "v\(Self.messageSearchIndexVersion)|g\(generation)|\(scope)|\(request.contentFilter.rawValue)|\(request.senderUserID?.rawValue ?? "")|\(queryKey)"
     }
 }

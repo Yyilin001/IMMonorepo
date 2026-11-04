@@ -106,6 +106,9 @@ public struct V2MessageSearchHit: Equatable, Sendable, Identifiable {
     /// 消息创建时刻。
     public let createdAt: Date
 
+    /// 命中正文内的 UTF-16 范围。
+    public internal(set) var matchRanges: [NSRange] = []
+
     /// 用于列表标识。
     public var id: MessageID { messageID }
 
@@ -234,83 +237,4 @@ public enum V2MessageSearchError: Error, Equatable, Sendable {
     case indexUnavailable(V2MessageSearchIndexState)
     /// 游标与本次搜索范围或筛选不匹配。
     case cursorDoesNotMatchScope
-}
-
-/// 字符级分词器。
-///
-/// 搜索语义在此显式定义，而不依赖 SQLite 分词器的偶然特性；
-/// 字节编码让每个扩展字形簇（含标点与表情）都成为安全的全文本检索词元。
-struct V2CharacterGramTokenizer: Sendable {
-    /// 分词方案版本，索引结构变更时同步递增。
-    static let version = 1
-
-    /// 一次分词的结果。
-    struct Tokens: Equatable, Sendable {
-        /// 规范化后的文本。
-        let normalized: String
-        /// 单字符词元。
-        let unigrams: [String]
-        /// 相邻双字符词元。
-        let bigrams: [String]
-
-        /// 字符数，等于单字符词元数量。
-        var characterCount: Int { unigrams.count }
-    }
-
-    /// 对输入文本分词。
-    ///
-    /// - Parameter input: 原始文本。
-    /// - Returns: 规范化文本、单字符与双字符词元。
-    func tokenize(_ input: String) -> Tokens {
-        let normalized = Self.normalize(input)
-        let characters = Array(normalized)
-        let unigrams = characters.map { Self.token(prefix: "u1", text: String($0)) }
-        let bigrams = zip(characters, characters.dropFirst()).map {
-            Self.token(prefix: "u2", text: String($0.0) + String($0.1))
-        }
-        return .init(normalized: normalized, unigrams: unigrams, bigrams: bigrams)
-    }
-
-    /// 规范化输入：兼容分解后重新组合并转为小写。
-    ///
-    /// - Parameter input: 原始文本。
-    /// - Returns: 规范化文本。
-    static func normalize(_ input: String) -> String {
-        input.precomposedStringWithCompatibilityMapping.lowercased()
-    }
-
-    /// 生成范围或标识对应的词元。
-    ///
-    /// - Parameters:
-    ///   - prefix: 词元前缀，用于区分作用域。
-    ///   - identifier: 标识内容。
-    /// - Returns: 编码后的词元。
-    static func scopeToken(prefix: String, identifier: String) -> String {
-        token(prefix: prefix, text: identifier)
-    }
-
-    /// 以前缀与十六进制编码生成词元。
-    ///
-    /// - Parameters:
-    ///   - prefix: 词元前缀。
-    ///   - text: 词元原文。
-    /// - Returns: 编码后的词元。
-    private static func token(prefix: String, text: String) -> String {
-        prefix + hex(text.utf8)
-    }
-
-    /// 把字节序列编码为小写十六进制字符串。
-    ///
-    /// - Parameter bytes: 待编码字节。
-    /// - Returns: 十六进制字符串。
-    private static func hex<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
-        let digits = Array("0123456789abcdef".utf8)
-        var encoded = [UInt8]()
-        encoded.reserveCapacity(bytes.underestimatedCount * 2)
-        for byte in bytes {
-            encoded.append(digits[Int(byte >> 4)])
-            encoded.append(digits[Int(byte & 0x0F)])
-        }
-        return String(decoding: encoded, as: UTF8.self)
-    }
 }

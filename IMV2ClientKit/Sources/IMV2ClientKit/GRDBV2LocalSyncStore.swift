@@ -213,7 +213,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         pure: true
     ) { values in
         guard let value = String.fromDatabaseValue(values[0]) else { return "" }
-        return V2CharacterGramTokenizer().tokenize(value).unigrams.joined(separator: " ")
+        return V2ContactSearchTokenizer().tokenize(value).unigrams.joined(separator: " ")
     }
 
     private static let contactSearchBigramsFunction = DatabaseFunction(
@@ -222,7 +222,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         pure: true
     ) { values in
         guard let value = String.fromDatabaseValue(values[0]) else { return "" }
-        return V2CharacterGramTokenizer().tokenize(value).bigrams.joined(separator: " ")
+        return V2ContactSearchTokenizer().tokenize(value).bigrams.joined(separator: " ")
     }
 
     public func boundAccountID() throws -> UserID? {
@@ -5107,15 +5107,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                     ON v2_search_documents (server_created_at DESC, message_id DESC);
                 CREATE INDEX v2_search_documents_sender_order_idx
                     ON v2_search_documents (sender_user_id, server_created_at DESC, message_id DESC);
-                CREATE VIRTUAL TABLE v2_message_char_fts USING fts5(
-                    room_scope,
-                    sender_scope,
-                    unigrams,
-                    bigrams,
-                    tokenize = 'ascii',
-                    detail = full,
-                    columnsize = 0
-                );
+                \(messageFTSSchema);
             """)
         }
         return migrator

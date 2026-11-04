@@ -1580,6 +1580,32 @@ struct V2MessageSearchView: View {
     let onSelect: (V2MessageSearchHit) -> Void
     @State private var profilePageID = UUID()
 
+    static func highlightedBody(_ hit: V2MessageSearchHit) -> AttributedString {
+        let text = hit.text
+        guard let first = hit.matchRanges.first, let match = Range(first, in: text) else {
+            return AttributedString(text)
+        }
+        // 搜索列表只展示两行。保留命中前少量同一行上下文，让长消息末尾也能直接定位。
+        let contextStart = text.index(match.lowerBound, offsetBy: -12, limitedBy: text.startIndex) ?? text.startIndex
+        let preceding = text[contextStart..<match.lowerBound]
+        let start = preceding.lastIndex(where: \.isNewline).map { text.index(after: $0) } ?? contextStart
+        let end = text.index(match.lowerBound, offsetBy: 120, limitedBy: text.endIndex) ?? text.endIndex
+        let window = NSRange(start..<end, in: text)
+        let excerpt = String(text[start..<end])
+        var result = AttributedString(excerpt)
+        for range in hit.matchRanges {
+            let overlap = NSIntersectionRange(window, range)
+            guard overlap.length > 0 else { continue }
+            let local = NSRange(location: overlap.location - window.location, length: overlap.length)
+            if let characters = Range(local, in: excerpt), let displayRange = Range(characters, in: result) {
+                result[displayRange].inlinePresentationIntent = .stronglyEmphasized
+            }
+        }
+        if start != text.startIndex { result = AttributedString("…") + result }
+        if end != text.endIndex { result += AttributedString("…") }
+        return result
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 10) {
@@ -1648,7 +1674,7 @@ struct V2MessageSearchView: View {
                                 onSelect(hit)
                             } label: {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text(hit.text)
+                                    Text(Self.highlightedBody(hit))
                                         .foregroundStyle(.primary)
                                         .lineLimit(2)
                                     Text(hit.createdAt, format: .dateTime.year().month().day().hour().minute())

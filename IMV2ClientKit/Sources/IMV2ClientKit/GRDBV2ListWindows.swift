@@ -18,7 +18,7 @@ extension GRDBV2LocalSyncStore {
     static func relationshipListSelection(scope: V2ClientRelationshipPageScope, matching query: String?) throws -> (clauses: [String], arguments: StatementArguments, searchJoin: String) {
         let trimmedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard trimmedQuery.utf8.count <= 100 else { throw V2ClientProjectionError.invalidMessagePayload }
-        let searchTokens = V2CharacterGramTokenizer().tokenize(trimmedQuery)
+        let searchTokens = V2ContactSearchTokenizer().tokenize(trimmedQuery)
         guard trimmedQuery.isEmpty || !searchTokens.unigrams.isEmpty else {
             throw V2ClientProjectionError.invalidMessagePayload
         }
