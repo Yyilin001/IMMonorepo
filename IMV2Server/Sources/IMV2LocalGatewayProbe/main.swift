@@ -203,7 +203,7 @@ private struct Configuration: Sendable {
         self.accountBaseURL=accountBaseURL
         host = environment["IM_V2_GATEWAY_PROBE_HOST"] ?? "127.0.0.1"
         serverName = environment["IM_V2_GATEWAY_PROBE_SERVER_NAME"] ?? "localhost"
-        caPath = environment["IM_V2_GATEWAY_PROBE_CA_PATH"] ?? "/caddy/caddy/pki/authorities/local/root.crt"
+        caPath = environment["IM_V2_GATEWAY_PROBE_CA_PATH"] ?? "/run/im-edge-tls/root.crt"
         let rawPort = environment["IM_V2_GATEWAY_PROBE_PORT"] ?? "7443"
         guard let port = Int(rawPort), (1...65_535).contains(port),
               !host.isEmpty, !serverName.isEmpty, !caPath.isEmpty

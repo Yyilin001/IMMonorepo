@@ -5,7 +5,7 @@ Only loopback sockets are opened. All keys, database files and TLS certificates
 are newly generated beneath a private temporary directory and removed at exit.
 No Docker, existing database or production secret is used. Optional App UI tests
 trust the temporary CA only in a newly created simulator that is deleted at exit.
-The HTTPS proxy supplies the same trusted edge headers as the local Caddy edge;
+The HTTPS proxy supplies the same trusted edge headers as the local Nginx edge;
 all registration, credential, device and rate-limit behavior is the real server.
 Cross-Gateway mode uses authenticated Actor callbacks. The former broker-outage
 scenario is retired; callback transport faults are checked by

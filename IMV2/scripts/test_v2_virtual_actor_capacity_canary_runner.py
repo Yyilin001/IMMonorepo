@@ -17,7 +17,7 @@ from assess_v2_virtual_actor_capacity import read_run
 from virtual_actor_capacity_measurement import MeasurementFailure
 
 from test_v2_virtual_actor_capacity_canary import (
-    CAPACITY_NOFILE, CADDY_IMAGE, IMAGE, PLACEMENT_VOTERS, CanaryFailure, install_account_services,
+    CAPACITY_NOFILE, NGINX_IMAGE, IMAGE, PLACEMENT_VOTERS, CanaryFailure, install_account_services,
     install_placement_services,
     capture_detached_loader_open_file_limits,
     capture_pid1_open_file_limits, capture_project_diagnostics,
@@ -71,27 +71,27 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
         original = {"services": {
             "account": {"environment": {"edge-secret": "private", "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS": "240"},
                 "ports": ["127.0.0.1:8443:8443"], "volumes": [], "restart": "on-failure"},
-            "caddy": {"environment": {"edge-secret": "private"}, "volumes": []}}}
+            "nginx": {"environment": {"edge-secret": "private"}, "volumes": []}}}
         services = {}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             install_account_services(document=original, services=services, private=root,
                 runtime=root / "products", tls=root / "tls", gateway_environment=gateway,
                 database_names={"postgres": "control", "owner00": "owner"})
-            account, edge = services["account"], services["caddy"]
+            account, edge = services["account"], services["nginx"]
             self.assertNotIn("ports", account)
             self.assertNotIn("restart", account)
             self.assertEqual(account["command"], ["/run/va-products/IMV2AccountServerApp"])
             self.assertEqual({key: account["environment"][key] for key in keys}, gateway)
             self.assertEqual(account["environment"]["IM_V2_ACCOUNT_LISTEN_HOST"], "127.0.0.1")
             self.assertEqual(set(account["depends_on"]), {"postgres", "owner00"})
-            self.assertEqual(edge["image"], CADDY_IMAGE)
+            self.assertEqual(edge["image"], NGINX_IMAGE)
             self.assertEqual(edge["network_mode"], "service:account")
-            config = (root / "Caddyfile").read_text()
-            self.assertIn("https://account:8443", config)
-            self.assertIn("reverse_proxy 127.0.0.1:8444", config)
+            config = (root / "account.conf.template").read_text()
+            self.assertIn("listen 8443 ssl", config)
+            self.assertIn("proxy_pass http://127.0.0.1:8444", config)
             self.assertIn("X-IM-V2-Account-Edge-Authorization", config)
-            self.assertEqual((root / "Caddyfile").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((root / "account.conf.template").stat().st_mode & 0o777, 0o600)
             self.assertEqual(original["services"]["account"]["environment"]["IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS"], "240")
 
     def test_owner_fault_functional_cli_cannot_be_assessed_as_formal(self) -> None:

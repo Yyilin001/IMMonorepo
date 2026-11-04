@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # Non-destructive smoke test for the local-only V2 account stack. It proves
-# that the Caddy HTTPS edge, password fallback and device credential issuer
+# that the Nginx HTTPS edge, password fallback and device credential issuer
 # are connected without printing an assertion, access token or refresh token.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,51 +57,10 @@ test -f "${ca_path}" || {
   exit 1
 }
 
-# Caddy's internal development leaves are short-lived. The long-running native
-# gateway reads its PEM files only at process startup, so Caddy can renew the
-# file while the gateway continues presenting the expired in-memory leaf.
-# Validate the actual public gateway handshake first; on this local-only
-# Compose stack, refresh only Caddy and the gateway, never PostgreSQL or the
-# account service. This keeps a long-lived developer stack usable without
-# concealing a certificate failure from the black-box probe.
-gateway_tls_is_usable() {
-  compose exec -T gateway sh -c '
-    openssl s_client \
-      -connect 127.0.0.1:7443 \
-      -servername localhost \
-      -CAfile /caddy/caddy/pki/authorities/local/root.crt \
-      -verify_return_error \
-      </dev/null >/dev/null 2>&1
-  '
-}
-
-refresh_local_gateway_tls() {
-  compose up -d --force-recreate caddy
-  for _ in {1..30}; do
-    if compose cp caddy:/data/caddy/pki/authorities/local/root.crt "${ca_path}" >/dev/null 2>&1 &&
-      compose exec -T gateway test -s /caddy/caddy/certificates/local/localhost/localhost.crt &&
-      compose exec -T gateway test -s /caddy/caddy/certificates/local/localhost/localhost.key; then
-      break
-    fi
-    sleep 1
-  done
-  test -s "${ca_path}" || {
-    printf 'local Caddy did not expose its CA while refreshing the gateway certificate\n' >&2
-    exit 1
-  }
-  compose up -d --wait --force-recreate gateway
-}
-
 phase="gateway TLS readiness"
-if ! gateway_tls_is_usable; then
-  phase="gateway TLS certificate refresh"
-  refresh_local_gateway_tls
-  phase="gateway TLS readiness after refresh"
-  gateway_tls_is_usable || {
-    printf 'local gateway TLS verification still fails after refreshing its Caddy certificate\n' >&2
-    exit 1
-  }
-fi
+source "${script_dir}/local_gateway_tls.sh"
+local_compose() { compose "$@"; }
+v2_ensure_local_gateway_tls "${ca_path}"
 
 phase="invalid-request rejection"
 invalid_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
@@ -238,7 +197,7 @@ peer_user_id="$(printf '%s' "${peer_issued_credentials}" | jq -er '.userID')"
 # produced two independent device credentials. The sender-side probe opens the
 # unique direct room and accepts a message; the recipient-side probe reads
 # that same room-log event and checks its message ID. Both run in the gateway container
-# so they trust only the local Caddy root, and neither prints credentials or
+# so they trust only the local Nginx root, and neither prints credentials or
 # identities or becomes a gateway debug endpoint.
 phase="authenticated V2 direct-message send"
 gateway_send_result="$(compose \
@@ -494,7 +453,7 @@ test "${push_delete_status}" = '204' || {
 }
 
 # The operator listener has no host-published port and is not connected to
-# Caddy. Probe it only from its own container namespace, preserving the
+# Nginx. Probe it only from its own container namespace, preserving the
 # production invariant that this destructive API is loopback-only. The bearer
 # comes from that container's local environment and is never printed.
 if [[ -n "${cross_entry_fixture}" ]]; then

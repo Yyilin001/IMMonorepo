@@ -123,18 +123,16 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 该脚本会：
 
 - 创建被 Git 忽略的 `IMV2/.env.local`，其中是仅本机使用的随机密钥；
-- 启动 PostgreSQL、仅监听容器回环地址的账户服务、V2 TLS 网关，以及 Caddy；
+- 启动 PostgreSQL、仅监听容器回环地址的账户服务、V2 TLS 网关，以及 Nginx；
 - 仅向 macOS 发布 `https://localhost:8443`（账户 HTTPS）和
   `localhost:7443`（V2 TLS 网关），不会发布数据库、指标或账户服务的
   内部 HTTP 端口；
-- 输出 `IMV2/local-ca/root.crt`。首次使用时，将该证书导入所选模拟器并
+- 输出 `IMV2/local-ca/root.crt`。首次使用或从旧代理迁移后，将该证书导入所选模拟器并
   启用完全信任，否则 URLSession 会正确拒绝本地 HTTPS 证书。
 - 回归脚本会让两个独立临时账号经 HTTPS 取得设备凭据，并在网关容器内完成真实
   TLS 1.3 / Protobuf 认证：发送端打开私聊并接受一条消息，接收端通过 `SyncPull`
   观察到同一消息。它不会打印或持久化凭据或身份。
-- 该回归先验证网关实际提供的 TLS 证书。若长驻网关仍持有 Caddy 已轮换的过期本地
-  叶证书，脚本只重建 Caddy 和网关以重新加载证书；不会重建 PostgreSQL、账户服务或
-  删除本地卷。
+- 该回归先验证网关实际提供的 TLS 证书。若本地证书过期，开发脚本使用保留的开发 CA 重新签发证书，再重建 Nginx 和网关加载证书。
 - 本地脚本会忽略终端中意外遗留的 `IM_V2_*` 环境变量，始终以受限权限的
   `IMV2/.env.local` 为 Compose 的唯一 V2 配置来源；可用
   `bash IMV2/scripts/test_v2_local_compose_env_precedence.sh` 做无副作用验证。

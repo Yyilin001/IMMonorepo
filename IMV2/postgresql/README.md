@@ -38,7 +38,7 @@ alone is not sufficient validation.
 
 Drain/stop front-end writers before recreating PostgreSQL, wait for database
 readiness, restart front-end services, and verify health and end-to-end message
-completion. In deployments where Caddy shares the account container's network
+completion. In deployments where Nginx shares the account container's network
 namespace, stop/start the pair together. Verify the library in the postmaster's
 `/proc/<pid>/maps` and confirm all three durability settings remain `on`.
 

@@ -375,7 +375,7 @@ COMMIT;
 
         probe_env.update({
             "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL": args.gateway_account_url,
-            "IM_V2_GATEWAY_PROBE_CA_PATH": "/caddy/caddy/pki/authorities/local/root.crt",
+            "IM_V2_GATEWAY_PROBE_CA_PATH": "/run/im-edge-tls/root.crt",
             "IM_V2_GATEWAY_PROBE_MODE": "sendRoomMediaMessage",
             "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN": owner[0],
             "IM_V2_GATEWAY_PROBE_DEVICE_ID": owner[1],

@@ -7,3 +7,4 @@
 **/.env
 **/.env.*
 !**/.env.example
+IMV2/local-ca/

@@ -60,7 +60,7 @@ fi
 printf '%s\n' 'preflight: ensure the selected simulator has been manually unlocked at least once since it was last booted, and that the Mac is unlocked.' >&2
 
 running_services="$(local_compose ps --status running --services 2>/dev/null || true)"
-if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'caddy' <<<"${running_services}"; then
+if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'nginx' <<<"${running_services}"; then
   "${local_stack_script}"
 fi
 v2_seed_local_admission_pool

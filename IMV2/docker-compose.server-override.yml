@@ -151,7 +151,7 @@ services:
         soft: 65536
         hard: 65536
 
-  caddy:
+  nginx:
     restart: unless-stopped
     ulimits:
       nofile:

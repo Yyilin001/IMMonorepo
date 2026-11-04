@@ -42,7 +42,7 @@ LAYOUTS = ("hot", "same-owner", "mixed", "cold")
 HEX64 = re.compile(r"[a-f0-9]{64}\Z")
 HEX40 = re.compile(r"[a-f0-9]{40}\Z")
 CAPACITY_NOFILE = 65_536
-CADDY_IMAGE = "caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17"
+NGINX_IMAGE = "nginx:stable-alpine@sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949"
 PLACEMENT_VOTERS = ("placement-a", "placement-b", "placement-c")
 
 
@@ -490,7 +490,7 @@ def install_account_services(*, document: dict, services: dict, private: Path,
     account["depends_on"] = {name: {"condition": "service_healthy", "required": True}
                              for name in database_names}
     account["volumes"] = [mount for mount in account.get("volumes", [])
-                          if mount["target"] != "/caddy"] + [
+                          if mount["target"] != "/run/im-edge-tls"] + [
         {"type": "bind", "source": str(runtime), "target": "/run/va-products", "read_only": True}]
     inherited = ("IM_V2_DATABASE_URL", "IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64",
                  "IM_V2_CAPACITY_PROFILE_ID", "IM_V2_MAX_ELIGIBLE_MEMBERS",
@@ -507,42 +507,35 @@ def install_account_services(*, document: dict, services: dict, private: Path,
         int(pool.get("IM_V2_DATABASE_EVENT_LOOP_THREADS", "2")) *
         int(pool.get("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP", "4")) * len(database_names)))
     services["account"] = account
-    config = private / "Caddyfile"
-    write_private(config, """{
-    admin off
-    auto_https off
-}
-https://account:8443 {
-    tls /run/va-tls/gateway.pem /run/va-tls/gateway.key
-    reverse_proxy 127.0.0.1:8444 {
-        header_up X-IM-V2-Account-Edge-Authorization "{$IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64}"
-        header_up X-IM-V2-Account-Client-Address "{remote_host}"
-    }
-}
-""")
-    caddy = deepcopy(document["services"]["caddy"])
-    caddy["image"] = CADDY_IMAGE
-    caddy["network_mode"] = "service:account"
-    caddy["depends_on"] = {"account": {"condition": "service_healthy", "required": True}}
-    caddy["volumes"] = [
-        {"type": "bind", "source": str(config), "target": "/etc/caddy/Caddyfile", "read_only": True},
+    config = private / "account.conf.template"
+    template = (RUNNER_ROOT / "IMV2/local/account.conf.template").read_text()
+    write_private(config, template.replace("/run/im-edge-tls/leaf.pem", "/run/va-tls/gateway.pem")
+                  .replace("/run/im-edge-tls/leaf.key", "/run/va-tls/gateway.key"))
+    nginx = deepcopy(document["services"]["nginx"])
+    nginx["image"] = NGINX_IMAGE
+    nginx["network_mode"] = "service:account"
+    nginx["depends_on"] = {"account": {"condition": "service_healthy", "required": True}}
+    nginx["volumes"] = [
+        {"type": "bind", "source": str(config), "target": "/etc/nginx/templates/default.conf.template", "read_only": True},
         {"type": "bind", "source": str(tls), "target": "/run/va-tls", "read_only": True}]
-    caddy.pop("ports", None)
-    services["caddy"] = caddy
+    nginx.pop("ports", None)
+    services["nginx"] = nginx
 
 
 def wait_for_account_https(*, compose: list[str], execute: object) -> None:
     """Require CA/hostname-verified HTTPS and a reachable Account upstream."""
     probe = """import ssl, urllib.request, urllib.error
 context = ssl.create_default_context(cafile='/run/va-tls/ca.pem')
+request = urllib.request.Request('https://account:8443/v2/account-auth/password/assertion',
+                                 data=b'{}', headers={'Content-Type': 'application/json'})
 try:
-    response = urllib.request.urlopen('https://account:8443/health', context=context, timeout=5)
+    response = urllib.request.urlopen(request, context=context, timeout=5)
     code = response.status
     response.close()
 except urllib.error.HTTPError as error:
     code = error.code
     error.close()
-assert code not in (502, 503, 504), code
+assert code == 400, code
 print('ACCOUNT_HTTPS_READY status=' + str(code))
 """
     deadline = time.monotonic() + 60
@@ -618,7 +611,7 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
     loader_open_file_limits_hash = capture_detached_loader_open_file_limits(
         run=run, docker=docker, loader_id=loader_id, execute=execute)
     application_containers = {name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
-                              for name in ("account", "caddy", *PLACEMENT_VOTERS)}
+                              for name in ("account", "nginx", *PLACEMENT_VOTERS)}
     containers = {**application_containers, **{name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
                      for name in services}, "gateway": gateway_id, "loader": loader_id}
     if any(not re.fullmatch(r"[a-f0-9]{64}", container) for container in containers.values()):
@@ -883,7 +876,7 @@ def main() -> int:
         "scenarioSHA256": sha256(scenario) if scenario_document is None else None,
         "mode": result_mode(args, scenario_document),
         "formalSamplingEligible": False,
-        "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE, "caddyImage": CADDY_IMAGE,
+        "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE, "nginxImage": NGINX_IMAGE,
         "measurementMainRevision": args.measurement_main_revision,
         "mainCalibrationFreezeSHA256": sha256(args.measurement_freeze_file)
         if args.measurement_freeze_file else None,
@@ -910,7 +903,7 @@ def main() -> int:
         phase = "image inspection"
         result["swiftImageID"] = execute(docker + ["image", "inspect", IMAGE, "--format", "{{.Id}}"], "image.log", 30).strip()
         result["postgresImageID"] = execute(docker + ["image", "inspect", POSTGRES_IMAGE, "--format", "{{.Id}}"], "image.log", 30).strip()
-        result["caddyImageID"] = execute(docker + ["image", "inspect", CADDY_IMAGE, "--format", "{{.Id}}"], "image.log", 30).strip()
+        result["nginxImageID"] = execute(docker + ["image", "inspect", NGINX_IMAGE, "--format", "{{.Id}}"], "image.log", 30).strip()
         phase = "private configuration"
         runtime = private / "products"
         runtime.mkdir(mode=0o700)
@@ -986,7 +979,7 @@ def main() -> int:
                                  for name in db_names}
         gateway["ports"] = [{"mode": "ingress", "host_ip": "127.0.0.1", "target": 7443,
                              "published": "0", "protocol": "tcp"}]
-        gateway["volumes"] = [mount for mount in gateway.get("volumes", []) if mount["target"] != "/caddy"]
+        gateway["volumes"] = [mount for mount in gateway.get("volumes", []) if mount["target"] != "/run/im-edge-tls"]
         gateway["volumes"] += [
             {"type": "bind", "source": str(runtime), "target": "/run/va-products", "read_only": True},
             {"type": "bind", "source": str(tls), "target": "/run/va-tls", "read_only": True},
@@ -1014,7 +1007,7 @@ def main() -> int:
                                  runtime=runtime, tls=tls, gateway_environment=gateway_env,
                                  database_names=db_names)
         install_placement_services(document=document, services=services, runtime=runtime, shards=shards)
-        result["accountEdgeConfigurationSHA256"] = sha256(private / "Caddyfile")
+        result["accountEdgeConfigurationSHA256"] = sha256(private / "account.conf.template")
         result["accountClientRateLimitMaxRequests"] = int(services["account"]["environment"]["IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS"])
         connections = (args.measurement_connections if scenario_document is not None else
                        args.canary_connections if args.canary_connections is not None else
@@ -1074,7 +1067,7 @@ def main() -> int:
                         "IM_V2_CAPACITY_PROFILE_ID", "IM_V2_MAX_ELIGIBLE_MEMBERS", "IM_V2_MAX_COMMANDS_PER_WINDOW"}},
                 "services": measurement_service_settings(services),
                 "swiftImageID": result["swiftImageID"], "postgresImageID": result["postgresImageID"],
-                "caddyImageID": result["caddyImageID"]},
+                "nginxImageID": result["nginxImageID"]},
                 indent=2, sort_keys=True) + "\n")
             result["measurementComposeSettingsSHA256"] = sha256(run / "measurement-compose-settings.json")
         phase = "database startup"
@@ -1121,7 +1114,7 @@ def main() -> int:
         phase = "gateway startup"
         execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway", "account"], "startup.log", 180)
         phase = "account HTTPS startup"
-        execute(compose + ["up", "-d", "caddy"], "startup.log", 60)
+        execute(compose + ["up", "-d", "nginx"], "startup.log", 60)
         wait_for_account_https(compose=compose, execute=execute)
         phase = "runtime provenance"
         gateway_id = execute(compose + ["ps", "-q", "gateway"], "open-file-limits.log", 15,
@@ -1135,7 +1128,7 @@ def main() -> int:
         provenance = capture_runtime_provenance(
             docker=docker, compose=compose, services=db_names, manifest=manifest,
             layout=args.layout, execute=execute, psql=psql,
-            application_services=("gateway", "account", "caddy", *PLACEMENT_VOTERS))
+            application_services=("gateway", "account", "nginx", *PLACEMENT_VOTERS))
         if (provenance["projectContainers"]["gateway"]["containerID"] != gateway_id or
                 provenance["projectContainers"]["account"]["containerID"] != account_id):
             raise CanaryFailure("application changed after PID 1 open-file limit check")

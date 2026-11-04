@@ -2,7 +2,7 @@
 
 # Shared local-stack Compose boundary. Docker Compose gives a variable exported
 # by the invoking shell precedence over `--env-file`. For this repository that
-# is unsafe: account, gateway and Caddy must use one persisted local secret
+# is unsafe: account, gateway and Nginx must use one persisted local secret
 # set, not an accidental terminal export left by another project. Strip only
 # `IM_V2_*` variables from the Compose process; explicit `docker compose exec
 # --env IM_V2_*` probe arguments still reach their target container normally.

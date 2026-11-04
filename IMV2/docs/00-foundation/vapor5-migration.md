@@ -93,7 +93,7 @@ Linux 的 NIO FileSystem 可以用 `O_TMPFILE` 写入匿名暂存文件，上传
 
 最终统一 Release 镜像 `edfa08e79209` 已通过默认 PostgreSQL `search_path` 下的三服务启动、完整账户/TLS 网关冒烟，以及 32 MiB 媒体上传下载、Range、慢读和断连暂存清理。Account、Operator、Gateway 收到停止信号后均在 1 秒内以状态 0 退出，无 OOM。
 
-本地栈重启使用 `IMV2/scripts/run_v2_local_account_stack.sh` 的既定顺序：Account/Operator、重新创建 Caddy、再创建 Gateway。Caddy 共享 Account 的网络命名空间；只重启 Account 而保留旧 Caddy，可能使宿主机 HTTPS 端口失效。
+本地栈重启使用 `IMV2/scripts/run_v2_local_account_stack.sh` 的既定顺序：Account/Operator、重新创建 Nginx、再创建 Gateway。Nginx 共享 Account 的网络命名空间；只重启 Account 而保留旧 Nginx，可能使宿主机 HTTPS 端口失效。
 
 ## 回退边界
 

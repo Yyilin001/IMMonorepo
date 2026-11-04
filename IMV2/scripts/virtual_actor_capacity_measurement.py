@@ -19,7 +19,7 @@ from typing import Any
 
 PHASES = ("warmup", "steady", "cooldown")
 MEASUREMENT_SEMANTICS_VERSION = "native-placement-single-loader-phase-counters-v4"
-SEND_RESOURCE_SCOPE = ("gateway", "account", "caddy", "placement-a", "placement-b", "placement-c")
+SEND_RESOURCE_SCOPE = ("gateway", "account", "nginx", "placement-a", "placement-b", "placement-c")
 FAULT_RESOURCE_SCOPE = ("gateway", "placement-a", "placement-b", "placement-c")
 HARNESS_FILE_KEYS = (
     "IMV2/scripts/test_v2_virtual_actor_capacity_canary.py",

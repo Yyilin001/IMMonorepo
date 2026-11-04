@@ -46,7 +46,7 @@ class AssessmentTests(unittest.TestCase):
                                             "sampledPeakProcessRSSBytes": 1024},
                                "account": {"cpuUsageUsec": 10000000,
                                            "sampledPeakProcessRSSBytes": 4096},
-                               "caddy": {"cpuUsageUsec": 5000000,
+                               "nginx": {"cpuUsageUsec": 5000000,
                                          "sampledPeakProcessRSSBytes": 512},
                                "loader": {"cpuUsageUsec": 10000000,
                                           "sampledPeakProcessRSSBytes": 2048}},

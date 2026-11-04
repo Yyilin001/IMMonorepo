@@ -1,4 +1,4 @@
-# Local V2 account-factor stack. It intentionally publishes only the Caddy
+# Local V2 account-factor stack. It intentionally publishes only the Nginx
 # HTTPS listener to macOS loopback. PostgreSQL and the account service remain
 # on this Compose network and are never reachable from the LAN.
 services:
@@ -100,7 +100,7 @@ services:
       IM_V2_MAX_COMMANDS_PER_WINDOW: 1000
       IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS: 3
       # Explicit local-only filesystem substitute for an object store. The
-      # signed targets still traverse Caddy over HTTPS, so the iOS upload and
+      # signed targets still traverse Nginx over HTTPS, so the iOS upload and
       # download path exercises the same client boundary as production.
       IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
       IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
@@ -119,15 +119,15 @@ services:
       placement-c:
         condition: service_healthy
     healthcheck:
-      # The account listener must be accepting connections before Caddy is
+      # The account listener must be accepting connections before Nginx is
       # considered usable; a merely running process can still be initializing
       # its database and route graph.
       test: ["CMD-SHELL", "bash -c ': > /dev/tcp/127.0.0.1/8444'"]
       interval: 1s
       timeout: 3s
       retries: 30
-    # Caddy joins this container's network namespace. The only host-published
-    # port therefore belongs to Caddy, while the account listener stays loopback.
+    # Nginx joins this container's network namespace. The only host-published
+    # port therefore belongs to Nginx, while the account listener stays loopback.
     ports:
       - "127.0.0.1:8443:8443"
     volumes:
@@ -177,8 +177,8 @@ services:
       IM_V2_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: 10000
       IM_V2_TLS_HOST: 0.0.0.0
       IM_V2_TLS_PORT: 7443
-      IM_V2_TLS_CERTIFICATE_CHAIN_PATH: /caddy/caddy/certificates/local/localhost/localhost.crt
-      IM_V2_TLS_PRIVATE_KEY_PATH: /caddy/caddy/certificates/local/localhost/localhost.key
+      IM_V2_TLS_CERTIFICATE_CHAIN_PATH: /run/im-edge-tls/leaf.pem
+      IM_V2_TLS_PRIVATE_KEY_PATH: /run/im-edge-tls/leaf.key
       IM_V2_CAPABILITY_PROFILE: base
       IM_V2_MAX_MESSAGE_UTF8_BYTES: 4096
       IM_V2_MAX_FRAME_BYTES: 65536
@@ -259,7 +259,7 @@ services:
         condition: service_healthy
       placement-c:
         condition: service_healthy
-      caddy:
+      nginx:
         condition: service_started
     healthcheck:
       # The public TLS port is the gateway readiness boundary. It is checked
@@ -273,13 +273,13 @@ services:
       - "127.0.0.1:7443:7443"
     volumes:
       - ./local-room-actors/gateway:/run/im-v2-room-actor:ro
-      - v2-local-caddy-data:/caddy:ro
+      - ./local-ca/tls:/run/im-edge-tls:ro
       - v2-local-media-objects:/var/lib/im-v2-local-media
     restart: on-failure:5
     mem_limit: 2g
     pids_limit: 256
 
-  # This process is deliberately not published to the host, Caddy, or any
+  # This process is deliberately not published to the host, Nginx, or any
   # application-facing network edge. The local smoke script enters its own
   # container namespace to exercise the same loopback-only operator boundary
   # that production must place behind a bastion or mTLS proxy.
@@ -328,20 +328,20 @@ services:
     mem_limit: 1g
     pids_limit: 128
 
-  caddy:
-    image: caddy:2.8-alpine
+  nginx:
+    image: nginx:stable-alpine@sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949
     network_mode: service:account
     environment:
+      NGINX_ENVSUBST_FILTER: "^IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64$$"
       IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64: ${IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64:?run IMV2/scripts/run_v2_local_account_stack.sh first}
+    tmpfs:
+      - /etc/nginx/conf.d:mode=0700
     volumes:
-      - ./local/Caddyfile:/etc/caddy/Caddyfile:ro
-      - v2-local-caddy-data:/data
-      - v2-local-caddy-config:/config
+      - ./local/account.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./local-ca/tls:/run/im-edge-tls:ro
     mem_limit: 256m
     pids_limit: 64
 
 volumes:
   v2-local-account-postgres:
-  v2-local-caddy-data:
-  v2-local-caddy-config:
   v2-local-media-objects:

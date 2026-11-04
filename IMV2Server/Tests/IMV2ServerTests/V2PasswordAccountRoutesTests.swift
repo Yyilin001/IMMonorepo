@@ -133,7 +133,7 @@ struct V2PasswordAccountRoutesTests {
         }
     }
 
-    @Test("account edge limits only an authenticated Caddy-derived client address")
+    @Test("account edge limits only an authenticated Nginx-derived client address")
     func accountEdgeClientBudgetIsNoStoreAndFailsClosed() async throws {
         let app = try await Application(.testing)
         defer { Task { try? await app.shutdown() } }

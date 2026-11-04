@@ -80,7 +80,7 @@ printf '%s\n' 'preflight: manually unlock both selected simulators at least once
 
 if [[ "${external_stack}" == false ]]; then
   running_services="$(local_compose ps --status running --services 2>/dev/null || true)"
-  if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'caddy' <<<"${running_services}"; then
+  if ! grep -qx 'account' <<<"${running_services}" || ! grep -qx 'gateway' <<<"${running_services}" || ! grep -qx 'nginx' <<<"${running_services}"; then
     "${local_stack_script}"
   fi
   v2_seed_local_admission_pool

@@ -34,7 +34,7 @@ class MeasurementTests(unittest.TestCase):
             self.assertEqual(detail["connectionsPerWorker"], 10_000 if workload == "mixed" else 100)
             self.assertEqual(detail["latencyScope"], "single-process-phase-samples")
             self.assertEqual(detail["measurementSemanticsVersion"], MEASUREMENT_SEMANTICS_VERSION)
-            self.assertEqual(detail["resourceScope"], ["gateway", "account", "caddy", "placement-a", "placement-b", "placement-c"])
+            self.assertEqual(detail["resourceScope"], ["gateway", "account", "nginx", "placement-a", "placement-b", "placement-c"])
             self.assertEqual(scenario["phases"][0]["messagesPerSecond"],
                              scenario["phases"][1]["messagesPerSecond"])
             self.assertTrue(all(scenario["phases"][2].get(name, 0) == 0 for name in
@@ -91,7 +91,7 @@ class MeasurementTests(unittest.TestCase):
             phase_delta(before, after, samples)
 
     def test_resource_scopes_include_http_send_path(self) -> None:
-        self.assertEqual(resource_scope("hot"), ("gateway", "account", "caddy", "placement-a", "placement-b", "placement-c"))
+        self.assertEqual(resource_scope("hot"), ("gateway", "account", "nginx", "placement-a", "placement-b", "placement-c"))
         self.assertEqual(resource_scope("fault"), ("gateway", "placement-a", "placement-b", "placement-c"))
 
     def test_cleanly_exited_loader_only_truncates_its_own_tail(self) -> None:
@@ -203,7 +203,7 @@ class MeasurementTests(unittest.TestCase):
                           harness_files=harness_files)
             self.assertEqual(freeze["loaderWorkers"], 1)
             self.assertEqual(freeze["connectionsPerWorker"], 100)
-            self.assertEqual(freeze["resourceScope"], ["gateway", "account", "caddy", "placement-a", "placement-b", "placement-c"])
+            self.assertEqual(freeze["resourceScope"], ["gateway", "account", "nginx", "placement-a", "placement-b", "placement-c"])
             wrong_scope = dict(freeze, resourceScope=["gateway"])
             output.write_text(json.dumps(wrong_scope))
             with self.assertRaises(MeasurementFailure):

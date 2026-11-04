@@ -51,7 +51,7 @@ swift run --package-path IMV2Server IMV2AccountServerApp
 
 客户端通行密钥流程已有完整的挑战/断言传输边界，但该程序尚未挂载公开 WebAuthn 端点；开放端点需要经过审计的服务端验证器和一次性挑战存储。当前可部署的初始账户路径为密码备用认证。“账户安全”提供密码修改和离线恢复码，接口行为、断言版本、迁移与验证见[生命周期合同](../docs/reviews/account-authentication-lifecycle.md)。
 
-每个账户请求必须携带 Base64 入口授权密钥和由同一 HTTPS 代理注入的有效客户端地址。账户进程在限流前拒绝直接回环请求、重复请求头和无效地址，探针及工具也不得绕过代理。仓库中的本地 Caddy 配置从直接连接对端获取地址，其正常反向代理行为会丢弃客户端提供的 `X-Forwarded-*` 值。生产拓扑位于其他七层代理之后时，必须显式配置并验证可信代理链，不能直接复制任意转发地址到该请求头。
+每个账户请求必须携带 Base64 入口授权密钥和由同一 HTTPS 代理注入的有效客户端地址。账户进程在限流前拒绝直接回环请求、重复请求头和无效地址，探针及工具也不得绕过代理。仓库中的本地 Nginx 配置从直接连接对端获取地址，并显式覆盖转发地址和入口授权头。生产拓扑位于其他七层代理之后时，必须显式配置并验证可信代理链，不能直接复制任意转发地址到该请求头。
 
 ### 原生客户端的本地开发流程
 
@@ -61,9 +61,9 @@ swift run --package-path IMV2Server IMV2AccountServerApp
 bash IMV2/scripts/run_v2_local_account_stack.sh
 ```
 
-脚本在被 Git 忽略的 `IMV2/.env.local` 中创建本地专用密钥，启动 PostgreSQL、账户进程和原生 V2 TLS 网关。macOS 回环地址仅发布 `https://localhost:8443` 和 TLS 网关 `localhost:7443`。Caddy 与账户进程共享容器网络命名空间，因此账户进程仍仅绑定 `127.0.0.1:8444`；数据库和内部 HTTP 端口不发布到 macOS。
+脚本在被 Git 忽略的 `IMV2/.env.local` 中创建本地专用密钥，启动 PostgreSQL、账户进程和原生 V2 TLS 网关。macOS 回环地址仅发布 `https://localhost:8443` 和 TLS 网关 `localhost:7443`。Nginx 与账户进程共享容器网络命名空间，因此账户进程仍仅绑定 `127.0.0.1:8444`；数据库和内部 HTTP 端口不发布到 macOS。
 
-首次运行时，将生成的 `IMV2/local-ca/root.crt` 导入所选 iOS 模拟器并启用完全信任。Debug App 已默认使用 `https://localhost:8443`。辅助脚本会输出准确的停止命令，不创建 Python 虚拟环境，也不修改宿主机数据库。
+开发脚本在宿主机保管开发 CA 私钥，Nginx 和网关仅挂载叶证书、叶私钥与公开根证书。首次运行或从旧代理迁移后，将生成的 `IMV2/local-ca/root.crt` 导入所选 iOS 模拟器并启用完全信任。Debug App 已默认使用 `https://localhost:8443`。辅助脚本会输出准确的停止命令，不创建 Python 虚拟环境，也不修改宿主机数据库。
 
 网关绑定 TLS 端口前检查数据库结构是否就绪。它要求 TLS 1.3，配置缺失时直接拒绝启动，不使用开发默认值。
 

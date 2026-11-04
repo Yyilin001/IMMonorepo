@@ -780,18 +780,16 @@ def main() -> int:
         # Its healthcheck must allow that bounded wait before counting failures.
         document["services"]["account"]["healthcheck"]["start_period"] = "120s"
         result["testAccountStartPeriod"] = "120s"
-        # Task-owned HTTPS virtual host: the gateway container resolves account
-        # through Compose DNS, while Caddy still proxies its loopback-only listener.
-        # The same private CA signs both localhost (host probes) and account.
-        caddy_config = private / "Caddyfile"
-        caddy_config.write_text((ROOT / "IMV2/local/Caddyfile").read_text().replace(
-            "https://localhost:8443 {", "https://localhost:8443, https://account:8443 {"))
-        for volume in document["services"]["caddy"]["volumes"]:
-            if volume.get("target") == "/etc/caddy/Caddyfile":
-                volume["source"] = str(caddy_config)
+        # This topology owns its trust root and mounts only the signed leaf and public CA.
+        subprocess.run([sys.executable, str(ROOT / "IMV2/scripts/prepare_local_edge_tls.py"),
+                        str(private / "edge-ca")], check=True)
+        for service in ("gateway", "nginx"):
+            for volume in document["services"][service]["volumes"]:
+                if volume.get("target") == "/run/im-edge-tls":
+                    volume["source"] = str(private / "edge-ca/tls")
         document["services"]["gateway"]["environment"].update({
             "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL": "https://account:8443",
-            "IM_V2_GATEWAY_PROBE_CA_PATH": "/caddy/caddy/pki/authorities/local/root.crt"})
+            "IM_V2_GATEWAY_PROBE_CA_PATH": "/run/im-edge-tls/root.crt"})
         for name, product in zip(["account", "gateway", "operator"], PRODUCTS):
             service = document["services"][name]
             service["image"] = IMAGE
@@ -820,8 +818,7 @@ def main() -> int:
                          "target": "/run/im-v2-room-actor", "read_only": True}],
             "networks": copy.deepcopy(document["services"][PLACEMENT_VOTERS[0]].get("networks", {})),
             "mem_limit": "512m", "pids_limit": 128}
-        # Caddy needs the Account container's network namespace to issue its
-        # private CA. Keep that container running, but defer its Actor join until
+        # Nginx needs the Account container's network namespace to accept HTTPS. Keep that container running, but defer its Actor join until
         # the configured Host and Gateway have registered their Compose names.
         account = document["services"]["account"]
         account["volumes"].append({"type": "bind", "source": str(account_start_barrier),
@@ -873,21 +870,12 @@ def main() -> int:
             execute(compose + ["run", "--rm", "--no-deps", voter,
                 "/workspace/IMV2Server/.build/release/IMV2PlacementControlApp", "--provision"], "placement-provision.log")
         execute(compose + ["up", "-d", "--wait", "--wait-timeout", "90", *PLACEMENT_VOTERS], "placement-startup.log")
-        execute(compose + ["up", "-d", "account", "caddy", "operator"], "startup.log")
+        execute(compose + ["up", "-d", "account", "nginx", "operator"], "startup.log")
         account_container = subprocess.check_output(compose + ["ps", "-q", "account"],
             env=environment, text=True, timeout=15).strip()
         if not account_container:
             raise RuntimeError("Account network namespace did not start")
-        ca = private / "root.crt"
-        expires = time.monotonic() + 60
-        while True:
-            copied = subprocess.run(compose + ["cp", "caddy:/data/caddy/pki/authorities/local/root.crt", str(ca)],
-                                    env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-            if copied.returncode == 0 and ca.is_file():
-                break
-            if time.monotonic() >= expires:
-                raise RuntimeError("Caddy did not initialize its private CA")
-            time.sleep(1)
+        ca = private / "edge-ca/root.crt"
         if args.remote_gateway:
             execute(compose + ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "actor-host"], "startup.log")
         # Dependencies are already running. Waiting on them here would also wait

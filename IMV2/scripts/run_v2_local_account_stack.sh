@@ -196,29 +196,14 @@ elif [[ "${placement_files}" != 3 ]]; then
   exit 1
 fi
 compose up -d --wait --force-recreate placement-a placement-b placement-c
-# Caddy's development leaf certificate is intentionally short-lived. Recreate
-# the local TLS edge on every explicit start so a retained Compose project
-# cannot stay "healthy" after its certificate expires. The local CA volume is
-# retained, so simulators that trust its root do not need to be reconfigured.
-# The image tag stays stable for convenient local use. Explicitly recreate all
-# binaries after each build so a successful smoke test can never exercise a
-# stale account, operator, or gateway process left behind by Compose.
-compose up -d --wait --force-recreate account operator
-compose up -d --force-recreate caddy
-mkdir -p "${v2_dir}/local-ca"
+python3 "${script_dir}/prepare_local_edge_tls.py" "${v2_dir}/local-ca"
 ca_path="${v2_dir}/local-ca/root.crt"
-for _ in {1..30}; do
-  if compose cp caddy:/data/caddy/pki/authorities/local/root.crt "${ca_path}" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-test -f "${ca_path}" || {
-  printf 'Caddy did not generate its local CA certificate; inspect: docker compose --project-name %s --env-file %s --file %s logs caddy\n' "${compose_project}" "${env_file}" "${compose_file}" >&2
-  exit 1
-}
-# The gateway reads Caddy's certificate files only at startup, so it must be
-# recreated after the edge writes a replacement leaf certificate.
+# Remove the retired edge before its account network namespace is recreated.
+if docker container inspect "${compose_project}-caddy-1" >/dev/null 2>&1; then
+  docker rm -f "${compose_project}-caddy-1" >/dev/null
+fi
+compose up -d --wait --force-recreate account operator
+compose up -d --force-recreate nginx
 compose up -d --wait --force-recreate gateway
 
 printf 'V2 local account stack ready at https://localhost:8443\n'
