@@ -60,7 +60,7 @@ package struct V2PostgresSocialRelationshipPersistence: Sendable {
 
     /// 应用一次关系变更。
     ///
-    /// 先按发起者与操作标识串行化并处理幂等，再按用户对加锁。事务内会确认发起者账号有效，
+    /// 调用方已在同一事务中完成幂等检查并持有用户对锁。事务内会确认发起者账号有效，
     /// 对请求与接受动作额外校验目标账号有效，检查双向拉黑；发起好友请求时还会读取目标的
     /// 被添加偏好，偏好被锁定后按同一顺序继续处理。
     ///
@@ -71,14 +71,13 @@ package struct V2PostgresSocialRelationshipPersistence: Sendable {
     /// - Throws: 标识非法、时刻不可编码或连接不支持 SQL 时抛出
     ///   ``V2SocialRelationshipStoreError/corruptPersistenceState``；
     ///   发起者账号无效时抛出 ``V2SocialRelationshipStoreError/actorInactive``。
-    private func applyRelationship(_ command:V2ChangeRelationshipCommand,transaction:any Database,now:Date) async throws -> V2RelationshipOutcome {
+    private func applyRelationshipWithPairLocked(_ command:V2ChangeRelationshipCommand,transaction:any Database,now:Date) async throws -> V2RelationshipOutcome {
             guard let sql = transaction as? any SQLDatabase else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2SocialRelationshipStoreError.corruptPersistenceState)
             let targetID = try v2PersistenceUUID(command.targetUserID, invalid: V2SocialRelationshipStoreError.corruptPersistenceState)
             let operationID = try v2PersistenceUUID(command.operationID, invalid: V2SocialRelationshipStoreError.corruptPersistenceState)
             guard v2PostgresTimestampCanEncode(now) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             let pair = socialPair(actorID, targetID)
-            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
             guard try await socialUserIsActive(actorID, sql: sql) else {
                 throw V2SocialRelationshipStoreError.actorInactive
             }
@@ -88,7 +87,8 @@ package struct V2PostgresSocialRelationshipPersistence: Sendable {
             let blocked = try await isBlocked(actorID, targetID, sql: sql)
             guard !blocked else { return .forbidden }
             if command.action == .request {
-                try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: socialUserAddPreferenceLockKey(targetID)), 0))").run()
+                // 申请之间共享读锁；设置写入持有同键排他锁直到提交。
+                try await sql.raw("SELECT pg_advisory_xact_lock_shared(hashtextextended(\(bind: socialUserAddPreferenceLockKey(targetID)), 0))").run()
                 let allowsBeingAdded = try await sql.raw("SELECT COALESCE((SELECT allows_being_added FROM im_v2.user_add_preferences WHERE user_id = \(bind: targetID)), TRUE) AS value").first(decoding: SocialBooleanRow.self)?.value ?? false
                 guard allowsBeingAdded else { return .forbidden }
             }
@@ -128,7 +128,7 @@ package struct V2PostgresSocialRelationshipPersistence: Sendable {
 
     /// 应用一次用户拉黑变更。
     ///
-    /// 与关系变更共用同一用户对锁与幂等记录语义，保证拉黑与好友关系不会出现互相矛盾的提交。
+    /// 调用方持有与好友变更、私聊建房相同的用户对锁，直至事务提交。
     ///
     /// - Parameters:
     ///   - command: 拉黑变更命令。
@@ -137,14 +137,13 @@ package struct V2PostgresSocialRelationshipPersistence: Sendable {
     /// - Throws: 标识非法、时刻不可编码或连接不支持 SQL 时抛出
     ///   ``V2SocialRelationshipStoreError/corruptPersistenceState``；
     ///   发起者账号无效时抛出 ``V2SocialRelationshipStoreError/actorInactive``。
-    private func applyUserBlock(_ command:V2ChangeUserBlockCommand,transaction:any Database,now:Date) async throws -> V2UserBlockOutcome {
+    private func applyUserBlockWithPairLocked(_ command:V2ChangeUserBlockCommand,transaction:any Database,now:Date) async throws -> V2UserBlockOutcome {
             guard let sql = transaction as? any SQLDatabase else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2SocialRelationshipStoreError.corruptPersistenceState)
             let targetID = try v2PersistenceUUID(command.targetUserID, invalid: V2SocialRelationshipStoreError.corruptPersistenceState)
             let operationID = try v2PersistenceUUID(command.operationID, invalid: V2SocialRelationshipStoreError.corruptPersistenceState)
             guard v2PostgresTimestampCanEncode(now) else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             let pair = socialPair(actorID, targetID)
-            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
             guard try await socialUserIsActive(actorID, sql: sql) else {
                 throw V2SocialRelationshipStoreError.actorInactive
             }
@@ -363,14 +362,14 @@ extension V2PostgresSocialRelationshipPersistence {
             let outcome:V2SocialOperationTerminalOutcome
             switch command.action {
             case .relationship(let action):
-                switch try await applyRelationship(.init(actorUserID:command.actorUserID,operationID:.init(command.identity.operation.rawOperationID),targetUserID:command.targetUserID,action:action),transaction:transaction,now:clock) {
+                switch try await applyRelationshipWithPairLocked(.init(actorUserID:command.actorUserID,operationID:.init(command.identity.operation.rawOperationID),targetUserID:command.targetUserID,action:action),transaction:transaction,now:clock) {
                 case .changed(let value):outcome = .applied(.relationship(state:value.resultingState,revision:observed+1))
                 case .invalidState:outcome = .rejected(.invalidState)
                 case .forbidden:outcome = .rejected(.permissionDenied)
                 case .idempotent,.idempotencyConflict:throw V2SocialRelationshipStoreError.corruptPersistenceState
                 }
             case .userBlock(let action):
-                switch try await applyUserBlock(.init(actorUserID:command.actorUserID,operationID:.init(command.identity.operation.rawOperationID),targetUserID:command.targetUserID,action:action),transaction:transaction,now:clock) {
+                switch try await applyUserBlockWithPairLocked(.init(actorUserID:command.actorUserID,operationID:.init(command.identity.operation.rawOperationID),targetUserID:command.targetUserID,action:action),transaction:transaction,now:clock) {
                 case .changed(let value):outcome = .applied(.userBlock(isBlocked:value.isBlocked,revision:observed+1))
                 case .idempotent,.idempotencyConflict:throw V2SocialRelationshipStoreError.corruptPersistenceState
                 }
