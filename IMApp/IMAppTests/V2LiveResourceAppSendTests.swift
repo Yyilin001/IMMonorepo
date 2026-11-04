@@ -2,7 +2,7 @@ import Foundation
 import IMV2Core
 import Network
 import Security
-import Synchronization
+import os
 import Testing
 import UIKit
 @testable import IMV2ClientKit
@@ -155,7 +155,7 @@ private struct AppResourceCredentials: V2ClientMediaEdgeCredentialProvider {
     func mediaEdgeCredentials() -> V2ClientMediaEdgeCredentials { .init(accessToken: value.accessToken, deviceID: value.deviceID) }
 }
 private final class AppResourceFixturePersistence: V2IssuedCredentialRecoveryPersisting, V2DeviceRevocationPersisting {
-    private let data = Mutex<Data?>(nil)
+    private let data = OSAllocatedUnfairLock<Data?>(initialState: nil)
     func load() -> Data? { data.withLock { $0 } }
     func save(_ value: Data) { data.withLock { $0 = value } }
     func delete() { data.withLock { $0 = nil } }

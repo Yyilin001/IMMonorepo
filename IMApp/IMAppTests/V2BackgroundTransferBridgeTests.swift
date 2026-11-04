@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 import IMV2Core
 import Testing
-import Synchronization
+import os
 @testable import IMApp
 @testable import IMV2ClientKit
 
@@ -137,7 +137,7 @@ struct V2BackgroundTransferBridgeTests {
     #endif
 }
 private final class RecordingResourceProtectionWriter:V2ResourceFileProtectionWriting {
-    private let values=Mutex<[String:V2ResourceFileProtection]>([:])
+    private let values=OSAllocatedUnfairLock<[String:V2ResourceFileProtection]>(initialState: [:])
     func apply(_ protection:V2ResourceFileProtection,to file:URL) { values.withLock { $0[file.path]=protection } }
     func policy(at file:URL) -> V2ResourceFileProtection? { values.withLock { $0[file.path] } }
 }

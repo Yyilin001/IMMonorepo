@@ -1,6 +1,6 @@
 import Foundation
 import IMV2Core
-import Synchronization
+import os
 
 /// Synchronous OS-callback boundary of FileStore. Its small AFU permit is
 /// written only after durable capacity admission, before the task can resume.
@@ -26,7 +26,7 @@ struct V2ResourceBackgroundDownloadInbox: Sendable {
     private let root: URL
     private let sessionID: UUID
     private let protection: any V2ResourceFileProtectionWriting
-    private static let io = Mutex(())
+    private static let io = OSAllocatedUnfairLock(initialState: ())
     init(root: URL, sessionID: UUID, protection: any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) {
         self.root = root.standardizedFileURL; self.sessionID = sessionID; self.protection = protection
         directory = root.appending(path: "downloads").appending(path: sessionID.uuidString)

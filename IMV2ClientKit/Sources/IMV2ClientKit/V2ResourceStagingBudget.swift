@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 #if canImport(OSLog)
 import OSLog
 #endif
@@ -29,7 +29,7 @@ public enum V2ResourceStagingBudget {
         var rootLimitRejections: UInt64 = 0
         var unavailableUsageRejections: UInt64 = 0
     }
-    private static let observations = Mutex(Observations())
+    private static let observations = OSAllocatedUnfairLock(initialState: Observations())
     public static func snapshot() -> Snapshot {
         observations.withLock { value in
             Snapshot(lastObservedBytes: value.lastBytes, observedPeakBytes: value.observedPeak,
@@ -72,7 +72,7 @@ public enum V2ResourceStagingBudget {
         #endif
     }
     private struct Root:Sendable { let url:URL;let background:Bool;let accountTree:Bool }
-    private static let roots=Mutex<[String:Root]>([:])
+    private static let roots=OSAllocatedUnfairLock<[String:Root]>(initialState: [:])
     /// One admission scan is bounded even when a directory contains tiny files.
     /// Exhausting this limit leaves usage unknown and refuses growth.
     private static let maximumScanEntries = 65_536
@@ -128,7 +128,7 @@ public enum V2ResourceStagingBudget {
     private static func checkedCopy<T>(directory:URL,additionalBytes:Int64,background:Bool,
                                        operation:() throws -> T) throws -> T {
         guard additionalBytes>0,additionalBytes<=maximumBytes else { throw Failure.exceeded }
-        return try roots.withLock { registered in
+        return try roots.withLockUnchecked { registered in
             try pruneMissingRoots(&registered)
             let accountTree = !background && directory.lastPathComponent=="media-staging"
             let root=accountTree ? directory.deletingLastPathComponent().deletingLastPathComponent() : directory
@@ -142,7 +142,7 @@ public enum V2ResourceStagingBudget {
             var scannedEntries = 0
             do {
                 for entry in registered.values {
-                    let enumerationFailed = Mutex(false)
+                    let enumerationFailed = OSAllocatedUnfairLock(initialState: false)
                     guard let files = FileManager.default.enumerator(at: entry.url,
                         includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey],
                         errorHandler: { _, _ in enumerationFailed.withLock { $0 = true }; return false }) else {

@@ -1,6 +1,6 @@
 import Foundation
 import IMV2Core
-import Synchronization
+import os
 import Testing
 @testable import IMV2ClientKit
 @testable import IMApp
@@ -333,7 +333,7 @@ struct V2DurableResourceLifecycleTests {
         await imports.entered()
         #expect(try await store.resourceImport(id: id)?.attempts == 2)
         #expect(try await store.dueResourceImports(now: .distantFuture).isEmpty)
-        let returned = Mutex(false)
+        let returned = OSAllocatedUnfairLock(initialState: false)
         let closing = Task { await sender.close(); returned.withLock { $0 = true } }
         await imports.cancelled()
         #expect(!returned.withLock { $0 })

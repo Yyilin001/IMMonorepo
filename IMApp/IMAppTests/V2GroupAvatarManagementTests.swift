@@ -1,6 +1,6 @@
 import Foundation
 import IMV2Core
-import Synchronization
+import os
 import Testing
 @testable import IMV2ClientKit
 @testable import IMApp
@@ -184,7 +184,7 @@ struct V2GroupAvatarManagementTests {
 
     @Test("expired or wrong-device presentations cannot admit a new command", arguments: [false, true])
     func presentationFences(wrongDevice: Bool) async throws {
-        let clock = Mutex(ContinuousClock.now)
+        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
         let f = try await AvatarManagementFixture(now: { clock.withLock { $0 } })
         if wrongDevice { await f.authority.configure(wrongDevice: true) }
         else { await f.authority.configure(onRead: { clock.withLock { $0 = $0.advanced(by: .seconds(301)) } }) }

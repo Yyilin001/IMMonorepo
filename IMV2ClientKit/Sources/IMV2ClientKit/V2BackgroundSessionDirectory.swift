@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 
 enum V2BackgroundSessionKind: String, Codable, Sendable { case upload, download }
 
@@ -23,7 +23,7 @@ struct V2BackgroundSessionDirectory: Sendable {
     private let directory: URL
     private let allowedRoot: URL
     private let protection: any V2ResourceFileProtectionWriting
-    private static let io = Mutex(())
+    private static let io = OSAllocatedUnfairLock(initialState: ())
     init(directory: URL, allowedRoot: URL,
          protection: any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) throws {
         guard directory.isFileURL, allowedRoot.isFileURL else { throw V2ResourceStorageError.unsafeFile }

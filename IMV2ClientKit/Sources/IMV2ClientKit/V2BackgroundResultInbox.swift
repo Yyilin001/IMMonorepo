@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import CryptoKit
-import Synchronization
+import os
 
 /// Minimal cross-process handoff. This dedicated tree uses UntilFirstAuthentication;
 /// the business database, original sources and credentials keep their original protection.
@@ -9,13 +9,13 @@ public struct V2BackgroundResultInbox: Sendable {
     public let directory: URL
     private let root: URL
     private let protectionWriter:any V2ResourceFileProtectionWriting
-    private static let io = Mutex(())
+    private static let io = OSAllocatedUnfairLock(initialState: ())
     public init(root: URL, sessionID: UUID, protectionWriter:any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) throws {
         self.protectionWriter=protectionWriter
         guard root.isFileURL, root.resolvingSymlinksInPath().path == root.standardizedFileURL.path else { throw V2ResourceStorageError.unsafeFile }
         self.root = root.standardizedFileURL
         directory=self.root.appendingPathComponent(sessionID.uuidString,isDirectory:true)
-        try Self.io.withLock { _ in
+        try Self.io.withLock { [self] _ in
             for item in [self.root, directory] {
                 if try !exists(item, type: .typeDirectory) {
                     try FileManager.default.createDirectory(at:item,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
@@ -30,7 +30,7 @@ public struct V2BackgroundResultInbox: Sendable {
     public func write(_ result:V2BackgroundTransferResult) throws {
         let data=try JSONEncoder().encode(result)
         guard data.count<=2048 else { throw V2BackgroundTransferError.mappingConflict }
-        try Self.io.withLock { _ in
+        try Self.io.withLock { [self] _ in
             try requireOwnedDirectories()
             let file = resultURL(result.mappingID)
             let replacing = try exists(file, type: .typeRegular)
@@ -51,7 +51,7 @@ public struct V2BackgroundResultInbox: Sendable {
         }
     }
     public func results() throws -> [V2BackgroundTransferResult] {
-        try Self.io.withLock { _ in
+        try Self.io.withLock { [self] _ in
             try requireOwnedDirectories()
             return try entries().sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap {
                 try readReceipt(at: $0)
@@ -60,7 +60,7 @@ public struct V2BackgroundResultInbox: Sendable {
     }
 
     func result(for id: UUID) throws -> V2BackgroundTransferResult? {
-        try Self.io.withLock { _ in
+        try Self.io.withLock { [self] _ in
             try requireOwnedDirectories()
             do { return try readReceipt(at: resultURL(id)) }
             catch V2ResourceStorageError.unsafeFile { return nil }
@@ -83,14 +83,14 @@ public struct V2BackgroundResultInbox: Sendable {
         return result
     }
     public func remove(_ id:UUID) throws {
-        try Self.io.withLock { _ in
+        try Self.io.withLock { [self] _ in
             try requireOwnedDirectories()
             try removeRegular(resultURL(id))
         }
     }
     /// Reconciliation ignores invalid leaf entries, just like discovery. Never follow or unlink them.
     func discardReceipt(for id: UUID) throws {
-        try Self.io.withLock { _ in
+        try Self.io.withLock { [self] _ in
             try requireOwnedDirectories()
             do { try removeRegular(resultURL(id)) }
             catch V2ResourceStorageError.unsafeFile { return }

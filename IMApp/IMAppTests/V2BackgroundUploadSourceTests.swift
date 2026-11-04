@@ -1,6 +1,6 @@
 import Foundation
 import IMV2Core
-import Synchronization
+import os
 import Testing
 @testable import IMV2ClientKit
 @testable import IMApp
@@ -63,7 +63,7 @@ struct V2BackgroundUploadSourceTests {
 /// attributes cannot prove locked-device key availability; that remains a
 /// separate device lifecycle gate.
 nonisolated private final class BackgroundSourceProtectionWitness: V2ResourceFileProtectionWriting {
-    private let values = Mutex<[String: V2ResourceFileProtection]>([:])
+    private let values = OSAllocatedUnfairLock<[String: V2ResourceFileProtection]>(initialState: [:])
     func apply(_ protection: V2ResourceFileProtection, to file: URL) throws {
         try V2SystemResourceFileProtectionWriter().apply(protection, to: file)
         values.withLock { $0[file.path] = protection }

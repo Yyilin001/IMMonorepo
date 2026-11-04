@@ -5,7 +5,7 @@
 本仓库是一个 iOS 项目。
 
 最低前提：
-- iOS 26
+- iOS 17（更新系统的 API 需检查可用性）
 - Swift 6
 - 默认假设可使用现代 SwiftUI、Swift Concurrency 与 Observation 相关能力
 

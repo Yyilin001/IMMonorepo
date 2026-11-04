@@ -1,6 +1,6 @@
 import Foundation
 import IMV2Core
-import Synchronization
+import os
 import Testing
 @testable import IMV2ClientKit
 @testable import IMApp
@@ -42,7 +42,7 @@ struct V2GroupAvatarManagementStoreTests {
     }
 
     @Test func leaseAndCapabilityGateNewImagesWhileRemovalNeedsNoUpload() async throws {
-        let clock = Mutex(ContinuousClock.now), room = RoomID(uuid: UUID())
+        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now), room = RoomID(uuid: UUID())
         let manager = PageAvatarManager(snapshot: try snapshot(room: room, deadline: clock.withLock { $0 }.advanced(by: .seconds(60))))
         let stager = PageAvatarStager(), store = V2GroupAvatarManagementStore(roomID: room, manager: manager, stager: stager,
             notifier: nil, now: { clock.withLock { $0 } })
@@ -131,7 +131,7 @@ struct V2GroupAvatarManagementStoreTests {
 
     @Test("refresh preserves only unexpired display and never grants stale management", arguments: ["network", "forbidden", "session", "expired"])
     func refreshDisplayAndAuthority(kind: String) async throws {
-        let clock = Mutex(ContinuousClock.now), room = RoomID(uuid: UUID())
+        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now), room = RoomID(uuid: UUID())
         let manager = PageAvatarManager(snapshot: try snapshot(room: room, deadline: clock.withLock { $0 }.advanced(by: .seconds(60))))
         let store = V2GroupAvatarManagementStore(roomID: room, manager: manager, stager: PageAvatarStager(),
             notifier: nil, now: { clock.withLock { $0 } })

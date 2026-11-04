@@ -7,8 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C6A01A010000000000000001 /* MessagingUI in Frameworks */ = {isa = PBXBuildFile; productRef = C6A01A010000000000000002 /* MessagingUI */; };
-		C1D2E3F405162738495A6B01 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = C1D2E3F405162738495A6B02 /* GRDB */; };
 		1BADBC402F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC422F73859E00E89B24 /* IMV2ClientKit */; };
 		1BADBC432F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC442F73859E00E89B24 /* IMV2ClientKit */; };
 		1BADBC452F73859E00E89B24 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC482F73859E00E89B24 /* IMV2Core */; };
@@ -16,6 +14,8 @@
 		A1E2E3E4F567891011121321 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1E2E3E4F567891011121323 /* IMV2ClientKit */; };
 		A1E2E3E4F567891011121322 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = A1E2E3E4F567891011121324 /* IMV2Core */; };
 		A1E2E3E4F567891011121325 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A1E2E3E4F567891011121326 /* GRDB */; };
+		C1D2E3F405162738495A6B01 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = C1D2E3F405162738495A6B02 /* GRDB */; };
+		C6A01A010000000000000001 /* MessagingUI in Frameworks */ = {isa = PBXBuildFile; productRef = C6A01A010000000000000002 /* MessagingUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -290,6 +290,14 @@
 		1BADBC062F73859D00E89B24 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
+				A1E2E3E4F567891011121311 = {
+					CreatedOnToolsVersion = 26.3;
+					TestTargetID = 1BADBC0D2F73859D00E89B24;
+				};
+				B2C3D4E5F60718293A4B5C11 = {
+					CreatedOnToolsVersion = 26.3;
+					TestTargetID = 1BADBC0D2F73859D00E89B24;
+				};
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
@@ -301,18 +309,10 @@
 						CreatedOnToolsVersion = 26.3;
 						TestTargetID = 1BADBC0D2F73859D00E89B24;
 					};
-				1BADBC242F73859E00E89B24 = {
+					1BADBC242F73859E00E89B24 = {
 						CreatedOnToolsVersion = 26.3;
 						TestTargetID = 1BADBC0D2F73859D00E89B24;
 					};
-				};
-				A1E2E3E4F567891011121311 = {
-					CreatedOnToolsVersion = 26.3;
-					TestTargetID = 1BADBC0D2F73859D00E89B24;
-				};
-				B2C3D4E5F60718293A4B5C11 = {
-					CreatedOnToolsVersion = 26.3;
-					TestTargetID = 1BADBC0D2F73859D00E89B24;
 				};
 			};
 			buildConfigurationList = 1BADBC092F73859D00E89B24 /* Build configuration list for PBXProject "IMApp" */;
@@ -399,9 +399,6 @@
 			name = "Validate Release Network Configuration";
 			outputFileListPaths = (
 			);
-			// This is a security gate over build settings. It intentionally runs on
-			// every build so a caller cannot bypass Release validation through an
-			// otherwise incremental derived-data build.
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -524,7 +521,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -582,7 +579,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -596,15 +593,19 @@
 		1BADBC302F73859E00E89B24 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APS_ENVIRONMENT = development;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				APS_ENVIRONMENT = development;
-				CODE_SIGN_STYLE = Automatic;
 				CODE_SIGN_ENTITLEMENTS = Config/IMApp.entitlements;
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = T79S2V9A32;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				IM_V2_ACCOUNT_BASE_URL = "https://localhost:8443";
+				IM_V2_GATEWAY_HOST = localhost;
+				IM_V2_GATEWAY_PORT = 7443;
+				IM_V2_PUSH_ENVIRONMENT = development;
 				INFOPLIST_FILE = Config/IMAppInfo.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = iIM;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -612,10 +613,6 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IM_V2_ACCOUNT_BASE_URL = "https://localhost:8443";
-				IM_V2_GATEWAY_HOST = localhost;
-				IM_V2_GATEWAY_PORT = 7443;
-				IM_V2_PUSH_ENVIRONMENT = development;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -636,15 +633,19 @@
 		1BADBC312F73859E00E89B24 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APS_ENVIRONMENT = production;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				APS_ENVIRONMENT = production;
-				CODE_SIGN_STYLE = Automatic;
 				CODE_SIGN_ENTITLEMENTS = Config/IMApp.entitlements;
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = T79S2V9A32;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				IM_V2_ACCOUNT_BASE_URL = "https://im.example.com";
+				IM_V2_GATEWAY_HOST = gateway.im.example.com;
+				IM_V2_GATEWAY_PORT = 7443;
+				IM_V2_PUSH_ENVIRONMENT = production;
 				INFOPLIST_FILE = Config/IMAppInfo.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = iIM;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -652,10 +653,6 @@
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IM_V2_ACCOUNT_BASE_URL = "https://im.example.com";
-				IM_V2_GATEWAY_HOST = gateway.im.example.com;
-				IM_V2_GATEWAY_PORT = 7443;
-				IM_V2_PUSH_ENVIRONMENT = production;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -680,7 +677,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codex.imappTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -701,7 +698,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codex.imappTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -759,7 +756,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codex.imappLocalAccountE2ETests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -779,7 +776,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codex.imappLocalAccountE2ETests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -799,7 +796,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codex.imappLocalTwoInstallE2ETests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -819,7 +816,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.codex.imappLocalTwoInstallE2ETests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -904,14 +901,6 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-        C6A01A010000000000000003 /* XCRemoteSwiftPackageReference "MessagingUI" */ = {
-            isa = XCRemoteSwiftPackageReference;
-            repositoryURL = "https://github.com/Yyilin001/MessagingUI.git";
-            requirement = {
-                kind = revision;
-                revision = 7c0f422e393e0d17584450b3b27e4cac376e0fde;
-            };
-        };
 		A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/groue/GRDB.swift.git";
@@ -920,14 +909,17 @@
 				minimumVersion = 7.10.0;
 			};
 		};
+		C6A01A010000000000000003 /* XCRemoteSwiftPackageReference "MessagingUI" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Yyilin001/MessagingUI.git";
+			requirement = {
+				kind = revision;
+				revision = 7c0f422e393e0d17584450b3b27e4cac376e0fde;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-        C6A01A010000000000000002 /* MessagingUI */ = {
-            isa = XCSwiftPackageProductDependency;
-            package = C6A01A010000000000000003 /* XCRemoteSwiftPackageReference "MessagingUI" */;
-            productName = MessagingUI;
-        };
 		1BADBC422F73859E00E89B24 /* IMV2ClientKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */;
@@ -967,6 +959,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
 			productName = GRDB;
+		};
+		C6A01A010000000000000002 /* MessagingUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6A01A010000000000000003 /* XCRemoteSwiftPackageReference "MessagingUI" */;
+			productName = MessagingUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

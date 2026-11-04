@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
@@ -256,7 +256,7 @@ struct V2RoomSubscriptionAppTests {
     @Test("activity expiry refresh does not replay applied room payloads or trigger a history pull")
     func activityRefreshDoesNotWakeHistory() async throws {
         let wire = AppSubscriptionWire()
-        let cursorReads = Mutex(0)
+        let cursorReads = OSAllocatedUnfairLock(initialState: 0)
         let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
             groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true },
             roomCursor: { _ in cursorReads.withLock { $0 += 1 }; return 3 },
@@ -272,7 +272,7 @@ struct V2RoomSubscriptionAppTests {
         while live.liveEvents.isEmpty { live = try await adapter.nextWake() }
         #expect(try await adapter.applyLiveEvent(live))
         let readsBeforeRefresh = cursorReads.withLock { $0 }
-        let received = Mutex(false)
+        let received = OSAllocatedUnfairLock(initialState: false)
         let nextWake = Task {
             do { _ = try await adapter.nextWake(); received.withLock { $0 = true } }
             catch { }

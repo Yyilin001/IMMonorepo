@@ -316,7 +316,7 @@ private struct V2AuthorizedProfileView: View {
         }
         .onChange(of: localIdentity ?? (pipeline?.localDisplay == nil && canDisplay ? displaySnapshot?.identity : nil), initial: true) { _, identity in onIdentity?(identity) }
         .onAppear { isVisible = true }
-        .onScrollVisibilityChange(threshold: 0.1) { isVisible = $0; if !$0 { snapshot = nil } }
+        .v2AvatarVisibility { isVisible = $0; if !$0 { snapshot = nil } }
         .onDisappear { isVisible = false; snapshot = nil }
     }
     private var placeholderTitle: String? {
@@ -399,5 +399,12 @@ private struct V2AuthorizedProfileView: View {
     private struct InvalidationSubscription {
         let activation: V2ProfilePageActivation
         let updates: AsyncStream<Void>
+    }
+}
+
+extension View {
+    @ViewBuilder func v2AvatarVisibility(_ changed: @escaping (Bool) -> Void) -> some View {
+        if #available(iOS 18, *) { onScrollVisibilityChange(threshold: 0.1, changed) }
+        else { self } // Row appearance and disappearance own the iOS 17 fallback.
     }
 }

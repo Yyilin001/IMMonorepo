@@ -4,7 +4,7 @@ import GRDB
 import IMV2Core
 import Observation
 import QuickLook
-import Synchronization
+import os
 import Testing
 import UIKit
 @testable import IMV2ClientKit
@@ -18,7 +18,7 @@ struct V2ResourceManagementStoreTests {
         let page = V2ResourceStorageStore(service: f.service)
         await page.reload()
         let original = try #require(page.content.snapshot)
-        let contentChanges = Mutex(0), networkChanges = Mutex(0)
+        let contentChanges = OSAllocatedUnfairLock(initialState: 0), networkChanges = OSAllocatedUnfairLock(initialState: 0)
         withObservationTracking { _ = page.content } onChange: { contentChanges.withLock { $0 += 1 } }
         withObservationTracking { _ = page.downloadNetworkPreferences } onChange: { networkChanges.withLock { $0 += 1 } }
         await page.reload(); await page.reload()
@@ -46,7 +46,7 @@ struct V2ResourceManagementStoreTests {
             Issue.record("Closed resource center must expose a failed read"); try await f.close(); return
         }
         #expect(previous == latest)
-        let repeatedFailureChanges = Mutex(0)
+        let repeatedFailureChanges = OSAllocatedUnfairLock(initialState: 0)
         withObservationTracking { _ = page.content } onChange: { repeatedFailureChanges.withLock { $0 += 1 } }
         await page.reload()
         #expect(repeatedFailureChanges.withLock { $0 } == 0)
@@ -108,7 +108,7 @@ struct V2ResourceManagementStoreTests {
     }
     @Test func selectionCommandCannotBeReenteredWhileItsDatabaseRequestFails() async throws {
         let f = try await Fixture(), resource = try await f.add(name: "selected-once.png")
-        let attempts = Mutex(0)
+        let attempts = OSAllocatedUnfairLock(initialState: 0)
         try await f.local.databasePool.write { db in
             db.add(function: DatabaseFunction("selection_retention_attempt", argumentCount: 0, pure: false) { _ in
                 attempts.withLock { $0 += 1 }; return 1
@@ -132,7 +132,7 @@ struct V2ResourceManagementStoreTests {
     }
 
     @Test func batchTransferCommandCannotBeReenteredWhileItsDatabaseRequestFails() async throws {
-        let f = try await Fixture(), upload = try await f.attentionUpload(), attempts = Mutex(0)
+        let f = try await Fixture(), upload = try await f.attentionUpload(), attempts = OSAllocatedUnfairLock(initialState: 0)
         try await f.local.databasePool.write { db in
             db.add(function: DatabaseFunction("batch_retry_attempt", argumentCount: 0, pure: false) { _ in
                 attempts.withLock { $0 += 1 }; return 1

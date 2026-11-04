@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 
 /// 投影失效作用域。
 ///
@@ -133,7 +133,7 @@ final class V2ProjectionChangeHub: Sendable {
         var slots: [UUID: Slot] = [:]
         var diagnostics: V2NetworkDiagnostics?
     }
-    private let state = Mutex(State())
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     func installDiagnostics(_ diagnostics: V2NetworkDiagnostics) { state.withLock { $0.diagnostics = diagnostics } }
     func diagnosticSink() -> V2NetworkDiagnostics? { state.withLock { $0.diagnostics } }

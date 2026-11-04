@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 
 public enum V2ResourceTransferWaitingReason: Equatable, Sendable {
     case network, networkPolicy, transferSlot, requestSlot, serviceCooldown
@@ -44,7 +44,7 @@ final class V2ResourceConnectivityObservation: Sendable {
     private enum State: Sendable {
         case pending, waiting(V2ResourceTransferWaitReporter?), finished
     }
-    private let state = Mutex<State>(.pending)
+    private let state = OSAllocatedUnfairLock<State>(initialState: .pending)
     private let context: V2ResourceTransferWaitContext?
     init(context: V2ResourceTransferWaitContext? = V2ResourceTransferWaitScope.context) { self.context = context }
     func waiting() {

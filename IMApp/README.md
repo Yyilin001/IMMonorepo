@@ -3,7 +3,7 @@
 `IMApp` 的运行入口为 V2。当前组合根只注册 V2 登录态、账户 HTTPS 入口、
 TLS 会话与本地同步投影。
 
-当前 target 支持 iPhone 与 iPad，最低系统版本为 iOS/iPadOS 26.2。
+当前 target 支持 iPhone 与 iPad，最低系统版本为 iOS/iPadOS 17.0。
 [场景配置](Config/IMAppInfo.plist)明确关闭多窗口；iPad 声明支持四个方向，
 分屏、场景重建及真机系统行为仍须实际验收，不能由 iPhone 模拟器结果替代。
 [2026-11-01 iPad 定向证据](../docs/verification/ipad-ui-20261101.json)记录群目录导航、

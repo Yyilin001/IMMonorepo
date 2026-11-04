@@ -267,7 +267,7 @@ struct V2ZoomableConversationImage: View {
         .buttonStyle(.plain)
         .accessibilityLabel("查看大图")
         .accessibilityIdentifier("v2.message.image.open")
-        .matchedTransitionSource(id: "image", in: transition)
+        .v2ImageTransition(transition, source: true)
         .fullScreenCover(item: $selection) { selected in
             NavigationStack {
                 V2ConversationOriginalImageView(preview: selected.image, loadOriginal: loadOriginal)
@@ -284,7 +284,7 @@ struct V2ZoomableConversationImage: View {
                         }
                     }
             }
-            .navigationTransition(.zoom(sourceID: "image", in: transition))
+            .v2ImageTransition(transition, source: false)
         }
     }
 }
@@ -823,5 +823,14 @@ struct V2LocalMediaShareSheet: UIViewControllerRepresentable {
             let retained = lease; lease = nil
             Task { await retained?.release() }
         }
+    }
+}
+
+private extension View {
+    @ViewBuilder func v2ImageTransition(_ namespace: Namespace.ID, source: Bool) -> some View {
+        if #available(iOS 18, *) {
+            if source { matchedTransitionSource(id: "image", in: namespace) }
+            else { navigationTransition(.zoom(sourceID: "image", in: namespace)) }
+        } else { self }
     }
 }

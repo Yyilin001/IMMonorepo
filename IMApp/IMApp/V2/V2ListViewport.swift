@@ -170,13 +170,23 @@ struct V2ListViewportContainer: ViewModifier {
             content
                 .coordinateSpace(name: coordinateSpace)
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { viewport.resize(visibleBounds: $0) }
-                .onScrollPhaseChange { _, phase in
-                    if phase == .tracking || phase == .interacting { viewport.userDidBeginScrolling() }
-                }
+                .v2OnUserScroll { viewport.userDidBeginScrolling() }
                 .task(id: viewport.restoration?.id) {
                     guard let request = viewport.restoration else { return }
                     await viewport.performRestoration(request) { proxy.scrollTo($0, anchor: .top) }
                 }
+        }
+    }
+}
+
+extension View {
+    @ViewBuilder func v2OnUserScroll(_ action: @escaping () -> Void) -> some View {
+        if #available(iOS 18, *) {
+            onScrollPhaseChange { _, phase in
+                if phase == .tracking || phase == .interacting { action() }
+            }
+        } else {
+            simultaneousGesture(DragGesture().onChanged { _ in action() })
         }
     }
 }

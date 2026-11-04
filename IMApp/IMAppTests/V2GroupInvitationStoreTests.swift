@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
@@ -244,7 +244,7 @@ private struct InvitationUnusedSecrets:V2InvitationSecretStoring {
 }
 
 private final class InvitationRecordingSecrets: V2InvitationSecretStoring, Sendable {
-    private let records = Mutex<[V2GroupInvitationSecretAuthorization]>([])
+    private let records = OSAllocatedUnfairLock<[V2GroupInvitationSecretAuthorization]>(initialState: [])
     var authorizations: [V2GroupInvitationSecretAuthorization] { records.withLock { $0 } }
     func save(_ authorization: V2GroupInvitationSecretAuthorization, reference: UUID, accountID: UserID) throws {
         records.withLock { $0.append(authorization) }

@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 
 /// Transport observations for one attempt, not provider receipts or business
 /// completion. Multipart attempts measure only the current part; Range
@@ -32,7 +32,7 @@ final class V2ResourceTransferProgressHub: Sendable {
         var waits: [UUID: Wait] = [:]
         var networkWaits: [V2ManagedResourceTransferID: V2ResourceTransferWaitingReason] = [:]
     }
-    private let state = Mutex(State())
+    private let state = OSAllocatedUnfairLock(initialState: State())
     let updates: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
     init() {
@@ -135,7 +135,7 @@ final class V2ResourceDownloadProgressRequest: Sendable {
         var expected: Int64 = 0
         var reporter: V2ResourceTransferProgressReporter?
     }
-    private let state = Mutex(State())
+    private let state = OSAllocatedUnfairLock(initialState: State())
     private let context: V2ResourceDownloadProgressContext?
     init(context: V2ResourceDownloadProgressContext?) { self.context = context }
     func begin(expectedBytes: Int64) throws {

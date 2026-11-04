@@ -55,7 +55,7 @@ struct V2AuthorizedGroupAvatarView: View {
             if value == .active, snapshot.map({ $0.deadline <= .now }) ?? true { refresh &+= 1 }
         }
         .onAppear { visible = true }
-        .onScrollVisibilityChange(threshold: 0.1) { visible = $0; if !$0 { snapshot = nil } }
+        .v2AvatarVisibility { visible = $0; if !$0 { snapshot = nil } }
         .onDisappear { visible = false; snapshot = nil }
     }
 

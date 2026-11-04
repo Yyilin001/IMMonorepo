@@ -1379,9 +1379,7 @@ struct V2ConversationListView: View {
                     .accessibilityIdentifier("v2.conversation.list")
                     .coordinateSpace(name: "v2.conversation.viewport")
                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { store.viewport.resize(visibleBounds: $0) }
-                    .onScrollPhaseChange { _, phase in
-                        if phase == .tracking || phase == .interacting { store.viewport.userDidBeginScrolling() }
-                    }
+                    .v2OnUserScroll { store.viewport.userDidBeginScrolling() }
                     .task(id: store.viewport.restoration?.id) {
                         guard let request = store.viewport.restoration else { return }
                         await store.viewport.performRestoration(request) { scrollProxy.scrollTo($0, anchor: .top) }
@@ -2178,7 +2176,7 @@ struct V2ConversationDetailView: View {
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("v2.message.reply.composer")
                     }
-                    GlassEffectContainer(spacing: 12) {
+                    V2ComposerContainer {
                         HStack(alignment: .bottom, spacing: 12) {
                             Menu {
                                 Button("照片", systemImage: "photo.on.rectangle") {
@@ -3254,5 +3252,13 @@ private struct V2ReactionPickerMenu: View {
             }
         }
         .accessibilityIdentifier("v2.message.reaction-picker.\(message.id)")
+    }
+}
+
+private struct V2ComposerContainer<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        if #available(iOS 26, *) { GlassEffectContainer(spacing: 12, content: content) }
+        else { content() }
     }
 }

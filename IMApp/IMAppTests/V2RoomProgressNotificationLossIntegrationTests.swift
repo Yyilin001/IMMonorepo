@@ -1,6 +1,6 @@
 import Foundation
 import GRDB
-import Synchronization
+import os
 import Testing
 import IMV2Core
 @testable import IMV2ClientKit
@@ -139,7 +139,7 @@ struct V2RoomProgressNotificationLossIntegrationTests {
         let auth = V2AuthSession(credentialStore: ProgressCredentials(receiver.credentials), transport: ProgressNoRefresh(), revocationScheduler: ProgressNoRevocation())
         let credentials = try await auth.realtimeCredentials()
         let epoch = try #require(credentials.sessionEpoch)
-        let activeWire = Mutex<V2TLSFrameConnection?>(nil)
+        let activeWire = OSAllocatedUnfairLock<V2TLSFrameConnection?>(initialState: nil)
         func makeRuntime(_ local: GRDBV2LocalSyncStore) async throws -> V2AppRealtimeRuntime {
             try await V2AppRealtimeRuntime(configuration: configuration, actorUserID: receiver.userID,
                 deviceID: receiver.deviceID, authSession: auth, authEpoch: epoch, localStore: local,
@@ -337,7 +337,7 @@ struct V2RoomProgressNotificationLossIntegrationTests {
             transport: ProgressNoRefresh(), revocationScheduler: ProgressNoRevocation())
         let credentials = try await auth.realtimeCredentials()
         let epoch = try #require(credentials.sessionEpoch)
-        let activeWire = Mutex<V2TLSFrameConnection?>(nil)
+        let activeWire = OSAllocatedUnfairLock<V2TLSFrameConnection?>(initialState: nil)
         var senderRuntime: V2AppRealtimeRuntime?
         var senderTask: Task<Void, Error>?
         do {
@@ -434,7 +434,7 @@ private final class RoomProgressLossWitness: Sendable {
         var maximumHeartbeatHead: UInt64 = 0
     }
     let room: RoomID
-    let state = Mutex(State())
+    let state = OSAllocatedUnfairLock(initialState: State())
     init(room: RoomID) { self.room = room }
     func recovery(_ event: V2RoomRecoveryObservation) {
         state.withLock { value in

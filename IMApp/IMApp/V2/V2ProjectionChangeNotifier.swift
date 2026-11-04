@@ -30,13 +30,12 @@ actor V2ProjectionChangeNotifier {
         let id: UUID
         let notifier: V2ProjectionChangeNotifier
         let wakes: AsyncStream<Void>
-        struct AsyncIterator: AsyncIteratorProtocol {
+        nonisolated struct AsyncIterator: AsyncIteratorProtocol {
             let id: UUID
             let notifier: V2ProjectionChangeNotifier
             var wakes: AsyncStream<Void>.Iterator
-            mutating func next() async -> Request? { await next(isolation: #isolation) }
-            mutating func next(isolation actor: isolated (any Actor)?) async -> Request? {
-                while await wakes.next(isolation: actor) != nil {
+            @concurrent mutating func next() async -> Request? {
+                while await wakes.next() != nil {
                     if let request = await notifier.take(id) { return request }
                 }
                 return nil

@@ -6,7 +6,7 @@ import Testing
 import UIKit
 import SwiftUI
 import Observation
-import Synchronization
+import os
 @testable import IMApp
 
 @MainActor
@@ -53,7 +53,7 @@ struct V2ProfileAvatarPipelineTests {
         let f = try await ProfilePipelineFixture(seedCache: false)
         defer { try? FileManager.default.removeItem(at: f.root) }
         await f.reader.withholdFirstDownloadPlan(failRefresh: false)
-        let clock = Mutex(ContinuousClock.now)
+        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
         await f.reader.shortenFirstLease(to: 1, beforeRefresh: { clock.withLock { $0 += .seconds(2) } })
         let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root])
         let pipeline = f.pipeline(thumbnails, now: { clock.withLock { $0 } }, sleepUntil: { _ in try Task.checkCancellation() })
@@ -73,7 +73,7 @@ struct V2ProfileAvatarPipelineTests {
     func oldDecodeDoesNotBorrowRenewal() async throws {
         let f = try await ProfilePipelineFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
-        let clock = Mutex(ContinuousClock.now)
+        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
         await f.reader.shortenFirstLease(to: 1)
         await f.reader.removeDownloadPlan()
         let entered = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()

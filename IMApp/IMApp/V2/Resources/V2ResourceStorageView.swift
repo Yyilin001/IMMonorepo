@@ -239,6 +239,10 @@ private struct V2ResourceSettingsPage<Content: View>: View {
     let content: Content
     init(@ViewBuilder content: () -> Content) { self.content = content() }
     var body: some View {
+        if #available(iOS 18, *) { expandedSettings } else { Form { content } }
+    }
+    @available(iOS 18, *)
+    private var expandedSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 ForEach(sections: content) { section in

@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 
 /// One physical download's monotonic demand, shared by its independently
 /// cancellable readers. The small synchronous registration boundary closes the
@@ -9,8 +9,8 @@ final class V2ByteTransferDemand: Sendable {
         var priority: V2NetworkWorkPriority
         var observers: [UUID: @Sendable (V2NetworkWorkPriority) -> Void] = [:]
     }
-    private let state: Mutex<State>
-    init(priority: V2NetworkWorkPriority) { state = Mutex(.init(priority: priority)) }
+    private let state: OSAllocatedUnfairLock<State>
+    init(priority: V2NetworkWorkPriority) { state = OSAllocatedUnfairLock(initialState: .init(priority: priority)) }
     var priority: V2NetworkWorkPriority { state.withLock { $0.priority } }
 
     func promote(to priority: V2NetworkWorkPriority) {

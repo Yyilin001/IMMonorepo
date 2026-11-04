@@ -4,7 +4,7 @@ import ImageIO
 import IMV2ClientKit
 import IMV2Core
 import PhotosUI
-import Synchronization
+import os
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
@@ -115,11 +115,11 @@ struct V2PhotoLibraryImage: Transferable, Sendable {
 /// allocating it; returning zero makes the encoder stop on overflow/cancel.
 nonisolated private final class V2BoundedPhotoEncodingBuffer: Sendable {
     private struct State { var data = Data(); var exceeded = false; var cancelled = false }
-    private let state = Mutex(State())
+    private let state = OSAllocatedUnfairLock(initialState: State())
     private let maximumBytes: Int
     init(maximumBytes: Int) { self.maximumBytes = maximumBytes }
     func append(_ pointer: UnsafeRawPointer, count: Int) -> Int {
-        state.withLock { state in
+        state.withLockUnchecked { state in
             if Task.isCancelled { state.cancelled = true }
             guard !state.exceeded, !state.cancelled else { return 0 }
             guard count >= 0, count <= maximumBytes - state.data.count else { state.exceeded = true; return 0 }

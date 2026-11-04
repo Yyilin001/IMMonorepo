@@ -204,7 +204,7 @@ public actor V2RoomRecoveryRunner {
         }
     }
 
-    private func wait(_ iterator: inout AsyncThrowingStream<Void, Error>.Iterator,
+    private nonisolated func wait(_ iterator: inout AsyncThrowingStream<Void, Error>.Iterator,
                       continuation: AsyncThrowingStream<Void, Error>.Continuation,
                       delay: TimeInterval?) async throws {
         let timer: Task<Void, Never>? = delay.map { seconds in
@@ -217,7 +217,7 @@ public actor V2RoomRecoveryRunner {
             }
         }
         do {
-            guard try await iterator.next(isolation: self) != nil else { throw CancellationError() }
+            guard try await iterator.next() != nil else { throw CancellationError() }
             timer?.cancel()
             await timer?.value
             try Task.checkCancellation()

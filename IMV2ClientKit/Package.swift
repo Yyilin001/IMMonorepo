@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "IMV2ClientKit",
-    platforms: [.iOS(.v26), .macOS(.v15)],
+    platforms: [.iOS(.v17), .macOS(.v15)],
     products: [.library(name: "IMV2ClientKit", targets: ["IMV2ClientKit"])],
     dependencies: [
         .package(path: "../IMV2Core"),

@@ -4,7 +4,7 @@ import IMV2Core
 #if canImport(Network) && canImport(Security)
 import Network
 import Security
-import Synchronization
+import os
 #endif
 
 enum V2MessageSendConnectionScope {
@@ -291,7 +291,7 @@ struct V2NetworkTLSByteConnection: V2TLSByteConnection {
     /// waiting 等中间状态继续等待，本层不设置启动超时。
     func start() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let pending = Mutex<CheckedContinuation<Void, Error>?>(continuation)
+            let pending = OSAllocatedUnfairLock<CheckedContinuation<Void, Error>?>(initialState: continuation)
             connection.stateUpdateHandler = { state in
                 let result: Result<Void, Error>
                 switch state {

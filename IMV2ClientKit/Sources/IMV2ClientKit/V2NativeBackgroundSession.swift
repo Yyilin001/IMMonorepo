@@ -1,5 +1,5 @@
 import Foundation
-import Synchronization
+import os
 #if os(iOS)
 import UIKit
 
@@ -13,7 +13,7 @@ public final class V2NativeBackgroundSession: NSObject, V2BackgroundSessionDrivi
         var responseBytes: [Int:Int] = [:]
         var downloadErrors: [Int:Int] = [:]
     }
-    private let state=Mutex(State())
+    private let state=OSAllocatedUnfairLock(initialState: State())
     private let inbox:V2BackgroundResultInbox
     private let isDownload: Bool
     private let root: URL
@@ -23,7 +23,7 @@ public final class V2NativeBackgroundSession: NSObject, V2BackgroundSessionDrivi
     public let identifier:String
     private var session:URLSession!
     private var protectedDataObserver:(any NSObjectProtocol)?
-    private static let registry=Mutex<[String:V2NativeBackgroundSession]>([:])
+    private static let registry=OSAllocatedUnfairLock<[String:V2NativeBackgroundSession]>(initialState: [:])
     public static func shared(sessionID:UUID,root:URL) throws -> V2NativeBackgroundSession {
         try shared(sessionID: sessionID, root: root, locator: .production())
     }

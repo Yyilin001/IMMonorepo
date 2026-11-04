@@ -3,7 +3,7 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 import Testing
-import Synchronization
+import os
 import UIKit
 @testable import IMApp
 
@@ -33,7 +33,7 @@ struct V2GroupAvatarPipelineTests {
         let f = try await GroupPipelineFixture(seedCache: false)
         defer { try? FileManager.default.removeItem(at: f.root) }
         await f.reader.withholdFirstPlan()
-        let clock = Mutex(ContinuousClock.now)
+        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
         await f.reader.shortenFirstLease(to: 1, beforeRefresh: { clock.withLock { $0 += .seconds(2) } })
         let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root])
         let pipeline = f.pipeline(thumbnails, now: { clock.withLock { $0 } })
