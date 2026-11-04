@@ -6,6 +6,7 @@ import IMV2ServerContracts
 public struct V2ResourceRuntimeConfiguration: Sendable {
     public enum Scanner: Sendable, Equatable {
         case unsafeLocalFixture
+        case integrityOnly
         case clamAV(executable: URL, databaseDirectory: URL)
     }
     public let rootDirectory: URL
@@ -31,13 +32,20 @@ public struct V2ResourceRuntimeConfiguration: Sendable {
               let encoded = environment.value(for: "IM_V2_RESOURCE_SIGNING_KEY_BASE64"),
               let key = Data(base64Encoded: encoded), key.count == 32,
               let rawMaximum = environment.value(for: "IM_V2_RESOURCE_MAXIMUM_BYTES"),
-              let maximum = Int64(rawMaximum), maximum > 0, maximum <= 256 * 1_024 * 1_024,
-              environment.value(for: "IM_V2_RESOURCE_SCANNER") == "clamav",
-              let executable = environment.value(for: "IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE"), executable.hasPrefix("/"),
-              let database = environment.value(for: "IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY"), database.hasPrefix("/")
+              let maximum = Int64(rawMaximum), maximum > 0, maximum <= 256 * 1_024 * 1_024
         else { throw V2ResourceProviderError.configurationInvalid }
         rootDirectory = URL(fileURLWithPath: directory, isDirectory: true).standardizedFileURL
         publicBaseURL = url; signingKey = key; maximumBytes = maximum
-        scanner = .clamAV(executable: URL(fileURLWithPath: executable), databaseDirectory: URL(fileURLWithPath: database, isDirectory: true))
+        switch environment.value(for: "IM_V2_RESOURCE_SCANNER") {
+        case "disabled":
+            scanner = .integrityOnly
+        case "clamav":
+            guard let executable = environment.value(for: "IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE"), executable.hasPrefix("/"),
+                  let database = environment.value(for: "IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY"), database.hasPrefix("/")
+            else { throw V2ResourceProviderError.configurationInvalid }
+            scanner = .clamAV(executable: URL(fileURLWithPath: executable), databaseDirectory: URL(fileURLWithPath: database, isDirectory: true))
+        default:
+            throw V2ResourceProviderError.configurationInvalid
+        }
     }
 }

@@ -1,0 +1,41 @@
+# Overlay on IMV2/docker-compose.local-account.yml for real resource scanning.
+x-scan-environment: &scan-environment
+  IM_V2_RESOURCE_SCANNER: clamav
+  IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE: /opt/imv2/scan-client.py
+  IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY: /var/lib/clamav
+  IM_V2_RESOURCE_MAXIMUM_BYTES: "268435456"
+x-scan-mounts: &scan-mounts
+  - ./clamd/clamd.conf:/etc/imv2/clamd.conf:ro
+  - ./clamd/scan-client.py:/opt/imv2/scan-client.py:ro
+  - ${IM_V2_CLAMD_SOCKET_DIRECTORY:?}:/run/im-clamd:ro
+services:
+  clamd:
+    image: clamav/clamav:1.5.4_base@sha256:58168cd4f48a118c7d20b76da8ffce97e579b84ed7e6d1e977c6e22b1e989c5a
+    entrypoint: ["/usr/sbin/clamd"]
+    command: ["--config-file=/etc/imv2/clamd.conf"]
+    network_mode: none
+    environment: {TZ: UTC}
+    volumes:
+      - ./clamd/clamd.conf:/etc/imv2/clamd.conf:ro
+      - ${IM_V2_CLAMD_SOCKET_DIRECTORY:?}:/run/im-clamd
+      - ${IM_V2_CLAMD_SIGNATURE_DIRECTORY:?}:/var/lib/clamav:ro
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 64
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --config-file=/etc/imv2/clamd.conf --ping=1 >/dev/null"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 60s
+  account:
+    environment: *scan-environment
+    volumes: *scan-mounts
+    depends_on:
+      clamd: {condition: service_healthy}
+  gateway:
+    environment: *scan-environment
+    volumes: *scan-mounts
+    depends_on:
+      clamd: {condition: service_healthy}

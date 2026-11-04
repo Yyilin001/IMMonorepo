@@ -2,7 +2,7 @@ import Foundation
 import IMV2ServerApplication
 import IMV2ServerContracts
 
-/// Runs the installed ClamAV engine against verified bytes, with explicit scan
+/// Runs the configured scan client against verified bytes, with explicit scan
 /// limits. Engine errors, skipped scans and unavailable signatures never pass.
 /// Worker concurrency and deployment memory/disk limits bound aggregate work.
 public struct V2ClamAVResourceScanner: V2ResourceScanner {

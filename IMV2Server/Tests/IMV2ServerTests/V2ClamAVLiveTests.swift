@@ -58,6 +58,27 @@ struct V2ClamAVLiveTests {
         }
     }
 
+    @Test func explicitlyDisabledScannerChecksIntegrityWithoutAntivirus() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = try V2LocalResourceStorage(root: root.appendingPathComponent("objects"),
+            binding: .init(id: "integrity-test", configurationRevision: 1))
+        let bytes = Data(#"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"#.utf8)
+        let source = root.appendingPathComponent("sample")
+        try bytes.write(to: source)
+        let facts = try await storage.write(storage.allocate(), byteCount: Int64(bytes.count),
+            sha256: Data(SHA256.hash(data: bytes)), bytes: V2LocalResourceStorage.stream(file: source))
+        let scanner = V2IntegrityOnlyResourceScanner(maximumBytes: Int64(bytes.count))
+        let receipt = try await scanner.scan(facts, storage: storage)
+        #expect(receipt.result == .passed)
+        #expect(receipt.engineVersion == "antivirus-disabled")
+        let altered = try V2StoredObjectFacts(reference: facts.reference, byteCount: facts.byteCount, sha256: Data(repeating: 0, count: 32))
+        await #expect(throws: V2ResourceProviderError.integrityMismatch) {
+            _ = try await scanner.scan(altered, storage: storage)
+        }
+    }
+
     private func configuredURL(_ key: String) throws -> URL {
         let path = try #require(ProcessInfo.processInfo.environment[key])
         try #require(path.hasPrefix("/"), "\(key) must be an absolute path")

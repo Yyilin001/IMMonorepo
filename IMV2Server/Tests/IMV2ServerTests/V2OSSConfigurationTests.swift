@@ -45,6 +45,12 @@ struct V2OSSConfigurationTests {
                 _ = try V2ResourceRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(incomplete))
             }
         }
+        var disabled = values
+        disabled["IM_V2_RESOURCE_SCANNER"] = "disabled"
+        disabled.removeValue(forKey: "IM_V2_RESOURCE_CLAMSCAN_EXECUTABLE")
+        disabled.removeValue(forKey: "IM_V2_RESOURCE_CLAMAV_DATABASE_DIRECTORY")
+        let integrityOnly = try #require(try V2ResourceRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(disabled)))
+        #expect(integrityOnly.scanner == .integrityOnly)
         var fixture = values
         fixture["IM_V2_RESOURCE_SCANNER"] = "eicar-fixture"
         #expect(throws: V2ResourceProviderError.configurationInvalid) {

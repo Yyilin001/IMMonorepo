@@ -4,7 +4,7 @@
 FROM swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6
 
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl imagemagick ffmpeg clamav \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl imagemagick ffmpeg clamav python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

@@ -16,7 +16,7 @@ import IMV2ServerGateway
 /// 并交换普通私聊命令。它不暴露任何网关路由，不持久化凭据，
 /// 也不会打印身份或凭据材料。
 /// `sendDirectMessage` 可选 CLIENT_MESSAGE_ID；提供时须同时提供原 SEND_DEADLINE_MS，确保跨进程恢复冻结指纹不变。
-/// `sendRoomMediaMessage` 另要求 EXPECTED_ROOM_ID、MEDIA_ID、CLIENT_MESSAGE_ID；
+/// `sendRoomMediaMessage` 另要求 EXPECTED_ROOM_ID、MEDIA_ID（多附件用逗号分隔的 MEDIA_IDS）、CLIENT_MESSAGE_ID；
 /// 它只输出接受结果的 room/message ID，供外部 smoke 在 SQL 中校验唯一消息与媒体归属。
 @main
 enum IMV2LocalGatewayProbe {
@@ -89,7 +89,7 @@ private struct Configuration: Sendable {
     let targetUserID: UserID?
     let expectedRoomID: RoomID?
     let expectedMessageID: MessageID?
-    let mediaID: MediaID?
+    let mediaIDs: [MediaID]
     let clientMessageID: ClientMessageID?
     let sendDeadlineMilliseconds: UInt64
     let heldReadyPath: String?
@@ -123,7 +123,18 @@ private struct Configuration: Sendable {
         targetUserID = try environment["IM_V2_GATEWAY_PROBE_TARGET_USER_ID"].map(UserID.init)
         expectedRoomID = try environment["IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID"].map(RoomID.init)
         expectedMessageID = try environment["IM_V2_GATEWAY_PROBE_EXPECTED_MESSAGE_ID"].map(MessageID.init)
-        mediaID = try environment["IM_V2_GATEWAY_PROBE_MEDIA_ID"].map(MediaID.init)
+        if let list = environment["IM_V2_GATEWAY_PROBE_MEDIA_IDS"] {
+            let entries = list.split(separator: ",", omittingEmptySubsequences: false)
+            guard environment["IM_V2_GATEWAY_PROBE_MEDIA_ID"] == nil,
+                  (1...V2MessageCommandLimits.maxMediaAttachments).contains(entries.count) else {
+                throw ProbeError.invalidConfiguration
+            }
+            mediaIDs = try entries.map { try MediaID(String($0)) }
+        } else if let single = environment["IM_V2_GATEWAY_PROBE_MEDIA_ID"] {
+            mediaIDs = [try MediaID(single)]
+        } else {
+            mediaIDs = []
+        }
         clientMessageID = try environment["IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID"].map(ClientMessageID.init)
         if let rawDeadline = environment["IM_V2_GATEWAY_PROBE_SEND_DEADLINE_MS"] {
             guard let deadline = UInt64(rawDeadline), deadline > 0, deadline <= UInt64(Int64.max) else { throw ProbeError.invalidConfiguration }
@@ -141,40 +152,40 @@ private struct Configuration: Sendable {
         switch mode {
         case .authenticate:
             guard targetUserID == nil, expectedRoomID == nil, expectedMessageID == nil,
-                  mediaID == nil, clientMessageID == nil else {
+                  mediaIDs.isEmpty, clientMessageID == nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .sendDirectMessage:
             guard targetUserID != nil, expectedRoomID == nil, expectedMessageID == nil,
-                  mediaID == nil else {
+                  mediaIDs.isEmpty else {
                 throw ProbeError.invalidConfiguration
             }
         case .relationshipRequest, .relationshipAccept:
             guard targetUserID != nil, expectedRoomID == nil, expectedMessageID == nil,
-                  mediaID == nil, clientMessageID == nil else {
+                  mediaIDs.isEmpty, clientMessageID == nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .receiveDirectMessage:
             guard targetUserID == nil, expectedRoomID != nil, expectedMessageID != nil,
-                  mediaID == nil, clientMessageID == nil else {
+                  mediaIDs.isEmpty, clientMessageID == nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .sendRoomMediaMessage:
             guard targetUserID == nil, expectedRoomID != nil, expectedMessageID == nil,
-                  mediaID != nil, clientMessageID != nil else {
+                  !mediaIDs.isEmpty, clientMessageID != nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .sendKnownRoomMessage, .sendKnownRoomExpectDenied, .barrierRoomSend:
             guard targetUserID == nil, expectedRoomID != nil, expectedMessageID == nil,
-                  mediaID == nil, clientMessageID != nil else {
+                  mediaIDs.isEmpty, clientMessageID != nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .heldRoomSend:
             guard targetUserID == nil, expectedRoomID != nil, expectedMessageID == nil,
-                  mediaID == nil, clientMessageID != nil else { throw ProbeError.invalidConfiguration }
+                  mediaIDs.isEmpty, clientMessageID != nil else { throw ProbeError.invalidConfiguration }
         case .heldRoomRead:
             guard targetUserID == nil, expectedRoomID != nil, expectedMessageID != nil,
-                  mediaID == nil, clientMessageID == nil else { throw ProbeError.invalidConfiguration }
+                  mediaIDs.isEmpty, clientMessageID == nil else { throw ProbeError.invalidConfiguration }
         }
         switch mode {
         case .heldRoomSend, .heldRoomRead:
@@ -669,7 +680,7 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         guard let actor = authenticatedUserID else { throw ProbeError.unexpectedResponse }
         let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
             senderUserID: actor, clientMessageID: configuration.clientMessageID ?? .init(UUID().uuidString),
-            text: Configuration.messageText, media: configuration.mediaID.map { [.init(mediaID: $0)] } ?? [],
+            text: Configuration.messageText, media: configuration.mediaIDs.map { .init(mediaID: $0) },
             limits: .init(maxUTF8Bytes: 65_536)),
             firstSubmissionDeadlineMilliseconds: configuration.sendDeadlineMilliseconds)
         let requestID = takeRequestID()
