@@ -260,3 +260,45 @@ func ids(_ index: SearchIndex, _ text: String, group: String? = nil) async throw
         await #expect(throws: SearchIndexError.staleCursor) { try await index.search(request, after: cursor) }
     }
 }
+
+@Test func embeddedIndexEncodingPreservesPersistedTokens() throws {
+    let fixtures = [
+        ("", ""),
+        ("Ａﬃß", "x61 x66 x66 x69 xc39f"),
+        ("\r\n\0", "x0d0a x00"),
+        ("e\u{301}㍻", "xc3a9 xe5b9b3 xe68890"),
+        ("ㅂㅏ", "xebb094"),
+        ("🇨🇳", "xf09f87a8f09f87b3")
+    ]
+    for (source, expected) in fixtures {
+        #expect(try SubstringSearchText.encodeForIndex(source) == expected)
+    }
+
+    // 拼接原字符后再分词，覆盖兼容展开、跨字符合成及 Unicode 边界的相互作用。
+    let pieces = ["Ａ", "ﬃ", "ㅂ", "ㅏ", "\u{301}", "\r", "\n", " ", "\0", "🇨", "🇳", "👩", "🏽", "\u{200D}", "💻", "1️⃣"]
+    for first in pieces {
+        for second in pieces {
+            let text = first + second + first
+            #expect(try SubstringSearchText.encodeForIndex(text) == SubstringSearchText(text).encodedPhrase)
+        }
+    }
+}
+
+@Test func tailPreviewPreservesOriginalRangesAcrossMultipleSlices() throws {
+    let prefix = String(repeating: "👩🏽‍💻㍻", count: 1_000)
+    for boundary in 0..<4 {
+        let text = prefix + String(repeating: "x", count: boundary) + "ㅂㅏﬃＢ\r\nＡﬃ" + prefix
+        let query = try SubstringSearchText("fi")
+        let expected = try query.matchingRanges(in: text)
+        #expect(expected.count == 2)
+        #expect(try query.previewRanges(in: text, characterCount: 120) == expected)
+    }
+}
+
+@Test func embeddedWriteHonorsCancellation() async {
+    let task = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        #expect(throws: CancellationError.self) { try SubstringSearchText.encodeForIndex("取消索引") }
+    }
+    await task.value
+}

@@ -8,7 +8,7 @@ public struct SubstringSearchText: Sendable {
         pattern = try TokenPattern(Self.tokenize(text).tokens)
     }
 
-    private static func tokenize(_ text: String) throws -> TokenizedText {
+    private static func tokenize(_ text: some StringProtocol) throws -> TokenizedText {
         try CharacterTokenizer.tokenize(text, mode: .compatibilityCaseInsensitive, byteLimit: .max, graphemeByteLimit: .max)
     }
 
@@ -17,7 +17,7 @@ public struct SubstringSearchText: Sendable {
 
     /// 写入索引时无需编译查询。
     public static func encodeForIndex(_ text: String) throws -> String {
-        try tokenize(text).tokens.joined(separator: " ")
+        try CharacterTokenizer.encodeForIndex(text)
     }
 
     /// 返回至多 100 个原文 UTF-16 范围，支持重叠命中。
@@ -38,7 +38,7 @@ public struct SubstringSearchText: Sendable {
         while start < text.endIndex {
             try Task.checkCancellation()
             let end = text.index(start, offsetBy: batch, limitedBy: text.endIndex) ?? text.endIndex
-            let chunk = try Self.tokenize(String(text[start..<end]))
+            let chunk = try Self.tokenize(text[start..<end])
             var stable = chunk.tokens.count
             if end != text.endIndex {
                 // 后文可能与最后一个规范化字素合成。保留它及共享原字符的所有词元。

@@ -17,8 +17,14 @@ enum CharacterTokenizer {
         let utf16End: Int
     }
 
+    private static func singleASCIIByte(_ character: Character) -> UInt8? {
+        // Swift 的 CRLF 字素也有 asciiValue（10），但索引必须保留两个原始字节。
+        guard let byte = character.asciiValue, character != "\r\n" else { return nil }
+        return byte
+    }
+
     private static func normalized(_ character: Character, mode: SearchTextMode) -> String {
-        if let ascii = character.asciiValue, character != "\r\n" {
+        if let ascii = singleASCIIByte(character) {
             let lowercase = mode != .literal && (65...90).contains(ascii)
             return String(UnicodeScalar(lowercase ? ascii + 32 : ascii))
         }
@@ -29,19 +35,45 @@ enum CharacterTokenizer {
         return original.precomposedStringWithCanonicalMapping
     }
 
-    private static func token(_ character: Character, mode: SearchTextMode) -> String {
-        // 跨原字符合成的字素也必须与查询得到相同的字节编码。
-        let canonical = String(character).precomposedStringWithCanonicalMapping
-        var encoded: [UInt8] = [120]
-        for raw in canonical.utf8 {
-            let byte = mode == .asciiCaseInsensitive && (65...90).contains(raw) ? raw + 32 : raw
-            encoded.append(hex[Int(byte >> 4)])
-            encoded.append(hex[Int(byte & 15)])
+    private static func appendToken(_ character: Character, mode: SearchTextMode, to bytes: inout [UInt8]) {
+        bytes.append(120)
+        if let ascii = singleASCIIByte(character) {
+            appendHex(ascii, mode: mode, to: &bytes)
+            return
         }
-        return String(decoding: encoded, as: UTF8.self)
+        // 跨原字符合成的字素也必须与查询得到相同的字节编码。
+        for raw in String(character).precomposedStringWithCanonicalMapping.utf8 {
+            appendHex(raw, mode: mode, to: &bytes)
+        }
     }
 
-    static func tokenize(_ text: String, mode: SearchTextMode, byteLimit: Int, graphemeByteLimit: Int = 256,
+    private static func appendHex(_ raw: UInt8, mode: SearchTextMode, to bytes: inout [UInt8]) {
+        let byte = mode == .asciiCaseInsensitive && (65...90).contains(raw) ? raw + 32 : raw
+        bytes.append(hex[Int(byte >> 4)])
+        bytes.append(hex[Int(byte & 15)])
+    }
+
+    /// 嵌入式索引只保存 FTS 短语。同查询一样，先规范化整段，再按最终字素边界编码。
+    static func encodeForIndex(_ text: String) throws -> String {
+        let mode = SearchTextMode.compatibilityCaseInsensitive
+        var normalizedText = ""
+        normalizedText.reserveCapacity(text.utf8.count)
+        for (position, character) in text.enumerated() {
+            if position.isMultiple(of: 128) { try Task.checkCancellation() }
+            normalizedText += normalized(character, mode: mode)
+        }
+
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(normalizedText.utf8.count)
+        for (position, character) in normalizedText.enumerated() {
+            if position.isMultiple(of: 128) { try Task.checkCancellation() }
+            if !bytes.isEmpty { bytes.append(32) }
+            appendToken(character, mode: mode, to: &bytes)
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    static func tokenize(_ text: some StringProtocol, mode: SearchTextMode, byteLimit: Int, graphemeByteLimit: Int = 256,
                          check: () throws -> Void = { try Task.checkCancellation() }) throws -> TokenizedText {
         guard text.utf8.count <= byteLimit else { throw SearchIndexError.invalidArgument("text byte limit exceeded") }
         // 先记录原文边界，再按完整规范化字符串划分字素。同时覆盖一个字符展开与多个字符合成。
@@ -61,6 +93,7 @@ enum CharacterTokenizer {
         }
 
         var tokens: [String] = [], ranges: [TextRange] = [], sourceBytes: [Range<Int>] = []
+        var encoded: [UInt8] = []
         var source = 0, offset = 0
         for (position, character) in normalizedText.enumerated() {
             if position.isMultiple(of: 128) { try check() }
@@ -71,7 +104,9 @@ enum CharacterTokenizer {
             offset += count
             while boundaries[source + 1].normalizedEnd < offset { source += 1 }
             let last = boundaries[source + 1]
-            tokens.append(token(character, mode: mode))
+            encoded.removeAll(keepingCapacity: true)
+            appendToken(character, mode: mode, to: &encoded)
+            tokens.append(String(decoding: encoded, as: UTF8.self))
             ranges.append(TextRange(location: first.utf16End, length: last.utf16End - first.utf16End))
             sourceBytes.append(first.utf8End..<last.utf8End)
         }
