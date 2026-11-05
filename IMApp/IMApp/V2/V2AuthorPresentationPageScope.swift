@@ -57,7 +57,57 @@ final class V2AuthorPresentationPageScope {
     init(context: Context) { self.context = context }
     func accepts(_ key: V2ProfileViewLookupKey) -> Bool { context.accepts(key) }
     func revision(for key: V2ProfileViewLookupKey) -> UUID? { revisions[key] }
-    func hide() { activation = nil; revisions = [:]; snapshots = [:] }
+    private struct GroupKey: Hashable { let room: RoomID; let pixels: Int }
+    private struct GroupEntry { let id: UUID; let generation: UInt64; var value: V2AvatarPipeline.GroupSnapshot?; let task: Task<Void, Never> }
+    private var groupEntries: [GroupKey: GroupEntry] = [:]
+    func hide() {
+        activation = nil; revisions = [:]; snapshots = [:]
+        for entry in groupEntries.values { entry.task.cancel() }
+        groupEntries = [:]
+    }
+
+    func cachedGroup(room: RoomID, pixels: Int, pipeline: V2AvatarPipeline) -> V2AvatarPipeline.GroupSnapshot? {
+        guard activation != nil, !pipeline.isSuspending else { return nil }
+        func usable(_ entry: GroupEntry) -> Bool {
+            entry.generation == pipeline.generation && entry.value?.image != nil &&
+                entry.value.map { $0.deadline > .now } == true
+        }
+        if let exact = groupEntries[.init(room: room, pixels: pixels)], usable(exact) { return exact.value }
+        // A larger presentation may reuse authorized smaller pixels while its
+        // own decode is pending. An empty decode must never mask a real image.
+        return groupEntries.filter { $0.key.room == room && usable($0.value) }
+            .max(by: { $0.key.pixels < $1.key.pixels })?.value.value
+    }
+
+    func prepareGroup(room: RoomID, pixels: Int, pipeline: V2AvatarPipeline) {
+        guard activation != nil, !pipeline.isSuspending else { return }
+        let key = GroupKey(room: room, pixels: pixels)
+        if groupEntries[key] != nil { return }
+        if groupEntries.count >= 64, let oldest = groupEntries.keys.first {
+            groupEntries.removeValue(forKey: oldest)?.task.cancel()
+        }
+        let id = UUID()
+        let task = Task { [weak self] in
+            guard let token = try? await pipeline.groups.activate(roomID: room) else {
+                if self?.groupEntries[key]?.id == id { self?.groupEntries.removeValue(forKey: key) }
+                return
+            }
+            do {
+                let updates = try await pipeline.groups.invalidations(for: token)
+                let value = try await pipeline.groupSnapshot(activation: token, pixels: pixels)
+                try Task.checkCancellation()
+                if self?.groupEntries[key]?.id == id { self?.groupEntries[key]?.value = value }
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { for await _ in updates { return } }
+                    group.addTask { try? await ContinuousClock().sleep(until: value.deadline) }
+                    _ = await group.next(); group.cancelAll()
+                }
+            } catch { }
+            if self?.groupEntries[key]?.id == id { self?.groupEntries.removeValue(forKey: key) }
+            await pipeline.groups.deactivate(token)
+        }
+        groupEntries[key] = .init(id: id, generation: pipeline.generation, value: nil, task: task)
+    }
 
     /// Synchronous reuse is restricted to this active page and the original
     /// authorization deadline. It never persists a private name or extends a lease.
@@ -171,7 +221,7 @@ private struct V2AuthorPresentationPageModifier: ViewModifier {
         } else {
         content
             .environment(\.v2AuthorPresentationPageScope, scope)
-            .task(id: TaskKey(phase: phase != .background ? .active : .background, generation: pipeline?.generation ?? 0)) {
+            .task(id: TaskKey(pipeline: pipeline.map(ObjectIdentifier.init), phase: phase != .background ? .active : .background, generation: pipeline?.generation ?? 0)) {
                 scope.hide()
                 // All pages contribute to the account connection's foreground
                 // view. Backgrounding retires their grants and subscriptions.
@@ -185,7 +235,7 @@ private struct V2AuthorPresentationPageModifier: ViewModifier {
             .onDisappear { scope.hide() }
         }
     }
-    private struct TaskKey: Equatable { let phase: ScenePhase; let generation: UInt64 }
+    private struct TaskKey: Equatable { let pipeline: ObjectIdentifier?; let phase: ScenePhase; let generation: UInt64 }
 }
 extension View {
     @ViewBuilder

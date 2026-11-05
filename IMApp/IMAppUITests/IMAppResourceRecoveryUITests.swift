@@ -21,6 +21,9 @@ final class IMAppResourceRecoveryUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["v2.group.avatar.updating"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["v2.group.avatar.query"].exists)
         XCTAssertFalse(app.buttons["v2.group.avatar.close"].exists)
+        app.buttons["v2.group.avatar.done"].tap()
+        XCTAssertTrue(app.buttons["v2.group.avatar.manage"].waitForExistence(timeout: 5))
+        openAvatar(app)
         XCUIDevice.shared.press(.home)
         app.activate()
         XCTAssertTrue(app.descendants(matching: .any)["v2.group.avatar.updating"].waitForExistence(timeout: 10))
@@ -42,10 +45,18 @@ final class IMAppResourceRecoveryUITests: XCTestCase {
     }
 
     @MainActor private func openAvatar(_ app: XCUIApplication) {
-        let avatar = app.buttons["v2.resource-test.avatar.open"]
+        let avatar = app.buttons["v2.group.avatar.manage"]
         XCTAssertTrue(avatar.waitForExistence(timeout: 10))
+        XCTAssertTrue(avatar.isHittable)
+        XCTAssertTrue(avatar.label.contains("头像测试群"))
+        XCTAssertEqual(app.buttons.matching(identifier: "v2.group.avatar.manage").count, 1)
+        XCTAssertFalse(app.buttons["v2.message.forward.begin"].exists)
         XCTAssertFalse(app.buttons["v2.group.avatar.pending.open"].exists)
         XCTAssertFalse(app.staticTexts["待处理群头像"].exists)
         avatar.tap()
+        XCTAssertTrue(app.buttons["v2.group.avatar.library"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["v2.group.avatar.choose-resource"].exists)
+        XCTAssertFalse(app.buttons["v2.group.avatar.choose"].exists)
+        XCTAssertFalse(app.buttons["v2.group.avatar.remove"].exists)
     }
 }

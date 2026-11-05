@@ -289,7 +289,7 @@ private struct V2AuthorizedProfileView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(appearance == .handle ? displayHandle : displayName)
-        .task(id: TaskKey(key: key, phase: phase, generation: pipeline?.generation ?? 0, visible: isVisible, refresh: refresh,
+        .task(id: TaskKey(pipeline: pipeline.map(ObjectIdentifier.init), key: key, phase: phase, generation: pipeline?.generation ?? 0, visible: isVisible, refresh: refresh,
                           activation: sharedPage?.activation, pageRevision: sharedPage?.revision(for: key), appearance: appearance)) {
             // A restarted task may still own a valid presentation. Do not blank
             // it while the replacement read is in flight; canDisplay continues
@@ -392,6 +392,7 @@ private struct V2AuthorizedProfileView: View {
         if subscription?.activation == activation { subscription = nil }
     }
     private struct TaskKey: Equatable {
+        let pipeline: ObjectIdentifier?
         let key: V2ProfileViewLookupKey; let phase: ScenePhase; let generation: UInt64; let visible: Bool; let refresh: UInt64
         let activation: V2ProfilePageActivation?; let pageRevision: UUID?
         let appearance: V2ProfileAppearance

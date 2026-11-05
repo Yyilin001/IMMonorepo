@@ -455,6 +455,9 @@ struct V2MessageSendWorkTests {
         func applyLive() async throws {
             _ = try await f.store.applyGroupEventPage(.init(roomID: f.room, events: [event], nextRoomSequence: 2, hasMore: false))
         }
+        let before = try await f.store.conversationSendTimeline(in: f.room, for: f.account, before: nil,
+            limit: 80, pendingPage: 0, requiresAuthorization: false)
+        #expect(before.timeline.messages.isEmpty && before.pending.submitted.map(\.id) == [intent.id])
         let projectedFirst = order == "projectionFirst" || order == "projectionBeforeSnapshot"
         if projectedFirst { try await applyLive() }
         var snapshot: SnapshotFixture?
@@ -494,6 +497,13 @@ struct V2MessageSendWorkTests {
             }
         }
         if !projectedFirst { try await applyLive() }
+        let after = try await f.store.conversationSendTimeline(in: f.room, for: f.account, before: nil,
+            limit: 80, pendingPage: 0, requiresAuthorization: false)
+        #expect(after.pending.submitted.isEmpty)
+        if order != "projectionBeforeSnapshot" {
+            #expect(after.timeline.messages.map(\.messageID) == [message])
+            #expect(after.timeline.localSendIntentIDs == [message: intent.id])
+        }
         // No page read was required to record the authoritative materialization.
         let observed = try await f.store.databasePool.read { try Int.fetchOne($0, sql: "SELECT accepted_projection_observed FROM v2_message_send_operations WHERE work_id=?", arguments: [work.id.uuidString]) }
         #expect(observed == 1)

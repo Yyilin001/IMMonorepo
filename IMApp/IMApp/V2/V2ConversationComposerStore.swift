@@ -20,7 +20,10 @@ final class V2ConversationComposerStore {
     @ObservationIgnored private var didRestoreAttachmentDraft = false
     private var capabilityGeneration = 0
 
-    var draft: String
+    @ObservationIgnored private var draftRevision: UInt64 = 0
+    var draft: String {
+        didSet { if oldValue != draft { draftRevision &+= 1 } }
+    }
     var mentionHandlesText: String
     private(set) var replyTarget: V2ConversationMessageItem?
     private(set) var attachments: [V2ConversationAttachmentItem] = []
@@ -70,6 +73,15 @@ final class V2ConversationComposerStore {
     func nextPendingResourceSendPage() { guard hasNextPendingResourceSendPage else { return }; pendingResourceSends=[]; hasNextPendingResourceSendPage=false; pendingResourceSendPage += 1 }
     func previousPendingResourceSendPage() { guard pendingResourceSendPage > 0 else { return }; pendingResourceSends=[]; hasNextPendingResourceSendPage=false; pendingResourceSendPage -= 1 }
 
+    func applyPendingPage(_ result: V2DurableConversationSendService.PendingPage) {
+        pendingResourceSends = result.items
+        hasNextPendingResourceSendPage = result.hasNext
+    }
+
+    func pendingObservationFailed() {
+        sendFeedback = "发送进度观察已暂停，重新进入会话后可继续查看。"
+    }
+
     func observeResourceSends() async {
         guard let durable = resourceSender, let room = try? RoomID(roomID) else { return }
         do {
@@ -77,13 +89,12 @@ final class V2ConversationComposerStore {
             for try await result in durable.pendingPageUpdates(in:room,page:page) {
                 try Task.checkCancellation()
                 guard page == pendingResourceSendPage else { return }
-                pendingResourceSends = result.items
-                hasNextPendingResourceSendPage = result.hasNext
+                applyPendingPage(result)
             }
         } catch is CancellationError { return }
         catch {
             guard !Task.isCancelled else { return }
-            sendFeedback = "附件进度观察已暂停，重新进入会话后可继续查看。"
+            pendingObservationFailed()
         }
     }
     func retryResourceSend(_ id: UUID) async {
@@ -136,6 +147,7 @@ final class V2ConversationComposerStore {
             sendFeedback = "部分附件原件不可用，请移除后重新选择。"; return .none
         }
         let frozenReplyTarget = replyTarget
+        let submittedDraftRevision = draftRevision
         isSending = true
         defer { isSending = false }
         do {
@@ -153,7 +165,7 @@ final class V2ConversationComposerStore {
                 try await durable.freezeSend(text: text, mentions: mentions, replyTo: frozenReply, roomID: .init(roomID), attachments: frozenAttachments)
                 // The journal now owns these files, including across process death.
                 attachments = []
-                draft = ""
+                clearDraft(ifUnchangedSince: submittedDraftRevision)
                 mentionHandlesText = ""
                 replyTarget = nil
                 // The durable pending bubble owns preparation and confirmation progress.
@@ -173,14 +185,14 @@ final class V2ConversationComposerStore {
             case .accepted:
                 sendFeedback = "已发送，正在同步。"
                 await discardAttachmentsAfterDurableSend()
-                draft = ""
+                clearDraft(ifUnchangedSince: submittedDraftRevision)
                 mentionHandlesText = ""
                 replyTarget = nil
             case .queuedForRetry:
                 // Tracked sends display their progress on the pending message row.
                 sendFeedback = sender is any V2ConversationSendTracking ? nil : "已安全保存，连接恢复后会重试。"
                 await discardAttachmentsAfterDurableSend()
-                draft = ""
+                clearDraft(ifUnchangedSince: submittedDraftRevision)
                 mentionHandlesText = ""
                 replyTarget = nil
             case .rejected(let code):
@@ -203,6 +215,12 @@ final class V2ConversationComposerStore {
             sendFeedback = "无法保存待发送消息。"
         }
         return .none
+    }
+
+    private func clearDraft(ifUnchangedSince revision: UInt64) {
+        // A durable save may suspend while the focused input accepts the next draft.
+        guard draftRevision == revision else { return }
+        draft = ""
     }
 
     func beginReply(to message: V2ConversationMessageItem) {

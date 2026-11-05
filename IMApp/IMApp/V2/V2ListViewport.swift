@@ -46,6 +46,14 @@ final class V2ListViewport {
         updateAnchor()
     }
 
+    /// The native renderer reports one coherent layout per frame in collection coordinates.
+    func replaceVisibleRows(_ positions: [String: RowPosition], in bounds: CGRect) {
+        visibleBounds = bounds
+        rows = positions.filter { allowedIDs.contains($0.key) }
+        rowOwners.removeAll(keepingCapacity: true)
+        updateAnchor()
+    }
+
     func record(id: String, position: RowPosition, ownerID: UUID? = nil) {
         guard allowedIDs.contains(id) else { return }
         rows[id] = position
@@ -131,7 +139,7 @@ final class V2ListViewport {
         guard restoration == nil, visibleBounds.height > 0 else { return }
         let top = rows.filter { $0.value.maxY > visibleBounds.minY && $0.value.minY < visibleBounds.maxY }
             .min { lhs, rhs in lhs.value.minY == rhs.value.minY ? lhs.key < rhs.key : lhs.value.minY < rhs.value.minY }
-        if let top { anchorID = top.key }
+        if let top, anchorID != top.key { anchorID = top.key }
     }
 }
 

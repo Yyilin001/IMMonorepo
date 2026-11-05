@@ -20,7 +20,6 @@ actor V2ProfileAvatarImageProcessor {
               ] as CFDictionary) else { throw Failure.unreadable }
         return .init(image: UIImage(cgImage: image))
     }
-    func file(_ url: URL) throws -> V2NormalizedPhoto { try V2PhotoLibraryImage.prepare(from: url).content }
     func camera(_ captured: V2SendableImage) throws -> V2NormalizedPhoto {
         try Task.checkCancellation()
         let source = captured.image
@@ -67,17 +66,15 @@ actor V2ProfileAvatarImageProcessor {
 struct V2ProfileAvatarEditor: View {
     let store: V2PublicIdentitySettingsStore
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.v2ResourceManagement) private var resources
     @State private var modal: SourceModal?
     @State private var path: [UUID] = []
     @State private var photo: V2NormalizedPhoto?
-    @State private var chosenResource: V2AvatarResourceSelection?
     @State private var task: Task<Void, Never>?
     @State private var isImporting = false
     @State private var feedback: String?
     @State private var processor = V2ProfileAvatarImageProcessor()
     private enum SourceModal: String, Identifiable {
-        case library, camera, files, resources, remove, cameraPermission
+        case library, camera, cameraPermission
         var id: String { rawValue }
     }
     var body: some View {
@@ -94,24 +91,17 @@ struct V2ProfileAvatarEditor: View {
                         Button("拍照", systemImage: "camera") { requestCamera() }
                             .accessibilityIdentifier("v2.profile.avatar.camera")
                     }
-                    if resources != nil {
-                        Button("从聊天图片选择", systemImage: "bubble.left.and.text.bubble.right") { modal = .resources }
-                            .accessibilityIdentifier("v2.profile.avatar.choose-resource")
-                    }
-                    Button("从文件选择", systemImage: "folder") { modal = .files }
-                        .accessibilityIdentifier("v2.profile.avatar.files")
                 }.disabled(isImporting || !store.canEdit)
-                if store.currentAvatar != nil || store.stagedAvatar != nil || store.existingAvatar != nil {
-                    Section {
-                        Button("移除头像", role: .destructive) { modal = .remove }
-                            .disabled(isImporting || store.isSaving).accessibilityIdentifier("v2.profile.avatar.remove")
-                    }
-                }
                 if isImporting { Section { ProgressView("正在读取照片…") } }
                 if let feedback { Section { Text(feedback).foregroundStyle(.secondary) } }
             }
             .v2GroupedPageSurface().navigationTitle("更换头像").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(store.isSaving) } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }.disabled(store.isSaving)
+                        .accessibilityIdentifier("v2.profile.avatar.cancel")
+                }
+            }
             .navigationDestination(for: UUID.self) { _ in
                 if let photo {
                     V2ProfileAvatarCropView(photo: photo, processor: processor) { cropped in
@@ -126,26 +116,6 @@ struct V2ProfileAvatarEditor: View {
         .v2PhotoLibraryPicker(isPresented: binding(.library), isImporting: $isImporting, maximumSelectionCount: 1) { photo in
             self.photo = photo; path = [UUID()]
         }
-        .fileImporter(isPresented: binding(.files), allowedContentTypes: [.image]) { result in
-            guard case .success(let url) = result else { return }
-            run {
-                let accessed = url.startAccessingSecurityScopedResource()
-                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-                do { photo = try await processor.file(url); try Task.checkCancellation(); path = [UUID()] }
-                catch is CancellationError { }
-                catch { feedback = "无法读取这张图片，请选择其他照片。" }
-            }
-        }
-        .sheet(isPresented: binding(.resources), onDismiss: {
-            guard let selected = chosenResource else { return }
-            chosenResource = nil
-            run {
-                if await store.saveAvatarResource(selected) { dismiss() }
-                else { feedback = store.feedback }
-            }
-        }) {
-            if let resources { V2AvatarResourcePicker(service: resources) { chosenResource = $0 } }
-        }
         .fullScreenCover(isPresented: binding(.camera)) {
             V2ProfileAvatarCamera { captured in
                 modal = nil
@@ -156,12 +126,6 @@ struct V2ProfileAvatarEditor: View {
                     catch { feedback = "照片处理失败，请重试。" }
                 }
             }.ignoresSafeArea()
-        }
-        .confirmationDialog("移除当前头像？", isPresented: binding(.remove), titleVisibility: .visible) {
-            Button("移除头像", role: .destructive) {
-                run { if await store.removeAndSaveAvatar() { dismiss() } else { feedback = store.feedback } }
-            }.accessibilityIdentifier("v2.profile.avatar.remove.confirm")
-            Button("取消", role: .cancel) { }
         }
         .alert("无法使用相机", isPresented: binding(.cameraPermission)) {
             Button("打开设置") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }

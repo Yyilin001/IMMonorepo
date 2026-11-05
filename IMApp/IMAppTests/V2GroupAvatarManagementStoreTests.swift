@@ -8,6 +8,26 @@ import Testing
 @MainActor
 @Suite("Group avatar page state and dismissal", .timeLimit(.minutes(1)))
 struct V2GroupAvatarManagementStoreTests {
+    @Test("unchanged management reads preserve presentation while a new avatar invalidates it")
+    func avatarChangesInvalidateWithoutBlankingUnchangedReads() async throws {
+        let room = RoomID(uuid: UUID()), original = try snapshot(room: room)
+        let manager = PageAvatarManager(snapshot: original)
+        let store = V2GroupAvatarManagementStore(roomID: room, manager: manager, stager: PageAvatarStager(), notifier: nil)
+        await store.observe()
+        #expect(store.presentationInvalidationGeneration == 0)
+        store.refresh(); await settle(store)
+        #expect(store.presentationInvalidationGeneration == 0)
+        let changed = V2GroupAvatarManagementSnapshot(access: .authorized(.init(
+            state: try .init(roomID: room, mediaID: .init(uuid: UUID()), revision: 8),
+            canManage: true, deadline: .now.advanced(by: .seconds(60)), maximumUploadBytes: 1024)), pending: [])
+        await manager.update(changed)
+        store.refresh(); await settle(store)
+        #expect(store.presentationInvalidationGeneration == 1)
+        store.refresh(); await settle(store)
+        #expect(store.presentationInvalidationGeneration == 1)
+        store.suspend()
+    }
+
     @Test func normalizedPhotoUsesDurableGroupAvatarStaging() async throws {
         let room = RoomID(uuid: UUID()), manager = PageAvatarManager(snapshot: try snapshot(room: room))
         let stager = PageAvatarStager(), store = V2GroupAvatarManagementStore(roomID: room, manager: manager, stager: stager, notifier: nil)

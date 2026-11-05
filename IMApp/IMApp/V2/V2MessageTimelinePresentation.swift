@@ -10,8 +10,12 @@ enum V2MessageTimelineRow: Hashable, Identifiable {
     case pending(V2DurableConversationSendService.Pending)
     var id: String {
         switch self {
-        case .committed(let item): item.id
-        case .pending(let item): "pending-" + item.id.uuidString
+        case .committed(let item):
+            if case .message(let message, _) = item, let intentID = message.localSendIntentID {
+                return "pending-" + intentID.uuidString
+            }
+            return item.id
+        case .pending(let item): return "pending-" + item.id.uuidString
         }
     }
 }
@@ -104,7 +108,11 @@ final class V2MessageTimelinePresentation {
     }
 
     private static func merge(_ items: [V2ConversationTimelineItem], pending: [V2DurableConversationSendService.Pending]) -> [V2MessageTimelineRow] {
-        let pending = pending.sorted {
+        let confirmed = Set(items.compactMap { item -> UUID? in
+            if case .message(let message, _) = item { return message.localSendIntentID }
+            return nil
+        })
+        let pending = pending.filter { !confirmed.contains($0.id) }.sorted {
             if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
             return $0.id.uuidString < $1.id.uuidString
         }
@@ -165,9 +173,24 @@ struct V2MessageTimelineInheritedEnvironment: ViewModifier {
             .environment(\.timeZone, source.timeZone)
         #if DEBUG
         inherited.environment(\.v2MockProfileNames, source.v2MockProfileNames)
+            .environment(\.v2GroupAvatarDisplayObservation, source.v2GroupAvatarDisplayObservation)
         #else
         inherited
         #endif
+    }
+}
+
+struct V2MessageBubbleSurface: ViewModifier {
+    let isOutgoing: Bool
+    var isWithdrawn = false
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(isOutgoing && !isWithdrawn ? V2VisualStyle.outgoing : V2VisualStyle.incoming,
+                in: UnevenRoundedRectangle(topLeadingRadius: isOutgoing ? 19 : 5,
+                    bottomLeadingRadius: 19, bottomTrailingRadius: 19, topTrailingRadius: isOutgoing ? 5 : 19))
     }
 }
 
@@ -179,12 +202,13 @@ struct V2PendingMessageRow: View {
     var borrowImage: (@MainActor (UUID) async throws -> V2ResourceFileLease)? = nil
 
     var body: some View {
-        HStack {
-            Spacer(minLength: 48)
-            VStack(alignment: .trailing, spacing: 6) {
-                VStack(alignment: .trailing, spacing: 6) {
+        HStack(alignment: .top) {
+            Spacer(minLength: 56)
+            VStack(alignment: .trailing, spacing: 5) {
+                VStack(alignment: .trailing, spacing: 3) {
                     if !pending.text.isEmpty || (pending.images.isEmpty && pending.total == 0) {
-                        Text(pending.text.isEmpty ? "附件" : pending.text)
+                        Text(verbatim: pending.text.isEmpty ? "附件" : pending.text)
+                            .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
                     }
                     if !pending.images.isEmpty {
                         ForEach(pending.images, id: \.jobID) { image in
@@ -198,16 +222,16 @@ struct V2PendingMessageRow: View {
                             .accessibilityLabel("待发送附件")
                     }
                 }
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .foregroundStyle(.white)
-                    .background(V2VisualStyle.outgoing, in: RoundedRectangle(cornerRadius: 20))
-                Text(pending.status).font(.caption).foregroundStyle(.secondary)
-                if pending.canRetry || pending.canCancel {
-                    HStack {
-                        if pending.canRetry { Button(pending.retryTitle, action: retry) }
-                        if pending.canCancel { Button("取消", action: cancel) }
-                    }.font(.caption).buttonStyle(.bordered)
+                .foregroundStyle(.white)
+                .modifier(V2MessageBubbleSurface(isOutgoing: true))
+                HStack {
+                    Text(pending.status).foregroundStyle(.secondary)
+                    if pending.canRetry { Button(pending.retryTitle, action: retry) }
+                    if pending.canCancel { Button("取消", action: cancel) }
                 }
+                .font(.caption2)
+                .buttonStyle(.borderless)
+                .padding(.horizontal, 4)
             }
         }
         .accessibilityIdentifier("v2.message.pending.\(pending.id.uuidString)")

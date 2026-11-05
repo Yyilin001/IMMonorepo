@@ -4,41 +4,26 @@ import XCTest
 /// Owned HTTPS/TLS/OSS stack only; selected by the resource acceptance driver.
 /// Both identities are created through real UI and isolated Keychain scopes.
 final class IMAppLiveResourceUITests: XCTestCase {
-    @MainActor func testOwnAvatarUsingExistingPhotoAppearsInProfileAndAccountPage() {
+    @MainActor func testOwnAvatarFromLibrarySurvivesProfileEditsAndRelaunch() {
         continueAfterFailure = false
-        let app = XCUIApplication(), receiver = Identity(role: "avatar receiver"), author = Identity(role: "avatar owner")
-        for identity in [author, receiver] {
-            addTeardownBlock { @MainActor in
-                app.terminate(); app.launchArguments = identity.scopeArguments + ["-v2-ui-testing-cleanup-local-account"]
-                app.launch()
-                XCTAssertTrue(app.staticTexts["v2.local-e2e.cleanup.completed"].waitForExistence(timeout: 15))
-                app.terminate()
-            }
+        let app = XCUIApplication(), author = Identity(role: "avatar owner")
+        addTeardownBlock { @MainActor in
+            app.terminate(); app.launchArguments = author.scopeArguments + ["-v2-ui-testing-cleanup-local-account"]
+            app.launch()
+            XCTAssertTrue(app.staticTexts["v2.local-e2e.cleanup.completed"].waitForExistence(timeout: 15))
+            app.terminate()
         }
-        register(receiver, app: app); app.terminate()
-        register(author, app: app, extra: ["-v2-ui-testing-direct-target", receiver.publicHandle])
-        app.buttons["v2.conversation.new-direct"].tap()
-        let start = app.buttons["v2.conversation.direct-submit"]
-        XCTAssertTrue(start.waitForExistence(timeout: 10)); start.tap()
-        XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 45))
-        app.buttons["v2.message.composer.options"].tap()
-        let choosePhoto = app.buttons["v2.message.photo.add"]
-        if !choosePhoto.waitForExistence(timeout: 3) { app.buttons["v2.message.composer.options"].tap() }
-        XCTAssertTrue(choosePhoto.waitForExistence(timeout: 10)); choosePhoto.tap()
-        let photo = app.scrollViews["photosView_content_scroll_view"].images.matching(identifier: "PXGGridLayout-Info").firstMatch
-        XCTAssertTrue(photo.waitForExistence(timeout: 20)); photo.tap()
-        app.navigationBars["照片"].buttons["完成"].tap()
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.attachment.remove.")).firstMatch.waitForExistence(timeout: 20))
-        app.buttons["v2.message.send"].tap()
-        let accepted = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.attachments.")).firstMatch
-        XCTAssertTrue(accepted.waitForExistence(timeout: 90))
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        register(author, app: app)
         app.tabBars.buttons["我的"].tap()
         app.buttons["v2.identity.open"].tap()
         app.buttons["v2.profile.avatar.choose"].tap()
-        app.buttons["v2.profile.avatar.choose-resource"].tap()
-        let image = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.avatar.resources.item.")).firstMatch
-        XCTAssertTrue(image.waitForExistence(timeout: 20)); image.tap()
+        app.buttons["v2.profile.avatar.library"].tap()
+        let photo = app.scrollViews["photosView_content_scroll_view"].images.matching(identifier: "PXGGridLayout-Info").firstMatch
+        XCTAssertTrue(photo.waitForExistence(timeout: 20)); photo.tap()
+        let done = app.navigationBars["照片"].buttons["完成"]
+        if done.waitForExistence(timeout: 2) { done.tap() }
+        XCTAssertTrue(app.descendants(matching: .any)["v2.profile.avatar.crop.canvas"].firstMatch.waitForExistence(timeout: 20))
+        app.buttons["v2.profile.avatar.crop.confirm"].tap()
         let saved = app.staticTexts["已保存"]
         if !saved.waitForExistence(timeout: 45) {
             attach(app, "Live avatar save did not complete")
@@ -72,15 +57,12 @@ final class IMAppLiveResourceUITests: XCTestCase {
         app.buttons["v2.identity.open"].tap()
         XCTAssertTrue(app.staticTexts[renamed].waitForExistence(timeout: 10))
         app.buttons["v2.profile.avatar.choose"].tap()
-        app.buttons["v2.profile.avatar.remove"].tap()
-        app.buttons["v2.profile.avatar.remove.confirm"].firstMatch.tap()
-        XCTAssertTrue(saved.waitForExistence(timeout: 45))
-        let removed = NSPredicate { _, _ in !Self.containsFixturePhoto(app.screenshot()) }
-        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: removed, object: nil)], timeout: 30), .completed)
-        app.buttons["完成"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["v2.identity.open"].waitForExistence(timeout: 10))
-        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: removed, object: nil)], timeout: 30), .completed)
-        attach(app, "Removed avatar is cleared in the profile and account home")
+        XCTAssertTrue(app.buttons["v2.profile.avatar.library"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["v2.profile.avatar.choose-resource"].exists)
+        XCTAssertFalse(app.buttons["v2.profile.avatar.files"].exists)
+        XCTAssertFalse(app.buttons["v2.profile.avatar.remove"].exists)
+        app.buttons["v2.profile.avatar.cancel"].tap()
+        requirePhoto(app)
     }
 
     @MainActor func testOwnAvatarFromPhotoLibraryCanBeCroppedAndSaved() {

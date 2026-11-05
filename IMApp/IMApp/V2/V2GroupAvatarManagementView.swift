@@ -3,19 +3,16 @@ import IMV2ClientKit
 import IMV2Core
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
 
 struct V2GroupAvatarManagementView: View {
-    private enum Modal: Equatable { case chooseImage, chooseResource, remove, library }
     @State private var store: V2GroupAvatarManagementStore
-    @State private var modal: Modal?
+    @State private var isChoosingPhoto = false
     @State private var isReadingPhoto = false
     @State private var selectedPhoto: V2NormalizedPhoto?
     @State private var processor = V2ProfileAvatarImageProcessor()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @Environment(\.v2AvatarPipeline) private var pipeline
-    @Environment(\.v2ResourceManagement) private var resources
 
     init(store: V2GroupAvatarManagementStore) { _store = State(initialValue: store) }
 
@@ -27,22 +24,10 @@ struct V2GroupAvatarManagementView: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 24)
                 }.listRowBackground(Color.clear).listRowSeparator(.hidden)
                 Section {
-                    Button("从相册选择", systemImage: "photo.on.rectangle") { modal = .library }
+                    Button("从相册选择", systemImage: "photo.on.rectangle") { isChoosingPhoto = true }
                         .disabled(!store.canUpload || isReadingPhoto)
                         .accessibilityIdentifier("v2.group.avatar.library")
-                    if resources != nil {
-                        Button("从聊天图片选择", systemImage: "bubble.left.and.text.bubble.right") { modal = .chooseResource }
-                            .disabled(!store.canChange).accessibilityIdentifier("v2.group.avatar.choose-resource")
-                    }
-                    Button("从文件选择", systemImage: "folder") { modal = .chooseImage }
-                        .disabled(!store.canUpload).accessibilityIdentifier("v2.group.avatar.choose")
                 } footer: { accessDescription }
-                if store.displayAuthority?.state.mediaID != nil {
-                    Section {
-                        Button("移除群头像", role: .destructive) { modal = .remove }
-                            .disabled(!store.canRemove).accessibilityIdentifier("v2.group.avatar.remove")
-                    }
-                }
                 if isReadingPhoto { Section { ProgressView("正在读取照片…") } }
                 if !store.drafts.isEmpty {
                     Section("本机头像草稿") {
@@ -74,7 +59,7 @@ struct V2GroupAvatarManagementView: View {
                 }
             }
         }
-        .v2PhotoLibraryPicker(isPresented: modalBinding(.library), isImporting: $isReadingPhoto, maximumSelectionCount: 1) { selectedPhoto = $0 }
+        .v2PhotoLibraryPicker(isPresented: $isChoosingPhoto, isImporting: $isReadingPhoto, maximumSelectionCount: 1) { selectedPhoto = $0 }
         .sheet(isPresented: Binding(get: { selectedPhoto != nil }, set: { if !$0 { selectedPhoto = nil } })) {
             if let selectedPhoto {
                 NavigationStack {
@@ -86,16 +71,6 @@ struct V2GroupAvatarManagementView: View {
                 }
             }
         }
-        .fileImporter(isPresented: modalBinding(.chooseImage), allowedContentTypes: [.jpeg, .png], allowsMultipleSelection: false) { result in
-            modal = nil
-            if case .success(let urls) = result, let url = urls.first { store.importImage(from: url) }
-        }
-        .sheet(isPresented: modalBinding(.chooseResource)) {
-            if let resources { V2AvatarResourcePicker(service: resources) { value in modal = nil; store.useResource(value) } }
-        }
-        .confirmationDialog("移除当前群头像？", isPresented: modalBinding(.remove), titleVisibility: .visible) {
-            Button("移除", role: .destructive) { store.remove() }
-        }
         .task(id: phase) {
             if phase == .active { await store.observe() }
             else { store.suspend() }
@@ -105,15 +80,11 @@ struct V2GroupAvatarManagementView: View {
             do { try await ContinuousClock().sleep(until: deadline); try Task.checkCancellation(); store.expirePermission(deadline) }
             catch { }
         }
-        .task(id: store.authority?.state.revision) {
-            guard store.authority != nil else { return }
-            await pipeline?.groups.invalidate(roomID: store.roomID)
-        }
         .task(id: store.presentationInvalidationGeneration) {
             guard store.presentationInvalidationGeneration > 0 else { return }
             await pipeline?.groups.invalidate(roomID: store.roomID)
         }
-        .onDisappear { modal = nil; store.suspend() }
+        .onDisappear { isChoosingPhoto = false; store.suspend() }
     }
 
     @ViewBuilder private var accessDescription: some View {
@@ -157,9 +128,6 @@ struct V2GroupAvatarManagementView: View {
         }
     }
 
-    private func modalBinding(_ value: Modal) -> Binding<Bool> {
-        .init(get: { modal == value }, set: { if !$0, modal == value { modal = nil } })
-    }
 }
 
 private struct V2GroupAvatarDraftRow: View {

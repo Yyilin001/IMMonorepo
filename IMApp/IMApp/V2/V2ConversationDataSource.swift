@@ -13,7 +13,13 @@ protocol V2DiscoveredConversationRefreshing: Sendable {
     func refreshDiscoveredConversations(roomIDs: [RoomID]) async throws
 }
 
-actor V2GRDBConversationDataSource: V2GroupDirectoryReading, V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
+protocol V2ConversationSendTimelineReading: Sendable {
+    func sendTimeline(in roomID: RoomID, for userID: UserID, before cursor: V2ConversationTimelineCursor?,
+                      limit: Int, pendingPage: Int) async throws -> (V2ConversationTimelinePage, V2PendingResourceSendSnapshot)
+    func sendTimelineChanges(in roomID: RoomID, page: Int) async -> AsyncThrowingStream<Void, any Error>
+}
+
+actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDirectoryReading, V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
     private let requiresLocalReadAuthorization: Bool
     private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
@@ -227,6 +233,18 @@ actor V2GRDBConversationDataSource: V2GroupDirectoryReading, V2DiscoveredConvers
         return Self.timelinePage(page, userID: userID)
     }
 
+    func sendTimeline(in roomID: RoomID, for userID: UserID, before cursor: V2ConversationTimelineCursor?,
+                      limit: Int, pendingPage: Int) async throws -> (V2ConversationTimelinePage, V2PendingResourceSendSnapshot) {
+        let snapshot = try await localStore.conversationSendTimeline(in: roomID, for: userID, before: cursor.map {
+            .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID, kind: $0.kind)
+        }, limit: limit, pendingPage: pendingPage, requiresAuthorization: requiresLocalReadAuthorization)
+        return (Self.timelinePage(snapshot.timeline, userID: userID.rawValue), snapshot.pending)
+    }
+
+    func sendTimelineChanges(in roomID: RoomID, page: Int) -> AsyncThrowingStream<Void, any Error> {
+        localStore.resourceSendChanges(in: roomID, page: page)
+    }
+
     func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation {
         if requiresLocalReadAuthorization, try await !localStore.roomAllowsLocalRead(roomID: RoomID(roomID)) { return .unavailable }
         let location = try await localStore.conversationTimelineWindow(in: RoomID(roomID), for: UserID(userID), around: MessageID(messageID), before: before, after: after, aggregateReactions: true)
@@ -252,7 +270,8 @@ actor V2GRDBConversationDataSource: V2GroupDirectoryReading, V2DiscoveredConvers
                     pinnedMessageIDs: page.pinnedMessageIDs,
                     favoritedMessageIDs: page.favoritedMessageIDs,
                     directReceipt: page.directReadReceipt,
-                    reactionSummary: summariesByMessageID.map { $0[message.messageID] ?? [] }
+                    reactionSummary: summariesByMessageID.map { $0[message.messageID] ?? [] },
+                    localSendIntentID: page.localSendIntentIDs[message.messageID]
                 ),
                 timelineSequence: message.timelineSequence
             )
@@ -351,7 +370,8 @@ actor V2GRDBConversationDataSource: V2GroupDirectoryReading, V2DiscoveredConvers
         pinnedMessageIDs: Set<MessageID>,
         favoritedMessageIDs: Set<MessageID>,
         directReceipt: V2DirectReadReceiptProjection?,
-        reactionSummary: [V2ClientMessageReactionSummary]? = nil
+        reactionSummary: [V2ClientMessageReactionSummary]? = nil,
+        localSendIntentID: UUID? = nil
     ) -> V2ConversationMessageItem {
         .init(
             id: message.messageID.rawValue,
@@ -374,7 +394,7 @@ actor V2GRDBConversationDataSource: V2GroupDirectoryReading, V2DiscoveredConvers
             isFavorited: favoritedMessageIDs.contains(message.messageID),
             isPinnedInGroup: pinnedMessageIDs.contains(message.messageID),
             isForwarded: !message.isWithdrawn && message.forwardedFrom != nil,
-            senderUserID: message.senderUserID
+            senderUserID: message.senderUserID, localSendIntentID: localSendIntentID
         )
     }
 

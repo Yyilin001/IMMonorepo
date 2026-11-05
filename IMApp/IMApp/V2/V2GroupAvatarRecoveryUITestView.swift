@@ -9,11 +9,9 @@ import SwiftUI
 /// It runs exclusively behind the signed-out DEBUG test launch mode.
 struct V2GroupAvatarRecoveryUITestView: View {
     private enum State { case loading, ready(RecoveryUIFixture), failed, cleaned }
-    private enum Sheet: String, Identifiable { case avatar; var id: String { rawValue } }
     let scope: UUID
     let cleanup: Bool
     @State private var state: State = .loading
-    @State private var sheet: Sheet?
 
     var body: some View {
         NavigationStack {
@@ -22,18 +20,7 @@ struct V2GroupAvatarRecoveryUITestView: View {
             case .failed: Text("测试资源初始化失败").accessibilityIdentifier("v2.resource-test.failed")
             case .cleaned: Text("测试数据已清理").accessibilityIdentifier("v2.resource-test.cleaned")
             case .ready(let fixture):
-                V2AccountHomeView(displayName: "头像测试账号", handle: "@avatar-test",
-                    canOpenPublicIdentity: false, canOpenDevices: false, canOpenSecurity: false,
-                    openPublicIdentity: {}, openDevices: {}, openPrivacy: {}, openSecurity: {},
-                    openFavorites: {}, signOut: {})
-                    .navigationTitle("我的")
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("群头像") { sheet = .avatar }
-                                .accessibilityIdentifier("v2.resource-test.avatar.open")
-                        }
-                    }
-                    .sheet(item: $sheet) { _ in V2GroupAvatarManagementView(store: fixture.page) }
+                V2ConversationSettingsView(store: fixture.conversation, focusMessage: { _ in })
             }
         }
         .task { await run() }
@@ -52,7 +39,7 @@ struct V2GroupAvatarRecoveryUITestView: View {
             do {
                 try await fixture.journal.runResourcePreparation { try await fixture.intents.recoverOnce() }
             } catch { }
-            sheet = nil; state = .loading
+            state = .loading
             await fixture.close()
         } catch { if !Task.isCancelled { state = .failed } }
     }
@@ -60,7 +47,7 @@ struct V2GroupAvatarRecoveryUITestView: View {
 
 @MainActor
 private struct RecoveryUIFixture {
-    let page: V2GroupAvatarManagementStore
+    let conversation: V2ConversationDetailStore
     let manager: V2GroupAvatarManagementService
     let intents: V2GroupAvatarIntentEngine
     let transfers: V2ResourceTransferEngine
@@ -92,16 +79,19 @@ private struct RecoveryUIFixture {
                 _ = try await journal.freezeGroupAvatarIntent(actorUserID: actor, command: command, uploadJobID: nil)
                 _ = try? await intents.resume(command.operationID)
             }
-            let page = V2GroupAvatarManagementStore(roomID: command.roomID, manager: manager,
-                stager: boundary, notifier: notifier)
+            let conversation = V2ConversationDetailStore(environment: .init(userID: actor.rawValue,
+                projections: .init(dataSource: V2GRDBConversationDataSource(localStore: journal, requestLatestVisible: { _ in })),
+                groups: .init(avatarManager: manager), media: .init(attachmentStager: boundary),
+                runtime: .init(projectionChangeNotifier: notifier)),
+                context: .init(roomID: command.roomID.rawValue, title: "头像测试群", kind: .group))
             try Task.checkCancellation()
             try activation.adopt()
-            return .init(page: page, manager: manager, intents: intents, transfers: transfers, notifier: notifier, journal: journal, resources: resources)
+            return .init(conversation: conversation, manager: manager, intents: intents, transfers: transfers, notifier: notifier, journal: journal, resources: resources)
         }
     }
 
     func close() async {
-        page.suspend(); await manager.close(); await intents.close(); await transfers.close(); await notifier.finish()
+        await manager.close(); await intents.close(); await transfers.close(); await notifier.finish()
         await resources.close(); try? await journal.close()
     }
 }

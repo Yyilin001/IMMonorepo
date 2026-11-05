@@ -228,6 +228,7 @@ final class V2GroupAvatarManagementStore {
         await reloadSelections(epoch: epoch)
         guard activation == epoch, !Task.isCancelled else { return }
         let read = UUID(), pendingAtStart = pendingRead
+        let previousAvatar = displayAuthority?.state
         authorityRead = read
         isStale = true
         if authorizationChanged { presentationInvalidationGeneration &+= 1 }
@@ -240,6 +241,12 @@ final class V2GroupAvatarManagementStore {
             guard activation == epoch, authorityRead == read, !Task.isCancelled else { return }
             didReadPending = true; isStale = false
             if case .forbidden = value.access { presentationInvalidationGeneration &+= 1 }
+            // First load and unchanged refreshes do not revoke other visible
+            // pages' grants. New pages authorize their own avatar separately.
+            if case .authorized(let authority) = value.access,
+               let previousAvatar, previousAvatar != authority.state {
+                presentationInvalidationGeneration &+= 1
+            }
             state = .loaded(.init(access: value.access, pending: pendingAtStart == pendingRead ? values : pending))
         } catch is CancellationError { }
         catch {

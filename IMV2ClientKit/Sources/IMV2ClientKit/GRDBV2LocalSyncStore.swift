@@ -396,12 +396,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     /// Local presentation needs positive retained room authority and no explicit
     /// membership/room denial. Cached titles, messages or identities alone do not override a denial.
     public func roomAllowsLocalRead(roomID: RoomID) throws -> Bool {
-        try databasePool.read { db in
-            if try Bool.fetchOne(db, sql: "SELECT is_member = 0 FROM v2_room_membership_states WHERE room_id = ?", arguments: [roomID.rawValue]) == true { return false }
-            if try Bool.fetchOne(db, sql: "SELECT is_authorized = 0 FROM v2_room_event_authorizations WHERE room_id = ?", arguments: [roomID.rawValue]) == true { return false }
-            if let authorized = try Bool.fetchOne(db, sql: "SELECT is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) { return authorized }
-            return try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_direct_room_identities WHERE room_id = ? UNION ALL SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = ?)", arguments: [roomID.rawValue, roomID.rawValue]) == true
-        }
+        try databasePool.read { try Self.roomAllowsLocalRead(roomID: roomID, db: $0) }
+    }
+
+    private static func roomAllowsLocalRead(roomID: RoomID, db: Database) throws -> Bool {
+        if try Bool.fetchOne(db, sql: "SELECT is_member = 0 FROM v2_room_membership_states WHERE room_id = ?", arguments: [roomID.rawValue]) == true { return false }
+        if try Bool.fetchOne(db, sql: "SELECT is_authorized = 0 FROM v2_room_event_authorizations WHERE room_id = ?", arguments: [roomID.rawValue]) == true { return false }
+        if let authorized = try Bool.fetchOne(db, sql: "SELECT is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) { return authorized }
+        return try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_direct_room_identities WHERE room_id = ? UNION ALL SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = ?)", arguments: [roomID.rawValue, roomID.rawValue]) == true
     }
 
     public func isKnownRoomLogRoom(roomID: RoomID) throws -> Bool {
@@ -2000,9 +2002,34 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     ) throws -> V2ClientConversationTimelinePage {
         guard (1 ... 10_000).contains(limit) else { throw V2ClientProjectionError.invalidMessagePayload }
         return try databasePool.read { db in
-            let candidates = try Self.timelineCandidates(db: db, roomID: roomID, cursor: cursor, newer: false, limit: limit + 1)
-            return try Self.timelinePage(db: db, roomID: roomID, selected: Array(candidates.prefix(limit).reversed()), hasOlder: candidates.count > limit, presentationUserID: presentationUserID)
+            try Self.readTimelinePage(db: db, roomID: roomID, cursor: cursor, limit: limit, userID: presentationUserID)
         }
+    }
+
+    /// One SQLite read version for a visible chat: a projected send cannot vanish
+    /// from the journal without its matching timeline version being read as well.
+    public func conversationSendTimeline(in roomID: RoomID, for userID: UserID, before cursor: V2ClientTimelineCursor?,
+                                         limit: Int, pendingPage: Int, requiresAuthorization: Bool) throws
+        -> (timeline: V2ClientConversationTimelinePage, pending: V2PendingResourceSendSnapshot) {
+        guard (1...10_000).contains(limit), (0...(Int.max / 200 - 1)).contains(pendingPage) else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
+        return try databasePool.read { db in
+            if requiresAuthorization, try !Self.roomAllowsLocalRead(roomID: roomID, db: db) {
+                return (.init(messages: [], activities: [], reactions: [], pinnedMessageIDs: [], favoritedMessageIDs: [],
+                              directReadReceipt: nil, olderCursor: nil),
+                        .init(preparing: [], submitted: [], hasNext: false, localImages: [:]))
+            }
+            return try (Self.readTimelinePage(db: db, roomID: roomID, cursor: cursor, limit: limit, userID: userID),
+                        Self.readPendingResourceSends(in: roomID, page: pendingPage, now: .now, db: db))
+        }
+    }
+
+    private static func readTimelinePage(db: Database, roomID: RoomID, cursor: V2ClientTimelineCursor?, limit: Int,
+                                         userID: UserID?) throws -> V2ClientConversationTimelinePage {
+        let candidates = try timelineCandidates(db: db, roomID: roomID, cursor: cursor, newer: false, limit: limit + 1)
+        return try timelinePage(db: db, roomID: roomID, selected: Array(candidates.prefix(limit).reversed()),
+                                hasOlder: candidates.count > limit, presentationUserID: userID)
     }
 
     /// 读取包含目标消息的时间线窗口。
@@ -2145,6 +2172,21 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             directReadReceipt = nil
         }
 
+        var localSendIntentIDs: [MessageID: UUID] = [:]
+        let outgoing = messages.filter { $0.senderUserID == presentationUserID }
+        if !outgoing.isEmpty {
+            let placeholders = Array(repeating: "?", count: outgoing.count).joined(separator: ",")
+            let receipts = try Row.fetchAll(db, sql: """
+                SELECT m.accepted_message_id, w.intent_id FROM v2_message_send_operations m
+                JOIN v2_operation_work w USING(work_id)
+                JOIN v2_message_projections p ON p.room_id=m.room_id AND p.message_id=m.accepted_message_id
+                    AND p.room_sequence=m.accepted_room_sequence
+                WHERE m.room_id=? AND m.accepted_message_id IN (\(placeholders))
+                """, arguments: StatementArguments([roomID.rawValue] + outgoing.map { $0.messageID.rawValue }))
+            for row in receipts {
+                localSendIntentIDs[try MessageID(row["accepted_message_id"] as String)] = UUID(uuidString: row["intent_id"])
+            }
+        }
         let olderCursor = hasOlder ? selected.first.map(\.cursor) : nil
         return .init(
             messages: messages,
@@ -2154,7 +2196,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             favoritedMessageIDs: favoritedMessageIDs,
             directReadReceipt: directReadReceipt,
             olderCursor: olderCursor,
-            reactionSummaries: reactionSummaries
+            reactionSummaries: reactionSummaries,
+            localSendIntentIDs: localSendIntentIDs
         )
     }
 

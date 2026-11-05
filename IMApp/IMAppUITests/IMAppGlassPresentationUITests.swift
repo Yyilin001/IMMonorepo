@@ -46,6 +46,150 @@ final class IMAppGlassPresentationUITests: XCTestCase {
     }
 
     @MainActor
+    func testConversationPerformanceLabRunsBothScalesAndReturnsToInbox() {
+        let app = launch()
+        let entry = app.buttons["v2.conversation.performance.open"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 10))
+        entry.tap()
+        let start = app.buttons["v2.performance.start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        start.tap()
+        let phase = app.staticTexts["v2.performance.phase"]
+        XCTAssertTrue(phase.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.collectionViews["v2.performance.list"].waitForExistence(timeout: 5))
+        app.buttons["v2.performance.stop"].tap()
+        XCTAssertEqual(phase.label, "已停止")
+        app.buttons["v2.performance.configure"].tap()
+
+        app.buttons["v2.performance.scenario"].tap()
+        app.buttons["大列表跳转浏览"].tap()
+        app.buttons["v2.performance.duration"].tap()
+        app.buttons["5 秒"].tap()
+        start.tap()
+        XCTAssertTrue(app.collectionViews["v2.performance.list"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["v2.performance.configure"].waitForExistence(timeout: 12))
+        XCTAssertEqual(phase.label, "测试完成")
+        XCTAssertTrue(app.staticTexts["v2.performance.events"].label.contains("已投递"))
+        app.buttons["v2.performance.configure"].tap()
+        app.navigationBars["本地性能测试配置"].buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["v2.conversation.group.00000000-0000-0000-0000-000000000101"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testPerformanceListOpensBoundChatAndResumesAfterBack() {
+        let app = launch()
+        app.buttons["v2.conversation.performance.open"].tap()
+        app.buttons["v2.performance.scenario"].tap()
+        app.buttons["群聊消息突发"].tap()
+        app.buttons["v2.performance.start"].tap()
+        let row = app.buttons["v2.performance.room.2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        let header = app.navigationBars["模拟会话 3"]
+        XCTAssertTrue(header.waitForExistence(timeout: 5))
+        let draft = app.textFields["v2.message.draft"]
+        draft.tap()
+        draft.typeText("lab-only text")
+        app.buttons["v2.message.send"].tap()
+        XCTAssertTrue(app.staticTexts["lab-only text"].waitForExistence(timeout: 5))
+        header.buttons.element(boundBy: 0).tap()
+        let phase = app.staticTexts["v2.performance.phase"]
+        XCTAssertTrue(phase.waitForExistence(timeout: 5))
+        XCTAssertEqual(phase.label, "测试中")
+        app.buttons["v2.performance.stop"].tap()
+        row.tap()
+        XCTAssertTrue(header.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["lab-only text"].waitForExistence(timeout: 5))
+        header.buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(phase.label, "已停止")
+    }
+
+    @MainActor
+    func testOpenArchiveKeepsItsOwnerDuringLiveGrowth() {
+        assertLiveSwipeOwner(scenario: "持续新增会话")
+    }
+
+    @MainActor
+    func testOpenArchiveKeepsItsOwnerDuringBursts() {
+        assertLiveSwipeOwner(scenario: "群聊消息突发")
+    }
+
+    @MainActor
+    private func assertLiveSwipeOwner(scenario: String) {
+        let app = launch()
+        app.buttons["v2.conversation.performance.open"].tap()
+        app.buttons["v2.performance.scenario"].tap()
+        app.buttons[scenario].tap()
+        app.buttons["v2.performance.start"].tap()
+        let list = app.collectionViews["v2.performance.list"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        let slot = list.cells.element(boundBy: 1)
+        slot.swipeLeft()
+        let archive = app.buttons["归档"]
+        XCTAssertTrue(archive.waitForExistence(timeout: 3))
+        let owner = slot.identifier
+        XCTAssertTrue(owner.hasPrefix("v2.performance.cell."))
+        let events = app.staticTexts["v2.performance.events"]
+        let before = events.label
+        let advanced = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", before), object: events)
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 4), .completed)
+        XCTAssertEqual(slot.identifier, owner)
+        archive.tap()
+        XCTAssertTrue(list.cells[owner].waitForNonExistence(timeout: 3))
+        if scenario == "群聊消息突发" {
+            XCTAssertTrue(events.label.contains("99"))
+        }
+    }
+
+    @MainActor
+    func testPerformanceListSwipesPinMuteAndArchiveTheBoundRow() {
+        let app = launch()
+        app.buttons["v2.conversation.performance.open"].tap()
+        app.buttons["v2.performance.start"].tap()
+        let list = app.collectionViews["v2.performance.list"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        app.buttons["v2.performance.stop"].tap()
+
+        list.cells.element(boundBy: 2).swipeRight()
+        app.buttons["置顶"].tap()
+        let first = list.cells.element(boundBy: 0)
+        first.swipeRight()
+        XCTAssertTrue(app.buttons["取消置顶"].waitForExistence(timeout: 5))
+        app.buttons["取消置顶"].tap()
+        first.swipeLeft()
+        app.buttons["免打扰"].tap()
+        first.swipeLeft()
+        XCTAssertTrue(app.buttons["恢复提醒"].waitForExistence(timeout: 5))
+        app.buttons["归档"].tap()
+        XCTAssertTrue(app.staticTexts["v2.performance.events"].label.contains("99"))
+    }
+
+    @MainActor
+    func testFilteringConversationSlotsPreservesRowActionsAndNavigation() {
+        let app = launch()
+        let query = app.textFields["v2.conversation.summary-search"]
+        let first = app.buttons["v2.conversation.group.00000000-0000-0000-0000-000000000101"]
+        let filtered = app.buttons["v2.conversation.group.00000000-0000-0000-0000-000000000103"]
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        query.tap()
+        query.typeText("iOS")
+        XCTAssertTrue(first.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(filtered.exists)
+        // Slot zero previously held a pinned room. Its menu must now target the unpinned room.
+        filtered.swipeRight()
+        XCTAssertTrue(app.buttons["置顶"].waitForExistence(timeout: 5))
+        filtered.tap()
+        filtered.press(forDuration: 1)
+        let pinMenu = app.buttons["会话置顶"]
+        XCTAssertTrue(pinMenu.waitForExistence(timeout: 5))
+        pinMenu.tap()
+        XCTAssertTrue(app.buttons["置顶会话"].waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.8)).tap()
+        filtered.tap()
+        XCTAssertTrue(app.navigationBars["iOS 开发交流"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testGroupDirectorySearchAndEmptyState() {
         let app = launch("contacts")
         let entry = app.buttons["v2.contacts.groups"]
@@ -151,7 +295,7 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let settings = app.navigationBars["群聊设置"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         XCTAssertEqual(app.sheets.count, 0)
-        XCTAssertTrue(app.buttons["v2.message.forward.begin"].exists)
+        XCTAssertFalse(app.buttons["v2.message.forward.begin"].exists)
         XCTAssertTrue(app.switches["v2.chat-settings.pin"].exists)
         XCTAssertTrue(app.switches["v2.chat-settings.archive"].exists)
         let image = XCTAttachment(screenshot: app.screenshot()); image.lifetime = .keepAlways; add(image)
@@ -161,23 +305,6 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         settings.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(tools.waitForExistence(timeout: 5))
         XCTAssertTrue(app.textFields["v2.message.draft"].exists)
-    }
-
-    @MainActor
-    func testSettingsForwardActionReturnsToTheSameChatSelection() {
-        let app = launch()
-        let room = "00000000-0000-0000-0000-000000000101"
-        let conversation = app.buttons["v2.conversation.group.\(room)"]
-        XCTAssertTrue(conversation.waitForExistence(timeout: 10)); conversation.tap()
-        let tools = app.buttons["v2.conversation.detail.tools"]
-        XCTAssertTrue(tools.waitForExistence(timeout: 10)); tools.tap()
-        let forward = app.buttons["v2.message.forward.begin"]
-        XCTAssertTrue(forward.waitForExistence(timeout: 5)); forward.tap()
-        let cancel = app.buttons["v2.message.forward.cancel"]
-        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.navigationBars["群聊设置"].exists)
-        cancel.tap()
-        XCTAssertTrue(tools.waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -297,9 +424,10 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let app = launch("chat")
         let draft = app.textFields["v2.message.draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        draft.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         for index in 1...3 {
-            draft.tap()
-            draft.typeText("Scroll regression message \(index)")
+            app.typeText("Scroll regression message \(index)")
             app.buttons["v2.message.send"].tap()
             let completed = NSPredicate { _, _ in
                 let send = app.buttons["v2.message.send"]
@@ -307,6 +435,7 @@ final class IMAppGlassPresentationUITests: XCTestCase {
                     && app.staticTexts["v2.message.send-feedback"].exists
             }
             XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: completed, object: nil)], timeout: 10), .completed)
+            XCTAssertTrue(app.keyboards.firstMatch.exists, "Sending must retain keyboard focus for the next message")
             // Hosted MessagingUI cells do not expose their text to XCUI.
             // Retain each settled frame for visual verification of the tail.
             let screenshot = XCTAttachment(screenshot: app.screenshot())
@@ -314,6 +443,8 @@ final class IMAppGlassPresentationUITests: XCTestCase {
             screenshot.lifetime = .keepAlways
             add(screenshot)
         }
+        app.descendants(matching: .any)["v2.message.list"].firstMatch.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Tapping the chat outside the composer still dismisses the keyboard")
     }
 
     @MainActor

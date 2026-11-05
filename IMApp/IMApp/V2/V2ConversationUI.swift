@@ -81,6 +81,7 @@ struct V2ConversationForwardTarget: Hashable, Identifiable, Sendable {
 }
 
 struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
+    let localSendIntentID: UUID?
     let senderUserID: UserID?
     let id: String
     let roomSequence: UInt64
@@ -112,7 +113,8 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
     let isForwarded: Bool
     let reactions: [V2ConversationMessageReaction]
 
-    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = [], isReadByPeer: Bool = false, isFavorited: Bool = false, isPinnedInGroup: Bool = false, isForwarded: Bool = false, senderUserID: UserID? = nil) {
+    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = [], isReadByPeer: Bool = false, isFavorited: Bool = false, isPinnedInGroup: Bool = false, isForwarded: Bool = false, senderUserID: UserID? = nil, localSendIntentID: UUID? = nil) {
+        self.localSendIntentID = localSendIntentID
         self.senderUserID = senderUserID
         self.id = id
         self.roomSequence = roomSequence
@@ -1286,105 +1288,20 @@ struct V2ConversationListView: View {
                         Button("重试") { Task { await store.refresh() } }
                     }
                 case .loaded:
-                    if store.visibleItems.isEmpty && store.pendingDirectConversationRequests.isEmpty {
+                    let visible = store.visibleItems
+                    let pending = store.pendingDirectConversationRequests
+                    if visible.isEmpty && pending.isEmpty {
                         V2ConversationEmptyState(
                             title: store.isShowingArchived ? "没有已归档会话" : "暂无会话",
                             symbol: store.isShowingArchived ? "archivebox" : "bubble.left.and.bubble.right",
                             description: store.isShowingArchived ? "归档的会话会显示在这里。" : "与朋友聊聊，或创建群聊开启新的讨论。"
                         )
                     } else {
-                    ScrollViewReader { scrollProxy in
-                    List {
-                    ForEach(store.pendingDirectConversationRequests, id: \.command.targetUserID) { request in
-                        NavigationLink(value: V2LocalDirectConversationRoute(operationID: request.work.id)) {
-                            HStack(spacing: 14) {
-                                let key = V2ProfileViewLookupKey(userID: request.command.targetUserID, context: .relationship)
-                                V2AuthorizedAvatarView(key: key, size: 52)
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(request.publicIdentity?.displayName ?? "聊天")
-                                        .font(.body.weight(.semibold))
-                                    Text(store.directConversationRequestStatus(request))
-                                        .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                                Spacer()
-                                Image(systemName: "clock").foregroundStyle(.orange)
-                            }.padding(.vertical, 12)
-                        }
-                        .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
-                        .accessibilityIdentifier("v2.conversation.local.\(request.work.id.uuidString)")
-                    }
-                    if store.hasEarlierConversations {
-                        Button("查看前面的会话") { Task { await store.loadEarlierConversations() } }
-                            .disabled(store.isLoadingMoreConversations)
-                            .accessibilityIdentifier("v2.conversation.load-earlier")
-                        Button("回到最新会话") { Task { await store.refresh(resetWindow: true) } }
-                            .accessibilityIdentifier("v2.conversation.return-to-latest")
-                    }
-                    ForEach(filteredConversations) { item in
-                        NavigationLink(value: V2ConversationRoute(roomID: item.id)) {
-                            V2ConversationSummaryRow(item: item)
-                        }
-                        .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
-                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                            Button(item.isPinned ? "取消置顶" : "置顶", systemImage: item.isPinned ? "pin.slash" : "pin") {
-                                Task { await store.updateConversationState(item, isPinned: !item.isPinned) }
-                            }.tint(.orange)
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(item.isArchived ? "取消归档" : "归档", systemImage: "archivebox") {
-                                Task { await store.updateConversationState(item, isArchived: !item.isArchived) }
-                            }.tint(.indigo)
-                            Button(item.muteUntil.map { $0 > Date() } == true ? "恢复提醒" : "免打扰", systemImage: "bell.slash") {
-                                Task { await store.updateConversationState(item, muteUntil: .some(item.muteUntil.map { $0 > Date() } == true ? nil : Date().addingTimeInterval(315_576_000))) }
-                            }.tint(.gray)
-                        }
-                        .contextMenu {
-                            Menu("会话置顶", systemImage: "pin") {
-                                Button(item.isPinned ? "取消置顶会话" : "置顶会话") { Task { await store.updateConversationState(item, isPinned: !item.isPinned) } }
-                            }
-                            Menu("会话归档", systemImage: "archivebox") {
-                                Button(item.isArchived ? "取消归档" : "归档会话") { Task { await store.updateConversationState(item, isArchived: !item.isArchived) } }
-                            }
-                            Menu("消息提醒", systemImage: "bell") {
-                                Button("免打扰 1 小时") { Task { await store.updateConversationState(item, muteUntil: .some(Date().addingTimeInterval(60 * 60))) } }
-                                Button("免打扰 8 小时") { Task { await store.updateConversationState(item, muteUntil: .some(Date().addingTimeInterval(28800))) } }
-                                Button("持续免打扰") { Task { await store.updateConversationState(item, muteUntil: .some(Date().addingTimeInterval(315_576_000))) } }
-                                if item.muteUntil.map({ $0 > Date() }) == true { Button("取消免打扰") { Task { await store.updateConversationState(item, muteUntil: .some(nil)) } } }
-                            }
-                        }
-                        .accessibilityIdentifier("v2.conversation.\(item.kind.accessibilityIdentifierComponent).\(item.id)")
-                        .id(item.id)
-                        .modifier(V2ListViewportRow(viewport: store.viewport, itemID: item.id, coordinateSpace: "v2.conversation.viewport"))
-                    }
-                    if store.conversationNextCursor != nil {
-                        HStack {
-                            Spacer()
-                            if store.isLoadingMoreConversations {
-                                ProgressView().accessibilityLabel("正在加载更多会话")
-                            } else {
-                                Button("加载更多会话") {
-                                    Task { await store.loadMoreConversations() }
-                                }
-                                .onAppear { Task { await store.loadMoreConversations() } }
-                                .accessibilityIdentifier("v2.conversation.load-more")
-                            }
-                            Spacer()
-                        }
-                    }
-                    }
-                    .listStyle(.plain)
-                    .listRowSeparatorTint(V2VisualStyle.separator)
-                    .v2PageSurface()
-                    .refreshable { await store.refresh() }
-                    .accessibilityIdentifier("v2.conversation.list")
-                    .coordinateSpace(name: "v2.conversation.viewport")
-                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { store.viewport.resize(visibleBounds: $0) }
-                    .v2OnUserScroll { store.viewport.userDidBeginScrolling() }
-                    .task(id: store.viewport.restoration?.id) {
-                        guard let request = store.viewport.restoration else { return }
-                        await store.viewport.performRestoration(request) { scrollProxy.scrollTo($0, anchor: .top) }
-                    }
-                    }
+                        V2ConversationCollectionView(
+                            store: store, conversations: filteredConversations(visible), pending: pending,
+                            navigation: rootNavigation, restoration: store.viewport.restoration
+                        )
+                        .id(ObjectIdentifier(store))
                     }
                 }
             }
@@ -1516,11 +1433,11 @@ struct V2ConversationListView: View {
         rootNavigation.showConversation(route)
     }
 
-    private var filteredConversations: [V2ConversationListItem] {
+    private func filteredConversations(_ items: [V2ConversationListItem]) -> [V2ConversationListItem] {
         let query = conversationQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return store.visibleItems }
+        guard !query.isEmpty else { return items }
         // Private identity strings remain in the expiring presentation pipeline.
-        return store.visibleItems.filter {
+        return items.filter {
             $0.preview.localizedStandardContains(query)
                 || ($0.kind == .group && $0.title.localizedStandardContains(query))
         }
@@ -1804,6 +1721,7 @@ struct V2FavoriteMessagesSheet: View {
 }
 
 struct V2ConversationDetailView: View {
+    private enum Destination: Hashable { case settings }
     private enum PresentedDetailSheet: Identifiable {
         case groupReadReceipts(V2ConversationMessageItem)
         case edit(V2ConversationMessageItem)
@@ -1828,6 +1746,7 @@ struct V2ConversationDetailView: View {
     }
 
     @Environment(\.v2UserInteractionContext) private var userContext
+    @Environment(\.v2ResourceNavigation) private var resourceNavigation
     @State private var userProfile: V2UserProfileTarget?
     @State private var peerActions: V2UserProfileActionStore?
     @State private var store: V2ConversationDetailStore
@@ -2247,7 +2166,7 @@ struct V2ConversationDetailView: View {
                                     accessibilityLabel: "消息内容",
                                     accessibilityHint: "输入要发送的消息"
                                 )
-                                .disabled(store.composer.isSending || store.composer.canSendInDirectConversation == false || store.directAccountKind == .system)
+                                .disabled(store.composer.canSendInDirectConversation == false || store.directAccountKind == .system)
                                 .onChange(of: store.composer.draft) { _, _ in store.liveActivity.updateTyping(for: store.composer.draft) }
                                 .accessibilityIdentifier("v2.message.draft")
                                 if store.composer.isSending {
@@ -2288,6 +2207,7 @@ struct V2ConversationDetailView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
+                    .background(V2KeyboardDismissal.PreservedRegion())
                     if !store.isGroupConversation, store.composer.canSendInDirectConversation == false || store.directAccountKind == .system {
                         Text(store.directAccountKind == .system ? "此系统账号仅用于发送通知" : "当前无法向此会话发送消息")
                             .font(.caption)
@@ -2342,6 +2262,13 @@ struct V2ConversationDetailView: View {
         .v2PageSurface()
         .navigationTitle(store.isGroupConversation ? store.title : "会话")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(for: Destination.self) { destination in
+            switch destination {
+            case .settings:
+                V2ConversationSettingsView(store: store, groupInvitationStore: groupInvitationStore,
+                    focusMessage: { focusedMessageID = $0 })
+            }
+        }
         .toolbar {
             if let key = store.presentationKey {
                 ToolbarItem(placement: .principal) {
@@ -2407,7 +2334,7 @@ struct V2ConversationDetailView: View {
         .task { await store.pollVisibleHybridGroupEvents() }
         .authorPresentationPage(context: store.authorPresentationContext)
         .task(id: store.composer.trackedSendIntentID) { await store.composer.observeSendConfirmation() }
-        .task(id: store.composer.pendingResourceSendPage) { await store.composer.observeResourceSends() }
+        .task(id: store.composer.pendingResourceSendPage) { await store.observeResourceSends() }
         .task { await store.observeReadSync() }
         .task { await store.observeMessageMutations() }
         .task { await store.observeReactionIntents() }
@@ -2531,11 +2458,19 @@ struct V2ConversationDetailView: View {
             }
         } else {
             ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink {
-                    V2ConversationSettingsView(store: store, groupInvitationStore: groupInvitationStore,
-                        focusMessage: { focusedMessageID = $0 })
-                } label: {
-                    Image(systemName: "ellipsis")
+                Group {
+                    if resourceNavigation != nil {
+                        // Settings must join the same value path as its resource
+                        // destinations, so it cannot remain above the pushed page.
+                        NavigationLink(value: Destination.settings) { Image(systemName: "ellipsis") }
+                    } else {
+                        // Standalone previews and the local performance flow own
+                        // view-based stacks without a shared resource router.
+                        NavigationLink {
+                            V2ConversationSettingsView(store: store, groupInvitationStore: groupInvitationStore,
+                                focusMessage: { focusedMessageID = $0 })
+                        } label: { Image(systemName: "ellipsis") }
+                    }
                 }
                 .accessibilityLabel("会话设置")
                 .accessibilityIdentifier("v2.conversation.detail.tools")
@@ -2557,7 +2492,7 @@ struct V2ConversationDetailView: View {
                   guard case .message(let message, _) = item else { return false }
                   return message.id == focusedMessageID
               }) else { return }
-        timelinePosition.scrollTo(id: target.id, anchor: .centered)
+        timelinePosition.scrollTo(id: V2MessageTimelineRow.committed(target).id, anchor: .centered)
     }
 }
 
@@ -2832,13 +2767,7 @@ private struct V2ConversationMessageBubble: View {
                     .accessibilityIdentifier("v2.message.attachments.\(message.id)")
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                message.isOutgoing && !message.isWithdrawn ? V2VisualStyle.outgoing : V2VisualStyle.incoming,
-                in: UnevenRoundedRectangle(topLeadingRadius: message.isOutgoing ? 19 : 5,
-                    bottomLeadingRadius: 19, bottomTrailingRadius: 19, topTrailingRadius: message.isOutgoing ? 5 : 19)
-            )
+            .modifier(V2MessageBubbleSurface(isOutgoing: message.isOutgoing, isWithdrawn: message.isWithdrawn))
             .contextMenu { messageActions }
             // The message body (or attachment summary) announces this time.
             // Keep one readable message target instead of a second tiny node.

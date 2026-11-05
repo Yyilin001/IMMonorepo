@@ -4,11 +4,158 @@ import IMV2ClientKit
 import IMV2Core
 import Testing
 import os
+import Observation
 import UIKit
+import SwiftUI
 @testable import IMApp
 
 @MainActor
 struct V2GroupAvatarPipelineTests {
+    @Test("the management sheet reuses authorized header pixels while its larger decode is unavailable")
+    func sheetReusesHeaderPixels() async throws {
+        let f = try await GroupPipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root])
+        let pipeline = f.pipeline(thumbnails)
+        let scope = V2AuthorPresentationPageScope(context: .list(UUID()))
+        let running = Task { await scope.run(pipeline: pipeline) }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while scope.activation == nil && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        scope.prepareGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline)
+        while scope.cachedGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline)?.image == nil && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(scope.cachedGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline)?.image != nil)
+        scope.prepareGroup(room: f.presentation.state.roomID, pixels: 144, pipeline: pipeline)
+        #expect(scope.cachedGroup(room: f.presentation.state.roomID, pixels: 144, pipeline: pipeline)?.image != nil,
+                "The sheet must reuse valid header pixels while loading its larger image")
+        scope.hide(); running.cancel(); await running.value
+        #expect(scope.cachedGroup(room: f.presentation.state.roomID, pixels: 144, pipeline: pipeline) == nil)
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("cold launch starts avatar loading when the pipeline arrives after the visible page", arguments: [false, true])
+    func delayedPipelineStartsVisibleAvatar(inCollection: Bool) async throws {
+        await V2UITestWindowOwnership.acquire()
+        defer { V2UITestWindowOwnership.release() }
+        let f = try await GroupPipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let state = ColdAvatarLaunchState()
+        let displayed = OSAllocatedUnfairLock(initialState: false)
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let listStore = V2ConversationListStore(environment: .init(userID: f.presentation.actorUserID.rawValue,
+            projections: .init(dataSource: GroupAvatarSettingsDataSource())))
+        let host = UIHostingController(rootView: ColdAvatarLaunchView(state: state, room: f.presentation.state.roomID,
+            listStore: inCollection ? listStore : nil)
+            .environment(\.v2GroupAvatarDisplayObservation, { _, image in displayed.withLock { $0 = image } }))
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        let appearedBy = ContinuousClock.now + .seconds(5)
+        while !state.appeared && ContinuousClock.now < appearedBy { await Task.yield() }
+        #expect(state.appeared)
+        state.pipeline = pipeline
+        let loadedBy = ContinuousClock.now + .seconds(5)
+        while !displayed.withLock({ $0 }) && ContinuousClock.now < loadedBy {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(displayed.withLock { $0 }, "The first visible avatar must load without switching tabs")
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("shared group pixels survive row recreation but clear on revocation and page exit")
+    func sharedGroupPixels() async throws {
+        let f = try await GroupPipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let scope = V2AuthorPresentationPageScope(context: .list(UUID()))
+        let running = Task { await scope.run(pipeline: pipeline) }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while scope.activation == nil && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        scope.prepareGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline)
+        while scope.cachedGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline) == nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(scope.cachedGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline)?.image != nil)
+        let reads = await f.reader.calls
+        scope.prepareGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline)
+        #expect(await f.reader.calls == reads)
+        await pipeline.groups.invalidate(roomID: f.presentation.state.roomID)
+        let clearedBy = ContinuousClock.now + .seconds(3)
+        while scope.cachedGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline) != nil && ContinuousClock.now < clearedBy { await Task.yield() }
+        #expect(scope.cachedGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline) == nil)
+        scope.hide(); running.cancel(); await running.value
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("opening the management sheet keeps the underlying group's unchanged avatar grant")
+    func openingManagementSheetKeepsUnderlyingAvatarGrant() async throws {
+        await V2UITestWindowOwnership.acquire()
+        defer { V2UITestWindowOwnership.release() }
+        let f = try await GroupPipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directories: [f.root]), pipeline = f.pipeline(thumbnails)
+        let activation = try await pipeline.groups.activate(roomID: f.presentation.state.roomID)
+        _ = try await pipeline.groupSnapshot(activation: activation, pixels: 52)
+        let grant = try #require(try await pipeline.groups.avatarReadGrant(for: activation))
+        let boundary = GroupManagementBoundary(state: f.presentation.state)
+        let store = V2GroupAvatarManagementStore(roomID: f.presentation.state.roomID,
+            manager: boundary, stager: boundary, notifier: nil)
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let conversation = V2ConversationDetailStore(environment: .init(userID: f.presentation.actorUserID.rawValue,
+            projections: .init(dataSource: GroupAvatarSettingsDataSource()),
+            groups: .init(avatarManager: boundary), media: .init(attachmentStager: boundary)),
+            context: .init(roomID: f.presentation.state.roomID.rawValue, title: "头像测试群", kind: .group))
+        let displayedStates = OSAllocatedUnfairLock(initialState: [Bool]())
+        let host = UIHostingController(rootView: NavigationStack {
+            V2ConversationSettingsView(store: conversation, focusMessage: { _ in })
+        }.environment(\.v2AvatarPipeline, pipeline).environment(\.scenePhase, .active)
+            .environment(\.v2GroupAvatarDisplayObservation, { size, hasImage in
+                if size == 52 { displayedStates.withLock { $0.append(hasImage) } }
+            })
+            .environment(\.v2AuthorPresentationPageScope, V2AuthorPresentationPageScope(context: .group(f.presentation.state.roomID))))
+        let sheetHasImage = OSAllocatedUnfairLock(initialState: false)
+        let sheet = UIHostingController(rootView: V2GroupAvatarManagementView(store: store)
+            .environment(\.v2AvatarPipeline, pipeline).environment(\.scenePhase, .active)
+            .environment(\.v2GroupAvatarDisplayObservation, { size, hasImage in
+                if size == 144 { sheetHasImage.withLock { $0 = hasImage } }
+            }))
+        sheet.modalPresentationStyle = .pageSheet
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey(); store.suspend() }
+        let loadedBy = ContinuousClock.now + .seconds(5)
+        while !displayedStates.withLock({ $0.last == true }) && ContinuousClock.now < loadedBy {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(displayedStates.withLock { $0.last == true })
+        // Let the independent page cache finish before opening the sheet.
+        try await Task.sleep(for: .milliseconds(100))
+        displayedStates.withLock { $0.removeAll() }
+        let initialReads = await f.reader.calls
+        #expect(initialReads >= 3)
+        await withCheckedContinuation { continuation in
+            host.present(sheet, animated: true) { continuation.resume() }
+        }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            let reads = await f.reader.calls
+            if store.authority != nil && reads > initialReads && sheetHasImage.withLock({ $0 }) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(sheetHasImage.withLock { $0 }, "The management sheet must display the group avatar, not just load permission")
+        #expect(store.authority?.state == f.presentation.state)
+        #expect(await f.reader.calls == initialReads + 1)
+        do { try await grant.requireValid() }
+        catch { Issue.record(error, "Opening an unchanged group avatar must preserve the underlying page's grant") }
+        await withCheckedContinuation { continuation in
+            host.dismiss(animated: true) { continuation.resume() }
+        }
+        #expect(displayedStates.withLock { !$0.contains(false) }, "The settings header must never return to its placeholder while opening or closing the sheet")
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
     @Test("a cold group avatar obtains a fresh plan with its own bounded display deadline")
     func coldAvatarRecovery() async throws {
         let f = try await GroupPipelineFixture(seedCache: false)
@@ -185,4 +332,53 @@ private struct NoGroupByteIO: V2ClientMediaDownloadTargetResolver, V2ClientMedia
     func upload(fileURL: URL, target: V2ClientMediaTransferTarget) throws { throw CancellationError() }
     func download(target: V2ClientMediaTransferTarget, destinationURL: URL) throws { throw CancellationError() }
     func readPresentations(_ keys: [V2ProfileViewLookupKey]) throws -> V2ProfilePresentationBatch { throw CancellationError() }
+}
+
+private struct GroupManagementBoundary: V2GroupAvatarManaging, V2ConversationAttachmentStaging {
+    let state: V2GroupAvatarState
+    func load(roomID: RoomID) -> V2GroupAvatarManagementSnapshot {
+        .init(access: .authorized(.init(state: state, canManage: false,
+            deadline: .now.advanced(by: .seconds(300)), maximumUploadBytes: nil)), pending: [])
+    }
+    func pending(roomID: RoomID) -> [V2GroupAvatarIntent] { [] }
+    func pendingIntent(roomID: RoomID, operationID: GroupAvatarOperationID) -> V2GroupAvatarIntent? { nil }
+    func change(roomID: RoomID, expectedRevision: UInt64, image: V2StagedConversationAttachment?) throws { throw CancellationError() }
+    func changeUsingResource(roomID: RoomID, expectedRevision: UInt64, selection: V2AvatarResourceSelection) throws { throw CancellationError() }
+    func act(roomID: RoomID, operationID: GroupAvatarOperationID, action: V2GroupAvatarManagementAction) throws { throw CancellationError() }
+    func stageNormalizedPhoto(_ photo: V2NormalizedPhoto, purpose: V2LocalResourceAssetPurpose) throws -> V2StagedConversationAttachment { throw CancellationError() }
+    func stageImportedFile(at sourceURL: URL, purpose: V2LocalResourceAssetPurpose) throws -> V2StagedConversationAttachment { throw CancellationError() }
+    func discard(_ attachment: V2StagedConversationAttachment) {}
+}
+
+private struct GroupAvatarSettingsDataSource: V2ConversationDataSource {
+    func conversationSummaryPage(for userID: String, isArchived: Bool, before cursor: V2ClientConversationListCursor?, limit: Int) async throws -> V2ConversationListPage { throw CancellationError() }
+    func timelinePage(in roomID: String, for userID: String, before cursor: V2ConversationTimelineCursor?, limit: Int) async throws -> V2ConversationTimelinePage { throw CancellationError() }
+    func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation { throw CancellationError() }
+}
+
+@MainActor @Observable private final class ColdAvatarLaunchState {
+    var pipeline: V2AvatarPipeline?
+    var appeared = false
+}
+private struct ColdAvatarLaunchView: View {
+    let state: ColdAvatarLaunchState
+    let room: RoomID
+    let listStore: V2ConversationListStore?
+    @State private var pageID = UUID()
+    @State private var navigation = V2RootNavigationStore()
+    var body: some View {
+        Group {
+            if let listStore {
+                V2ConversationCollectionView(store: listStore,
+                    conversations: [.init(id: room.rawValue, title: "冷启动测试群", preview: "测试", lastActivity: .now, isOutgoing: false, kind: .group)],
+                    pending: [], navigation: navigation, restoration: nil)
+            } else {
+                V2AuthorizedGroupAvatarView(roomID: room, size: 52)
+            }
+        }
+            .authorPresentationPage(context: .list(pageID))
+            .environment(\.v2AvatarPipeline, state.pipeline)
+            .environment(\.scenePhase, .active)
+            .onAppear { state.appeared = true }
+    }
 }

@@ -1,3 +1,4 @@
+import ConversationListKit
 import Foundation
 import SwiftUI
 import UIKit
@@ -165,7 +166,7 @@ struct V2ConversationWindowTests {
         #expect(!viewport.containsVisibleRow("row"))
     }
 
-    @Test("the actual SwiftUI List reports visible rows and restores the anchor after refresh")
+    @Test("the production collection view reports visible rows and restores the anchor after refresh")
     func actualListGeometryAndScrollRestoration() async throws {
         await V2UITestWindowOwnership.acquire()
         defer { V2UITestWindowOwnership.release() }
@@ -211,6 +212,67 @@ struct V2ConversationWindowTests {
         window.rootViewController = nil
         await Task.yield()
         try await local.close()
+    }
+
+    enum ListFeed { case orderedWindow, rankedEvents }
+    private struct ProbeRow: Identifiable, Equatable, Sendable {
+        let id: Int
+        var value: Int
+    }
+
+    @Test("a frame reconfigures only the changed visible slot in a 10,000-row list",
+          arguments: [ListFeed.orderedWindow, .rankedEvents])
+    func coalescedVisibleSlotUpdates(feed: ListFeed) async throws {
+        await V2UITestWindowOwnership.acquire()
+        defer { V2UITestWindowOwnership.release() }
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        var configured = [Int]()
+        var firstVisible: Int?
+        let configuration = FixedPositionListController<ProbeRow>.Configuration(configure: { cell, row in
+            configured.append(row.value)
+            var content = cell.defaultContentConfiguration()
+            content.text = String(row.value)
+            cell.contentConfiguration = content
+        }, visibleRowsChanged: { rows, _ in firstVisible = rows.first?.row.value })
+        var rows = (0..<10_000).map { ProbeRow(id: $0, value: $0) }
+        let ordered = OrderedListWindow(rows)
+        let ranked = RankedListViewport<ProbeRow>()
+        let source: any FixedPositionViewportDataSource<ProbeRow>
+        switch feed {
+        case .orderedWindow: source = ordered
+        case .rankedEvents:
+            let engine = RankedViewportEngine<Int>()
+            await engine.replace(with: rows.map(\.id))
+            ranked.install(engine: engine, totalCount: rows.count, pinnedCount: 0, rows: rows)
+            source = ranked
+        }
+        let controller = FixedPositionListController(source: source, configuration: configuration)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; controller.stop(); previousWindow?.makeKey() }
+        try await waitUntil { firstVisible == 0 }
+        let list = try #require(controller.view as? UICollectionView)
+        let path = IndexPath(item: 0, section: 0)
+        let originalCell = try #require(list.cellForItem(at: path))
+        configured.removeAll()
+        switch feed {
+        case .orderedWindow:
+            rows[0].value = -1
+            ordered.replace(with: rows)
+            rows[0].value = -2
+            rows[9_999].value = -3
+            ordered.replace(with: rows)
+        case .rankedEvents:
+            ranked.enqueueRealtimeUpdate(.init(id: 0, value: -1), targetPosition: nil)
+            ranked.enqueueRealtimeUpdate(.init(id: 0, value: -2), targetPosition: nil)
+            ranked.enqueueRealtimeUpdate(.init(id: 9_999, value: -3), targetPosition: nil)
+            #expect(ranked.row(at: 9_999) == nil)
+        }
+        try await waitUntil { firstVisible == -2 }
+        #expect(configured == [-2])
+        #expect(list.cellForItem(at: path) === originalCell)
     }
 
     private enum LayoutWaitError: Error { case timedOut(line: Int) }

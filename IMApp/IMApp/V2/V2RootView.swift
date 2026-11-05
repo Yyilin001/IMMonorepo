@@ -497,6 +497,14 @@ struct V2SignedInRootView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if rootNavigation.selectedTab == .conversations {
+                    ToolbarItem(placement: .topBarLeading) {
+                        NavigationLink {
+                            V2ConversationPerformanceConfigView()
+                        } label: {
+                            Label("本地性能测试", systemImage: "gauge.with.dots.needle.67percent")
+                        }
+                        .accessibilityIdentifier("v2.conversation.performance.open")
+                    }
                     ToolbarItem(placement: .principal) {
                         V2ConnectionStatusButton(store: appStore, navigationTitle:
                             conversationStore.isShowingArchived ? "已归档" : "消息")

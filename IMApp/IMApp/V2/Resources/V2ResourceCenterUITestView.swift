@@ -19,7 +19,9 @@ struct V2ResourceCenterUITestView: View {
         @Bindable var navigation = navigation
         NavigationStack(path: $navigation.path) {
             Group {
-                if fixture != nil {
+                if let conversations = fixture?.conversations {
+                    V2ConversationListView(store: conversations, rootNavigation: navigation)
+                } else if fixture != nil {
                     V2AccountHomeView(displayName: "资源测试账号", handle: "@resource-test",
                         canOpenPublicIdentity: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-center-profile-picker"), canOpenDevices: false, canOpenSecurity: false,
                         openPublicIdentity: { showingProfile = true }, openDevices: {}, openPrivacy: {}, openSecurity: {},
@@ -27,9 +29,16 @@ struct V2ResourceCenterUITestView: View {
                 } else { Text(status).accessibilityIdentifier("v2.resources.fixture-status") }
             }
             .navigationTitle("我的").navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: V2ConversationRoute.self) { route in
+                if let conversations = fixture?.conversations {
+                    V2ConversationDetailView(store: conversations.detailStore(for: route.roomID))
+                }
+            }
             .v2ResourceDestinations(service: fixture?.service, navigation: navigation, profile: fixture?.profileSettings)
         }
         .environment(\.v2MediaThumbnailCache, fixture?.thumbnails)
+        .environment(\.v2ResourceManagement, fixture?.service)
+        .environment(\.v2ResourceNavigation, navigation)
         .sheet(isPresented: $showingProfile) {
             if let settings = fixture?.profileSettings {
                 NavigationStack {
@@ -75,6 +84,7 @@ struct V2ResourceCenterUITestView: View {
     let downloader: V2ForegroundConversationMediaDownloader
     let thumbnails: V2LocalMediaThumbnailCache
     let profileSettings: V2PublicIdentitySettingsStore?
+    let conversations: V2ConversationListStore?
     static func make(root: URL) async throws -> Self {
         let user = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
         let scope = try await V2AccountStorageDirectory(root: root, cacheRoot: root.appending(path: "cache-scopes")).openScope(accountID: user)
@@ -196,8 +206,20 @@ struct V2ResourceCenterUITestView: View {
                     try await local.pauseResourceImport(id: job, needsAttention: true)
                 }
             }
+            var conversations: V2ConversationListStore?
+            if ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-center-chat") {
+                let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(uuid: UUID()), projectionKind: "room",
+                    payload: JSONSerialization.data(withJSONObject: ["event_type": "room.created", "room_id": room.rawValue,
+                        "title": "文件测试会话", "owner_user_id": user.rawValue, "membership_revision": 1,
+                        "capacity_class": "standard", "created_at_ms": 1_750_000_000_000]))
+                _ = try await local.apply(.init(generation: 1, records: [record], nextSyncToken: .init("chat-files"),
+                    receipt: .init("chat-files"), hasMore: false, capabilityProfile: "base"))
+                conversations = .init(environment: .init(userID: user.rawValue,
+                    projections: .init(dataSource: V2GRDBConversationDataSource(localStore: local, requestLatestVisible: { _ in }))))
+            }
             return .init(service: .init(center: center, localStore: local, downloader: files, directory: boundary), downloader: files,
-                thumbnails: V2LocalMediaThumbnailCache(directories: [scope.directory, scope.cacheDirectory]), profileSettings: profileSettings)
+                thumbnails: V2LocalMediaThumbnailCache(directories: [scope.directory, scope.cacheDirectory]),
+                profileSettings: profileSettings, conversations: conversations)
         } catch { await center.close(); try? await local.close(); throw error }
     }
     func close() async throws { await thumbnails.close(); await service.center.close(); try await service.localStore.close() }

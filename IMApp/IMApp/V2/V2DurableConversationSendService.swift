@@ -3,6 +3,7 @@ import IMV2ClientKit
 import IMV2Core
 
 protocol V2DurableConversationSending: Sendable {
+    var recoveryError: String? { get async }
     func upload(_ attachment: V2StagedConversationAttachment, usage: V2ResourceUsage) async throws -> V2MediaReference
     func copyAttachments(sources: [V2ResourceImportSource], to room: RoomID) async throws
     func pending(in roomID: RoomID) async throws -> [V2DurableConversationSendService.Pending]
@@ -12,6 +13,10 @@ protocol V2DurableConversationSending: Sendable {
     func runRecovery() async throws
     func close() async
     func freezeSend(text: String, mentions: [V2MentionTarget], replyTo: V2MessageReplyReference?, roomID: RoomID, attachments: [V2StagedConversationAttachment]) async throws
+}
+
+extension V2DurableConversationSending {
+    var recoveryError: String? { get async { nil } }
 }
 
 /// Account lifetime owner; recovery survives page closure and reads only frozen
@@ -206,8 +211,12 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
 
     private func performPending(in roomID: RoomID,page:Int) async throws -> PendingPage {
         try requireOpen()
-        var result: [Pending] = []
         let snapshot = try await store.pendingResourceSendSnapshot(in: roomID, page: page)
+        return Self.present(snapshot, recoveryError: recoveryError)
+    }
+
+    nonisolated static func present(_ snapshot: V2PendingResourceSendSnapshot, recoveryError: String?) -> PendingPage {
+        var result: [Pending] = []
         for intent in snapshot.preparing {
             let status = recoveryError ?? (intent.isRejected ? "附件处理失败" : intent.isExpired ? "发送准备已过期，可重新准备后发送" : intent.isUserPaused ? "附件准备已暂停，可在文件与存储中继续" : intent.isPaused ? "上传已暂停，可重试" : intent.isProcessing ? "正在安全处理" : intent.total == 0 ? "等待发送" : "正在准备附件")
             result.append(.init(id: intent.id, createdAt: intent.createdAt, text: intent.text, completed: intent.completed, total: intent.total,

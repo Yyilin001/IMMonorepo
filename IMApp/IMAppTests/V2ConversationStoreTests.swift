@@ -1039,6 +1039,26 @@ struct V2ConversationStoreTests {
         #expect(store.composer.draft.isEmpty)
     }
 
+    @Test("saving a message preserves text edited while the keyboard stays active",
+          arguments: [V2ConversationSendOutcome.accepted, .queuedForRetry], ["下一条消息", "原消息"])
+    func messageSendPreservesNewDraft(outcome: V2ConversationSendOutcome, nextDraft: String) async {
+        let sender = V2SuspendingConversationSender(result: outcome)
+        let store = makeConversationDetailStore(
+            dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: sender, userID: "current-user", roomID: "room-a")
+        store.composer.draft = "原消息"
+        let sending = Task { await store.sendDraft() }
+        await sender.waitUntilSending()
+        // Clearing and retyping the same text is also a new draft.
+        store.composer.draft = ""
+        store.composer.draft = nextDraft
+        await sender.complete()
+        await sending.value
+        #expect(store.composer.draft == nextDraft)
+        #expect(await sender.sentMessages() == [.init(text: "原消息", roomID: "room-a")])
+        #expect(!store.composer.isSending)
+    }
+
     @Test func messageSendIgnoresLateSuccessAfterCancellation() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2SuspendingConversationSender()
@@ -4061,10 +4081,13 @@ private actor V2ConversationSenderFake: V2ConversationSending {
 }
 
 private actor V2SuspendingConversationSender: V2ConversationSending {
+    private let result: V2ConversationSendOutcome
     private var messages: [V2SentMessage] = []
     private var beganSending = false
     private var startWaiter: CheckedContinuation<Void, Never>?
     private var completion: CheckedContinuation<Void, Never>?
+
+    init(result: V2ConversationSendOutcome = .accepted) { self.result = result }
 
     func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome {
         try await send(text: text, media: media, mentions: [], in: roomID)
@@ -4076,7 +4099,7 @@ private actor V2SuspendingConversationSender: V2ConversationSending {
         startWaiter?.resume()
         startWaiter = nil
         await withCheckedContinuation { completion = $0 }
-        return .accepted
+        return result
     }
 
     func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
@@ -4085,7 +4108,7 @@ private actor V2SuspendingConversationSender: V2ConversationSending {
         startWaiter?.resume()
         startWaiter = nil
         await withCheckedContinuation { completion = $0 }
-        return .accepted
+        return result
     }
 
     func waitUntilSending() async {

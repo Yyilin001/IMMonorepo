@@ -205,6 +205,8 @@ public struct V2ClientTimelineCursor: Equatable, Sendable {
 public struct V2ClientConversationTimelinePage: Equatable, Sendable {
     /// 本页消息投影。
     public let messages: [V2ClientMessageProjection]
+    /// Receipt-proven local identity for outgoing bubbles in this window.
+    public let localSendIntentIDs: [MessageID: UUID]
     /// 本页时间线活动条目。
     public let activities: [V2ClientTimelineActivityProjection]
     /// 本页涉及的表情记录。
@@ -238,9 +240,11 @@ public struct V2ClientConversationTimelinePage: Equatable, Sendable {
         favoritedMessageIDs: Set<MessageID>,
         directReadReceipt: V2DirectReadReceiptProjection?,
         olderCursor: V2ClientTimelineCursor?,
-        reactionSummaries: [V2ClientMessageReactionSummary]? = nil
+        reactionSummaries: [V2ClientMessageReactionSummary]? = nil,
+        localSendIntentIDs: [MessageID: UUID] = [:]
     ) {
         self.messages = messages
+        self.localSendIntentIDs = localSendIntentIDs
         self.activities = activities
         self.reactions = reactions
         self.reactionSummaries = reactionSummaries

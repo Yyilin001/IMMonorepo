@@ -30,4 +30,33 @@ struct V2KeyboardDismissalTests {
         coordinator.attach(to: nil)
         #expect(!(second.gestureRecognizers ?? []).contains(gesture))
     }
+
+    @Test(arguments: [true, false])
+    func composerRegionPreservesOnlyItsVisiblePage(attachFirst: Bool) {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+        let page = UIViewController()
+        page.view.frame = window.bounds
+        window.addSubview(page.view)
+        let coordinator = V2KeyboardDismissal.Coordinator()
+        if attachFirst { coordinator.attach(to: window) }
+        let region = V2KeyboardDismissal.PreservedRegionView(frame: CGRect(x: 0, y: 700, width: 400, height: 100))
+        page.view.addSubview(region)
+        if !attachFirst { coordinator.attach(to: window) }
+        let inside = CGPoint(x: 200, y: 750)
+        #expect(!coordinator.shouldDismiss(touching: page.view, at: inside))
+        #expect(coordinator.shouldDismiss(touching: page.view, at: CGPoint(x: 200, y: 600)))
+
+        let sheet = UIViewController()
+        sheet.view.frame = window.bounds
+        window.addSubview(sheet.view)
+        #expect(coordinator.shouldDismiss(touching: sheet.view, at: inside))
+        sheet.view.removeFromSuperview()
+
+        region.isHidden = true
+        #expect(coordinator.shouldDismiss(touching: page.view, at: inside))
+        region.isHidden = false
+        region.removeFromSuperview()
+        #expect(coordinator.shouldDismiss(touching: page.view, at: inside))
+        coordinator.attach(to: nil)
+    }
 }

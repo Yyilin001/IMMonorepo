@@ -2,6 +2,35 @@ import XCTest
 import UIKit
 
 final class IMAppResourceCenterUITests: XCTestCase {
+    @MainActor func testChatSettingsOpensItsFilesAndReturnsToTheSameChat() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-resource-center-scope", UUID().uuidString,
+            "-v2-ui-testing-resource-center-chat", "-v2-ui-testing-resource-center-document", "-AppleLanguages", "(zh-Hans)"]
+        addTeardownBlock { @MainActor in
+            app.terminate(); app.launchArguments += ["-v2-ui-testing-resource-center-cleanup"]; app.launch()
+            XCTAssertTrue(app.staticTexts["测试数据已清理"].waitForExistence(timeout: 10)); app.terminate()
+        }
+        app.launch()
+        let chat = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.conversation.group.")).firstMatch
+        XCTAssertTrue(chat.waitForExistence(timeout: 15)); chat.tap()
+        let tools = app.buttons["v2.conversation.detail.tools"]
+        XCTAssertTrue(tools.waitForExistence(timeout: 5)); tools.tap()
+        let files = app.buttons["v2.chat-settings.resources"]
+        XCTAssertTrue(files.waitForExistence(timeout: 5)); files.tap()
+        XCTAssertTrue(app.navigationBars["聊天文件"].waitForExistence(timeout: 5))
+        let document = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+            "v2.resources.item.", "项目资源管理功能验证与交付说明")).firstMatch
+        XCTAssertTrue(document.waitForExistence(timeout: 5)); document.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["v2.resources.detail"].firstMatch.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.navigationBars["聊天文件"].waitForExistence(timeout: 5))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(files.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(tools.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["文件测试会话"].exists)
+    }
+
     @MainActor func testStorageAndDownloadSettingsWithVoiceOver() throws {
         guard #available(iOS 27.0, *) else {
             throw XCTSkip("VoiceOver automation requires iOS 27 or later.")
@@ -731,31 +760,35 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["测试数据已清理"].waitForExistence(timeout: 10)); app.terminate()
     }
 
-    @MainActor func testProfileChoosesExistingImageAndLinksImportToItsChange() {
+    @MainActor func testProfileAvatarPhotoLibraryCanCancelBackToProfile() {
         let app = XCUIApplication()
         app.launchArguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-resource-center-scope", UUID().uuidString,
             "-v2-ui-testing-resource-center-manual-queue", "-v2-ui-testing-resource-center-profile-picker", "-AppleLanguages", "(zh-Hans)"]
+        addTeardownBlock { @MainActor in
+            app.terminate(); app.launchArguments += ["-v2-ui-testing-resource-center-cleanup"]; app.launch()
+            XCTAssertTrue(app.staticTexts["测试数据已清理"].waitForExistence(timeout: 10)); app.terminate()
+        }
         app.launch()
         let profile = app.buttons["v2.identity.open"]
         XCTAssertTrue(profile.waitForExistence(timeout: 15)); profile.tap()
         app.buttons["v2.profile.avatar.choose"].tap()
-        let choose = app.buttons["v2.profile.avatar.choose-resource"]
-        XCTAssertTrue(choose.waitForExistence(timeout: 5)); choose.tap()
-        let search = app.textFields["v2.avatar.resources.search"]
-        XCTAssertTrue(search.waitForExistence(timeout: 5)); search.tap(); search.typeText("设计说明")
-        let image = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.avatar.resources.item.")).firstMatch
-        XCTAssertTrue(image.waitForExistence(timeout: 5))
-        attach(app, name: "Existing JPEG and PNG picker uses the local resource catalog")
-        image.tap()
-        XCTAssertTrue(app.staticTexts["正在更新头像…"].waitForExistence(timeout: 5))
-        app.buttons["v2.resources.fixture.profile.done"].tap()
-        app.buttons["v2.resources.open"].tap(); app.buttons["v2.resources.transfers.open"].tap()
-        let owner = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.resources.transfers.owners.")).firstMatch
-        XCTAssertTrue(owner.waitForExistence(timeout: 5)); owner.tap()
-        XCTAssertTrue(app.navigationBars["相关更改"].waitForExistence(timeout: 5))
-        attach(app, name: "Selected image import belongs to the persisted profile change")
-        app.terminate(); app.launchArguments += ["-v2-ui-testing-resource-center-cleanup"]; app.launch()
-        XCTAssertTrue(app.staticTexts["测试数据已清理"].waitForExistence(timeout: 10)); app.terminate()
+        let library = app.buttons["v2.profile.avatar.library"]
+        XCTAssertTrue(library.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["v2.profile.avatar.choose-resource"].exists)
+        XCTAssertFalse(app.buttons["v2.profile.avatar.files"].exists)
+        XCTAssertFalse(app.buttons["v2.profile.avatar.remove"].exists)
+        attach(app, name: "Profile avatar photo sources")
+        library.tap()
+        let cancel = app.buttons.matching(NSPredicate(format: "label IN %@ AND identifier != %@",
+            ["取消", "Cancel"], "v2.profile.avatar.cancel")).firstMatch
+        XCTAssertTrue(cancel.waitForExistence(timeout: 10))
+        let loading = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@ OR label BEGINSWITH %@", "正在加载", "Loading")).firstMatch
+        XCTAssertTrue(loading.waitForNonExistence(timeout: 20))
+        cancel.tap()
+        XCTAssertTrue(library.waitForExistence(timeout: 5))
+        app.buttons["v2.profile.avatar.cancel"].tap()
+        XCTAssertTrue(app.buttons["v2.profile.avatar.choose"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["正在更新头像…"].exists)
     }
 
     @MainActor func testUnresolvedDownloadShowsPersistentReasonAndControls() {

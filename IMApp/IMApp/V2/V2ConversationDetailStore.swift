@@ -311,22 +311,24 @@ final class V2ConversationDetailStore {
         let generation = refreshGeneration
         let refreshTimeline = scopes.contains(.conversationDetails) || scopes.contains(.conversationTimeline)
         let refreshMetadata = scopes.contains(.conversationDetails) || scopes.contains(.conversationMetadata)
-        if refreshTimeline, timeline.isEmpty { state = .loading }
+        if refreshTimeline, state == .failed { state = .loading }
         do {
             // Preserve only the window the user explicitly loaded. The normal
             // path remains a small page, while edits/withdrawals inside the
             // visible window are refreshed from one SQLite snapshot.
             let page: V2ConversationTimelinePage?
+            var pending: V2DurableConversationSendService.PendingPage?
+            let pendingPage = composer.pendingResourceSendPage
             if refreshTimeline {
-                page = try await dataSource.timelinePage(
-                    in: roomID,
-                    for: userID,
-                    before: newerTimelineBoundary,
-                    limit: min(
-                        Self.maximumRetainedTimelineItems,
-                        max(Self.initialTimelinePageSize, timeline.count)
-                    )
-                )
+                let limit = min(Self.maximumRetainedTimelineItems, max(Self.initialTimelinePageSize, timeline.count))
+                if let reader = dataSource as? any V2ConversationSendTimelineReading {
+                    let (window, journal) = try await reader.sendTimeline(in: RoomID(roomID), for: UserID(userID),
+                        before: newerTimelineBoundary, limit: limit, pendingPage: pendingPage)
+                    page = window
+                    pending = V2DurableConversationSendService.present(journal, recoveryError: await resourceSender?.recoveryError)
+                } else {
+                    page = try await dataSource.timelinePage(in: roomID, for: userID, before: newerTimelineBoundary, limit: limit)
+                }
             } else { page = nil }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
@@ -341,6 +343,12 @@ final class V2ConversationDetailStore {
                 await seedDecodedImagePreviews(from: refreshedMessages, generation: generation)
                 try Task.checkCancellation()
                 guard generation == refreshGeneration else { return }
+            }
+            // No suspension between the pending and committed publication. Both
+            // sides describe the same SQLite snapshot even when receipt/sync race.
+            if let pending {
+                guard pendingPage == composer.pendingResourceSendPage else { return }
+                composer.applyPendingPage(pending)
             }
             let timelineChanged = refreshTimeline && refreshedTimeline != timeline
             if refreshTimeline {
@@ -391,7 +399,7 @@ final class V2ConversationDetailStore {
             return
         } catch {
             guard !Task.isCancelled, generation == refreshGeneration else { return }
-            if timeline.isEmpty {
+            if timeline.isEmpty && composer.pendingResourceSends.isEmpty {
                 state = .failed
             } else {
                 state = .loaded
@@ -530,6 +538,23 @@ final class V2ConversationDetailStore {
                 outgoingPreviews.removeObject(forKey: media.mediaID.rawValue as NSString)
                 await cache?.discard(media)
             }
+        }
+    }
+
+    func observeResourceSends() async {
+        guard let reader = dataSource as? any V2ConversationSendTimelineReading,
+              let room = try? RoomID(roomID) else { await composer.observeResourceSends(); return }
+        let page = composer.pendingResourceSendPage
+        do {
+            for try await _ in await reader.sendTimelineChanges(in: room, page: page) {
+                try Task.checkCancellation()
+                guard page == composer.pendingResourceSendPage else { return }
+                if let projectionChangeNotifier {
+                    await projectionChangeNotifier.publish(.init(scopes: .conversationTimeline, requiresImmediateRefresh: false, roomIDs: [roomID]))
+                } else { await refresh(scopes: .conversationTimeline) }
+            }
+        } catch {
+            if !Task.isCancelled { composer.pendingObservationFailed() }
         }
     }
 
@@ -816,7 +841,11 @@ final class V2ConversationDetailStore {
 
     func sendDraft() async {
         guard case .refreshTimeline = await composer.sendDraft() else { return }
-        await refresh()
+        if isBrowsingHistoricalTimeline {
+            await returnToLatestTimeline()
+        } else {
+            await refresh(scopes: .conversationTimeline)
+        }
     }
 
     func copyAttachments(_ message: V2ConversationMessageItem, to targetRoomID: String) async -> Bool {

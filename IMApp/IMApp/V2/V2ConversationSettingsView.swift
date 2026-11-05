@@ -11,6 +11,7 @@ struct V2ConversationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.v2UserInteractionContext) private var context
     @Environment(\.v2ResourceManagement) private var resources
+    @State private var avatarPageID = UUID()
     @State private var profile: V2UserProfileTarget?
     @State private var presentedSheet: PresentedSheet?
     @State private var pendingFocusedMessage: String?
@@ -56,13 +57,6 @@ struct V2ConversationSettingsView: View {
                         }
                     }
                 }
-            }
-            Section("消息操作") {
-                action("多选转发", symbol: "arrowshape.turn.up.right", color: .teal,
-                       identifier: "v2.message.forward.begin") {
-                    dismiss()
-                    store.beginForwardSelection()
-                }.disabled(store.messages.allSatisfy(\.isWithdrawn))
             }
             if let item {
                 Section("会话整理") {
@@ -128,6 +122,8 @@ struct V2ConversationSettingsView: View {
                 }
             }
         }
+        // Include sheet presentation in the same live avatar authority scope.
+        .authorPresentationPage(context: .list(avatarPageID))
         .task(id: context?.conversations.items) {
             guard let context,
                   let source = context.conversations.items.first(where: { $0.id == store.roomID }) ?? lastItem else { return }
@@ -152,23 +148,40 @@ struct V2ConversationSettingsView: View {
             }
         } else if store.isGroupConversation, let room = try? RoomID(store.roomID) {
             Section {
-                HStack(spacing: 12) {
-                    V2AuthorizedGroupAvatarView(roomID: room, size: 52, fallbackTitle: store.title)
-                    Text(store.title).font(.headline)
-                }.padding(.vertical, 6)
+                if store.hasGroupAvatarManagement {
+                    Button {
+                        if let manager = store.groupAvatarManagementStore() { presentedSheet = .avatar(manager) }
+                    } label: { groupIdentity(room: room) }
+                    .buttonStyle(GroupAvatarRowButtonStyle())
+                    .accessibilityLabel("群头像，\(store.title)")
+                    .accessibilityHint("查看或更改群头像")
+                    .accessibilityIdentifier("v2.group.avatar.manage")
+                } else {
+                    groupIdentity(room: room)
+                }
             }
         }
+    }
+
+    private func groupIdentity(room: RoomID) -> some View {
+        HStack(spacing: 12) {
+            V2AuthorizedGroupAvatarView(roomID: room, size: 52, fallbackTitle: store.title)
+            Text(store.title).font(.headline)
+            Spacer()
+            if store.hasGroupAvatarManagement {
+                Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .foregroundStyle(.primary)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder private var groupSections: some View {
         Section("群聊信息") {
             action("群成员", symbol: "person.2", color: .blue, identifier: "v2.group.members") { presentedSheet = .members }
             action("群公告", symbol: "megaphone", color: .orange, identifier: "v2.group.announcement") { presentedSheet = .announcement }
-            if store.hasGroupAvatarManagement {
-                action("群头像", symbol: "person.crop.circle", color: .purple, identifier: "v2.group.avatar.manage") {
-                    if let manager = store.groupAvatarManagementStore() { presentedSheet = .avatar(manager) }
-                }
-            }
         }
         if store.canEditOwnGroupNickname {
             Section("我在本群") {
@@ -214,5 +227,11 @@ struct V2ConversationSettingsView: View {
             await context.conversations.refresh()
             lastItem = await context.conversations.displayedConversationState(context.conversations.items.first { $0.id == store.roomID } ?? item)
         }
+    }
+}
+
+private struct GroupAvatarRowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.background(configuration.isPressed ? Color.primary.opacity(0.04) : Color.clear)
     }
 }

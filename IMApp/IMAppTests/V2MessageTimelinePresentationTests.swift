@@ -91,6 +91,23 @@ struct V2MessageTimelinePresentationTests {
         #expect(model.dataSource.id == identity)
     }
 
+    @Test func identicalTextsKeepDistinctRowsWhenOneSendIsConfirmed() {
+        let model = V2MessageTimelinePresentation()
+        let first = pending(at: 10), second = pending(at: 20)
+        let confirmed = V2ConversationTimelineItem.message(.init(id: "server-id", revision: 1,
+            text: first.text, createdAt: first.createdAt, isOutgoing: true, isWithdrawn: false,
+            localSendIntentID: first.id), timelineSequence: 1)
+        #expect(model.apply([], pending: [first, second]))
+        let identities = model.dataSource.items.map(\.id)
+        let revision = model.dataSource.changeCounter
+        #expect(model.apply([confirmed], pending: [first, second]))
+        #expect(model.dataSource.items.map(\.id) == identities)
+        #expect(Array(model.dataSource.items) == [.committed(confirmed), .pending(second)])
+        #expect(model.dataSource.changeCounter == revision + 1)
+        #expect(model.apply([confirmed], pending: [second]))
+        #expect(model.dataSource.changeCounter == revision + 1)
+    }
+
     @Test func failuresAreMergedAtTheirOriginalTimesInsteadOfAfterNewMessages() {
         let model = V2MessageTimelinePresentation()
         let old = pending(at: 50), middle = pending(at: 150), newest = pending(at: 250)
