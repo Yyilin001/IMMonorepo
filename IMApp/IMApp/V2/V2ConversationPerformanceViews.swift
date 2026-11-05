@@ -44,7 +44,7 @@ struct V2ConversationPerformanceConfigView: View {
                 }
                 .accessibilityIdentifier("v2.performance.start")
             } footer: {
-                Text("会话和事件在本机内存中生成。相同配置使用固定随机种子。点击会话可查看本地聊天，返回列表后继续计时。右滑置顶，左滑归档或设置免打扰。")
+                Text("会话和事件在本机内存中生成。相同配置使用固定随机种子。点击会话可查看本地聊天，返回列表后继续计时。右滑置顶，左滑隐藏或设置免打扰。")
             }
         }
         .navigationTitle("本地性能测试配置")

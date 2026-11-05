@@ -13,10 +13,10 @@ struct V2SearchField: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.body).foregroundStyle(.secondary).accessibilityHidden(true)
-            TextField(title, text: $text, axis: .vertical)
+            TextField(title, text: $text)
                 .focused($isFocused)
                 .textFieldStyle(.plain)
-                .font(.body).foregroundStyle(.primary).lineLimit(1...3)
+                .font(.body).foregroundStyle(.primary).lineLimit(1)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
@@ -33,7 +33,9 @@ struct V2SearchField: View {
                 .accessibilityIdentifier(identifier + ".clear")
             }
         }
-        .padding(12)
+        .frame(minHeight: 44, alignment: .center)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
         .background(V2VisualStyle.surface, in: RoundedRectangle(cornerRadius: 16))
         .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(V2VisualStyle.separator) }
         .padding(.horizontal, 20).padding(.vertical, 8)

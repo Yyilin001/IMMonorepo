@@ -47,7 +47,7 @@ final class V2PreferenceActivityStore {
         switch entry.target {
         case .favorite(_, _, let value): return value ? "收藏消息" : "取消收藏"
         case .conversation(_, let pinned, let archived, let mute):
-            return [pinned ? "置顶" : "不置顶", archived ? "归档" : "不归档", mute == nil ? "接收提醒" : "免打扰"].joined(separator: " · ")
+            return [pinned ? "置顶" : "不置顶", archived ? "隐藏" : "不隐藏", mute == nil ? "接收提醒" : "免打扰"].joined(separator: " · ")
         }
     }
     static func status(_ entry: V2PersonalPreferencePending) -> String {

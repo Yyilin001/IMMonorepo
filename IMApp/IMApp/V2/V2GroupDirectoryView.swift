@@ -118,7 +118,7 @@ struct V2GroupDirectoryView: View {
                                 V2AuthorizedGroupAvatarView(roomID: item.roomID, size: 48, fallbackTitle: item.title)
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(item.title).font(.body.weight(.medium))
-                                    if item.isArchived { Label("已归档", systemImage: "archivebox").font(.caption).foregroundStyle(.secondary) }
+                                    if item.isArchived { Label("隐藏的聊天", systemImage: "eye.slash").font(.caption).foregroundStyle(.secondary) }
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)

@@ -228,7 +228,7 @@ private actor V2MockPreviewSource: V2GroupMemberDirectoryReading, V2GroupCreatio
         let page = try await conversationSummaryPage(for: user.rawValue, isArchived: false, before: nil, limit: limit)
         let groups = try page.items.map {
             try V2ClientGroupDirectoryItem(roomID: .init($0.id), title: $0.title, isArchived: false)
-        } + [.init(roomID: .init("00000000-0000-0000-0000-000000000106"), title: "归档的项目群", isArchived: true)]
+        } + [.init(roomID: .init("00000000-0000-0000-0000-000000000106"), title: "隐藏的项目群", isArchived: true)]
         let items = groups.filter { query.isEmpty || $0.title.localizedStandardContains(query) }
         return .init(items: cursor == nil ? items : [], nextCursor: nil)
     }

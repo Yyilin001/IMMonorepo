@@ -64,7 +64,7 @@ struct V2ConversationSettingsView: View {
                         rowLabel("置顶聊天", symbol: "pin", color: .orange)
                     }.accessibilityIdentifier("v2.chat-settings.pin")
                     Toggle(isOn: Binding(get: { item.isArchived }, set: { update(isArchived: $0) })) {
-                        rowLabel("归档会话", symbol: "archivebox", color: .blue)
+                        rowLabel("隐藏聊天", symbol: "eye.slash", color: .blue)
                     }.accessibilityIdentifier("v2.chat-settings.archive")
                 }.disabled(isUpdating)
                 Section("消息通知") {

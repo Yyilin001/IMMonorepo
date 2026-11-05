@@ -125,7 +125,7 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         let slot = list.cells.element(boundBy: 1)
         slot.swipeLeft()
-        let archive = app.buttons["归档"]
+        let archive = app.buttons["隐藏"]
         XCTAssertTrue(archive.waitForExistence(timeout: 3))
         let owner = slot.identifier
         XCTAssertTrue(owner.hasPrefix("v2.performance.cell."))
@@ -160,7 +160,7 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         app.buttons["免打扰"].tap()
         first.swipeLeft()
         XCTAssertTrue(app.buttons["恢复提醒"].waitForExistence(timeout: 5))
-        app.buttons["归档"].tap()
+        app.buttons["隐藏"].tap()
         XCTAssertTrue(app.staticTexts["v2.performance.events"].label.contains("99"))
     }
 

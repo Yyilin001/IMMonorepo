@@ -1292,9 +1292,9 @@ struct V2ConversationListView: View {
                     let pending = store.pendingDirectConversationRequests
                     if visible.isEmpty && pending.isEmpty {
                         V2ConversationEmptyState(
-                            title: store.isShowingArchived ? "没有已归档会话" : "暂无会话",
+                            title: store.isShowingArchived ? "没有隐藏的聊天" : "暂无会话",
                             symbol: store.isShowingArchived ? "archivebox" : "bubble.left.and.bubble.right",
-                            description: store.isShowingArchived ? "归档的会话会显示在这里。" : "与朋友聊聊，或创建群聊开启新的讨论。"
+                            description: store.isShowingArchived ? "隐藏的聊天会显示在这里。" : "与朋友聊聊，或创建群聊开启新的讨论。"
                         )
                     } else {
                         V2ConversationCollectionView(
@@ -1305,7 +1305,7 @@ struct V2ConversationListView: View {
                     }
                 }
             }
-            .navigationTitle(store.isShowingArchived ? "已归档" : "消息")
+            .navigationTitle(store.isShowingArchived ? "隐藏的聊天" : "消息")
             .navigationBarTitleDisplayMode(.inline)
             .v2PageSurface()
             .safeAreaInset(edge: .top) {

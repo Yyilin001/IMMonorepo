@@ -253,8 +253,8 @@ private struct V2ConversationCollectionRow: View {
                 Task { await store.updateConversationState(item, isPinned: !item.isPinned) }
             }
         }
-        Menu("会话归档", systemImage: "archivebox") {
-            Button(item.isArchived ? "取消归档" : "归档会话") {
+        Menu("隐藏聊天", systemImage: "eye.slash") {
+            Button(item.isArchived ? "取消隐藏" : "隐藏聊天") {
                 Task { await store.updateConversationState(item, isArchived: !item.isArchived) }
             }
         }
@@ -285,7 +285,7 @@ enum V2ConversationSwipeAction {
 
     static func trailing(isArchived: Bool, isMuted: Bool, perform: @escaping (Self) async -> Void) -> UISwipeActionsConfiguration {
         actions([
-            action(isArchived ? "取消归档" : "归档", image: "archivebox", color: .systemIndigo) {
+            action(isArchived ? "取消隐藏" : "隐藏", image: "eye.slash", color: .systemIndigo) {
                 await perform(.archive(!isArchived))
             },
             action(isMuted ? "恢复提醒" : "免打扰", image: "bell.slash", color: .systemGray) {

@@ -493,7 +493,7 @@ struct V2SignedInRootView: View {
             .tag(V2RootNavigationStore.Tab.account)
 
         }
-            .navigationTitle(rootNavigation.selectedTab == .conversations ? (conversationStore.isShowingArchived ? "已归档" : "消息") : rootNavigation.selectedTab == .contacts ? "联系人" : "我的")
+            .navigationTitle(rootNavigation.selectedTab == .conversations ? (conversationStore.isShowingArchived ? "隐藏的聊天" : "消息") : rootNavigation.selectedTab == .contacts ? "联系人" : "我的")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if rootNavigation.selectedTab == .conversations {
@@ -507,7 +507,7 @@ struct V2SignedInRootView: View {
                     }
                     ToolbarItem(placement: .principal) {
                         V2ConnectionStatusButton(store: appStore, navigationTitle:
-                            conversationStore.isShowingArchived ? "已归档" : "消息")
+                            conversationStore.isShowingArchived ? "隐藏的聊天" : "消息")
                     }
                 }
                 if rootNavigation.selectedTab == .conversations {
@@ -526,7 +526,7 @@ struct V2SignedInRootView: View {
                     }
                     }
                     Section("查找内容") {
-                        Button(conversationStore.isShowingArchived ? "返回收件箱" : "已归档", systemImage: conversationStore.isShowingArchived ? "tray" : "archivebox") {
+                        Button(conversationStore.isShowingArchived ? "返回消息列表" : "隐藏的聊天", systemImage: conversationStore.isShowingArchived ? "tray" : "eye.slash") {
                             Task { await conversationStore.toggleArchivedConversations() }
                         }
                         .accessibilityIdentifier("v2.conversation.archive-toggle")
@@ -543,7 +543,7 @@ struct V2SignedInRootView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                     .accessibilityLabel("会话工具")
-                    .accessibilityHint("打开归档、搜索和收藏")
+                    .accessibilityHint("打开隐藏的聊天、搜索和收藏")
                     .accessibilityIdentifier("v2.conversation.tools")
                     Button("新建私聊", systemImage: "square.and.pencil") {
                         rootNavigation.conversationAction = .newDirect
