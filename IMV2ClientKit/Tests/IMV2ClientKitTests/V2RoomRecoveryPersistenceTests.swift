@@ -728,6 +728,77 @@ struct V2RoomRecoveryPersistenceTests {
         #expect(try await store.verifyRoomRecoveryCompletion(candidate, personalAppliedThrough: change == 4 ? 8 : 7) == (change == 0))
     }
 
+    @Test(arguments: ["state", "summary", "body"])
+    func batchRecoveryRollsBackEveryRoomAndReplaysExactly(stage: String) async throws {
+        let (store, _, _, user) = try fixture()
+        try await store.databasePool.write { try $0.execute(sql: "INSERT INTO v2_sync_cursor(singleton,state,generation,applied_sequence,server_acknowledged_sequence,sync_token) VALUES (1,'ready',1,0,0,'initial')") }
+        let scope = try await store.beginRoomRecoveryScan(userID: user)
+        let rooms = [RoomID(uuid: UUID()), RoomID(uuid: UUID())]
+        for room in rooms { try await store.enqueueRoomRecovery(roomID: room, targetHead: 1, priority: 1, scope: scope, now: .now) }
+        var work = try await store.roomRecoveryWork(scope: scope, limit: 100, oldestFirst: true, now: .now)
+        let bad = work.last!.roomID
+        let table = stage == "state" ? "v2_room_sync_states" : stage == "summary" ? "v2_room_latest_visible" : "v2_message_projections"
+        let states = try work.map { item in (state: try V2RoomSynchronizationState(roomID: item.roomID, ownerEpoch: 1,
+            viewerMembershipRevision: 1, head: 1, trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0), work: item) }
+        if stage != "state" { try await store.commitRoomRecoveryStates(states, now: .now) }
+        work = try await store.roomRecoveryWork(scope: scope, limit: 100, oldestFirst: true, now: .now)
+        let captured = work
+        let request = try await store.beginRoomLatestVisibleRequest(scope: scope)
+        let summaries = try captured.map { (snapshot: try V2RoomLatestVisible(roomID: $0.roomID, ownerEpoch: 1, membershipRevision: 1, head: 1, latest: nil), work: $0) }
+        let pages = try captured.map { item in
+            let payload = try JSONSerialization.data(withJSONObject: ["event_type": "message.accepted", "room_id": item.roomID.rawValue,
+                "room_sequence": 1, "message_id": UUID().uuidString, "message_revision": 1, "sender_user_id": user.rawValue,
+                "text": "atomic batch", "server_created_at_ms": 1_750_000_000_000])
+            return (page: try V2ClientGroupEventPage(roomID: item.roomID, events: [.init(sourceEventID: .init(uuid: UUID()),
+                roomSequence: 1, projectionKind: "message", payload: payload)], nextRoomSequence: 1, hasMore: false), work: item)
+        }
+        try await store.databasePool.write { db in
+            try db.execute(sql: "CREATE TRIGGER reject_test_batch AFTER INSERT ON \(table) WHEN NEW.room_id = '\(bad.rawValue)' BEGIN SELECT RAISE(ABORT,'injected batch failure'); END")
+        }
+        @Sendable func commit() async throws {
+            switch stage {
+            case "state": try await store.commitRoomRecoveryStates(states, now: .now)
+            case "summary": _ = try await store.commitRoomLatestVisibleBatch(summaries, request: request)
+            default: _ = try await store.applyRoomRecoveryPages(pages)
+            }
+        }
+        await #expect(throws: DatabaseError.self) { try await commit() }
+        #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM \(table)") } == 0)
+        if stage == "body" {
+            for room in rooms { #expect(try await store.groupEventCursor(roomID: room) == 0) }
+            #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_group_events") } == 0)
+        }
+        try await store.databasePool.write { try $0.execute(sql: "DROP TRIGGER reject_test_batch") }
+        try await commit()
+        try await commit()
+        #expect(try await store.databasePool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM \(table)") } == 2)
+        if stage == "body" { for room in rooms { #expect(try await store.groupEventCursor(roomID: room) == 1) } }
+    }
+
+    @Test(arguments: ["owner", "membership", "generation"])
+    func bodyBatchRechecksEveryRoomFenceBeforeCommit(change: String) async throws {
+        let (store, _, _, user) = try fixture()
+        try await store.databasePool.write { try $0.execute(sql: "INSERT INTO v2_sync_cursor(singleton,state,generation,applied_sequence,server_acknowledged_sequence,sync_token) VALUES (1,'ready',1,0,0,'initial')") }
+        let scope = try await store.beginRoomRecoveryScan(userID: user)
+        for _ in 0..<2 { try await store.enqueueRoomRecovery(roomID: .init(uuid: UUID()), targetHead: 1, priority: 1, scope: scope, now: .now) }
+        let initial = try await store.roomRecoveryWork(scope: scope, limit: 100, oldestFirst: true, now: .now)
+        try await store.commitRoomRecoveryStates(initial.map { (state: try .init(roomID: $0.roomID, ownerEpoch: 1,
+            viewerMembershipRevision: 1, head: 1, trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0), work: $0) }, now: .now)
+        let captured = try await store.roomRecoveryWork(scope: scope, limit: 100, oldestFirst: true, now: .now)
+        let last = captured.last!.roomID
+        try await store.databasePool.write { db in
+            switch change {
+            case "owner": try db.execute(sql: "UPDATE v2_room_sync_states SET owner_epoch=2 WHERE room_id=?", arguments: [last.rawValue])
+            case "membership": try db.execute(sql: "INSERT INTO v2_room_membership_states VALUES (?,2,'revoked',0)", arguments: [last.rawValue])
+            default: try db.execute(sql: "UPDATE v2_sync_cursor SET generation=2")
+            }
+        }
+        await #expect(throws: V2RoomRecoveryPersistenceError.self) {
+            _ = try await store.applyRoomRecoveryPages(captured.map { (page: try .init(roomID: $0.roomID, events: [], nextRoomSequence: 1, hasMore: false), work: $0) })
+        }
+        for item in captured { #expect(try await store.groupEventCursor(roomID: item.roomID) == 0) }
+    }
+
     private func fixture() throws -> (GRDBV2LocalSyncStore, URL, V2LocalInstallationBinding, UserID) {
         let url = FileManager.default.temporaryDirectory.appending(path: "room-recovery-\(UUID()).sqlite")
         let binding = V2LocalInstallationBinding(value: UUID())

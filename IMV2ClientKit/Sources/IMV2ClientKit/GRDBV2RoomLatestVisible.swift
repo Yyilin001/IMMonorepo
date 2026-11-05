@@ -173,62 +173,80 @@ extension GRDBV2LocalSyncStore {
 
     /// Display-only commit. It neither acknowledges content nor completes recovery work.
     public func commitRoomLatestVisible(_ snapshot: V2RoomLatestVisible, request: V2RoomLatestVisibleRequest, work: V2RoomRecoveryWork? = nil) async throws -> Bool {
-        try await databasePool.write { db in
-            _ = try Self.requireRoomRecoveryScope(request.scope, db: db)
-            if let work {
-                guard work.scope == request.scope, work.roomID == snapshot.roomID else { throw V2RoomRecoveryPersistenceError.invalidWork }
-                _ = try Self.requireRoomRecoveryWorkScope(work, db: db)
-                try Self.validateStoredRecoveryWork(roomID: work.roomID, db: db)
-            }
-            try Self.requireProjectionWritesUnfenced(db: db)
-            guard let cursor = try Self.readCursor(db), cursor.state == .ready else { throw V2ClientSyncError.resetPending }
-            guard cursor.generation == request.personalGeneration else { return false }
-            guard try Self.latestVisibleIsCurrent(snapshot, db: db) else { return false }
-            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_room_latest_visible WHERE room_id = ?", arguments: [snapshot.roomID.rawValue]),
-               (try Self.recoveryInteger(row, "personal_generation")) == Int64(cursor.generation) {
-                let existing = try Self.decodeLatestVisible(row)
-                guard snapshot.ownerEpoch >= existing.ownerEpoch, snapshot.membershipRevision >= existing.membershipRevision,
-                      snapshot.head >= existing.head else { return false }
-                if snapshot.head == existing.head && snapshot.ownerEpoch == existing.ownerEpoch
-                    && snapshot.membershipRevision == existing.membershipRevision {
-                    // Equal observation identity must describe the same visible state.
-                    guard snapshot == existing else { return false }
-                }
-            }
-            let message = snapshot.latest
-            try db.execute(sql: """
-                INSERT INTO v2_room_latest_visible
-                    (room_id, personal_generation, owner_epoch, membership_revision, head,
-                     message_id, sender_id, message_sequence, message_revision, preview, media_count, created_at_reference)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(room_id) DO UPDATE SET
-                    personal_generation = excluded.personal_generation, owner_epoch = excluded.owner_epoch,
-                    membership_revision = excluded.membership_revision, head = excluded.head,
-                    message_id = excluded.message_id, sender_id = excluded.sender_id,
-                    message_sequence = excluded.message_sequence, message_revision = excluded.message_revision,
-                    preview = excluded.preview, media_count = excluded.media_count, created_at_reference = excluded.created_at_reference
-                """, arguments: [snapshot.roomID.rawValue, Int64(cursor.generation), Int64(snapshot.ownerEpoch),
-                    Int64(snapshot.membershipRevision), Int64(snapshot.head), message?.id.rawValue, message?.senderID.rawValue,
-                    message.map { Int64($0.sequence) }, message.map { Int64($0.revision) }, message?.preview,
-                    message?.mediaCount, message?.createdAt.timeIntervalSinceReferenceDate])
-            if let work, snapshot.head >= work.targetHead {
-                try db.execute(sql: """
-                    UPDATE v2_room_recovery_work SET requires_summary = 0, target_head = MAX(target_head, ?),
-                        requires_state = CASE WHEN COALESCE((SELECT head FROM v2_room_sync_states WHERE room_id = ?), 0) < ?
-                            THEN 1 ELSE requires_state END
-                    WHERE room_id = ? AND request_revision = ?
-                    """, arguments: [Int64(snapshot.head), work.roomID.rawValue, Int64(snapshot.head),
-                        work.roomID.rawValue, work.requestRevision.uuidString])
-            }
-            return true
+        try await databasePool.write { db in try Self.commitLatestVisible(snapshot, request: request, work: work, db: db) }
+    }
+
+    func commitRoomLatestVisibleBatch(_ snapshots: [(snapshot: V2RoomLatestVisible, work: V2RoomRecoveryWork)],
+                                     request: V2RoomLatestVisibleRequest) async throws -> Set<RoomID> {
+        guard (1...100).contains(snapshots.count), Set(snapshots.map { $0.work.roomID }).count == snapshots.count else {
+            throw V2RoomRecoveryPersistenceError.invalidWork
         }
+        return try await databasePool.write { db in
+            var accepted = Set<RoomID>()
+            for item in snapshots {
+                try Task.checkCancellation()
+                if try Self.commitLatestVisible(item.snapshot, request: request, work: item.work, db: db) { accepted.insert(item.work.roomID) }
+            }
+            return accepted
+        }
+    }
+
+    private static func commitLatestVisible(_ snapshot: V2RoomLatestVisible, request: V2RoomLatestVisibleRequest,
+                                           work: V2RoomRecoveryWork?, db: Database) throws -> Bool {
+        _ = try Self.requireRoomRecoveryScope(request.scope, db: db)
+        if let work {
+            guard work.scope == request.scope, work.roomID == snapshot.roomID else { throw V2RoomRecoveryPersistenceError.invalidWork }
+            _ = try Self.requireRoomRecoveryWorkScope(work, db: db)
+            try Self.validateStoredRecoveryWork(roomID: work.roomID, db: db)
+        }
+        try Self.requireProjectionWritesUnfenced(db: db)
+        guard let cursor = try Self.readCursor(db), cursor.state == .ready else { throw V2ClientSyncError.resetPending }
+        guard cursor.generation == request.personalGeneration else { return false }
+        guard try Self.latestVisibleIsCurrent(snapshot, db: db) else { return false }
+        if let row = try Row.fetchOne(try db.cachedStatement(sql: "SELECT * FROM v2_room_latest_visible WHERE room_id = ?"), arguments: [snapshot.roomID.rawValue]),
+           (try Self.recoveryInteger(row, "personal_generation")) == Int64(cursor.generation) {
+            let existing = try Self.decodeLatestVisible(row)
+            guard snapshot.ownerEpoch >= existing.ownerEpoch, snapshot.membershipRevision >= existing.membershipRevision,
+                  snapshot.head >= existing.head else { return false }
+            if snapshot.head == existing.head && snapshot.ownerEpoch == existing.ownerEpoch
+                && snapshot.membershipRevision == existing.membershipRevision {
+                // Equal observation identity must describe the same visible state.
+                guard snapshot == existing else { return false }
+            }
+        }
+        let message = snapshot.latest
+        try db.cachedStatement(sql: """
+            INSERT INTO v2_room_latest_visible
+                (room_id, personal_generation, owner_epoch, membership_revision, head,
+                 message_id, sender_id, message_sequence, message_revision, preview, media_count, created_at_reference)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(room_id) DO UPDATE SET
+                personal_generation = excluded.personal_generation, owner_epoch = excluded.owner_epoch,
+                membership_revision = excluded.membership_revision, head = excluded.head,
+                message_id = excluded.message_id, sender_id = excluded.sender_id,
+                message_sequence = excluded.message_sequence, message_revision = excluded.message_revision,
+                preview = excluded.preview, media_count = excluded.media_count, created_at_reference = excluded.created_at_reference
+            """).execute(arguments: [snapshot.roomID.rawValue, Int64(cursor.generation), Int64(snapshot.ownerEpoch),
+                Int64(snapshot.membershipRevision), Int64(snapshot.head), message?.id.rawValue, message?.senderID.rawValue,
+                message.map { Int64($0.sequence) }, message.map { Int64($0.revision) }, message?.preview,
+                message?.mediaCount, message?.createdAt.timeIntervalSinceReferenceDate])
+        if let work, snapshot.head >= work.targetHead {
+            try db.cachedStatement(sql: """
+                UPDATE v2_room_recovery_work SET requires_summary = 0, target_head = MAX(target_head, ?),
+                    requires_state = CASE WHEN COALESCE((SELECT head FROM v2_room_sync_states WHERE room_id = ?), 0) < ?
+                        THEN 1 ELSE requires_state END
+                WHERE room_id = ? AND request_revision = ?
+                """).execute(arguments: [Int64(snapshot.head), work.roomID.rawValue, Int64(snapshot.head),
+                    work.roomID.rawValue, work.requestRevision.uuidString])
+        }
+        return true
     }
 
     public func roomLatestVisible(roomID: RoomID, scope: V2RoomRecoveryScope) async throws -> V2RoomLatestVisible? {
         try await databasePool.read { db in
             _ = try Self.requireRoomRecoveryScope(scope, db: db)
             guard let cursor = try Self.readCursor(db), cursor.state == .ready,
-                  let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_room_latest_visible WHERE room_id = ? AND personal_generation = ?",
+                  let row = try Row.fetchOne(try db.cachedStatement(sql: "SELECT * FROM v2_room_latest_visible WHERE room_id = ? AND personal_generation = ?"),
                     arguments: [roomID.rawValue, Int64(cursor.generation)]) else { return nil }
             let snapshot = try Self.decodeLatestVisible(row)
             return try Self.latestVisibleIsCurrent(snapshot, db: db) ? snapshot : nil
@@ -237,35 +255,35 @@ extension GRDBV2LocalSyncStore {
 
     static func latestVisibleIsCurrent(_ snapshot: V2RoomLatestVisible, db: GRDB.Database) throws -> Bool {
         let id = snapshot.roomID.rawValue
-        if let member = try Row.fetchOne(db, sql: "SELECT membership_revision, is_member FROM v2_room_membership_states WHERE room_id = ?", arguments: [id]) {
+        if let member = try Row.fetchOne(try db.cachedStatement(sql: "SELECT membership_revision, is_member FROM v2_room_membership_states WHERE room_id = ?"), arguments: [id]) {
             let revision = try recoveryInteger(member, "membership_revision")
             if revision > Int64(snapshot.membershipRevision) || (revision == Int64(snapshot.membershipRevision) && !(member["is_member"] as Bool)) { return false }
         }
-        if let state = try Row.fetchOne(db, sql: "SELECT owner_epoch, membership_revision, head FROM v2_room_sync_states WHERE room_id = ?", arguments: [id]) {
+        if let state = try Row.fetchOne(try db.cachedStatement(sql: "SELECT owner_epoch, membership_revision, head FROM v2_room_sync_states WHERE room_id = ?"), arguments: [id]) {
             guard (try recoveryInteger(state, "owner_epoch")) == Int64(snapshot.ownerEpoch),
                   (try recoveryInteger(state, "membership_revision")) == Int64(snapshot.membershipRevision),
                   (try recoveryInteger(state, "head")) <= Int64(snapshot.head) else { return false }
         }
-        let appliedRow = try Row.fetchOne(db, sql: "SELECT applied_room_sequence AS value FROM v2_group_event_cursors WHERE room_id = ?", arguments: [id])
+        let appliedRow = try Row.fetchOne(try db.cachedStatement(sql: "SELECT applied_room_sequence AS value FROM v2_group_event_cursors WHERE room_id = ?"), arguments: [id])
         let applied = try appliedRow.map { try recoveryInteger($0, "value") } ?? 0
         // Probe the sparse invalid-sequence index before MAX can hide bad rows.
         // Selecting message_id avoids preferring the room/sequence covering index.
-        let newestRow = try Row.fetchOne(db, sql: """
+        let newestRow = try Row.fetchOne(try db.cachedStatement(sql: """
             SELECT CASE WHEN EXISTS (
                 SELECT message_id FROM v2_message_projections WHERE room_id = ?
                   AND (typeof(room_sequence) <> 'integer' OR room_sequence < 1)
             ) THEN -1 ELSE (
                 SELECT COALESCE(MAX(room_sequence), 0) FROM v2_message_projections WHERE room_id = ?
             ) END AS value
-            """, arguments: [id, id])
+            """), arguments: [id, id])
         let newest = try newestRow.map { row -> Int64 in
             let value: DatabaseValue = row["value"]
             return value.isNull ? 0 : try recoveryInteger(row, "value")
         } ?? 0
         guard max(applied, newest) <= Int64(snapshot.head) else { return false }
         if let message = snapshot.latest {
-            if try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_message_tombstones WHERE message_id = ?)", arguments: [message.id.rawValue]) == true { return false }
-            if let local = try Row.fetchOne(db, sql: "SELECT room_id, message_revision, is_withdrawn FROM v2_message_projections WHERE message_id = ?", arguments: [message.id.rawValue]) {
+            if try Bool.fetchOne(try db.cachedStatement(sql: "SELECT EXISTS(SELECT 1 FROM v2_message_tombstones WHERE message_id = ?)"), arguments: [message.id.rawValue]) == true { return false }
+            if let local = try Row.fetchOne(try db.cachedStatement(sql: "SELECT room_id, message_revision, is_withdrawn FROM v2_message_projections WHERE message_id = ?"), arguments: [message.id.rawValue]) {
                 guard (local["room_id"] as String) == id, !(local["is_withdrawn"] as Bool),
                       (try recoveryInteger(local, "message_revision")) <= Int64(message.revision) else { return false }
             }

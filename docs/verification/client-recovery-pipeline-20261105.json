@@ -1,0 +1,821 @@
+{
+  "date": "2026-11-05",
+  "schema": "im-v2-current-82",
+  "serverRelease": "20261105T114222Z-38160e38",
+  "scenario": {
+    "rooms": 1000,
+    "messagesPerSecond": 100,
+    "durationSeconds": 300,
+    "messagesPerRun": 30000,
+    "client": "Mac Release SDK over real TLS with SQLite",
+    "priorState": "warm durable local state, same 1000 existing direct rooms",
+    "recoveryBudgetRooms": 100,
+    "progressReports": "synchronously awaited by the benchmark in every run; production App uses an independent reporter",
+    "admission": {
+      "deviceRate": 32,
+      "deviceBurst": 64,
+      "userRate": 128,
+      "userBurst": 256
+    }
+  },
+  "runs": {
+    "baseline": {
+      "load": {
+        "messagesSent": 30000,
+        "messagesAcknowledged": 30000,
+        "workloadFailed": 0,
+        "heartbeatMissed": 0,
+        "scenarioMessageQueueOverflowed": 0,
+        "coverageProofPassed": true,
+        "messageLatency": {
+          "count": 30000,
+          "maximum": 478.83,
+          "p50": 28,
+          "p95": 67,
+          "p99": 168
+        },
+        "messageEndToEndLatency": {
+          "count": 30000,
+          "maximum": 482.23,
+          "p50": 31,
+          "p95": 71,
+          "p99": 173
+        }
+      },
+      "delivery": {
+        "minimum_ms": 569.6886777877808,
+        "p50_ms": 12229.45487499237,
+        "p95_ms": 17212.820649147034,
+        "p99_ms": 19069.10765171051,
+        "maximum_ms": 30532.086968421936
+      },
+      "delivery_count": 30000,
+      "clock": [
+        {
+          "rtt_ms": 19.516944885253906,
+          "server_minus_mac_ms": 223.10948371887207
+        },
+        {
+          "rtt_ms": 19.356727600097656,
+          "server_minus_mac_ms": 223.54602813720703
+        }
+      ],
+      "source_observed_tail_seconds": 0.9282832145690918,
+      "client_tail_seconds": 7.462029218673706,
+      "dispatch_max": 13,
+      "dispatch_age_max_seconds": 0.125201,
+      "mac_peak_rss_mib": 98.25,
+      "mac_peak_cpu_percent": 51.5,
+      "cpu_peak_percent": {
+        "imtest-gateway-1": 159.86,
+        "imtest-postgres-1": 179.32
+      },
+      "account_target_transactions": 16620.0,
+      "account_target_body_sql": 49860.0,
+      "reconnect": [
+        {
+          "recoverySeconds": 0.206702375,
+          "stateRooms": 0,
+          "contentPulls": 0,
+          "rooms": 1002,
+          "accountReadySeconds": 0.1411325,
+          "directoryPages": 0,
+          "authSeconds": 0.116390417,
+          "round": 0
+        },
+        {
+          "recoverySeconds": 0.219619875,
+          "stateRooms": 0,
+          "contentPulls": 0,
+          "rooms": 1002,
+          "accountReadySeconds": 0.148017542,
+          "directoryPages": 0,
+          "authSeconds": 0.120328792,
+          "round": 1
+        },
+        {
+          "recoverySeconds": 0.199173416,
+          "stateRooms": 0,
+          "contentPulls": 0,
+          "rooms": 1002,
+          "accountReadySeconds": 0.130826875,
+          "directoryPages": 0,
+          "authSeconds": 0.1075255,
+          "round": 2
+        }
+      ],
+      "consistency": {
+        "rooms": 1000,
+        "messages": 318080,
+        "mismatchedRooms": 0,
+        "checks": [
+          "message count",
+          "ordered message IDs and body digest",
+          "room cursor equals authoritative head",
+          "conversation summary points to latest message"
+        ]
+      },
+      "database_all_work_delta": {
+        "db": {
+          "xact_commit": 314314,
+          "xact_rollback": 0,
+          "blks_read": 12936,
+          "blks_hit": 18323137,
+          "temp_bytes": 0,
+          "deadlocks": 0
+        },
+        "wal": {
+          "wal_records": 3216252,
+          "wal_fpi": 66972,
+          "wal_bytes": 588830243,
+          "wal_sync": 146875,
+          "wal_write": 146964,
+          "wal_buffers_full": 0
+        }
+      },
+      "recovery_stages": {
+        "delivery_observer": {
+          "p99_ms": 0.117625,
+          "p50_ms": 0.054958,
+          "sum_ms": 810.7981000000023,
+          "count": 13497,
+          "p95_ms": 0.091375,
+          "max_ms": 0.586417
+        },
+        "commitState": {
+          "p99_ms": 104.450667,
+          "p50_ms": 93.25075,
+          "sum_ms": 13029.784254999991,
+          "count": 141,
+          "p95_ms": 104.194917,
+          "max_ms": 116.286333
+        },
+        "personal_sync": {
+          "count": 363,
+          "max_ms": 759.576583,
+          "p50_ms": 35.068542,
+          "sum_ms": 50601.35959800003,
+          "p99_ms": 505.533792,
+          "p95_ms": 409.8445
+        },
+        "selectWork": {
+          "count": 363,
+          "max_ms": 8.3885,
+          "p50_ms": 0.490458,
+          "sum_ms": 733.4568280000004,
+          "p95_ms": 5.5475,
+          "p99_ms": 6.200791
+        },
+        "contentCommit": {
+          "count": 13497,
+          "max_ms": 615.021292,
+          "p50_ms": 3.597583,
+          "sum_ms": 56894.55287000022,
+          "p99_ms": 14.0765,
+          "p95_ms": 7.653584
+        },
+        "commitSummary": {
+          "count": 141,
+          "max_ms": 151.747334,
+          "sum_ms": 19079.626128000004,
+          "p50_ms": 137.907667,
+          "p99_ms": 151.073666,
+          "p95_ms": 147.792042
+        },
+        "contentBatch": {
+          "p99_ms": 259.624709,
+          "p50_ms": 129.737584,
+          "sum_ms": 118495.29737399996,
+          "count": 928,
+          "p95_ms": 196.119709,
+          "max_ms": 766.915167
+        },
+        "inspectContent": {
+          "p99_ms": 16.904,
+          "p50_ms": 0.355709,
+          "sum_ms": 2119.052092,
+          "count": 363,
+          "p95_ms": 15.972792,
+          "max_ms": 18.231125
+        },
+        "pass": {
+          "count": 363,
+          "max_ms": 2997.949792,
+          "sum_ms": 309008.80395000003,
+          "p50_ms": 39.193834,
+          "p95_ms": 2458.559875,
+          "p99_ms": 2678.3995
+        },
+        "recovery_budget": {
+          "p99_ms": 2058.82625,
+          "p50_ms": 1.491416,
+          "sum_ms": 226493.19045400005,
+          "count": 363,
+          "p95_ms": 1842.8617920000002,
+          "max_ms": 2415.581084
+        },
+        "fetchState": {
+          "count": 141,
+          "max_ms": 485.476208,
+          "sum_ms": 27578.781167,
+          "p50_ms": 189.715708,
+          "p99_ms": 406.009708,
+          "p95_ms": 286.659584
+        },
+        "fetchSummary": {
+          "p99_ms": 461.91725,
+          "p50_ms": 307.66475,
+          "sum_ms": 44924.31296600001,
+          "count": 141,
+          "p95_ms": 426.825666,
+          "max_ms": 502.989541
+        },
+        "progress_flush": {
+          "count": 363,
+          "max_ms": 448.101875,
+          "sum_ms": 31383.043664000015,
+          "p50_ms": 0.006209,
+          "p99_ms": 310.127667,
+          "p95_ms": 269.461042
+        }
+      },
+      "delivery_stages": {
+        "observed_to_commit": {
+          "count": 29782,
+          "max_ms": 28757.8341960907,
+          "sum_ms": 286628379.0807724,
+          "p50_ms": 11085.400104522705,
+          "p95_ms": 15851.107835769653,
+          "p99_ms": 17951.22003555298
+        },
+        "account_observed": {
+          "count": 29782,
+          "max_ms": 3342.3458337783813,
+          "p50_ms": 1231.8836450576782,
+          "sum_ms": 37189747.0304966,
+          "p99_ms": 2682.404637336731,
+          "p95_ms": 2351.833939552307
+        }
+      },
+      "sdk_retries": 0,
+      "pending_rooms_peak": 690,
+      "load_counts": {
+        "stateRooms": 13677,
+        "directoryPages": 0,
+        "contentPulls": 928,
+        "completedAt": 1793887347.0425692
+      },
+      "clock_offset_ms": 223.32775592803955,
+      "local_recovery_pending": 0
+    },
+    "optimized": {
+      "load": {
+        "messagesSent": 30000,
+        "messagesAcknowledged": 30000,
+        "workloadFailed": 0,
+        "heartbeatMissed": 0,
+        "scenarioMessageQueueOverflowed": 0,
+        "coverageProofPassed": true,
+        "messageLatency": {
+          "count": 30000,
+          "maximum": 715.03,
+          "p50": 32,
+          "p95": 114,
+          "p99": 262
+        },
+        "messageEndToEndLatency": {
+          "count": 30000,
+          "maximum": 715.8,
+          "p50": 33,
+          "p95": 116,
+          "p99": 264
+        }
+      },
+      "delivery": {
+        "minimum_ms": 680.7658672332764,
+        "p50_ms": 8818.98283958435,
+        "p95_ms": 16923.290729522705,
+        "p99_ms": 18549.088954925537,
+        "maximum_ms": 33869.070053100586
+      },
+      "delivery_count": 30000,
+      "clock": [
+        {
+          "rtt_ms": 17.731666564941406,
+          "server_minus_mac_ms": 227.95391082763672
+        },
+        {
+          "rtt_ms": 21.559953689575195,
+          "server_minus_mac_ms": 228.29580307006836
+        }
+      ],
+      "source_observed_tail_seconds": 0.46999502182006836,
+      "client_tail_seconds": 1.5901412963867188,
+      "dispatch_max": 20,
+      "dispatch_age_max_seconds": 0.144202,
+      "mac_peak_rss_mib": 96.875,
+      "mac_peak_cpu_percent": 64.3,
+      "cpu_peak_percent": {
+        "imtest-gateway-1": 148.41,
+        "imtest-postgres-1": 140.79
+      },
+      "account_target_transactions": 13025.0,
+      "account_target_body_sql": 39075.0,
+      "reconnect": [
+        {
+          "rooms": 1002,
+          "recoverySeconds": 0.33675775,
+          "directoryPages": 0,
+          "round": 0,
+          "authSeconds": 0.125237125,
+          "contentPulls": 0,
+          "accountReadySeconds": 0.15515625,
+          "stateRooms": 0
+        },
+        {
+          "rooms": 1002,
+          "recoverySeconds": 0.464612458,
+          "directoryPages": 0,
+          "round": 1,
+          "authSeconds": 0.128799208,
+          "contentPulls": 0,
+          "accountReadySeconds": 0.160405917,
+          "stateRooms": 0
+        },
+        {
+          "rooms": 1002,
+          "recoverySeconds": 0.298189792,
+          "directoryPages": 0,
+          "round": 2,
+          "authSeconds": 0.2021365,
+          "contentPulls": 0,
+          "accountReadySeconds": 0.226499167,
+          "stateRooms": 0
+        }
+      ],
+      "consistency": {
+        "rooms": 1000,
+        "messages": 348080,
+        "mismatchedRooms": 0,
+        "checks": [
+          "message count",
+          "ordered message IDs and body digest",
+          "room cursor equals authoritative head",
+          "conversation summary points to latest message"
+        ]
+      },
+      "database_all_work_delta": {
+        "db": {
+          "xact_commit": 267440,
+          "xact_rollback": 0,
+          "blks_read": 36873,
+          "blks_hit": 16849421,
+          "temp_bytes": 0,
+          "deadlocks": 0
+        },
+        "wal": {
+          "wal_records": 3146920,
+          "wal_fpi": 63072,
+          "wal_bytes": 574800567,
+          "wal_sync": 135897,
+          "wal_write": 135983,
+          "wal_buffers_full": 0
+        }
+      },
+      "recovery_stages": {
+        "progress_flush": {
+          "p95_ms": 322.526167,
+          "sum_ms": 39009.017239,
+          "p50_ms": 0.007416,
+          "count": 351,
+          "p99_ms": 377.035,
+          "max_ms": 500.758083
+        },
+        "fetchSummary": {
+          "p99_ms": 695.022167,
+          "p50_ms": 322.83225,
+          "sum_ms": 52978.88975100002,
+          "count": 157,
+          "p95_ms": 466.80825,
+          "max_ms": 871.040167
+        },
+        "commitState": {
+          "sum_ms": 12858.124876999995,
+          "p50_ms": 84.4375,
+          "count": 157,
+          "p99_ms": 106.444333,
+          "p95_ms": 101.101541,
+          "max_ms": 183.488458
+        },
+        "personal_sync": {
+          "p95_ms": 470.742583,
+          "p50_ms": 117.503,
+          "count": 351,
+          "p99_ms": 670.449916,
+          "max_ms": 743.257917,
+          "sum_ms": 60111.63806600001
+        },
+        "selectWork": {
+          "p95_ms": 5.626,
+          "sum_ms": 765.8033680000002,
+          "count": 351,
+          "p50_ms": 0.66925,
+          "p99_ms": 7.122,
+          "max_ms": 7.528167
+        },
+        "contentCommit": {
+          "p95_ms": 102.922958,
+          "sum_ms": 66741.14658199996,
+          "count": 1027,
+          "p50_ms": 62.381959,
+          "p99_ms": 120.786167,
+          "max_ms": 155.94125
+        },
+        "commitSummary": {
+          "p95_ms": 145.256625,
+          "sum_ms": 20116.135592999995,
+          "count": 157,
+          "p50_ms": 129.408792,
+          "p99_ms": 150.2255,
+          "max_ms": 153.024042
+        },
+        "fetchState": {
+          "sum_ms": 32394.809827999972,
+          "p50_ms": 191.992708,
+          "count": 157,
+          "p99_ms": 389.268041,
+          "p95_ms": 332.83175,
+          "max_ms": 597.793084
+        },
+        "delivery_observer": {
+          "p95_ms": 0.082834,
+          "sum_ms": 713.4299279999999,
+          "p50_ms": 0.042167,
+          "count": 15093,
+          "p99_ms": 0.113458,
+          "max_ms": 0.309542
+        },
+        "pass": {
+          "max_ms": 3148.601,
+          "p50_ms": 122.911334,
+          "count": 351,
+          "sum_ms": 304857.17050299986,
+          "p95_ms": 2358.907583,
+          "p99_ms": 2724.279333
+        },
+        "inspectContent": {
+          "p95_ms": 14.901583,
+          "sum_ms": 2229.4739170000007,
+          "count": 351,
+          "p50_ms": 0.470042,
+          "p99_ms": 15.2715,
+          "max_ms": 16.052333
+        },
+        "contentBatch": {
+          "count": 1027,
+          "p50_ms": 133.53875,
+          "sum_ms": 160124.94489100005,
+          "p99_ms": 640.734625,
+          "p95_ms": 280.188584,
+          "max_ms": 1007.905583
+        },
+        "recovery_budget": {
+          "p95_ms": 1642.412916,
+          "p50_ms": 1.991709,
+          "count": 351,
+          "p99_ms": 1976.548917,
+          "max_ms": 2488.977875,
+          "sum_ms": 205192.93933599995
+        }
+      },
+      "delivery_stages": {
+        "observed_to_commit": {
+          "p99_ms": 17415.0869846344,
+          "count": 29691,
+          "sum_ms": 232251920.40991783,
+          "p50_ms": 7874.937057495117,
+          "p95_ms": 15728.193759918213,
+          "max_ms": 32877.634048461914
+        },
+        "account_observed": {
+          "p99_ms": 2766.1988735198975,
+          "max_ms": 3569.291830062866,
+          "sum_ms": 34364298.0325222,
+          "count": 29691,
+          "p50_ms": 1115.7188415527344,
+          "p95_ms": 2286.6809368133545
+        }
+      },
+      "sdk_retries": 0,
+      "pending_rooms_peak": 670,
+      "load_counts": {
+        "stateRooms": 15443,
+        "completedAt": 1793888761.9603992,
+        "directoryPages": 0,
+        "contentPulls": 1027
+      },
+      "clock_offset_ms": 228.12485694885254,
+      "local_recovery_pending": 0
+    },
+    "cached": {
+      "load": {
+        "messagesSent": 30000,
+        "messagesAcknowledged": 30000,
+        "workloadFailed": 0,
+        "heartbeatMissed": 0,
+        "scenarioMessageQueueOverflowed": 0,
+        "coverageProofPassed": true,
+        "messageLatency": {
+          "count": 30000,
+          "maximum": 321.54,
+          "p50": 26,
+          "p95": 105,
+          "p99": 120
+        },
+        "messageEndToEndLatency": {
+          "count": 30000,
+          "maximum": 324.02,
+          "p50": 27,
+          "p95": 106,
+          "p99": 121
+        }
+      },
+      "delivery": {
+        "minimum_ms": 365.5366897583008,
+        "p50_ms": 2810.8229637145996,
+        "p95_ms": 3980.034589767456,
+        "p99_ms": 4584.510564804077,
+        "maximum_ms": 6200.395822525024
+      },
+      "delivery_count": 30000,
+      "clock": [
+        {
+          "rtt_ms": 22.346019744873047,
+          "server_minus_mac_ms": 229.9354076385498
+        },
+        {
+          "rtt_ms": 15.068769454956055,
+          "server_minus_mac_ms": 235.5520725250244
+        }
+      ],
+      "source_observed_tail_seconds": 0.40308094024658203,
+      "client_tail_seconds": 0.4543800354003906,
+      "dispatch_max": 20,
+      "dispatch_age_max_seconds": 0.126999,
+      "mac_peak_rss_mib": 99.78125,
+      "mac_peak_cpu_percent": 12.9,
+      "cpu_peak_percent": {
+        "imtest-gateway-1": 169.31,
+        "imtest-postgres-1": 141.44
+      },
+      "account_target_transactions": 12703.0,
+      "account_target_body_sql": 38109.0,
+      "reconnect": [
+        {
+          "recoverySeconds": 0.242476166,
+          "round": 0,
+          "stateRooms": 0,
+          "directoryPages": 0,
+          "accountReadySeconds": 0.116371458,
+          "authSeconds": 0.095434208,
+          "rooms": 1002,
+          "contentPulls": 0
+        },
+        {
+          "recoverySeconds": 0.20143875,
+          "round": 1,
+          "stateRooms": 0,
+          "directoryPages": 0,
+          "accountReadySeconds": 0.136583833,
+          "authSeconds": 0.114703375,
+          "rooms": 1002,
+          "contentPulls": 0
+        },
+        {
+          "recoverySeconds": 0.184043125,
+          "round": 2,
+          "stateRooms": 0,
+          "directoryPages": 0,
+          "accountReadySeconds": 0.125817334,
+          "authSeconds": 0.105601125,
+          "rooms": 1002,
+          "contentPulls": 0
+        }
+      ],
+      "consistency": {
+        "rooms": 1000,
+        "messages": 378080,
+        "mismatchedRooms": 0,
+        "checks": [
+          "message count",
+          "ordered message IDs and body digest",
+          "room cursor equals authoritative head",
+          "conversation summary points to latest message"
+        ]
+      },
+      "database_all_work_delta": {
+        "db": {
+          "xact_commit": 280340,
+          "xact_rollback": 0,
+          "blks_read": 83646,
+          "blks_hit": 17724031,
+          "temp_bytes": 0,
+          "deadlocks": 0
+        },
+        "wal": {
+          "wal_records": 3329529,
+          "wal_fpi": 63723,
+          "wal_bytes": 590021608,
+          "wal_sync": 138767,
+          "wal_write": 138856,
+          "wal_buffers_full": 0
+        }
+      },
+      "recovery_stages": {
+        "pass": {
+          "p50_ms": 116.406,
+          "sum_ms": 287119.28307300014,
+          "p95_ms": 1278.8219589999999,
+          "p99_ms": 1372.5462499999999,
+          "max_ms": 1472.612083,
+          "count": 507
+        },
+        "commitSummary": {
+          "p99_ms": 39.406917,
+          "count": 244,
+          "p95_ms": 27.198625,
+          "max_ms": 44.97025,
+          "p50_ms": 18.211166,
+          "sum_ms": 4616.898373000003
+        },
+        "commitState": {
+          "p50_ms": 12.959458,
+          "sum_ms": 3567.5337520000026,
+          "p95_ms": 32.151416,
+          "p99_ms": 37.168375,
+          "max_ms": 39.051958,
+          "count": 244
+        },
+        "selectWork": {
+          "p99_ms": 2.716625,
+          "count": 507,
+          "p95_ms": 2.432834,
+          "max_ms": 4.8655,
+          "p50_ms": 0.547959,
+          "sum_ms": 431.15634799999987
+        },
+        "inspectContent": {
+          "count": 507,
+          "p99_ms": 8.248875,
+          "p95_ms": 7.719917,
+          "max_ms": 8.546292,
+          "p50_ms": 0.29725,
+          "sum_ms": 1540.37358
+        },
+        "contentCommit": {
+          "p50_ms": 7.026916,
+          "sum_ms": 16857.135928999985,
+          "p95_ms": 26.493,
+          "max_ms": 40.366583,
+          "count": 1647,
+          "p99_ms": 29.843291
+        },
+        "contentBatch": {
+          "p99_ms": 152.747375,
+          "count": 1647,
+          "p95_ms": 129.806208,
+          "max_ms": 198.103708,
+          "p50_ms": 51.431375,
+          "sum_ms": 98785.18254100003
+        },
+        "progress_flush": {
+          "p50_ms": 0.00525,
+          "sum_ms": 57427.728786999985,
+          "p95_ms": 301.38225,
+          "max_ms": 488.131917,
+          "count": 507,
+          "p99_ms": 331.966541
+        },
+        "personal_sync": {
+          "p50_ms": 91.125916,
+          "sum_ms": 47599.97714199999,
+          "p95_ms": 220.414375,
+          "p99_ms": 247.153666,
+          "max_ms": 523.056542,
+          "count": 507
+        },
+        "delivery_observer": {
+          "p50_ms": 0.045542,
+          "sum_ms": 1284.4060430000075,
+          "p95_ms": 0.102666,
+          "max_ms": 1.828416,
+          "count": 23690,
+          "p99_ms": 0.147917
+        },
+        "fetchState": {
+          "p99_ms": 311.359333,
+          "count": 244,
+          "p95_ms": 286.12775,
+          "max_ms": 524.753708,
+          "p50_ms": 184.94075,
+          "sum_ms": 47660.00058300001
+        },
+        "fetchSummary": {
+          "count": 244,
+          "p99_ms": 432.758792,
+          "p95_ms": 375.249542,
+          "p50_ms": 293.145875,
+          "max_ms": 613.028458,
+          "sum_ms": 72434.19896299996
+        },
+        "recovery_budget": {
+          "p50_ms": 1.458583,
+          "sum_ms": 181518.88230100012,
+          "p95_ms": 886.750208,
+          "max_ms": 1060.521875,
+          "p99_ms": 962.080875,
+          "count": 507
+        }
+      },
+      "delivery_stages": {
+        "account_observed": {
+          "p50_ms": 707.7245712280273,
+          "sum_ms": 21146186.29860878,
+          "p95_ms": 1314.7788047790527,
+          "max_ms": 1758.833885192871,
+          "p99_ms": 1485.3277206420898,
+          "count": 29586
+        },
+        "observed_to_commit": {
+          "p50_ms": 1981.1201095581055,
+          "sum_ms": 61084881.89911842,
+          "p95_ms": 3348.954200744629,
+          "p99_ms": 3756.5901279449463,
+          "max_ms": 5847.54490852356,
+          "count": 29586
+        }
+      },
+      "sdk_retries": 0,
+      "pending_rooms_peak": 280,
+      "load_counts": {
+        "stateRooms": 24272,
+        "completedAt": 1793890021.791091,
+        "directoryPages": 0,
+        "contentPulls": 1647
+      },
+      "clock_offset_ms": 232.7437400817871,
+      "local_recovery_pending": 0
+    }
+  },
+  "changes": [
+    "bounded SQLite batch commits with unchanged per-room authorization, generation, revision and ordering checks",
+    "at most two disjoint room-body request batches in flight; per-room flight reservations retained",
+    "connection-owned prepared statements for fixed hot recovery and projection SQL; all values rebound and permission queries re-executed",
+    "progress reported only after the durable transaction commits; cancellation drains owned work"
+  ],
+  "validation": {
+    "debugTestsPassed": 235,
+    "releaseTestsPassed": 65,
+    "releaseSkippedOptInTests": 2,
+    "liveTestsPassed": 3,
+    "orderedRoomConsistencyPassedAllRuns": true,
+    "localThousandRoomDebugSeconds": {
+      "beforePreparedStatements": 8.875661792,
+      "withPreparedStatements": 1.361756625
+    },
+    "localThousandRoomNetwork": "deterministic stub; actual SQLite and production SDK",
+    "documentationContractPassed": true,
+    "markdownLinksPassed": true,
+    "diffWhitespacePassed": true
+  },
+  "postRun": {
+    "sourcePending": 0,
+    "snapshotReady": 0,
+    "localRecoveryPending": 0,
+    "temporaryTokensRevokedPerRun": 1001,
+    "temporaryTestDevicesRevokedPerRun": 1001,
+    "originalPhoneDeviceUnchanged": true,
+    "servicesHealthy": true,
+    "oom": false,
+    "fsync": "on",
+    "synchronous_commit": "on"
+  },
+  "limitations": [
+    "No phone UI or iOS energy measurement; this is a Mac SDK result.",
+    "One 5-minute run per implementation; not an isolated hardware capacity or long-term tail-latency guarantee.",
+    "All 30000 messages contribute to end-to-end delivery percentiles. Stage decomposition includes only messages whose covering watermark was observed before body arrival.",
+    "Delivery timestamps are observed after SQLite commit, corrected using the average of before/after minimum-RTT server-minus-Mac offsets.",
+    "15-second resource and queue samples are observed peaks, not continuous upper bounds.",
+    "Baseline additionally had one 3-second CPU sample.",
+    "Stage durations can nest and concurrent body batches can overlap; do not sum them as exclusive CPU or critical-path time.",
+    "Global PostgreSQL deltas include authentication, background work and monitoring. I/O timings were not enabled, so no WAL fsync tail-latency claim.",
+    "Sender process exit includes a 5-second post-drain hold. Tail-to-sync confirmation is not a per-message delay."
+  ],
+  "interpretation": {
+    "cause": "Repeated compilation of hot SQLite SQL and its visibility/list triggers, combined with serial recovery stages, prolongs each queue rotation. Watermark delivery was already much faster than body recovery.",
+    "batchOnly": "P50 improved, but maximum regressed; transaction reduction alone was insufficient.",
+    "final": "Prepared statements plus bounded batching reduced all receiver delay percentiles in this run without reducing visibility or persistence checks.",
+    "remaining": "State/summary network reads and benchmark synchronous progress reporting now dominate measured stages. Seconds of delivery latency remain."
+  },
+  "evidenceDirectory": "/tmp/im-recovery-stages-20261105"
+}

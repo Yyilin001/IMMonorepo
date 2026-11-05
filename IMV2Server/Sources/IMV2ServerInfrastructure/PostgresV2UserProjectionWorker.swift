@@ -56,18 +56,15 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 throw V2UserProjectionWorkerError.corruptPersistence
             }
             guard let checkpoint = try await sql.raw("""
-                SELECT checkpoint.user_id, checkpoint.projected_sequence
+                SELECT checkpoint.user_id, checkpoint.projected_sequence, ready.revision AS ready_revision
                 FROM \(unsafeRaw: table("user_projection_ready")) AS ready
                 JOIN \(unsafeRaw: table("user_projection_checkpoints")) AS checkpoint
                   ON checkpoint.user_id = ready.user_id
-                JOIN \(unsafeRaw: table("user_sync_sequences")) AS sequence
-                  ON sequence.user_id = checkpoint.user_id
                 WHERE ready.available_at <= \(bind: now)
-                  AND checkpoint.projected_sequence < sequence.next_sequence
                   AND checkpoint.state = 'ready'
                   AND (checkpoint.next_attempt_at IS NULL OR checkpoint.next_attempt_at <= \(bind: now))
                 ORDER BY ready.available_at, ready.enqueued_at, ready.user_id
-                FOR UPDATE OF ready, checkpoint SKIP LOCKED
+                FOR UPDATE OF checkpoint SKIP LOCKED
                 LIMIT 1
                 """).first(decoding: ProjectionCheckpointRow.self) else {
                 return .init(claimed: false, appliedRecordCount: 0)
@@ -81,7 +78,6 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 ORDER BY log.user_sync_sequence
                 LIMIT \(bind: batchSize)
                 """).all(decoding: ProjectionSyncRow.self)
-            guard !rows.isEmpty else { throw V2UserProjectionWorkerError.corruptPersistence }
             guard checkpoint.projectedSequence >= 0 else { throw V2UserProjectionWorkerError.corruptPersistence }
             var lastApplied = checkpoint.projectedSequence
             var rowIndex = 0
@@ -90,6 +86,17 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 try Task.checkCancellation()
                 guard lastApplied < Int64.max, row.sequence == lastApplied + 1 else {
                     throw V2UserProjectionWorkerError.corruptPersistence
+                }
+                if row.projectionKind == "room_head" {
+                    var end = rowIndex + 1
+                    while end < rows.count && rows[end].projectionKind == "room_head" { end += 1 }
+                    let heads = Array(rows[rowIndex..<end])
+                    for (offset, head) in heads.enumerated() {
+                        guard head.sequence == lastApplied + Int64(offset) + 1 else { throw V2UserProjectionWorkerError.corruptPersistence }
+                    }
+                    try await applyRoomHeads(heads, checkpoint: checkpoint, sql: sql)
+                    lastApplied = heads[heads.count-1].sequence; rowIndex = end
+                    continue
                 }
                 if ["message", "message_reaction", "group_capability", "moderation"].contains(row.projectionKind) {
                     throw ProjectionApplyFailure(userID: checkpoint.userID,
@@ -133,16 +140,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 rowIndex += 1
             }
             try await sql.raw("""
-                WITH locked_sequence AS MATERIALIZED (
-                    -- Delivery reserves this same row before its Sync Log
-                    -- insert. Lock it before deciding whether the durable
-                    -- ready row is obsolete, so a concurrent v6 enqueue is
-                    -- ordered either wholly before or wholly after removal.
-                    SELECT user_id, next_sequence
-                    FROM \(unsafeRaw: table("user_sync_sequences"))
-                    WHERE user_id = \(bind: checkpoint.userID)
-                    FOR UPDATE
-                ), advanced AS (
+                WITH advanced AS (
                     UPDATE \(unsafeRaw: table("user_projection_checkpoints"))
                     SET projected_sequence = \(bind: lastApplied), state = 'ready',
                         failure_count = 0, failed_sequence = NULL,
@@ -150,20 +148,26 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                         paused_at = NULL, updated_at = \(bind: now)
                     WHERE user_id = \(bind: checkpoint.userID)
                     RETURNING user_id, projected_sequence
-                ), removed_if_caught_up AS (
+                ), completed AS (
                     DELETE FROM \(unsafeRaw: table("user_projection_ready")) AS ready
-                    USING advanced, locked_sequence AS sequence
+                    USING advanced
                     WHERE ready.user_id = advanced.user_id
-                      AND sequence.user_id = advanced.user_id
-                      AND sequence.next_sequence <= advanced.projected_sequence
+                      AND ready.revision = \(bind: checkpoint.readyRevision)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM \(unsafeRaw: table("user_sync_log")) log
+                          WHERE log.user_id=advanced.user_id
+                            AND log.user_sync_sequence>advanced.projected_sequence)
                     RETURNING ready.user_id
                 )
                 UPDATE \(unsafeRaw: table("user_projection_ready")) AS ready
                 SET available_at = \(bind: now), updated_at = \(bind: now)
-                FROM advanced, locked_sequence AS sequence
-                WHERE ready.user_id = advanced.user_id
-                  AND sequence.user_id = advanced.user_id
-                  AND sequence.next_sequence > advanced.projected_sequence
+                FROM advanced
+                WHERE ready.user_id=advanced.user_id
+                  AND ready.revision=\(bind: checkpoint.readyRevision)
+                  AND EXISTS (
+                      SELECT 1 FROM \(unsafeRaw: table("user_sync_log")) log
+                      WHERE log.user_id=advanced.user_id
+                        AND log.user_sync_sequence>advanced.projected_sequence)
                 """).run()
             return .init(claimed: true, appliedRecordCount: rows.count)
             }
@@ -725,8 +729,8 @@ private struct ProjectionFailureCountRow: Decodable {
 }
 private struct V2ClientLikeRecord { let sequence: UInt64; let sourceEventID: EventID; let projectionKind: String; let payload: Data }
 private struct ProjectionCheckpointRow: Decodable {
-    let userID: UUID; let projectedSequence: Int64
-    enum CodingKeys: String, CodingKey { case userID = "user_id", projectedSequence = "projected_sequence" }
+    let userID: UUID; let projectedSequence: Int64; let readyRevision: Int64
+    enum CodingKeys: String, CodingKey { case userID = "user_id", projectedSequence = "projected_sequence", readyRevision = "ready_revision" }
 }
 private struct ProjectionSyncRow: Decodable {
     let sequence: Int64
@@ -761,3 +765,100 @@ private struct OwnReadWatermarkPayload: Decodable {
         case recordedAtMilliseconds = "recorded_at_ms"
     }
 }
+
+extension PostgresV2UserProjectionWorker {
+    /// Control records split runs. Every accepted intermediate version remains
+    /// addressable at its original account sequence, including snapshot cuts.
+    private func applyRoomHeads(_ rows: [ProjectionSyncRow], checkpoint: ProjectionCheckpointRow, sql: any SQLDatabase) async throws {
+        struct Head {
+            let row: ProjectionSyncRow
+            let value: V2AccountRoomHead
+            let key: String
+        }
+        var heads: [Head] = []
+        for row in rows {
+            do {
+                guard let json = row.payloadJSON else { throw V2UserProjectionWorkerError.invalidPayload }
+                let value = try JSONDecoder().decode(V2AccountRoomHead.self, from: Data(json.utf8))
+                let key = try V2SnapshotProjectionKey(projectionKind: "room_head", entityKey: value.roomID.rawValue)
+                heads.append(.init(row: row, value: value, key: key.entityKey))
+            } catch {
+                throw ProjectionApplyFailure(userID: checkpoint.userID, expectedCheckpoint: checkpoint.projectedSequence,
+                    failedSequence: row.sequence, sourceEventID: row.sourceEventID, code: "invalid_payload")
+            }
+        }
+        var requested: SQLQueryString = ""
+        for (index, head) in heads.enumerated() {
+            if index > 0 { requested += "," }
+            requested += "(\(bind: head.key)::text,\(bind: head.value.roomID.uuidValue!)::uuid)"
+        }
+        let states = try await sql.raw("""
+            WITH requested(entity_key,room_id) AS (VALUES \(requested))
+            SELECT DISTINCT requested.entity_key,version.payload::text AS payload_json,
+                EXISTS(SELECT 1 FROM \(unsafeRaw: table("user_projection_versions")) membership
+                    WHERE membership.user_id=\(bind: checkpoint.userID) AND membership.projection_kind='room'
+                      AND membership.scope_room_id=requested.room_id AND membership.valid_to_sequence IS NULL
+                      AND membership.payload->>'viewer_is_member'='false') AS revoked
+            FROM requested LEFT JOIN \(unsafeRaw: table("user_projection_versions")) version
+              ON version.user_id=\(bind: checkpoint.userID) AND version.projection_kind='room_head'
+             AND version.entity_key=requested.entity_key AND version.valid_to_sequence IS NULL
+            """).all(decoding: SnapshotHeadState.self)
+        var current: [String: V2AccountRoomHead] = [:]
+        let revoked = Set(states.filter(\.revoked).map(\.entity_key))
+        for state in states {
+            if let json = state.payload_json {
+                current[state.entity_key] = try JSONDecoder().decode(V2AccountRoomHead.self, from: Data(json.utf8))
+            }
+        }
+        struct Version {
+            let head: Head
+            var through: Int64?
+        }
+        var versions: [Version] = [], lastIndex: [String: Int] = [:], firstSequence: [String: Int64] = [:]
+        for head in heads {
+            try Task.checkCancellation()
+            if revoked.contains(head.key) { continue }
+            if let prior = current[head.key] {
+                if head.value.roomSequence < prior.roomSequence { continue }
+                if head.value.roomSequence == prior.roomSequence && head.value == prior { continue }
+                guard head.value.roomSequence > prior.roomSequence,
+                      head.value.membershipRevision >= prior.membershipRevision else {
+                    throw ProjectionApplyFailure(userID: checkpoint.userID, expectedCheckpoint: checkpoint.projectedSequence,
+                        failedSequence: head.row.sequence, sourceEventID: head.row.sourceEventID, code: "invalid_payload")
+                }
+            }
+            current[head.key] = head.value
+            if let last = lastIndex[head.key] { versions[last].through = head.row.sequence }
+            else { firstSequence[head.key] = head.row.sequence }
+            lastIndex[head.key] = versions.count; versions.append(.init(head: head))
+        }
+        guard !versions.isEmpty else { return }
+        var closing: SQLQueryString = ""
+        for (index, item) in firstSequence.sorted(by: { $0.key < $1.key }).enumerated() {
+            if index > 0 { closing += "," }
+            closing += "(\(bind: item.key)::text,\(bind: item.value)::bigint)"
+        }
+        try await sql.raw("""
+            UPDATE \(unsafeRaw: table("user_projection_versions")) version SET valid_to_sequence=closing.sequence
+            FROM (VALUES \(closing)) closing(entity_key,sequence)
+            WHERE version.user_id=\(bind: checkpoint.userID) AND version.projection_kind='room_head'
+              AND version.entity_key=closing.entity_key AND version.valid_to_sequence IS NULL
+            """).run()
+        var inserted: SQLQueryString = ""
+        for (index, version) in versions.enumerated() {
+            if index > 0 { inserted += "," }
+            let head = version.head
+            inserted += """
+                (\(bind: checkpoint.userID),'room_head',\(bind: head.key),\(bind: head.value.roomID.uuidValue!),
+                 \(bind: head.row.sequence),\(bind: version.through),\(bind: head.row.sourceEventID),
+                 \(bind: head.row.payloadJSON!)::jsonb,\(bind: head.row.createdAt))
+                """
+        }
+        try await sql.raw("""
+            INSERT INTO \(unsafeRaw: table("user_projection_versions"))
+                (user_id,projection_kind,entity_key,scope_room_id,valid_from_sequence,valid_to_sequence,source_event_id,payload,created_at)
+            VALUES \(inserted)
+            """).run()
+    }
+}
+private struct SnapshotHeadState: Decodable { let entity_key: String; let payload_json: String?; let revoked: Bool }

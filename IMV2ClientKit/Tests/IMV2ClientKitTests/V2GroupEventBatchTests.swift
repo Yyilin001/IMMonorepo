@@ -55,7 +55,11 @@ struct V2GroupEventBatchTests {
         let room = RoomID(uuid: UUID()), store = BatchCursorStore(), wire = BatchFlightWire()
         let engine = V2GroupEventSyncEngine(transport: wire, store: store)
         let batch = Task { try await engine.synchronizePages(targets: [(room, 1)],
-            commit: { try await store.applyGroupEventPageReportingChanges($0) }, unavailable: { _ in Issue.record("Unexpected denial") }) }
+            commit: { pages in
+                var results: [RoomID: V2GroupEventPageCommit] = [:]
+                for page in pages { results[page.roomID] = try await store.applyGroupEventPageReportingChanges(page) }
+                return results
+            }, unavailable: { _ in Issue.record("Unexpected denial") }) }
         await wire.waitUntilStarted()
         #expect(try await !engine.applyOnlineEvents(.init(roomID: room, highWatermark: 1, liveEvents: [])))
         if cancel { batch.cancel() }

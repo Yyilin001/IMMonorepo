@@ -562,82 +562,93 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         return try applyGroupEventPageReportingChanges(page, recoveryWork: work)
     }
 
-    private func applyGroupEventPageReportingChanges(_ page: V2ClientGroupEventPage, recoveryWork: V2RoomRecoveryWork?) throws -> V2GroupEventPageCommit {
-        try databasePool.write { db in
-            try Self.requireProjectionWritesUnfenced(db: db)
-            if let recoveryWork { try Self.requireRoomRecoveryPageAuthorization(recoveryWork, db: db) }
-            let cursorRow = try Row.fetchOne(
-                db,
-                sql: "SELECT applied_room_sequence, log_trimmed_through_room_sequence FROM v2_group_event_cursors WHERE room_id = ?",
-                arguments: [page.roomID.rawValue]
-            )
-            let cursor = try cursorRow.map { try Self.storageUnsigned($0, column: "applied_room_sequence") } ?? 0
-            if let cursorRow { _ = try Self.storageUnsigned(cursorRow, column: "log_trimmed_through_room_sequence") }
-            guard page.nextRoomSequence >= cursor,
-                  zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
-                  (page.events.last?.roomSequence ?? cursor) <= page.nextRoomSequence,
-                  !page.hasMore || page.nextRoomSequence > cursor
-            else { throw V2ClientSyncError.invalidRecordOrdering }
-            var insertedEvents = 0
-            for event in page.events {
-                if event.roomSequence <= cursor {
-                    guard let existing = try Row.fetchOne(
-                        db,
-                        sql: "SELECT source_event_id, projection_kind, payload FROM v2_group_events WHERE room_id = ? AND room_sequence = ?",
-                        arguments: [page.roomID.rawValue, try Self.storageInteger(event.roomSequence)]
-                    ) else { throw V2ClientSyncError.invalidRecordOrdering }
-                    let sourceEventID: String = existing["source_event_id"]
-                    let projectionKind: String = existing["projection_kind"]
-                    let payload: Data = existing["payload"]
-                    guard sourceEventID == event.sourceEventID.rawValue, projectionKind == event.projectionKind, payload == event.payload else {
-                        throw V2ClientSyncError.invalidRecordOrdering
-                    }
-                    continue
-                }
-                let record = try V2ClientSyncRecord(sequence: event.roomSequence, sourceEventID: event.sourceEventID, projectionKind: event.projectionKind, payload: event.payload)
-                try Self.applyRoomEventProjection(record, roomID: page.roomID, db: db)
-                try db.execute(
-                    sql: "INSERT INTO v2_group_events (room_id, room_sequence, source_event_id, projection_kind, payload) VALUES (?, ?, ?, ?, ?)",
-                    arguments: [page.roomID.rawValue, try Self.storageInteger(event.roomSequence), event.sourceEventID.rawValue, event.projectionKind, event.payload]
-                )
-                insertedEvents += 1
+    /// All pages retain independent room order and authorization fences. Progress
+    /// callbacks run only after this complete SQLite transaction has committed.
+    func applyRoomRecoveryPages(_ items: [(page: V2ClientGroupEventPage, work: V2RoomRecoveryWork)]) async throws -> [RoomID: V2GroupEventPageCommit] {
+        guard (1...16).contains(items.count), Set(items.map { $0.page.roomID }).count == items.count,
+              items.allSatisfy({ $0.page.roomID == $0.work.roomID }) else { throw V2RoomRecoveryPersistenceError.invalidWork }
+        return try await databasePool.write { db in
+            var result: [RoomID: V2GroupEventPageCommit] = [:]
+            for item in items {
+                try Task.checkCancellation()
+                result[item.page.roomID] = try Self.applyGroupEventPage(item.page, recoveryWork: item.work, db: db)
             }
-            // 缺口判定使用本事务开头验证过的游标：本页之前本地只应用到 cursor，
-            // 服务端已裁剪至 trimmed；若它超过旧游标，两者之间就是永久缺口。
-            let trimmedThrough = try Self.storageInteger(page.logTrimmedThroughRoomSequence)
-            let hasGap = page.logTrimmedThroughRoomSequence > cursor
-            try db.execute(
-                sql: """
-                    INSERT INTO v2_group_event_cursors
-                        (room_id, applied_room_sequence, log_trimmed_through_room_sequence, history_incomplete)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(room_id) DO UPDATE SET
-                        applied_room_sequence = excluded.applied_room_sequence,
-                        -- 下界只增不减：服务端裁剪过的历史不会因为一次旧响应而"变完整"。
-                        log_trimmed_through_room_sequence = MAX(
-                            v2_group_event_cursors.log_trimmed_through_room_sequence,
-                            excluded.log_trimmed_through_room_sequence
-                        ),
-                        -- 缺口是永久的：标记一旦置位就保持置位。
-                        history_incomplete = MAX(
-                            v2_group_event_cursors.history_incomplete,
-                            excluded.history_incomplete
-                        )
-                    """,
-                arguments: [
-                    page.roomID.rawValue,
-                    try Self.storageInteger(page.nextRoomSequence),
-                    trimmedThrough,
-                    hasGap ? 1 : 0
-                ]
-            )
-            if let recoveryWork {
-                if try !Self.finishRoomRecoveryWork(recoveryWork, db: db) {
-                    try Self.recordRoomRecoveryService(recoveryWork, db: db)
-                }
-            }
-            return try .init(appliedThrough: page.nextRoomSequence, insertedEventCount: insertedEvents)
+            return result
         }
+    }
+
+    private func applyGroupEventPageReportingChanges(_ page: V2ClientGroupEventPage, recoveryWork: V2RoomRecoveryWork?) throws -> V2GroupEventPageCommit {
+        try databasePool.write { db in try Self.applyGroupEventPage(page, recoveryWork: recoveryWork, db: db) }
+    }
+
+    private static func applyGroupEventPage(_ page: V2ClientGroupEventPage, recoveryWork: V2RoomRecoveryWork?, db: Database) throws -> V2GroupEventPageCommit {
+        try Self.requireProjectionWritesUnfenced(db: db)
+        if let recoveryWork { try Self.requireRoomRecoveryPageAuthorization(recoveryWork, db: db) }
+        let cursorRow = try Row.fetchOne(try db.cachedStatement(sql: "SELECT applied_room_sequence, log_trimmed_through_room_sequence FROM v2_group_event_cursors WHERE room_id = ?"),
+            arguments: [page.roomID.rawValue]
+        )
+        let cursor = try cursorRow.map { try Self.storageUnsigned($0, column: "applied_room_sequence") } ?? 0
+        if let cursorRow { _ = try Self.storageUnsigned(cursorRow, column: "log_trimmed_through_room_sequence") }
+        guard page.nextRoomSequence >= cursor,
+              zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
+              (page.events.last?.roomSequence ?? cursor) <= page.nextRoomSequence,
+              !page.hasMore || page.nextRoomSequence > cursor
+        else { throw V2ClientSyncError.invalidRecordOrdering }
+        var insertedEvents = 0
+        for event in page.events {
+            if event.roomSequence <= cursor {
+                guard let existing = try Row.fetchOne(try db.cachedStatement(sql: "SELECT source_event_id, projection_kind, payload FROM v2_group_events WHERE room_id = ? AND room_sequence = ?"),
+                    arguments: [page.roomID.rawValue, try Self.storageInteger(event.roomSequence)]
+                ) else { throw V2ClientSyncError.invalidRecordOrdering }
+                let sourceEventID: String = existing["source_event_id"]
+                let projectionKind: String = existing["projection_kind"]
+                let payload: Data = existing["payload"]
+                guard sourceEventID == event.sourceEventID.rawValue, projectionKind == event.projectionKind, payload == event.payload else {
+                    throw V2ClientSyncError.invalidRecordOrdering
+                }
+                continue
+            }
+            let record = try V2ClientSyncRecord(sequence: event.roomSequence, sourceEventID: event.sourceEventID, projectionKind: event.projectionKind, payload: event.payload)
+            try Self.applyRoomEventProjection(record, roomID: page.roomID, db: db)
+            try db.cachedStatement(sql: "INSERT INTO v2_group_events (room_id, room_sequence, source_event_id, projection_kind, payload) VALUES (?, ?, ?, ?, ?)").execute(
+                arguments: [page.roomID.rawValue, try Self.storageInteger(event.roomSequence), event.sourceEventID.rawValue, event.projectionKind, event.payload]
+            )
+            insertedEvents += 1
+        }
+        // 缺口判定使用本事务开头验证过的游标：本页之前本地只应用到 cursor，
+        // 服务端已裁剪至 trimmed；若它超过旧游标，两者之间就是永久缺口。
+        let trimmedThrough = try Self.storageInteger(page.logTrimmedThroughRoomSequence)
+        let hasGap = page.logTrimmedThroughRoomSequence > cursor
+        try db.cachedStatement(sql: """
+                INSERT INTO v2_group_event_cursors
+                    (room_id, applied_room_sequence, log_trimmed_through_room_sequence, history_incomplete)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(room_id) DO UPDATE SET
+                    applied_room_sequence = excluded.applied_room_sequence,
+                    -- 下界只增不减：服务端裁剪过的历史不会因为一次旧响应而"变完整"。
+                    log_trimmed_through_room_sequence = MAX(
+                        v2_group_event_cursors.log_trimmed_through_room_sequence,
+                        excluded.log_trimmed_through_room_sequence
+                    ),
+                    -- 缺口是永久的：标记一旦置位就保持置位。
+                    history_incomplete = MAX(
+                        v2_group_event_cursors.history_incomplete,
+                        excluded.history_incomplete
+                    )
+                """).execute(
+            arguments: [
+                page.roomID.rawValue,
+                try Self.storageInteger(page.nextRoomSequence),
+                trimmedThrough,
+                hasGap ? 1 : 0
+            ]
+        )
+        if let recoveryWork {
+            if try !Self.finishRoomRecoveryWork(recoveryWork, db: db) {
+                try Self.recordRoomRecoveryService(recoveryWork, db: db)
+            }
+        }
+        return try .init(appliedThrough: page.nextRoomSequence, insertedEventCount: insertedEvents)
     }
 
     public func apply(_ batch: V2ClientSyncBatch) throws -> V2LocalSyncCursor {
@@ -4295,12 +4306,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             // Validation below shares this transaction: invalid projections roll
             // back the marker as well as the projection. Cache trimming later
             // cannot resurrect a previously materialized local send row.
-            try db.execute(sql: "UPDATE v2_message_send_operations SET accepted_projection_observed=1,projection_observed_snapshot_id=NULL WHERE accepted_message_id=? AND room_id=? AND accepted_room_sequence=? AND accepted_projection_observed=0",
+            try db.cachedStatement(sql: "UPDATE v2_message_send_operations SET accepted_projection_observed=1,projection_observed_snapshot_id=NULL WHERE accepted_message_id=? AND room_id=? AND accepted_room_sequence=? AND accepted_projection_observed=0").execute(
                 arguments: [projection.messageID.rawValue,projection.roomID.rawValue,try storageInteger(projection.roomSequence)])
         }
         let messages = target.table("v2_message_projections")
         let tombstones = target.table("v2_message_tombstones")
-        if let existing = try Row.fetchOne(db, sql: "SELECT * FROM \(messages) WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
+        if let existing = try Row.fetchOne(try db.cachedStatement(sql: "SELECT * FROM \(messages) WHERE message_id = ?"), arguments: [projection.messageID.rawValue]) {
             let decoded = try decodeMessageProjection(existing)
             if projection.messageRevision < decoded.messageRevision {
                 guard decoded.hasSameAcceptance(as: projection) else { throw V2ClientProjectionError.invalidMessagePayload }
@@ -4315,17 +4326,16 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             else { throw V2ClientProjectionError.invalidMessagePayload }
             return
         }
-        try db.execute(
-            sql: """
+        try db.cachedStatement(sql: """
             INSERT INTO \(messages)
                 (message_id, source_event_id, room_id, room_sequence, timeline_sequence, message_revision, sender_user_id, text_body, media_ids, media_presentations, mention_targets, entities, reply_to_message_id, forwarded_from_message_id, forwarded_from_user_id, server_created_at, is_withdrawn)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            """).execute(
             arguments: [projection.messageID.rawValue, projection.sourceEventID.rawValue, projection.roomID.rawValue,
                         try storageInteger(projection.roomSequence), try storageInteger(projection.timelineSequence), try storageInteger(projection.messageRevision), projection.senderUserID.rawValue, projection.text, try encodeMedia(projection.media), try encodeMediaPresentations(projection.mediaPresentations), try encodeMentions(projection.mentions), try encodeEntities(projection.entities, text: projection.text), projection.replyTo?.messageID.rawValue, projection.forwardedFrom?.messageID.rawValue, projection.forwardedFrom?.senderUserID.rawValue,
                         projection.createdAt.timeIntervalSince1970, projection.isWithdrawn]
         )
-        if let tombstone = try Row.fetchOne(db, sql: "SELECT room_id, message_revision FROM \(tombstones) WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
+        if let tombstone = try Row.fetchOne(try db.cachedStatement(sql: "SELECT room_id, message_revision FROM \(tombstones) WHERE message_id = ?"), arguments: [projection.messageID.rawValue]) {
             let roomID: String = tombstone["room_id"]
             let revision = try storageInteger(tombstone, column: "message_revision")
             guard roomID == projection.roomID.rawValue, revision > (try storageInteger(projection.messageRevision)) else { throw V2ClientProjectionError.invalidMessagePayload }
@@ -4333,7 +4343,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         }
         if case .live = target { try indexMessageResources(projection, db: db) }
         else if !projection.media.isEmpty {
-            try db.execute(sql: "INSERT OR REPLACE INTO \(target.table("v2_resource_projection_index_jobs"))(message_id,room_id,queued_revision) VALUES(?,?,?)",
+            try db.cachedStatement(sql: "INSERT OR REPLACE INTO \(target.table("v2_resource_projection_index_jobs"))(message_id,room_id,queued_revision) VALUES(?,?,?)").execute(
                 arguments: [projection.messageID.rawValue,projection.roomID.rawValue,try storageInteger(projection.messageRevision)])
         }
         if updateConversationSummary {
@@ -4351,20 +4361,22 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         try refreshEffectiveConversationSummary(roomID: projection.roomID, db: db)
     }
 
+    // Reuse the connection-owned program, including its visibility/list triggers.
+    // Message/room values remain bound parameters, so the statement cache is bounded.
     private static func refreshEffectiveConversationSummary(roomID: RoomID, db: Database) throws {
-        let candidate = try String.fetchOne(db, sql: """
+        let candidate = try String.fetchOne(try db.cachedStatement(sql: """
             SELECT message_id FROM v2_message_projections
             WHERE room_id = ? AND is_withdrawn = 0
             ORDER BY room_sequence DESC, message_id DESC LIMIT 1
-            """, arguments: [roomID.rawValue])
+            """), arguments: [roomID.rawValue])
         if let candidate {
-            try db.execute(sql: """
+            try db.cachedStatement(sql: """
                 INSERT INTO v2_conversation_summaries (room_id, message_id) VALUES (?, ?)
                 ON CONFLICT(room_id) DO UPDATE SET message_id = excluded.message_id
                 WHERE message_id <> excluded.message_id
-                """, arguments: [roomID.rawValue, candidate])
+                """).execute(arguments: [roomID.rawValue, candidate])
         } else {
-            try db.execute(sql: "DELETE FROM v2_conversation_summaries WHERE room_id = ?", arguments: [roomID.rawValue])
+            try db.cachedStatement(sql: "DELETE FROM v2_conversation_summaries WHERE room_id = ?").execute(arguments: [roomID.rawValue])
         }
     }
 

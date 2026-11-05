@@ -6,10 +6,10 @@ import IMV2ServerContracts
 /// The same user-route fence as personal sync. No room mutation or live room
 /// subscription is involved in accepting account-level delivery responsibility.
 public struct V2RoutedRoomDispatchProjector: V2RoomDispatchProjecting {
-    private let routeFence: any V2UserShardRouteFencing
+    private let routeFence: any V2UserShardRouteFencing & V2UserShardRouteBatchFencing
     private let registry: any V2UserShardStorageResolving
 
-    public init(routeFence: any V2UserShardRouteFencing, registry: any V2UserShardStorageResolving) {
+    public init(routeFence: any V2UserShardRouteFencing & V2UserShardRouteBatchFencing, registry: any V2UserShardStorageResolving) {
         self.routeFence = routeFence; self.registry = registry
     }
 
@@ -23,6 +23,30 @@ public struct V2RoutedRoomDispatchProjector: V2RoomDispatchProjecting {
             let target = (owner.database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.userStateProjection) ?? owner.database
             try await PostgresV2UserStateEventProjector(database: target, schema: owner.schema)
                 .projectRoomChanges(leases, to: userID)
+        }
+    }
+
+    public func projectTargets(_ targets: [V2RoomDispatchTarget]) async throws -> Set<UserID> {
+        guard targets.count <= 1024 else { throw V2RoomDispatchError.invalidInput }
+        guard !targets.isEmpty else { return [] }
+        return try await routeFence.withCurrentRoutes(for: targets.map(\.userID)) { routes, _ in
+            guard routes.count == targets.count else { throw V2RoomDispatchError.corruptPersistence }
+            var groups: [String: [V2RoomDispatchTarget]] = [:]
+            for (route, target) in zip(routes, targets) { groups[route.bucket, default: []].append(target) }
+            // Separate physical destinations commit independently. Each batch is
+            // bounded; a failed destination never acknowledges another's work.
+            var accepted = Set<UserID>()
+            for (bucket, batch) in groups.sorted(by: { $0.key < $1.key }) {
+                try Task.checkCancellation()
+                let owner = try registry.location(for: bucket)
+                let database = (owner.database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.userStateProjection) ?? owner.database
+                do {
+                    try await PostgresV2UserStateEventProjector(database: database, schema: owner.schema).appendRoomChanges(batch)
+                    accepted.formUnion(batch.map(\.userID))
+                } catch is CancellationError { throw CancellationError() }
+                catch { /* Durable source leases retry unaccepted targets. */ }
+            }
+            return accepted
         }
     }
 

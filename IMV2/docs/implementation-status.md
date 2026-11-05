@@ -1,6 +1,6 @@
 # V2 当前实现与发布证据
 
-当前合同核对：2026-11-01（协议、schema、普通发送入口与关键配置默认值；各专项验收仍以其实际运行记录为准）
+当前合同核对：2026-11-05（协议、schema、普通发送入口与关键配置默认值；各专项验收仍以其实际运行记录为准）
 适用范围：当前 `IMV2Core`、`IMV2ClientKit`、`IMV2Server`、`IMApp` 与 `IMV2` 工具链。
 
 本文件只登记当前合同和可重复证据，不保留开发时间线。仓库内实现与本机测试通过不等于
@@ -55,7 +55,7 @@
   私聊与群聊的公共内容统一以房间日志为权威副本，不再提供 fanout 兼容模式；个人事件流保存个人状态与单侧提示。
   新编辑携带接受身份与显式完整状态以跨越合法版本缺口，见[完整编辑合同](../../docs/reviews/message-edit-replacement-contract.md)。
 - PostgreSQL 新环境从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
-  `im-v2-current-81`；这是唯一新环境建库合同。资源发布同时登记暂存清理，由独立、有租约的 worker 回收单次与分片上传字节；失败与进程重启不丢失待办，见[分片与回收合同](../../docs/proposals/aliyun-oss-integration.md#分片续传与暂存回收)。公告清除使用空正文并保留递增版本，迟到修改不能恢复已清除的旧公告。个人状态事件 outbox 增加按用户 stream head 的扫描索引，避免同用户后续事件在前序事件仍待处理时提前领取。本人资料操作已分离原回执和当前快照，提交/关闭共锁，终态永久保留；字段与恢复路由见[本人资料合同](../../docs/proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)。本轮仅为该领域已实现范围，不表示应用级弱网 W0–W6 全部完成。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
+  `im-v2-current-82`；这是唯一新环境建库合同。资源发布同时登记暂存清理，由独立、有租约的 worker 回收单次与分片上传字节；失败与进程重启不丢失待办，见[分片与回收合同](../../docs/proposals/aliyun-oss-integration.md#分片续传与暂存回收)。公告清除使用空正文并保留递增版本，迟到修改不能恢复已清除的旧公告。个人状态事件 outbox 增加按用户 stream head 的扫描索引，避免同用户后续事件在前序事件仍待处理时提前领取。本人资料操作已分离原回执和当前快照，提交/关闭共锁，终态永久保留；字段与恢复路由见[本人资料合同](../../docs/proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)。本轮仅为该领域已实现范围，不表示应用级弱网 W0–W6 全部完成。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
   readiness 拒绝不符合当前结构的数据库；旧压测库须重建，不提供在线升级。
   schema65 在撤销事件分配 identity 前通过语句级事务锁串行化写入，保证两个消费者推进水位时不会遗漏晚提交的小序号。资源导入独立保存源释放确认与不可变关闭记录：终态但释放未确认的操作继续恢复，首次保留之前的取消也会阻止晚到的保留；已提交目标的后台收尾不依赖原设备仍有客户端权限。
   消息编辑的版本、序号和成员修订在同事务中保存至不可变 `message_edit_visibility`，独立于日志裁剪。摘要从有权查看的版本读取当前正文或历史正文，缺少必要历史正文时拒绝读取，不能回退到未授权的当前内容。

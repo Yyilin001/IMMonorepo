@@ -7,8 +7,8 @@ import SQLKit
 
 /// 用户事件的目标事务；不读取房间日志，也不依赖扇出载荷、计划或完成单元。
 public struct PostgresV2UserStateEventProjector: V2UserStateEventProjecting {
-    private let database: any Database
-    private let schema: String
+    let database: any Database
+    let schema: String
 
     public init(database: any Database, schema: String = "im_v2") throws {
         guard schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else {
@@ -42,14 +42,14 @@ public struct PostgresV2UserStateEventProjector: V2UserStateEventProjecting {
         }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2UserStateEventError.corruptPersistenceState }
-            // 对每个用户的回执分配串行化，包括其首个事件。
+            // 只与其他账号写入串行；快照消费者从不持有这条序号行。
             try await sql.raw("""
-                INSERT INTO \(unsafeRaw: table("user_projection_checkpoints")) (user_id, projected_sequence, updated_at)
-                VALUES (\(bind: user), 0, clock_timestamp()) ON CONFLICT (user_id) DO NOTHING
+                INSERT INTO \(unsafeRaw: table("user_sync_sequences")) (user_id, next_sequence)
+                VALUES (\(bind: user), 0) ON CONFLICT (user_id) DO NOTHING
                 """).run()
             let checkpoint = try await sql.raw("""
                 SELECT user_id
-                FROM \(unsafeRaw: table("user_projection_checkpoints"))
+                FROM \(unsafeRaw: table("user_sync_sequences"))
                 WHERE user_id = \(bind: user) FOR UPDATE
                 """).first(decoding: UserStateEventUserRow.self)
             guard checkpoint != nil else { throw V2UserStateEventError.corruptPersistenceState }
@@ -117,25 +117,10 @@ public struct PostgresV2UserStateEventProjector: V2UserStateEventProjecting {
     /// accepted room changes. The original room acceptance transactions and
     /// sequences remain separate; each source event keeps its own receipt/alert.
     package func projectRoomChanges(_ leases: [V2RoomDispatchLease], to userID: UserID) async throws {
-        guard (1...32).contains(leases.count), let user = userID.uuidValue else { throw V2UserStateEventError.invalidEvent }
-        let events = try leases.map { try v2AccountRoomChangeEvent($0, userID: userID) }
-        try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2UserStateEventError.corruptPersistenceState }
-            try await sql.raw("""
-                INSERT INTO \(unsafeRaw: table("user_projection_checkpoints")) (user_id, projected_sequence, updated_at)
-                VALUES (\(bind: user), 0, clock_timestamp()) ON CONFLICT (user_id) DO NOTHING
-                """).run()
-            guard try await sql.raw("SELECT user_id FROM \(unsafeRaw: table("user_projection_checkpoints")) WHERE user_id = \(bind: user) FOR UPDATE")
-                .first() != nil else { throw V2UserStateEventError.corruptPersistenceState }
-            for (event, lease) in zip(events, leases) {
-                try Task.checkCancellation()
-                _ = try await projectAccountRoomHeadUnderLock(event, user: user, source: lease.eventID,
-                    projectionPayloadJSON: event.payloadJSON, notification: lease.messageID == nil ? nil : lease, sql: sql)
-            }
-        }
+        try await appendRoomChanges([.init(userID: userID, leases: leases)])
     }
 
-    /// The checkpoint row is already locked by the caller's transaction. Allocate
+    /// The account sequence row is already locked by the caller's transaction. Allocate
     /// the account sequence and persist all effects in one statement; this does
     /// not batch room writes or acknowledge before the target transaction commits.
     private func projectAccountRoomHeadUnderLock(_ event: V2UserStateEvent, user: UUID, source: UUID,

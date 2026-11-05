@@ -35,7 +35,14 @@ public enum V2RoomDispatchError: Error, Sendable {
     case invalidInput, corruptPersistence, lostLease
 }
 
+public struct V2RoomDispatchAcknowledgement: Sendable {
+    public let lease: V2RoomDispatchLease
+    public let through: UUID?
+    public init(lease: V2RoomDispatchLease, through: UUID?) { self.lease=lease; self.through=through }
+}
 public protocol V2RoomDispatchOutbox: Sendable {
+    func acknowledgePages(_ pages: [V2RoomDispatchAcknowledgement], now: Date) async throws -> Set<UUID>
+
     func claim(now: Date, limit: Int, leaseDuration: TimeInterval) async throws -> [V2RoomDispatchLease]
     func recipients(_ lease: V2RoomDispatchLease, limit: Int, now: Date) async throws -> [UserID]
     func acknowledgePage(_ lease: V2RoomDispatchLease, through cursor: UUID?, now: Date) async throws -> Bool
@@ -44,14 +51,47 @@ public protocol V2RoomDispatchOutbox: Sendable {
 
 /// Returning means the target account durably owns both its sync hint and its
 /// notification intent, regardless of any current connection or APNs setting.
+public struct V2RoomDispatchTarget: Sendable {
+    public let userID: UserID
+    public let leases: [V2RoomDispatchLease]
+    public init(userID: UserID, leases: [V2RoomDispatchLease]) {
+        self.userID = userID; self.leases = leases
+    }
+}
+
 public protocol V2RoomDispatchProjecting: Sendable {
+    /// Only returned users have durably accepted every item; omissions retry.
+    func projectTargets(_ targets: [V2RoomDispatchTarget]) async throws -> Set<UserID>
+
     func project(_ lease: V2RoomDispatchLease, to userID: UserID) async throws
     /// Batches already-committed changes for one account, never room writes.
     func project(_ leases: [V2RoomDispatchLease], to userID: UserID) async throws
 }
 
 extension V2RoomDispatchProjecting {
+    public func projectTargets(_ targets: [V2RoomDispatchTarget]) async throws -> Set<UserID> {
+        var accepted = Set<UserID>()
+        for target in targets {
+            try Task.checkCancellation()
+            do { try await project(target.leases, to: target.userID); accepted.insert(target.userID) }
+            catch is CancellationError { throw CancellationError() }
+            catch { /* The source still owns this target's delivery. */ }
+        }
+        return accepted
+    }
+
     public func project(_ leases: [V2RoomDispatchLease], to userID: UserID) async throws {
         for lease in leases { try await project(lease, to: userID) }
+    }
+}
+
+extension V2RoomDispatchOutbox {
+    public func acknowledgePages(_ pages: [V2RoomDispatchAcknowledgement], now: Date) async throws -> Set<UUID> {
+        var accepted = Set<UUID>()
+        for page in pages {
+            try Task.checkCancellation()
+            if try await acknowledgePage(page.lease, through: page.through, now: now) { accepted.insert(page.lease.eventID) }
+        }
+        return accepted
     }
 }

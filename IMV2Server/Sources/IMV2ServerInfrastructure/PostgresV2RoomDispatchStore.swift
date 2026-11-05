@@ -5,7 +5,7 @@ import IMV2ServerContracts
 import SQLKit
 
 public struct PostgresV2RoomDispatchStore: V2RoomDispatchOutbox {
-    private let database: any Database
+    let database: any Database
     public init(database: any Database) { self.database = database }
 
     public func claim(now: Date, limit: Int, leaseDuration: TimeInterval = 30) async throws -> [V2RoomDispatchLease] {

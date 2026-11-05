@@ -34,7 +34,7 @@ extension GRDBV2LocalSyncStore {
             _ = try Self.requireRoomRecoveryScope(scope, db: db)
             let personalGeneration = try Self.readCursor(db)?.generation
             let order = oldestFirst ? "last_served_order, enqueued_at, room_id" : "priority DESC, last_served_order, enqueued_at, room_id"
-            return try Row.fetchAll(db, sql: "SELECT * FROM v2_room_recovery_work WHERE next_attempt_at <= ? ORDER BY \(order) LIMIT ?",
+            return try Row.fetchAll(try db.cachedStatement(sql: "SELECT * FROM v2_room_recovery_work WHERE next_attempt_at <= ? ORDER BY \(order) LIMIT ?"),
                 arguments: [now.timeIntervalSince1970, limit]).map { row in
                     try Self.validateRecoveryWorkValues(row)
                     guard let revision = UUID(uuidString: row["request_revision"]) else { throw V2RoomRecoveryPersistenceError.invalidWork }
@@ -62,46 +62,65 @@ extension GRDBV2LocalSyncStore {
     /// revision, so a notification received during this read remains pending.
     public func commitRoomRecoveryState(_ state: V2RoomSynchronizationState, work: V2RoomRecoveryWork,
                                           now: Date) async throws -> V2RoomStateDisposition {
-        guard state.roomID == work.roomID, now.timeIntervalSince1970.isFinite else { throw V2RoomRecoveryPersistenceError.invalidWork }
-        return try await databasePool.write { db in
-            _ = try Self.requireRoomRecoveryWorkScope(work, db: db)
-            try Self.requireProjectionWritesUnfenced(db: db)
-            try Self.validateStoredRecoveryWork(roomID: work.roomID, db: db)
-            guard try Self.roomRecoveryMembershipAllows(state, db: db) else { throw V2RoomRecoveryPersistenceError.staleMembership }
-            let previous = try Self.readRoomSynchronizationState(roomID: state.roomID, db: db)
-            let disposition = try previous.map { try state.disposition(replacing: $0) } ?? .advance
-            guard disposition == .advance || disposition == .unchanged else {
-                try db.execute(sql: "UPDATE v2_room_recovery_work SET requires_state = 1 WHERE room_id = ? AND request_revision = ?",
-                    arguments: [work.roomID.rawValue, work.requestRevision.uuidString])
-                try Self.recordRoomRecoveryService(work, db: db)
-                return disposition
+        try await databasePool.write { db in try Self.commitRecoveryState(state, work: work, now: now, db: db) }
+    }
+
+    /// A bounded network result commits atomically. Hot SQL uses the connection
+    /// statement cache to avoid recompiling visibility triggers for every room.
+    /// Each room retains its own
+    /// request revision, generation and authorization checks inside the write.
+    func commitRoomRecoveryStates(_ states: [(state: V2RoomSynchronizationState, work: V2RoomRecoveryWork)],
+                                  now: Date) async throws {
+        guard (1...100).contains(states.count), Set(states.map { $0.work.roomID }).count == states.count else {
+            throw V2RoomRecoveryPersistenceError.invalidWork
+        }
+        try await databasePool.write { db in
+            for item in states {
+                try Task.checkCancellation()
+                _ = try Self.commitRecoveryState(item.state, work: item.work, now: now, db: db)
             }
-            // The state write itself can invalidate a cached summary and its
-            // trigger renews the work revision. That transaction-local change
-            // must not force a second identical authoritative state read.
-            // A newer request committed while network I/O was in flight still
-            // retains its fence and cannot be completed by this older response.
-            let ownsRequest = try Bool.fetchOne(db,
-                sql: "SELECT request_revision = ? FROM v2_room_recovery_work WHERE room_id = ?",
-                arguments: [work.requestRevision.uuidString, work.roomID.rawValue]) == true
-            try db.execute(sql: """
-                INSERT INTO v2_room_sync_states VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(room_id) DO UPDATE SET owner_epoch = excluded.owner_epoch,
-                    membership_revision = excluded.membership_revision, head = excluded.head,
-                    trimmed_through = excluded.trimmed_through, read_through = excluded.read_through,
-                    latest_own_sequence = excluded.latest_own_sequence, checked_at = excluded.checked_at
-                """, arguments: [state.roomID.rawValue, Int64(state.ownerEpoch), Int64(state.viewerMembershipRevision),
-                    Int64(state.head), Int64(state.trimmedThrough), Int64(state.readThrough), Int64(state.latestOwnMessageSequence), now.timeIntervalSince1970])
-            try db.execute(sql: """
-                UPDATE v2_room_recovery_work SET target_head = MAX(target_head, ?),
-                    requires_state = CASE WHEN target_head <= ?
-                        AND COALESCE(directory_membership_revision, 0) <= ?
-                        AND COALESCE(directory_owner_epoch, 0) <= ? THEN 0 ELSE 1 END
-                WHERE room_id = ? AND (request_revision = ? OR ?)
-                """, arguments: [Int64(state.head), Int64(state.head), Int64(state.viewerMembershipRevision),
-                    Int64(state.ownerEpoch), work.roomID.rawValue, work.requestRevision.uuidString, ownsRequest])
+        }
+    }
+
+    private static func commitRecoveryState(_ state: V2RoomSynchronizationState, work: V2RoomRecoveryWork,
+                                           now: Date, db: Database) throws -> V2RoomStateDisposition {
+        guard state.roomID == work.roomID, now.timeIntervalSince1970.isFinite else { throw V2RoomRecoveryPersistenceError.invalidWork }
+        _ = try Self.requireRoomRecoveryWorkScope(work, db: db)
+        try Self.requireProjectionWritesUnfenced(db: db)
+        try Self.validateStoredRecoveryWork(roomID: work.roomID, db: db)
+        guard try Self.roomRecoveryMembershipAllows(state, db: db) else { throw V2RoomRecoveryPersistenceError.staleMembership }
+        let previous = try Self.readRoomSynchronizationState(roomID: state.roomID, db: db)
+        let disposition = try previous.map { try state.disposition(replacing: $0) } ?? .advance
+        guard disposition == .advance || disposition == .unchanged else {
+            try db.cachedStatement(sql: "UPDATE v2_room_recovery_work SET requires_state = 1 WHERE room_id = ? AND request_revision = ?").execute(
+                arguments: [work.roomID.rawValue, work.requestRevision.uuidString])
+            try Self.recordRoomRecoveryService(work, db: db)
             return disposition
         }
+        // The state write itself can invalidate a cached summary and its
+        // trigger renews the work revision. That transaction-local change
+        // must not force a second identical authoritative state read.
+        // A newer request committed while network I/O was in flight still
+        // retains its fence and cannot be completed by this older response.
+        let ownsRequest = try Bool.fetchOne(try db.cachedStatement(sql: "SELECT request_revision = ? FROM v2_room_recovery_work WHERE room_id = ?"),
+            arguments: [work.requestRevision.uuidString, work.roomID.rawValue]) == true
+        try db.cachedStatement(sql: """
+            INSERT INTO v2_room_sync_states VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(room_id) DO UPDATE SET owner_epoch = excluded.owner_epoch,
+                membership_revision = excluded.membership_revision, head = excluded.head,
+                trimmed_through = excluded.trimmed_through, read_through = excluded.read_through,
+                latest_own_sequence = excluded.latest_own_sequence, checked_at = excluded.checked_at
+            """).execute(arguments: [state.roomID.rawValue, Int64(state.ownerEpoch), Int64(state.viewerMembershipRevision),
+                Int64(state.head), Int64(state.trimmedThrough), Int64(state.readThrough), Int64(state.latestOwnMessageSequence), now.timeIntervalSince1970])
+        try db.cachedStatement(sql: """
+            UPDATE v2_room_recovery_work SET target_head = MAX(target_head, ?),
+                requires_state = CASE WHEN target_head <= ?
+                    AND COALESCE(directory_membership_revision, 0) <= ?
+                    AND COALESCE(directory_owner_epoch, 0) <= ? THEN 0 ELSE 1 END
+            WHERE room_id = ? AND (request_revision = ? OR ?)
+            """).execute(arguments: [Int64(state.head), Int64(state.head), Int64(state.viewerMembershipRevision),
+                Int64(state.ownerEpoch), work.roomID.rawValue, work.requestRevision.uuidString, ownsRequest])
+        return disposition
     }
 
     /// An explicit unavailable result may end this request, but not a newer
@@ -112,17 +131,17 @@ extension GRDBV2LocalSyncStore {
             try Self.requireProjectionWritesUnfenced(db: db)
             guard try Self.readRecoveryMembershipFence(roomID: work.roomID, db: db) == work.membershipFence,
                   try Self.readRoomSynchronizationState(roomID: work.roomID, db: db) == work.stateFence else { return false }
-            try db.execute(sql: "DELETE FROM v2_room_recovery_work WHERE room_id = ? AND request_revision = ?",
+            try db.cachedStatement(sql: "DELETE FROM v2_room_recovery_work WHERE room_id = ? AND request_revision = ?").execute(
                 arguments: [work.roomID.rawValue, work.requestRevision.uuidString])
             guard db.changesCount == 1 else { return false }
-            try db.execute(sql: "DELETE FROM v2_room_sync_states WHERE room_id = ?", arguments: [work.roomID.rawValue])
+            try db.cachedStatement(sql: "DELETE FROM v2_room_sync_states WHERE room_id = ?").execute(arguments: [work.roomID.rawValue])
             try Self.markRoomEventUnauthorized(roomID: work.roomID, db: db)
             return true
         }
     }
 
     private static func readRecoveryMembershipFence(roomID: RoomID, db: Database) throws -> V2RoomRecoveryMembershipFence? {
-        guard let row = try Row.fetchOne(db, sql: "SELECT membership_revision, source_event_id, is_member FROM v2_room_membership_states WHERE room_id = ?",
+        guard let row = try Row.fetchOne(try db.cachedStatement(sql: "SELECT membership_revision, source_event_id, is_member FROM v2_room_membership_states WHERE room_id = ?"),
             arguments: [roomID.rawValue]) else { return nil }
         return .init(revision: try recoveryInteger(row, "membership_revision"), source: row["source_event_id"], isMember: row["is_member"])
     }
@@ -133,11 +152,11 @@ extension GRDBV2LocalSyncStore {
             _ = try Self.requireRoomRecoveryWorkScope(work, db: db)
             // Validate the matching request before overwriting its retry time.
             // A stale request still leaves a newer pending request untouched.
-            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_room_recovery_work WHERE room_id = ? AND request_revision = ?",
+            if let row = try Row.fetchOne(try db.cachedStatement(sql: "SELECT * FROM v2_room_recovery_work WHERE room_id = ? AND request_revision = ?"),
                 arguments: [work.roomID.rawValue, work.requestRevision.uuidString]) {
                 try Self.validateRecoveryWorkValues(row)
             }
-            try db.execute(sql: "UPDATE v2_room_recovery_work SET next_attempt_at = ? WHERE room_id = ? AND request_revision = ?",
+            try db.cachedStatement(sql: "UPDATE v2_room_recovery_work SET next_attempt_at = ? WHERE room_id = ? AND request_revision = ?").execute(
                 arguments: [date.timeIntervalSince1970, work.roomID.rawValue, work.requestRevision.uuidString])
             if db.changesCount == 1 { try Self.recordRoomRecoveryService(work, db: db) }
         }
@@ -150,13 +169,13 @@ extension GRDBV2LocalSyncStore {
         guard let state = try readRoomSynchronizationState(roomID: work.roomID, db: db),
               try roomRecoveryMembershipAllows(state, db: db) else { return false }
         try validateStoredRecoveryWork(roomID: work.roomID, db: db)
-        if let cursor = try Row.fetchOne(db, sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?", arguments: [work.roomID.rawValue]) {
+        if let cursor = try Row.fetchOne(try db.cachedStatement(sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?"), arguments: [work.roomID.rawValue]) {
             _ = try recoveryInteger(cursor, "applied_room_sequence")
         }
-        try db.execute(sql: """
+        try db.cachedStatement(sql: """
             DELETE FROM v2_room_recovery_work WHERE room_id = ? AND request_revision = ? AND requires_state = 0 AND requires_summary = 0
                 AND target_head <= COALESCE((SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?), 0)
-            """, arguments: [work.roomID.rawValue, work.requestRevision.uuidString, work.roomID.rawValue])
+            """).execute(arguments: [work.roomID.rawValue, work.requestRevision.uuidString, work.roomID.rawValue])
         return db.changesCount == 1
     }
 
@@ -164,17 +183,30 @@ extension GRDBV2LocalSyncStore {
         try await databasePool.write { try Self.finishRoomRecoveryWork(work, db: $0) }
     }
 
+    func finishRoomRecoveryWorks(_ work: [V2RoomRecoveryWork]) async throws -> Set<RoomID> {
+        guard work.count <= 100, Set(work.map(\.roomID)).count == work.count else { throw V2RoomRecoveryPersistenceError.invalidWork }
+        guard !work.isEmpty else { return [] }
+        return try await databasePool.write { db in
+            var finished = Set<RoomID>()
+            for item in work {
+                try Task.checkCancellation()
+                if try Self.finishRoomRecoveryWork(item, db: db) { finished.insert(item.roomID) }
+            }
+            return finished
+        }
+    }
+
     /// Scheduling progress is independent of acknowledgment. A new target for
     /// the same room retains its turn history, even if it arrived during I/O.
     static func recordRoomRecoveryService(_ work: V2RoomRecoveryWork, db: Database) throws {
         let scan = try requireRoomRecoveryWorkScope(work, db: db)
-        guard try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_room_recovery_work WHERE room_id = ?)",
+        guard try Bool.fetchOne(try db.cachedStatement(sql: "SELECT EXISTS(SELECT 1 FROM v2_room_recovery_work WHERE room_id = ?)"),
             arguments: [work.roomID.rawValue]) == true else { return }
         try validateStoredRecoveryWork(roomID: work.roomID, db: db)
         let sequence = try recoveryInteger(scan, "service_sequence")
         guard sequence < Int64.max else { throw V2RoomRecoveryPersistenceError.invalidWork }
-        try db.execute(sql: "UPDATE v2_room_recovery_scan SET service_sequence = ? WHERE singleton = 1", arguments: [sequence + 1])
-        try db.execute(sql: "UPDATE v2_room_recovery_work SET last_served_order = ? WHERE room_id = ?",
+        try db.cachedStatement(sql: "UPDATE v2_room_recovery_scan SET service_sequence = ? WHERE singleton = 1").execute(arguments: [sequence + 1])
+        try db.cachedStatement(sql: "UPDATE v2_room_recovery_work SET last_served_order = ? WHERE room_id = ?").execute(
             arguments: [sequence + 1, work.roomID.rawValue])
     }
 
@@ -202,7 +234,7 @@ extension GRDBV2LocalSyncStore {
     }
 
     private static func roomRecoveryMembershipAllows(_ state: V2RoomSynchronizationState, db: Database) throws -> Bool {
-        guard let row = try Row.fetchOne(db, sql: "SELECT membership_revision, is_member FROM v2_room_membership_states WHERE room_id = ?",
+        guard let row = try Row.fetchOne(try db.cachedStatement(sql: "SELECT membership_revision, is_member FROM v2_room_membership_states WHERE room_id = ?"),
             arguments: [state.roomID.rawValue]) else { return true }
         let revision = try recoveryInteger(row, "membership_revision")
         return revision < Int64(state.viewerMembershipRevision)
@@ -226,7 +258,7 @@ extension GRDBV2LocalSyncStore {
     }
 
     static func validateStoredRecoveryWork(roomID: RoomID, db: Database) throws {
-        if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_room_recovery_work WHERE room_id = ?", arguments: [roomID.rawValue]) {
+        if let row = try Row.fetchOne(try db.cachedStatement(sql: "SELECT * FROM v2_room_recovery_work WHERE room_id = ?"), arguments: [roomID.rawValue]) {
             try validateRecoveryWorkValues(row)
         }
     }
@@ -249,7 +281,7 @@ extension GRDBV2LocalSyncStore {
     }
 
     private static func readRoomSynchronizationState(roomID: RoomID, db: Database) throws -> V2RoomSynchronizationState? {
-        guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_room_sync_states WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
+        guard let row = try Row.fetchOne(try db.cachedStatement(sql: "SELECT * FROM v2_room_sync_states WHERE room_id = ?"), arguments: [roomID.rawValue]) else { return nil }
         return try .init(roomID: roomID, ownerEpoch: UInt64(try recoveryInteger(row, "owner_epoch")),
             viewerMembershipRevision: UInt64(try recoveryInteger(row, "membership_revision")), head: UInt64(try recoveryInteger(row, "head")),
             trimmedThrough: UInt64(try recoveryInteger(row, "trimmed_through")), readThrough: UInt64(try recoveryInteger(row, "read_through")),

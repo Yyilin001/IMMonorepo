@@ -25,6 +25,7 @@ struct V2AccountReconnectLiveTests {
         // instead supplies its original binding and retains its durable cursor.
         if !existingStore { try await store.requestSnapshotRebuild() }
         let deliveryTimings = LiveDeliveryTimings()
+        let measurements = LiveRecoveryMeasurements()
         var samples: [LiveReconnectSample] = []
         for round in 0..<3 {
             let connection = V2TLSFrameConnection(endpoint: try .init(host: fixture.host, port: fixture.port),
@@ -40,8 +41,12 @@ struct V2AccountReconnectLiveTests {
             let recovery = V2RoomRecoveryEngine(transport: wire, latestVisible: wire, store: store,
                 groupEvents: V2GroupEventSyncEngine(transport: wire, store: store),
                 didPersistProgress: { room, cursor in
+                    let started = ContinuousClock.now
+                    defer { measurements.record("delivery_observer", since: started) }
                     try await deliveryTimings.record(room: room, cursor: cursor, store: store)
                     try await transport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: cursor)
+                }, observeStage: { stage, ms in
+                    measurements.record(stage.rawValue, milliseconds: ms)
                 })
             do {
                 try await recovery.prepare(userID: user)
@@ -50,7 +55,7 @@ struct V2AccountReconnectLiveTests {
                 while true {
                     try #require(ContinuousClock.now < deadline, "Recovery did not drain before the deadline")
                     if try await recoveryPass(user: user, personal: personal, recovery: recovery,
-                        transport: transport, directoryPages: 1, checkComplete: true) { break }
+                        transport: transport, directoryPages: 1, checkComplete: true, measurements: measurements, deliveryTimings: deliveryTimings, store: store) { break }
                     try await Task.sleep(for: .milliseconds(20))
                 }
                 let counts = await wire.counts
@@ -63,13 +68,14 @@ struct V2AccountReconnectLiveTests {
                 try JSONEncoder().encode(samples).write(to: output.appending(path: "reconnect.json"), options: .atomic)
                 print("IMV2_DEPLOYED_RECONNECT round=\(round) auth=\(authSeconds) ready=\(readySeconds) directory_pages=\(counts.directoryPages) state_rooms=\(counts.stateRooms) content_pulls=\(counts.contentPulls)")
                 if round == 2 && fixture.waitForLoad {
+                    measurements.reset()
                     try await deliveryTimings.begin(store: store)
                     try Data("ready".utf8).write(to: output.appending(path: "receiver-ready"), options: .atomic)
                     let loadDeadline = ContinuousClock.now + .seconds(600)
                     while !FileManager.default.fileExists(atPath: output.appending(path: "senders-finished").path) {
                         try #require(ContinuousClock.now < loadDeadline, "Sender completion marker did not arrive")
                         _ = try await recoveryPass(user: user, personal: personal, recovery: recovery,
-                            transport: transport, directoryPages: 0, checkComplete: false)
+                            transport: transport, directoryPages: 0, checkComplete: false, measurements: measurements, deliveryTimings: deliveryTimings, store: store)
                         try await Task.sleep(for: .milliseconds(100))
                     }
                     // The sender completion marker means source ACKs, not async account delivery.
@@ -78,15 +84,16 @@ struct V2AccountReconnectLiveTests {
                     while true {
                         try #require(ContinuousClock.now < drainDeadline, "Account recovery did not drain")
                         _ = try await recoveryPass(user: user, personal: personal, recovery: recovery,
-                            transport: transport, directoryPages: 0, checkComplete: false)
+                            transport: transport, directoryPages: 0, checkComplete: false, measurements: measurements, deliveryTimings: deliveryTimings, store: store)
                         if FileManager.default.fileExists(atPath: output.appending(path: "source-drained").path),
                            try await recoveryPass(user: user, personal: personal, recovery: recovery,
-                            transport: transport, directoryPages: 0, checkComplete: true) { break }
+                            transport: transport, directoryPages: 0, checkComplete: true, measurements: measurements, deliveryTimings: deliveryTimings, store: store) { break }
                         try await Task.sleep(for: .milliseconds(100))
                     }
                 }
                 if round == 2 && fixture.waitForLoad {
                     try await deliveryTimings.write(to: output.appending(path: "delivery-timings.json"))
+                    try measurements.write(to: output.appending(path: "recovery-stages.json"))
                     let finalCounts = await wire.counts
                     let result: [String: Double] = ["completedAt": Date().timeIntervalSince1970,
                         "directoryPages": Double(finalCounts.directoryPages),
@@ -111,11 +118,20 @@ struct V2AccountReconnectLiveTests {
     // explicit rate limit without reconnecting or treating other failures as success.
     private func recoveryPass(user: UserID, personal: V2SyncEngine,
         recovery: V2RoomRecoveryEngine, transport: V2ProtobufSyncTransport,
-        directoryPages: Int, checkComplete: Bool) async throws -> Bool {
+        directoryPages: Int, checkComplete: Bool, measurements: LiveRecoveryMeasurements, deliveryTimings: LiveDeliveryTimings, store: GRDBV2LocalSyncStore) async throws -> Bool {
         do {
+            let passStart = ContinuousClock.now
+            defer { measurements.record("pass", since: passStart) }
+            var stageStart = ContinuousClock.now
             _ = try await personal.synchronizeIncludingResets()
+            measurements.record("personal_sync", since: stageStart)
+            try await deliveryTimings.observeHeads(store: store)
+            stageStart = .now
             _ = try await recovery.runBudget(userID: user, maximumDirectoryPages: directoryPages, maximumRooms: 100)
+            measurements.record("recovery_budget", since: stageStart)
+            stageStart = .now
             try await transport.flushDeviceRoomProgressReports()
+            measurements.record("progress_flush", since: stageStart)
             return checkComplete ? try await recovery.completeIfCaughtUp(using: personal) : false
         } catch let error as V2RealtimeTransportError {
             // Match the foreground recovery runner: every explicit retryable
@@ -176,12 +192,29 @@ private actor LiveDeliveryTimings {
     private var startedAt: Double?
     private var delays: [Double] = []
     private var lastDeliveryAt: Double = 0
+    private var observedThrough: [RoomID: Int64] = [:]
+    private var observations: [RoomID: [(Int64, Double)]] = [:]
+    private var accountDelays: [Double] = [], recoveryDelays: [Double] = []
+    private var windows: [Int: [Double]] = [:]
+    func observeHeads(store: GRDBV2LocalSyncStore) async throws {
+        guard startedAt != nil else { return }
+        let at = Date().timeIntervalSince1970
+        let heads = try await store.databasePool.read { db in
+            try Row.fetchAll(db, sql: "SELECT room_id, room_sequence FROM v2_account_room_heads").map {
+                (try RoomID($0["room_id"] as String), $0["room_sequence"] as Int64)
+            }
+        }
+        for (room, head) in heads where head > observedThrough[room, default: 0] {
+            observations[room, default: []].append((head, at)); observedThrough[room] = head
+        }
+    }
     func begin(store: GRDBV2LocalSyncStore) async throws {
         cursors = try await store.databasePool.read { db in
             try Dictionary(uniqueKeysWithValues: Row.fetchAll(db, sql: "SELECT room_id, applied_room_sequence FROM v2_group_event_cursors").map {
                 (try RoomID($0["room_id"] as String), $0["applied_room_sequence"] as Int64)
             })
         }
+        observedThrough = cursors
         startedAt = Date().timeIntervalSince1970; delays = []
     }
     func record(room: RoomID, cursor: UInt64, store: GRDBV2LocalSyncStore) async throws {
@@ -190,10 +223,16 @@ private actor LiveDeliveryTimings {
         guard through > after else { return }
         let committedAt = Date().timeIntervalSince1970
         let timestamps = try await store.databasePool.read { db in
-            try Double.fetchAll(db, sql: "SELECT server_created_at FROM v2_message_projections WHERE room_id = ? AND room_sequence > ? AND room_sequence <= ? AND server_created_at >= ?",
-                arguments: [room.rawValue, after, through, startedAt])
+            try Row.fetchAll(db, sql: "SELECT room_sequence, server_created_at FROM v2_message_projections WHERE room_id = ? AND room_sequence > ? AND room_sequence <= ? AND server_created_at >= ?",
+                arguments: [room.rawValue, after, through, startedAt]).map { ($0["room_sequence"] as Int64, $0["server_created_at"] as Double) }
         }
-        delays.append(contentsOf: timestamps.map { (committedAt - $0) * 1000 })
+        for (sequence, created) in timestamps {
+            let delay = (committedAt - created) * 1000
+            delays.append(delay); windows[Int((created-startedAt)/30), default: []].append(delay)
+            if let seen = observations[room]?.first(where: { $0.0 >= sequence })?.1 {
+                accountDelays.append((seen-created)*1000); recoveryDelays.append((committedAt-seen)*1000)
+            }
+        }
         cursors[room] = through
         if !timestamps.isEmpty { lastDeliveryAt = committedAt }
     }
@@ -204,5 +243,9 @@ private actor LiveDeliveryTimings {
             "p95_ms": percentile(0.95), "p99_ms": percentile(0.99), "maximum_ms": sorted.last ?? 0,
             "minimum_ms": sorted.first ?? 0, "lastDeliveryAt": lastDeliveryAt]
         try JSONEncoder().encode(result).write(to: url, options: .atomic)
+        let stages = ["account_observed": LiveRecoveryMeasurements.summary(accountDelays),
+                      "observed_to_commit": LiveRecoveryMeasurements.summary(recoveryDelays)]
+        try JSONEncoder().encode(stages).write(to: url.deletingLastPathComponent().appending(path: "delivery-stage-delays.json"), options: .atomic)
+        try JSONEncoder().encode(windows.mapValues { LiveRecoveryMeasurements.summary($0) }).write(to: url.deletingLastPathComponent().appending(path: "delivery-windows.json"), options: .atomic)
     }
 }

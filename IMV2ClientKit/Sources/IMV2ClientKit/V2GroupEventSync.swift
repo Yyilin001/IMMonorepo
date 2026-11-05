@@ -354,7 +354,7 @@ public actor V2GroupEventSyncEngine {
     /// single-page reads and online delivery use the same flights, so batching
     /// cannot race their cursor reads or reorder page commits.
     func synchronizePages(targets: [(roomID: RoomID, head: UInt64)],
-        commit: @escaping @Sendable (V2ClientGroupEventPage) async throws -> V2GroupEventPageCommit,
+        commit: @escaping @Sendable ([V2ClientGroupEventPage]) async throws -> [RoomID: V2GroupEventPageCommit],
         unavailable: @escaping @Sendable (RoomID) async throws -> Void
     ) async throws -> V2GroupEventSyncProgress {
         guard (1...16).contains(targets.count), Set(targets.map(\.roomID)).count == targets.count else {
@@ -378,7 +378,8 @@ public actor V2GroupEventSyncEngine {
             }
             let results = try await transport.pullGroupEventPages(requests)
             guard Set(results.keys) == Set(requests.map(\.roomID)) else { throw V2RealtimeTransportError.unexpectedResponse }
-            var applied = 0; var hasMore = false
+            var pages: [V2ClientGroupEventPage] = [], denied: [RoomID] = []
+            var hasMore = false
             for request in requests {
                 try Task.checkCancellation()
                 switch results[request.roomID]! {
@@ -387,14 +388,17 @@ public actor V2GroupEventSyncEngine {
                           page.nextRoomSequence >= request.afterRoomSequence,
                           !page.hasMore || page.nextRoomSequence > request.afterRoomSequence
                     else { throw V2RealtimeTransportError.unexpectedResponse }
-                    let committed = try await commit(page)
-                    applied += committed.insertedEventCount; hasMore = hasMore || page.hasMore
+                    pages.append(page); hasMore = hasMore || page.hasMore
                 case .failure(.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: _, currentRevision: _)):
-                    try await unavailable(request.roomID)
+                    denied.append(request.roomID)
                 case .failure(let error): throw error
                 }
             }
-            return .init(appliedEventCount: applied, hasMore: hasMore)
+            for room in denied { try Task.checkCancellation(); try await unavailable(room) }
+            try Task.checkCancellation()
+            let committed = pages.isEmpty ? [:] : try await commit(pages)
+            guard Set(committed.keys) == Set(pages.map(\.roomID)) else { throw V2RealtimeTransportError.unexpectedResponse }
+            return .init(appliedEventCount: committed.values.reduce(0) { $0 + $1.insertedEventCount }, hasMore: hasMore)
         })
         for target in targets { pageFlights[target.roomID] = current }
         defer {

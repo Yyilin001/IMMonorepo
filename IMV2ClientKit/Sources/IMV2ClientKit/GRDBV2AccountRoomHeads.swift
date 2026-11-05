@@ -28,7 +28,7 @@ extension GRDBV2LocalSyncStore {
                                     target: ProjectionTableTarget = .live, db: Database) throws {
         let head = try JSONDecoder().decode(V2AccountRoomHead.self, from: record.payload)
         let table = target.table("v2_account_room_heads")
-        if let prior = try Row.fetchOne(db, sql: "SELECT room_sequence, membership_revision FROM \(table) WHERE room_id = ?",
+        if let prior = try Row.fetchOne(try db.cachedStatement(sql: "SELECT room_sequence, membership_revision FROM \(table) WHERE room_id = ?"),
                                        arguments: [head.roomID.rawValue]) {
             let sequence = try storageInteger(prior, column: "room_sequence")
             let revision = try storageInteger(prior, column: "membership_revision")
@@ -40,11 +40,11 @@ extension GRDBV2LocalSyncStore {
             }
             guard head.membershipRevision >= UInt64(revision) else { throw V2ClientProjectionError.invalidMessagePayload }
         }
-        try db.execute(sql: """
+        try db.cachedStatement(sql: """
             INSERT INTO \(table)(room_id, room_sequence, membership_revision) VALUES (?, ?, ?)
             ON CONFLICT(room_id) DO UPDATE SET room_sequence = excluded.room_sequence,
                 membership_revision = excluded.membership_revision
-            """, arguments: [head.roomID.rawValue, Int64(head.roomSequence), Int64(head.membershipRevision)])
+            """).execute(arguments: [head.roomID.rawValue, Int64(head.roomSequence), Int64(head.membershipRevision)])
         if case .live = target {
             try enqueueRoomRecovery(roomID: head.roomID, head: head.roomSequence, priority: 1, now: .now, db: db)
         }

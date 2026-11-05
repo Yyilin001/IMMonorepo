@@ -208,12 +208,12 @@ extension GRDBV2LocalSyncStore {
     }
 
     static func requireRoomRecoveryScope(_ scope: V2RoomRecoveryScope, db: Database) throws -> Row {
-        guard let row = try Row.fetchOne(db, sql: """
+        guard let row = try Row.fetchOne(try db.cachedStatement(sql: """
             SELECT scan.* FROM v2_room_recovery_scan AS scan
             JOIN v2_local_installation AS account ON account.singleton = scan.singleton
                 AND account.binding = scan.installation_binding AND account.user_id = scan.user_id
             WHERE scan.singleton = 1 AND scan.scan_id = ? AND scan.user_id = ? AND scan.installation_binding = ?
-            """, arguments: [scope.scanID.uuidString, scope.userID.rawValue, scope.installationBinding]) else {
+            """), arguments: [scope.scanID.uuidString, scope.userID.rawValue, scope.installationBinding]) else {
             throw V2RoomRecoveryPersistenceError.staleScope
         }
         return row
@@ -227,32 +227,31 @@ extension GRDBV2LocalSyncStore {
         // discovery (H=0), directory/summary reads and unknown authority intact.
         // Do not touch an existing newer work revision when ignoring an old H.
         if priority == 1, head > 0, try groupEventAccess(roomID: roomID, db: db)?.isAuthorized == true,
-           let cursor = try Row.fetchOne(db,
-                sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?",
+           let cursor = try Row.fetchOne(try db.cachedStatement(sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?"),
                 arguments: [roomID.rawValue]),
            try storageUnsigned(cursor, column: "applied_room_sequence") >= head { return }
         if priority == 1, head > 0,
-           let existing = try Row.fetchOne(db, sql: "SELECT target_head FROM v2_room_recovery_work WHERE room_id = ?", arguments: [roomID.rawValue]),
+           let existing = try Row.fetchOne(try db.cachedStatement(sql: "SELECT target_head FROM v2_room_recovery_work WHERE room_id = ?"), arguments: [roomID.rawValue]),
            try recoveryInteger(existing, "target_head") >= Int64(head) {
-            try db.execute(sql: "UPDATE v2_room_recovery_work SET priority = MAX(priority, ?) WHERE room_id = ?", arguments: [priority, roomID.rawValue])
+            try db.cachedStatement(sql: "UPDATE v2_room_recovery_work SET priority = MAX(priority, ?) WHERE room_id = ?").execute(arguments: [priority, roomID.rawValue])
             return
         }
         let coveredByState = try priority == 1 && head > 0 &&
-            (Bool.fetchOne(db, sql: """
+            (Bool.fetchOne(try db.cachedStatement(sql: """
                 SELECT EXISTS(SELECT 1 FROM v2_room_sync_states s
                 WHERE s.room_id = ? AND s.head >= ?
                 AND NOT EXISTS(SELECT 1 FROM v2_room_membership_states m WHERE m.room_id = s.room_id
                     AND (m.membership_revision > s.membership_revision
                          OR (m.membership_revision = s.membership_revision AND m.is_member = 0))))
-                """, arguments: [roomID.rawValue, Int64(head)])) == true
-        try db.execute(sql: """
+                """), arguments: [roomID.rawValue, Int64(head)])) == true
+        try db.cachedStatement(sql: """
             INSERT INTO v2_room_recovery_work
                 (room_id, target_head, request_revision, requires_state, priority, enqueued_at, next_attempt_at, last_served_order)
             VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT service_sequence FROM v2_room_recovery_scan WHERE singleton = 1), 0))
             ON CONFLICT(room_id) DO UPDATE SET target_head = MAX(target_head, excluded.target_head),
                 request_revision = excluded.request_revision, requires_state = MAX(requires_state, excluded.requires_state),
                 priority = MAX(priority, excluded.priority), next_attempt_at = MIN(next_attempt_at, excluded.next_attempt_at)
-            """, arguments: [roomID.rawValue, Int64(head), UUID().uuidString, !coveredByState, priority,
+            """).execute(arguments: [roomID.rawValue, Int64(head), UUID().uuidString, !coveredByState, priority,
                 now.timeIntervalSince1970, now.timeIntervalSince1970])
     }
 }

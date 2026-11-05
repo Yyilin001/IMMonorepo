@@ -47,6 +47,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             #expect(try await !store.acknowledgePage(old, through: senderUUID, now: later))
             #expect(try await !store.acknowledgePage(current, through: nil, now: later))
+            #expect(try await store.acknowledgePages([.init(lease: old, through: senderUUID)], now: later).isEmpty)
+            #expect(try await store.acknowledgePages([.init(lease: current, through: nil)], now: later).isEmpty)
             #expect(current.mentionedUserIDs == [UserID(uuid: memberThreeUUID)])
             let first = try await store.recipients(current, limit: 1, now: later)
             #expect(first.count == 1)
@@ -54,7 +56,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let secondLease = try #require(try await store.claim(now: later, limit: 1).first)
             let second = try await store.recipients(secondLease, limit: 10, now: later)
             #expect(Set(first + second) == [UserID(uuid: senderUUID), UserID(uuid: memberThreeUUID)])
-            #expect(try await store.acknowledgePage(secondLease, through: try #require(second.last?.uuidValue), now: later))
+            #expect(try await store.acknowledgePages([.init(lease: secondLease, through: try #require(second.last?.uuidValue))], now: later) == [secondLease.eventID])
             #expect(try await store.claim(now: later, limit: 1).isEmpty)
             #expect(try await !store.acknowledgePage(secondLease, through: second.last?.uuidValue, now: later))
             #expect(try await count("im_v2.room_dispatch_outbox", on: sql) == 0)

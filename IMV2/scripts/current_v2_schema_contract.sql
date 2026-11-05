@@ -5,6 +5,14 @@ WITH schema_visibility AS MATERIALIZED (
  SELECT pg_catalog.set_config('search_path', '', true) AS active_path
 )
 SELECT (
+EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='user_projection_ready'
+       AND column_name='revision' AND data_type='bigint' AND is_nullable='NO')
+AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+       WHERE t.tgrelid=to_regclass('im_v2.user_sync_log') AND t.tgname='user_sync_log_snapshot_v8_projection'
+         AND t.tgtype=4 AND t.tgenabled='O' AND NOT t.tgisinternal
+         AND p.proname='enqueue_user_projection_v8'
+         AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='f4648a24e22fad385df2dad131c252f003f6ac2b469f55a055d150655d85cb0f') AND
+
 (NOT EXISTS (SELECT 1 FROM (VALUES ('source_event_id','uuid','NO'),
 ('room_id','uuid','NO'),
 ('room_sequence','int8','NO'),
@@ -765,7 +773,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-81''::text'
+       AND column_default = '''im-v2-current-82''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -775,7 +783,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-81%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-82%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns

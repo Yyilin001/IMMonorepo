@@ -1,0 +1,142 @@
+{
+  "load": {
+    "messagesSent": 30000,
+    "messagesAcknowledged": 30000,
+    "workloadFailed": 0,
+    "heartbeatMissed": 0,
+    "scenarioMessageQueueOverflowed": 0,
+    "coverageProofPassed": true,
+    "messageLatency": {
+      "count": 30000,
+      "maximum": 300.24,
+      "p50": 28,
+      "p95": 42,
+      "p99": 64
+    },
+    "messageEndToEndLatency": {
+      "count": 30000,
+      "maximum": 300.9,
+      "p50": 31,
+      "p95": 45,
+      "p99": 67
+    }
+  },
+  "delivery": {
+    "minimum_ms": 669.3806648254395,
+    "p50_ms": 11118.51191520691,
+    "p95_ms": 14940.861463546753,
+    "p99_ms": 16739.914655685425,
+    "maximum_ms": 32760.908603668213
+  },
+  "delivery_count": 30000,
+  "clock": [
+    {
+      "rtt_ms": 23.78702163696289,
+      "server_minus_mac_ms": 217.909574508667
+    },
+    {
+      "rtt_ms": 19.32811737060547,
+      "server_minus_mac_ms": 219.7859287261963
+    }
+  ],
+  "source_observed_tail_seconds": 0.40006208419799805,
+  "client_tail_seconds": 3.2971322536468506,
+  "dispatch_max": 15,
+  "dispatch_age_max_seconds": 0.150559,
+  "mac_peak_rss_mib": 95.4375,
+  "mac_peak_cpu_percent": 50.1,
+  "cpu_peak_percent": {
+    "imtest-gateway-1": 141.95,
+    "imtest-postgres-1": 139.03
+  },
+  "account_target_transactions": 17032.0,
+  "account_target_body_sql": 51096.0,
+  "reconnect": [
+    {
+      "stateRooms": 0,
+      "accountReadySeconds": 0.14278575,
+      "directoryPages": 0,
+      "contentPulls": 0,
+      "round": 0,
+      "rooms": 1002,
+      "authSeconds": 0.118295667,
+      "recoverySeconds": 0.219715875
+    },
+    {
+      "stateRooms": 0,
+      "accountReadySeconds": 0.147733959,
+      "directoryPages": 0,
+      "contentPulls": 0,
+      "round": 1,
+      "rooms": 1002,
+      "authSeconds": 0.120858292,
+      "recoverySeconds": 0.23093725
+    },
+    {
+      "stateRooms": 0,
+      "accountReadySeconds": 0.14390875,
+      "directoryPages": 0,
+      "contentPulls": 0,
+      "round": 2,
+      "rooms": 1002,
+      "authSeconds": 0.11880875,
+      "recoverySeconds": 0.213908833
+    }
+  ],
+  "consistency": {
+    "rooms": 1000,
+    "messages": 288080,
+    "mismatchedRooms": 0,
+    "checks": [
+      "message count",
+      "ordered message IDs and body digest",
+      "room cursor equals authoritative head",
+      "conversation summary points to latest message"
+    ]
+  },
+  "database_all_work_delta": null,
+  "database_statistics_note": "Auxiliary pg_stat_* capture omitted docker exec -i, so the SQL did not execute; no WAL/transaction global delta is claimed. Application metrics were captured successfully.",
+  "date": "2026-11-05",
+  "schema": "im-v2-current-82",
+  "release": "20261105T114222Z-38160e38",
+  "scenario": {
+    "rooms": 1000,
+    "messagesPerSecond": 100,
+    "durationSeconds": 300,
+    "client": "Mac Release SDK, real TLS and SQLite; no phone UI measurement"
+  },
+  "evidenceDirectory": "/tmp/im-account-decoupling-20261105",
+  "localRegression": {
+    "distinctServerTestsPassed": 25,
+    "schemaUpgradeAndRollbackRoundTrip": true
+  },
+  "postRun": {
+    "sourcePending": 0,
+    "snapshotReady": 0,
+    "snapshotPaused": 0,
+    "localRecoveryPending": 0,
+    "zeroSequenceRows": 0,
+    "temporaryTokensRevoked": 1001,
+    "temporaryTestDevicesRevoked": 1001,
+    "servicesHealthy": true,
+    "fsync": "on",
+    "synchronous_commit": "on"
+  },
+  "baseline": {
+    "sourceDispatchPeak": 1871,
+    "sourceOldestSeconds": 21.68,
+    "accountTargetTransactions": 33796,
+    "accountTargetBodySQL": 187592,
+    "clientP50Seconds": 9.37,
+    "clientP95Seconds": 18.99,
+    "clientP99Seconds": 22.17,
+    "clientMaximumSeconds": 23.52,
+    "clientTailSeconds": 15.93,
+    "macPeakRSSMiB": 95.14
+  },
+  "interpretation": {
+    "server": "No sustained source-dispatch backlog was observed during this 5 minute run.",
+    "client": "P95/P99 and completion tail improved, but P50 and maximum regressed. Account dispatch does not explain all remaining end-to-end latency.",
+    "causality": "Combined change comparison, not an isolated ablation or hardware capacity limit test."
+  }
+}

@@ -10,7 +10,7 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-81"
+    public static let currentSchemaID = "im-v2-current-82"
     private static let requiredTables = [
         "schema_contract", "room_dispatch_outbox", "account_notification_outbox", "author_presentation_change_head", "author_presentation_control_changes", "control_housekeeping_cursor", "realtime_device_control_versions", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "profile_security_invalidation_outbox", "public_profile_update_operations", "user_contact_aliases", "contact_alias_operation_receipts", "room_member_nicknames", "group_nickname_operation_receipts", "group_rooms", "group_invitation_admissions", "group_invitation_receipts", "group_invitation_control_commands", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
@@ -74,6 +74,16 @@ public enum V2SchemaReadiness {
             guard let row = try await sql.raw("SELECT to_regclass(\(bind: name)) IS NOT NULL AS exists").first(decoding: ExistsRow.self), row.exists else {
                 throw V2SchemaReadinessError.unavailableTable(name)
             }
+        }
+        guard try await sql.raw("""
+            SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                WHERE table_schema=\(bind: schema) AND table_name='user_projection_ready'
+                  AND column_name='revision' AND data_type='bigint' AND is_nullable='NO')
+              AND EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                WHERE n.nspname=\(bind: schema) AND p.proname='enqueue_user_projection_v8'
+                  AND encode(sha256(convert_to(replace(p.prosrc,\(bind: schema + "."),'im_v2.'),'UTF8')),'hex')='f4648a24e22fad385df2dad131c252f003f6ac2b469f55a055d150655d85cb0f') AS exists
+            """).first(decoding: ExistsRow.self)?.exists == true else {
+            throw V2SchemaReadinessError.unavailableTable("\(schema).user_projection_ready[independent-consumer]")
         }
         try await verifyRoomDispatch(sql: sql, schema: schema)
         try await verifyProfilePublication(sql: sql, schema: schema)
@@ -1615,7 +1625,7 @@ public enum V2SchemaReadiness {
                 AND COUNT(*) FILTER (
                     WHERE trigger_record.tgname IN (
                         'user_sync_log_projection_effect_v4',
-                        'user_sync_log_snapshot_v7_projection',
+                        'user_sync_log_snapshot_v8_projection',
                         'user_sync_log_enqueue_wake'
                     )
                 ) = 3 AS exists

@@ -46,7 +46,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION im_v2.enqueue_user_projection_v7() RETURNS trigger
+CREATE FUNCTION im_v2.enqueue_user_projection_v8() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
@@ -69,24 +69,20 @@ BEGIN
     )
     ON CONFLICT (user_id) DO NOTHING;
 
+    -- Writers only touch this short scheduling signal. Consumers hold their
+    -- checkpoint, never this row, while folding snapshots. An unconditional
+    -- conflict update prevents a concurrent completion/delete from losing work.
     WITH users AS MATERIALIZED (
         SELECT user_id, min(created_at) AS created_at
-        FROM inserted_user_sync_rows
-        GROUP BY user_id
+        FROM inserted_user_sync_rows GROUP BY user_id
     )
     INSERT INTO im_v2.user_projection_ready
         (user_id, available_at, enqueued_at, updated_at)
-    SELECT users.user_id, users.created_at,
-           users.created_at, users.created_at
-    FROM users
-    JOIN im_v2.user_projection_checkpoints AS checkpoint
-      ON checkpoint.user_id = users.user_id
-     AND checkpoint.state = 'ready'
-    WHERE NOT EXISTS (
-        SELECT 1 FROM im_v2.user_projection_ready AS ready
-        WHERE ready.user_id = users.user_id
-    )
-    ON CONFLICT (user_id) DO NOTHING;
+    SELECT user_id, created_at, created_at, created_at FROM users
+    ON CONFLICT (user_id) DO UPDATE
+    SET revision = im_v2.user_projection_ready.revision + 1,
+        available_at = LEAST(im_v2.user_projection_ready.available_at, EXCLUDED.available_at),
+        updated_at = GREATEST(im_v2.user_projection_ready.updated_at, EXCLUDED.updated_at);
 
     WITH users AS MATERIALIZED (
         SELECT user_id, min(created_at) AS created_at
@@ -2053,14 +2049,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-81'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-81'::text))
+    schema_id text DEFAULT 'im-v2-current-82'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-82'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-81');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-82');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2305,6 +2301,7 @@ CREATE TABLE im_v2.user_projection_effects (
 
 CREATE TABLE im_v2.user_projection_ready (
     user_id uuid NOT NULL,
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
     available_at timestamp with time zone NOT NULL,
     enqueued_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL
@@ -2460,7 +2457,7 @@ CREATE TABLE im_v2.user_sync_retention (
 CREATE TABLE im_v2.user_sync_sequences (
     user_id uuid NOT NULL,
     next_sequence bigint NOT NULL,
-    CONSTRAINT user_sync_sequences_next_sequence_check CHECK ((next_sequence > 0))
+    CONSTRAINT user_sync_sequences_next_sequence_check CHECK ((next_sequence >= 0))
 );
 
 ALTER TABLE ONLY im_v2.account_disables
@@ -3083,7 +3080,7 @@ CREATE TRIGGER rooms_capacity_class_immutable BEFORE UPDATE OF capacity_class ON
 
 CREATE TRIGGER user_sync_log_projection_effect_v4 AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.capture_user_projection_effect_v4();
 
-CREATE TRIGGER user_sync_log_snapshot_v7_projection AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_user_projection_v7();
+CREATE TRIGGER user_sync_log_snapshot_v8_projection AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_user_projection_v8();
 
 ALTER TABLE ONLY im_v2.content_review_cases
     ADD CONSTRAINT content_review_cases_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE CASCADE;

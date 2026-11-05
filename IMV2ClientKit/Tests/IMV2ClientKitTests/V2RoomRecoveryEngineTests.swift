@@ -477,8 +477,8 @@ struct V2RoomRecoveryEngineTests {
         await engine.stop()
     }
 
-    @Test func contentRecoveryRunsIndependentRoomsWithinConfiguredBound() async throws {
-        let (store, wire, engine, user) = try await fixture(contentConcurrency: 2)
+    @Test(arguments: [1, 2]) func contentRecoveryRunsIndependentRoomsWithinConfiguredBound(batchSize: Int) async throws {
+        let (store, wire, engine, user) = try await fixture(contentConcurrency: batchSize)
         await wire.pauseContent()
         let run = Task { try await engine.runBudget(userID: user, maximumDirectoryPages: 2) }
         await wire.waitForConcurrentContentPulls(2)

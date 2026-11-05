@@ -22,6 +22,11 @@ public enum V2RoomRecoveryObservation: Sendable {
     case onlineHead(UInt64), workSelected(UInt64, requiresState: Bool)
 }
 
+/// Wall-clock stages may be nested; contentCommit is included in contentBatch.
+public enum V2RoomRecoveryStage: String, Sendable {
+    case selectWork, fetchState, commitState, fetchSummary, commitSummary, inspectContent, contentBatch, contentCommit
+}
+
 /// One runtime-owned driver for discovery and room catch-up. Notifications may
 /// enqueue while a budget is awaiting I/O, but only one budget can drive pulls.
 public actor V2RoomRecoveryEngine {
@@ -32,6 +37,7 @@ public actor V2RoomRecoveryEngine {
     private let groupEvents: V2GroupEventSyncEngine
     private let didPersistProgress: @Sendable (RoomID, UInt64) async throws -> Void
     private let observe: (@Sendable (V2RoomRecoveryObservation) -> Void)?
+    private let observeStage: (@Sendable (V2RoomRecoveryStage, Double) -> Void)?
     private let now: @Sendable () -> Date
     private var scope: V2RoomRecoveryScope?
     private var epoch: UUID?
@@ -48,12 +54,14 @@ public actor V2RoomRecoveryEngine {
                 groupEvents: V2GroupEventSyncEngine, contentRecoveryBatchSize: Int = 16,
                 now: @escaping @Sendable () -> Date = Date.init,
                 didPersistProgress: @escaping @Sendable (RoomID, UInt64) async throws -> Void = { _, _ in },
-                observe: (@Sendable (V2RoomRecoveryObservation) -> Void)? = nil) {
+                observe: (@Sendable (V2RoomRecoveryObservation) -> Void)? = nil,
+                observeStage: (@Sendable (V2RoomRecoveryStage, Double) -> Void)? = nil) {
         precondition((1...16).contains(contentRecoveryBatchSize), "contentRecoveryBatchSize must be between 1 and 16")
         self.contentRecoveryBatchSize = contentRecoveryBatchSize
         self.transport = transport; self.latestVisible = latestVisible; self.store = store; self.groupEvents = groupEvents; self.now = now
         self.didPersistProgress = didPersistProgress
         self.observe = observe
+        self.observeStage = observeStage
     }
 
     /// Establishes the listener without reading a directory or processing old work.
@@ -195,6 +203,10 @@ public actor V2RoomRecoveryEngine {
         return false
     }
 
+    private func report(_ stage: V2RoomRecoveryStage, since start: ContinuousClock.Instant) {
+        observeStage?(stage, recoveryStageMilliseconds(since: start))
+    }
+
     private func drive(userID: UserID, directoryPages: Int, rooms: Int, restartDirectory: Bool) async throws -> V2RoomRecoveryBudgetResult {
         try Task.checkCancellation()
         if scope == nil {
@@ -241,17 +253,26 @@ public actor V2RoomRecoveryEngine {
             return .init(directoryPages: scanned, processedRooms: 0, directoryComplete: scan.directoryComplete)
         }
         batches = (batches + 1) % 4
+        var stageStart = ContinuousClock.now
         let work = try await store.roomRecoveryWork(scope: scope, limit: rooms, oldestFirst: batches % 4 == 0, now: now())
         for item in work { observe?(.workSelected(item.targetHead, requiresState: item.requiresState)) }
+        report(.selectWork, since: stageStart)
         let needingState = work.filter(\.requiresState)
         if !needingState.isEmpty {
             phase = .reconciling
+            stageStart = .now
             let results = try await transport.roomSyncStates(roomIDs: needingState.map(\.roomID))
             try Task.checkCancellation()
+            report(.fetchState, since: stageStart)
+            stageStart = .now
+            let states = try needingState.compactMap { item -> (state: V2RoomSynchronizationState, work: V2RoomRecoveryWork)? in
+                guard let result = results[item.roomID] else { throw V2RealtimeTransportError.unexpectedResponse }
+                if case .state(let state) = result { return (state, item) }; return nil
+            }
+            if !states.isEmpty { try await store.commitRoomRecoveryStates(states, now: now()) }
             for item in needingState {
                 switch results[item.roomID] {
-                case .state(let state):
-                    _ = try await store.commitRoomRecoveryState(state, work: item, now: now())
+                case .state: break
                 case .retry(let seconds):
                     phase = .retryWaiting
                     try await store.retryRoomRecoveryWork(item, at: now().addingTimeInterval(TimeInterval(max(1, seconds))))
@@ -261,16 +282,25 @@ public actor V2RoomRecoveryEngine {
                 }
             }
         }
+        if !needingState.isEmpty { report(.commitState, since: stageStart) }
         let summaryWork = try await store.roomRecoveryWork(scope: scope, limit: rooms,
             oldestFirst: batches % 4 == 0, now: now()).filter { $0.requiresSummary && !$0.requiresState }
         if !summaryWork.isEmpty {
             let request = try await store.beginRoomLatestVisibleRequest(scope: scope)
+            stageStart = .now
             let snapshots = try await latestVisible.latestVisible(roomIDs: summaryWork.map(\.roomID))
             try Task.checkCancellation()
+            report(.fetchSummary, since: stageStart)
+            stageStart = .now
+            let valid = try summaryWork.compactMap { item -> (snapshot: V2RoomLatestVisible, work: V2RoomRecoveryWork)? in
+                guard let result = snapshots[item.roomID] else { throw V2RealtimeTransportError.unexpectedResponse }
+                if case .snapshot(let snapshot) = result { return (snapshot, item) }; return nil
+            }
+            let accepted: Set<RoomID> = valid.isEmpty ? [] : try await store.commitRoomLatestVisibleBatch(valid, request: request)
             for item in summaryWork {
                 switch snapshots[item.roomID] {
-                case .snapshot(let snapshot):
-                    if try await !store.commitRoomLatestVisible(snapshot, request: request, work: item) {
+                case .snapshot:
+                    if !accepted.contains(item.roomID) {
                         try await store.retryRoomRecoveryWork(item, at: now().addingTimeInterval(1))
                     }
                 case .unavailable: _ = try await store.commitRoomRecoveryUnavailable(item)
@@ -280,43 +310,78 @@ public actor V2RoomRecoveryEngine {
                 }
             }
         }
+        if !summaryWork.isEmpty { report(.commitSummary, since: stageStart) }
+        stageStart = .now
         // Re-read targets after state commits. A response may raise the head,
         // or an in-flight notification may have replaced the request revision.
         let ready = try await store.roomRecoveryWork(scope: scope, limit: rooms, oldestFirst: batches % 4 == 0, now: now())
         var processed = 0
         var appliedEvents = 0
         var contentWork: [V2RoomRecoveryWork] = []
-        for item in ready where !item.requiresState {
+        let eligible = ready.filter { !$0.requiresState }
+        let finished = try await store.finishRoomRecoveryWorks(eligible)
+        for item in eligible {
             try Task.checkCancellation()
-            if try await store.finishRoomRecoveryWork(item) {
+            if finished.contains(item.roomID) {
                 try await didPersistProgress(item.roomID, store.groupEventCursor(roomID: item.roomID))
                 processed += 1; continue
             }
             contentWork.append(item)
         }
+        report(.inspectContent, since: stageStart)
         if !contentWork.isEmpty {
             phase = .catchingUp
-            // Bounded wire batches reduce request overhead; each room still
-            // commits its page and authorization fence in its own transaction.
-            for offset in stride(from: 0, to: contentWork.count, by: contentRecoveryBatchSize) {
-                let batch = Array(contentWork[offset..<min(offset + contentRecoveryBatchSize, contentWork.count)])
-                let byRoom = Dictionary(uniqueKeysWithValues: batch.map { ($0.roomID, $0) })
-                let content = try await groupEvents.synchronizePages(targets: batch.map { ($0.roomID, $0.targetHead) },
-                    commit: { [store, didPersistProgress] page in
-                        guard let item = byRoom[page.roomID] else { throw V2RealtimeTransportError.unexpectedResponse }
-                        let committed = try await store.applyRoomRecoveryPage(page, work: item)
-                        try await didPersistProgress(item.roomID, committed.appliedThrough)
-                        return committed
-                    }, unavailable: { [store] room in
-                        guard let item = byRoom[room] else { throw V2RealtimeTransportError.unexpectedResponse }
-                        _ = try await store.commitRoomRecoveryUnavailable(item)
-                    })
-                appliedEvents += content.appliedEventCount; processed += batch.count
+            // Two disjoint batches overlap network I/O. Group-event flights
+            // still reserve each room, and SQLite serializes the fenced commits.
+            let groups = stride(from: 0, to: contentWork.count, by: contentRecoveryBatchSize).map {
+                Array(contentWork[$0..<min($0 + contentRecoveryBatchSize, contentWork.count)])
             }
+            let content = try await withThrowingTaskGroup(of: (Int, Int).self) { tasks in
+                var next = 0, applied = 0, processed = 0
+                func submit(_ batch: [V2RoomRecoveryWork]) {
+                    tasks.addTask { [store, groupEvents, didPersistProgress, observeStage] in
+                        let byRoom = Dictionary(uniqueKeysWithValues: batch.map { ($0.roomID, $0) })
+                        let started = ContinuousClock.now
+                        let result = try await groupEvents.synchronizePages(targets: batch.map { ($0.roomID, $0.targetHead) },
+                            commit: { pages in
+                                let items = try pages.map { page in
+                                    guard let item = byRoom[page.roomID] else { throw V2RealtimeTransportError.unexpectedResponse }
+                                    return (page: page, work: item)
+                                }
+                                let commitStart = ContinuousClock.now
+                                let committed = try await store.applyRoomRecoveryPages(items)
+                                observeStage?(.contentCommit, recoveryStageMilliseconds(since: commitStart))
+                                // No report can precede the durable batch commit.
+                                for page in pages {
+                                    guard let cursor = committed[page.roomID] else { throw V2RealtimeTransportError.unexpectedResponse }
+                                    try await didPersistProgress(page.roomID, cursor.appliedThrough)
+                                }
+                                return committed
+                            }, unavailable: { room in
+                                guard let item = byRoom[room] else { throw V2RealtimeTransportError.unexpectedResponse }
+                                _ = try await store.commitRoomRecoveryUnavailable(item)
+                            })
+                        observeStage?(.contentBatch, recoveryStageMilliseconds(since: started))
+                        return (result.appliedEventCount, batch.count)
+                    }
+                }
+                while next < min(2, groups.count) { submit(groups[next]); next += 1 }
+                while let result = try await tasks.next() {
+                    applied += result.0; processed += result.1
+                    if next < groups.count { submit(groups[next]); next += 1 }
+                }
+                return (applied, processed)
+            }
+            appliedEvents += content.0; processed += content.1
         }
         let scan = try await store.roomRecoveryScan(scope: scope)
         // Directory completion alone cannot establish live: the personal stream
         // and all delayed/unfinished work must also be proven complete.
         return .init(directoryPages: scanned, processedRooms: processed, directoryComplete: scan.directoryComplete, appliedEventCount: appliedEvents)
     }
+}
+
+private func recoveryStageMilliseconds(since start: ContinuousClock.Instant) -> Double {
+    let elapsed = start.duration(to: .now).components
+    return Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15
 }

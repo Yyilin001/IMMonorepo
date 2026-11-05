@@ -373,7 +373,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             for table in [
                 "user_projection_checkpoints",
-                "user_projection_ready",
                 "user_sync_retention",
             ] {
                 try await sql.raw("""
@@ -384,8 +383,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     """).run()
             }
 
-            // Newer work must neither insert nor rewrite an unchanged
-            // checkpoint/retention/wake tuple.
+            // New work revises only the scheduling signal, never the
+            // snapshot checkpoint or retention tuple.
             try await sql.raw("""
                 INSERT INTO im_v2.user_sync_log
                     (user_id, user_sync_sequence, source_event_id,
@@ -401,11 +400,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                      '{"state":"accepted"}'::jsonb, \(bind: later))
                 """).run()
             #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 0)
-            #expect(try await count("im_v2.test_ready_updates", on: sql) == 0)
+            #expect(try await count("im_v2.test_ready_updates", on: sql) == 2)
 
-            // Backdated restoration work is already represented by the
-            // durable wake row. It must not rewrite either row or contend
-            // with a projector that currently owns them.
+            // Even backdated work increments the signal revision so a concurrent
+            // snapshot completion cannot erase this enqueue.
             try await sql.raw("""
                 INSERT INTO im_v2.user_sync_log
                     (user_id, user_sync_sequence, source_event_id,
@@ -415,7 +413,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                      '{"state":"accepted"}'::jsonb, \(bind: backdated))
                 """).run()
             #expect(try await count("im_v2.test_checkpoint_updates", on: sql) == 0)
-            #expect(try await count("im_v2.test_ready_updates", on: sql) == 0)
+            #expect(try await count("im_v2.test_ready_updates", on: sql) == 3)
             let backdatedCheckpoint = try #require(try await sql.raw("""
                 SELECT COUNT(*) AS value
                 FROM im_v2.user_projection_checkpoints
@@ -501,7 +499,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                      \(bind: payload)::jsonb, \(bind: now))
                 """).run()
 
-            // The v7 enqueue trigger runs first. This test-only trigger then
+            // The v8 enqueue trigger runs first. This test-only trigger then
             // holds the same INSERT transaction open so the projector can
             // exercise the exact delete-versus-commit race that previously
             // lost the durable ready row.
