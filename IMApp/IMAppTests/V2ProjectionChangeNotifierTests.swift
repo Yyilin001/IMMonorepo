@@ -7,17 +7,33 @@ import IMV2Core
 @MainActor
 @Suite("Projection notification coalescing", .timeLimit(.minutes(1)))
 struct V2ProjectionChangeNotifierTests {
+    @Test("ordinary conversation changes publish immediately without cancelling active reads")
+    func conversationChangesDoNotWait() async throws {
+        let clock = ProjectionNotificationClock()
+        let notifier = V2ProjectionChangeNotifier(sleep: { await clock.sleep($0) })
+        var updates = await notifier.updates(scopes: .conversations).makeAsyncIterator()
+        _ = await updates.next()
+        for generation in 1...3 {
+            await notifier.publish(.init(scopes: .conversations, requiresImmediateRefresh: false))
+            let update = try #require(await updates.next())
+            #expect(update.generation == UInt64(generation))
+            #expect(!update.requiresImmediateRefresh)
+        }
+        #expect(await clock.durations.isEmpty)
+        await notifier.finish()
+    }
+
     @Test("ordinary bursts use one timer and do not notify unrelated pages")
     func ordinaryBurst() async throws {
         let clock = ProjectionNotificationClock()
         let notifier = V2ProjectionChangeNotifier(sleep: { await clock.sleep($0) })
-        var conversations = await notifier.updates(scopes: .conversations).makeAsyncIterator()
+        var conversations = await notifier.updates(scopes: .conversationTimeline).makeAsyncIterator()
         var contacts = await notifier.updates(scopes: .contacts).makeAsyncIterator()
         var privacy = await notifier.updates(scopes: .privacy).makeAsyncIterator()
         #expect((await conversations.next())?.generation == 0)
         #expect((await contacts.next())?.generation == 0)
         #expect((await privacy.next())?.generation == 0)
-        for _ in 0..<40 { await notifier.publish(.init(scopes: .conversations, requiresImmediateRefresh: false)) }
+        for _ in 0..<40 { await notifier.publish(.init(scopes: .conversationTimeline, requiresImmediateRefresh: false)) }
         for _ in 0..<20 { await notifier.publish(.init(scopes: .contacts, requiresImmediateRefresh: false)) }
         await clock.waitForSleeps(1)
         #expect(await clock.durations == [.milliseconds(150)])
@@ -33,10 +49,10 @@ struct V2ProjectionChangeNotifierTests {
     func immediateChangeBypassesTimer() async throws {
         let clock = ProjectionNotificationClock()
         let notifier = V2ProjectionChangeNotifier(sleep: { await clock.sleep($0) })
-        var conversations = await notifier.updates(scopes: .conversations).makeAsyncIterator()
+        var conversations = await notifier.updates(scopes: .contacts).makeAsyncIterator()
         var privacy = await notifier.updates(scopes: .privacy).makeAsyncIterator()
         _ = (await conversations.next())?.generation; _ = (await privacy.next())?.generation
-        await notifier.publish(.init(scopes: .conversations, requiresImmediateRefresh: false))
+        await notifier.publish(.init(scopes: .contacts, requiresImmediateRefresh: false))
         await clock.waitForSleeps(1)
         await notifier.publish(.init(scopes: .privacy, requiresImmediateRefresh: true))
         #expect((await conversations.next())?.generation == 1)
@@ -60,9 +76,7 @@ struct V2ProjectionChangeNotifierTests {
         _ = await conversations.next(); _ = await privacy.next()
         await notifier.publish(.init(scopes: .conversations, requiresImmediateRefresh: true))
         await notifier.publish(.init(scopes: [.conversations, .privacy], requiresImmediateRefresh: false))
-        await clock.waitForSleeps(1)
-        await clock.releaseAll()
-        // Receiving the ordinary privacy wake proves the timer has published
+        // Receiving the ordinary privacy wake proves the update has published
         // before the deliberately stalled conversation consumer resumes.
         let ordinary = try #require(await privacy.next())
         #expect(ordinary.generation == 2 && !ordinary.requiresImmediateRefresh)
@@ -91,7 +105,7 @@ struct V2ProjectionChangeNotifierTests {
         await notifier.finish()
     }
 
-    @Test("real committed acceptance is coalesced but withdrawal wakes immediately")
+    @Test("real committed acceptance and withdrawal both wake without a timer")
     func productionSQLiteNotifications() async throws {
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-notification-integration-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
         let clock = ProjectionNotificationClock()
@@ -108,12 +122,14 @@ struct V2ProjectionChangeNotifierTests {
             "sender_user_id": "00000000-0000-0000-0000-000000000222", "text": "hello",
             "mention_user_ids": [], "mentions_everyone": false, "server_created_at_ms": 1_750_000_000_000
         ])
-        await clock.waitForSleeps(1)
+        let accepted = try #require(await conversations.next())
+        #expect(accepted.generation == 2 && !accepted.requiresImmediateRefresh)
+        #expect(await clock.durations.isEmpty)
         try await applyRoomMessage(local, sequence: 2, payload: [
             "event_type": "message.withdrawn", "message_id": message, "room_id": room, "message_revision": 2
         ])
-        #expect((await conversations.next())?.generation == 2)
-        #expect(await clock.pendingCount == 1)
+        #expect((await conversations.next())?.generation == 3)
+        #expect(await clock.pendingCount == 0)
         try await local.close()
         #expect((await contacts.next())?.generation == nil)
         #expect((await conversations.next())?.generation == nil)

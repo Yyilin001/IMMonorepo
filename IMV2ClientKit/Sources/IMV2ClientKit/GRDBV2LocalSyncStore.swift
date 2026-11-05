@@ -2728,6 +2728,23 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     ///   - limit: 本页最多返回的条数。
     /// - Returns: 会话列表分页。
     /// - Throws: 参数越界或数据库读取失败时抛出。
+    /// Read the complete ordered list from a single database snapshot.
+    public func allConversationListEntries(isArchived: Bool) throws -> [V2ClientConversationListEntry] {
+        try databasePool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT room_id, last_activity, is_pinned, is_archived, mute_until
+                FROM v2_conversation_list_entries WHERE is_archived = ?
+                ORDER BY is_pinned DESC, last_activity DESC, room_id ASC
+                """, arguments: [isArchived])
+            var entries: [V2ClientConversationListEntry] = []
+            // Bound SQL parameter counts while retaining one consistent snapshot.
+            for offset in stride(from: 0, to: rows.count, by: 100) {
+                entries += try Self.conversationListEntries(Array(rows[offset..<min(offset + 100, rows.count)]), db: db)
+            }
+            return entries
+        }
+    }
+
     public func conversationListPage(
         isArchived: Bool,
         before cursor: V2ClientConversationListCursor? = nil,

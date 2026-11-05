@@ -255,16 +255,6 @@ struct V2ConversationListPage: Equatable, Sendable {
     let nextCursor: V2ClientConversationListCursor?
 }
 
-struct V2ConversationListWindow: Sendable {
-    let page: V2ConversationListPage
-    let anchorID: String?
-    let hasEarlier: Bool
-}
-
-protocol V2ConversationWindowReading: Sendable {
-    func conversationWindow(for userID: String, isArchived: Bool, around anchor: V2ClientConversationListCursor, limit: Int, precedingCount: Int) async throws -> V2ConversationListWindow
-}
-
 /// 进入房间推进已读线所需的本地事实。
 ///
 /// 合同 §5.4 要推进到的是**房间头**，而不是最后一条可见消息的序号：房间头包含编辑、
@@ -282,6 +272,7 @@ struct V2ConversationRoomReadCheckpoint: Equatable, Sendable {
 }
 
 protocol V2ConversationDataSource: Sendable {
+    func allConversationSummaries(for userID: String, isArchived: Bool) async throws -> [V2ConversationListItem]
     func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation
     /// 该房间是否已被服务端保留裁剪掉一段历史（缺口永久存在）。
     func roomLogHistoryIsIncomplete(roomID: String) async throws -> Bool
@@ -303,6 +294,24 @@ protocol V2ConversationDataSource: Sendable {
 }
 
 extension V2ConversationDataSource {
+    func allConversationSummaries(for userID: String, isArchived: Bool) async throws -> [V2ConversationListItem] {
+        var items: [V2ConversationListItem] = []
+        var seen = Set<String>()
+        var cursors: [V2ClientConversationListCursor] = []
+        var cursor: V2ClientConversationListCursor?
+        repeat {
+            try Task.checkCancellation()
+            let page = try await conversationSummaryPage(for: userID, isArchived: isArchived, before: cursor, limit: 100)
+            items.append(contentsOf: page.items.filter { seen.insert($0.id).inserted })
+            cursor = page.nextCursor
+            if let cursor {
+                guard !cursors.contains(cursor) else { throw V2ClientProjectionError.invalidMessagePayload }
+                cursors.append(cursor)
+            }
+        } while cursor != nil
+        return items
+    }
+
     /// 不支持未读目录的数据源保持列表可用。
     /// 不支持本地投影的数据源按"历史完整"处理。
     func roomLogHistoryIsIncomplete(roomID _: String) async throws -> Bool { false }
@@ -425,7 +434,6 @@ extension V2ActiveHybridGroupSynchronizing {
 @MainActor
 @Observable
 final class V2ConversationListStore {
-    static let maximumWindowCount = 300
     let viewport = V2ListViewport()
     enum State: Equatable {
         case loading
@@ -435,7 +443,6 @@ final class V2ConversationListStore {
 
     private let environment: V2ConversationFeatureEnvironment
     private let dataSource: any V2ConversationDataSource
-    private let windowReader: (any V2ConversationWindowReading)?
     private let favoritesReader: (any V2ConversationFavoritesReading)?
     private let messageSearcher: (any V2ConversationMessageSearching)?
     private let userID: String
@@ -450,11 +457,6 @@ final class V2ConversationListStore {
     private(set) var isLoadingFavorites = false
     private(set) var favoritesFeedback: String?
     private(set) var favoritesNextCursor: V2ClientFavoriteMessageCursor?
-    private(set) var conversationNextCursor: V2ClientConversationListCursor?
-    private var conversationPageOperation: UUID?
-    var isLoadingMoreConversations: Bool { conversationPageOperation != nil }
-    private var conversationRefreshOperation: UUID?
-    private(set) var hasEarlierConversations = false
     /// 当前是否展示归档列表。
     ///
     /// 收件箱与归档是同一份持久化投影上的两个不同视图；
@@ -497,7 +499,6 @@ final class V2ConversationListStore {
     init(environment: V2ConversationFeatureEnvironment) {
         self.environment = environment
         dataSource = environment.projections.dataSource
-        windowReader = environment.projections.dataSource as? any V2ConversationWindowReading
         favoritesReader = environment.projections.dataSource as? any V2ConversationFavoritesReading
         messageSearcher = environment.projections.messageSearcher
         userID = environment.userID
@@ -685,166 +686,39 @@ final class V2ConversationListStore {
     func refresh(resetWindow: Bool = false) async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
-        conversationRefreshFeedback = nil
-        let operation = UUID()
-        conversationRefreshOperation = operation
-        conversationPageOperation = nil
-        defer { if conversationRefreshOperation == operation { conversationRefreshOperation = nil } }
-        let retainedCount = resetWindow ? 50 : min(Self.maximumWindowCount, max(50, items.count))
-        if resetWindow { items = []; conversationNextCursor = nil; hasEarlierConversations = false; viewport.reset() }
-        if state != .loaded || resetWindow { state = .loading }
         let archived = isShowingArchived
+        conversationRefreshFeedback = nil
+        if resetWindow { items = []; viewport.reset() }
+        if state != .loaded || resetWindow { state = .loading }
         do {
             await recoverDiscoveredDirectConversations()
             try Task.checkCancellation()
-            while true {
-                let capturedAnchorID = viewport.anchorID
-                let anchorID = capturedAnchorID ?? (hasEarlierConversations ? items.first?.id : nil)
-                if let windowReader, let index = items.firstIndex(where: { $0.id == anchorID }),
-                   let anchor = Self.windowCursor(items[index]) {
-                    let result = try await windowReader.conversationWindow(for: userID, isArchived: archived, around: anchor,
-                        limit: retainedCount, precedingCount: min(50, index, retainedCount - 1))
-                    try Task.checkCancellation()
-                    guard generation == refreshGeneration, archived == isShowingArchived else { return }
-                    guard case let .ready(restorationID) = viewport.resolveRead(capturedAnchorID: capturedAnchorID,
-                        returnedIDs: result.page.items.map(\.id), fallback: result.anchorID) else { continue }
-                    publishWindow(result, restoreTo: restorationID)
-                    state = .loaded
-                    await restoreDurableGroupCreationStatusIfNeeded()
-                    return
-                }
-                var refreshed: [V2ConversationListItem] = []
-                var seen = Set<String>()
-                var cursor: V2ClientConversationListCursor?
-                // Each read remains within the existing 100-row storage bound.
-                // The captured loaded count bounds this refresh even if new data
-                // arrives while the finite page sequence is being read.
-                for offset in stride(from: 0, to: retainedCount, by: 100) {
-                    let page = try await dataSource.conversationSummaryPage(
-                        for: userID, isArchived: archived, before: cursor,
-                        limit: min(100, retainedCount - offset)
-                    )
-                    try Task.checkCancellation()
-                    guard generation == refreshGeneration, archived == isShowingArchived else { return }
-                    guard page.nextCursor == nil || page.nextCursor != cursor else { throw V2ClientProjectionError.invalidMessagePayload }
-                    refreshed.append(contentsOf: page.items.filter { seen.insert($0.id).inserted })
-                    cursor = page.nextCursor
-                    if cursor == nil { break }
-                }
-                // Fallback data sources do not implement anchored windows. Their
-                // finite head read remains usable, but production can retarget.
-                let restorationID: String?
-                if case let .ready(target) = viewport.resolveRead(capturedAnchorID: capturedAnchorID,
-                    returnedIDs: refreshed.map(\.id), fallback: nil) { restorationID = target }
-                else if windowReader != nil { continue }
-                else { restorationID = nil }
-                items = refreshed
-                V2ProjectionVisibilityScope.conversationCommit?.didPublishSnapshot()
-                viewport.reconcile(ids: items.map(\.id))
-                viewport.restore(to: restorationID)
-                hasEarlierConversations = false
-                conversationNextCursor = cursor
-                state = .loaded
-                await restoreDurableGroupCreationStatusIfNeeded()
-                return
-            }
-        } catch is CancellationError {
-            return
-        } catch {
+            let refreshed = try await dataSource.allConversationSummaries(for: userID, isArchived: archived)
+            try Task.checkCancellation()
+            guard generation == refreshGeneration, archived == isShowingArchived else { return }
+            // Resolve against the latest viewport after the asynchronous read.
+            let anchor = viewport.anchorID
+            let ids = Set(refreshed.map(\.id))
+            let oldIndex = anchor.flatMap { id in items.firstIndex { $0.id == id } }
+            let restoration = anchor.flatMap { ids.contains($0) ? $0 : nil }
+                ?? oldIndex.flatMap { index in refreshed.isEmpty ? nil : refreshed[min(index, refreshed.count - 1)].id }
+            items = refreshed
+            V2ProjectionVisibilityScope.conversationCommit?.didPublishSnapshot()
+            viewport.reconcile(ids: items.map(\.id))
+            viewport.restore(to: restoration)
+            state = .loaded
+            await restoreDurableGroupCreationStatusIfNeeded()
+        } catch is CancellationError { return }
+        catch {
             guard !Task.isCancelled, generation == refreshGeneration else { return }
-            if items.isEmpty {
-                state = .failed
-            } else {
-                state = .loaded
-                conversationRefreshFeedback = "无法刷新会话列表，保留上次读取的内容。"
-            }
+            state = items.isEmpty ? .failed : .loaded
+            if !items.isEmpty { conversationRefreshFeedback = "无法刷新会话列表，保留上次读取的内容。" }
         }
     }
 
     func toggleArchivedConversations() async {
         isShowingArchived.toggle()
         await refresh(resetWindow: true)
-    }
-
-    func loadMoreConversations() async {
-        guard state == .loaded,
-              let cursor = conversationNextCursor,
-              conversationRefreshOperation == nil,
-              !isLoadingMoreConversations
-        else { return }
-        let generation = refreshGeneration
-        let archived = isShowingArchived
-        let operation = UUID()
-        conversationPageOperation = operation
-        defer { if conversationPageOperation == operation { conversationPageOperation = nil } }
-        do {
-            let page = try await dataSource.conversationSummaryPage(
-                for: userID,
-                isArchived: archived,
-                before: cursor,
-                limit: 50
-            )
-            try Task.checkCancellation()
-            guard generation == refreshGeneration, archived == isShowingArchived else { return }
-            var existingIDs = Set(items.map(\.id))
-            let anchorID = viewport.anchorID ?? items.last?.id
-            let additions = page.items.filter { existingIDs.insert($0.id).inserted }
-            let removedCount = max(0, items.count + additions.count - Self.maximumWindowCount)
-            // The user may have scrolled back while the page was being read.
-            // Keep both the window and its cursor when appending would evict
-            // their current row; a later explicit load can retry this page.
-            if let anchorID = viewport.anchorID, items.prefix(removedCount).contains(where: { $0.id == anchorID }) { return }
-            items.append(contentsOf: additions)
-            if removedCount > 0 {
-                items.removeFirst(removedCount)
-                hasEarlierConversations = true
-            }
-            viewport.reconcile(ids: items.map(\.id))
-            if removedCount > 0 { viewport.restore(to: anchorID ?? items.first?.id) }
-            conversationNextCursor = page.nextCursor
-        } catch is CancellationError {
-            return
-        } catch {
-            guard generation == refreshGeneration, archived == isShowingArchived else { return }
-            conversationStateFeedback = "无法加载更多会话。"
-        }
-    }
-
-    func loadEarlierConversations() async {
-        guard let windowReader, hasEarlierConversations, conversationRefreshOperation == nil,
-              conversationPageOperation == nil, let first = items.first, let anchor = Self.windowCursor(first) else { return }
-        let operation = UUID(), generation = refreshGeneration
-        let archived = isShowingArchived
-        let capturedAnchorID = viewport.anchorID
-        conversationPageOperation = operation
-        defer { if conversationPageOperation == operation { conversationPageOperation = nil } }
-        do {
-            let result = try await windowReader.conversationWindow(for: userID, isArchived: archived, around: anchor,
-                limit: Self.maximumWindowCount, precedingCount: Self.maximumWindowCount - 50)
-            try Task.checkCancellation()
-            guard generation == refreshGeneration, archived == isShowingArchived else { return }
-            guard case let .ready(restorationID) = viewport.resolveRead(capturedAnchorID: capturedAnchorID,
-                returnedIDs: result.page.items.map(\.id), fallback: result.page.items.first?.id) else { return }
-            publishWindow(result, restoreTo: restorationID)
-        } catch is CancellationError { return }
-        catch {
-            guard generation == refreshGeneration else { return }
-            conversationStateFeedback = "无法加载前面的会话。"
-        }
-    }
-
-    private func publishWindow(_ result: V2ConversationListWindow, restoreTo anchorID: String?) {
-        items = result.page.items
-        V2ProjectionVisibilityScope.conversationCommit?.didPublishSnapshot()
-        conversationNextCursor = result.page.nextCursor
-        hasEarlierConversations = result.hasEarlier
-        viewport.reconcile(ids: items.map(\.id))
-        viewport.restore(to: anchorID)
-    }
-
-    private static func windowCursor(_ item: V2ConversationListItem) -> V2ClientConversationListCursor? {
-        guard let roomID = try? RoomID(item.id) else { return nil }
-        return .init(isPinned: item.isPinned, lastActivity: item.lastActivity, roomID: roomID)
     }
 
     func loadFavorites() async {

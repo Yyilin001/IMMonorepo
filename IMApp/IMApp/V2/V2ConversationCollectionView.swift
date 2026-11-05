@@ -4,26 +4,20 @@ import IMV2Core
 import SwiftUI
 import UIKit
 
-/// Projects the store's already ordered window into fixed slots. Only conversation
+/// Projects the store's complete ordered snapshot into fixed slots. Only conversation
 /// rows participate in database scroll anchors; pending requests and controls do not.
 struct V2ConversationCollectionView: UIViewControllerRepresentable {
     enum Row: Equatable, Identifiable {
-        enum ID: Hashable { case conversation(String), pending(UUID), earlier, latest, more }
+        enum ID: Hashable { case conversation(String), pending(UUID) }
         var id: ID {
             switch self {
             case .conversation(let item): .conversation(item.id)
             case .pending(let request, _): .pending(request.work.id)
-            case .earlier: .earlier
-            case .latest: .latest
-            case .more: .more
             }
         }
 
         case conversation(V2ConversationListItem)
         case pending(V2DirectRoomPending, status: String)
-        case earlier(loading: Bool)
-        case latest
-        case more(V2ClientConversationListCursor, loading: Bool)
     }
 
     typealias Controller = FixedPositionListController<Row>
@@ -40,14 +34,7 @@ struct V2ConversationCollectionView: UIViewControllerRepresentable {
         var rows = pending.map {
             Row.pending($0, status: store.directConversationRequestStatus($0))
         }
-        if store.hasEarlierConversations {
-            rows.append(.earlier(loading: store.isLoadingMoreConversations))
-            rows.append(.latest)
-        }
         rows.append(contentsOf: conversations.map(Row.conversation))
-        if let cursor = store.conversationNextCursor {
-            rows.append(.more(cursor, loading: store.isLoadingMoreConversations))
-        }
         self.rows = rows
     }
 
@@ -72,7 +59,6 @@ struct V2ConversationCollectionView: UIViewControllerRepresentable {
 
     static func dismantleUIViewController(_ controller: Controller, coordinator: Coordinator) {
         coordinator.restorationTask?.cancel()
-        coordinator.pageTask?.cancel()
         controller.stop()
     }
 
@@ -100,17 +86,14 @@ struct V2ConversationCollectionView: UIViewControllerRepresentable {
             },
             visibleRowsChanged: { [store] visible, bounds in
                 var positions: [String: V2ListViewport.RowPosition] = [:]
-                var footer: V2ClientConversationListCursor?
                 for entry in visible {
                     switch entry.row {
                     case .conversation(let item):
                         positions[item.id] = .init(minY: entry.frame.minY, maxY: entry.frame.maxY)
-                    case .more(let cursor, _): footer = cursor
                     default: break
                     }
                 }
                 store.viewport.replaceVisibleRows(positions, in: bounds)
-                coordinator.footerVisible(footer, store: store)
             },
             didBeginDragging: { [store] in store.viewport.userDidBeginScrolling() },
             refresh: { [store] in await store.refresh() }
@@ -157,9 +140,7 @@ struct V2ConversationCollectionView: UIViewControllerRepresentable {
         let source = OrderedListWindow<Row>()
         var presentation: RowEnvironment?
         var restorationTask: Task<Void, Never>?
-        var pageTask: Task<Void, Never>?
         private var restorationID: UUID?
-        private var visibleFooter: V2ClientConversationListCursor?
 
         func restore(_ request: V2ListViewport.Restoration?, in controller: Controller, viewport: V2ListViewport) {
             guard restorationID != request?.id else { return }
@@ -177,15 +158,7 @@ struct V2ConversationCollectionView: UIViewControllerRepresentable {
             }
         }
 
-        func footerVisible(_ cursor: V2ClientConversationListCursor?, store: V2ConversationListStore) {
-            guard visibleFooter != cursor else { return }
-            visibleFooter = cursor
-            guard let cursor, store.viewport.restoration == nil else { return }
-            pageTask = Task {
-                guard !Task.isCancelled, store.conversationNextCursor == cursor else { return }
-                await store.loadMoreConversations()
-            }
-        }
+
     }
 }
 
@@ -224,26 +197,7 @@ private struct V2ConversationCollectionRow: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("v2.conversation.local.\(request.work.id.uuidString)")
             .id(request.work.id)
-        case .earlier(let loading):
-            Button("查看前面的会话") { Task { await store.loadEarlierConversations() } }
-                .disabled(loading)
-                .accessibilityIdentifier("v2.conversation.load-earlier")
-                .frame(minHeight: 44)
-        case .latest:
-            Button("回到最新会话") { Task { await store.refresh(resetWindow: true) } }
-                .accessibilityIdentifier("v2.conversation.return-to-latest")
-                .frame(minHeight: 44)
-        case .more(_, let loading):
-            HStack {
-                Spacer()
-                if loading {
-                    ProgressView().accessibilityLabel("正在加载更多会话")
-                } else {
-                    Button("加载更多会话") { Task { await store.loadMoreConversations() } }
-                        .accessibilityIdentifier("v2.conversation.load-more")
-                }
-                Spacer()
-            }.frame(minHeight: 44)
+
         }
     }
 

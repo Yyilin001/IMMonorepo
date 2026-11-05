@@ -10,28 +10,21 @@ import Testing
 @MainActor
 @Suite("Conversation window production integration", .serialized, .timeLimit(.minutes(1)))
 struct V2ConversationWindowTests {
-    @Test("deep pagination, head insertions and deletion keep a bounded production window")
+    @Test("full loading, head insertions and deletion preserve the visible conversation")
     func productionWindowLifecycle() async throws {
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-app-window-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
         try await seed(local, range: 1...2_000)
         let source = V2GRDBConversationDataSource(localStore: local, requestLatestVisible: { _ in })
         let store = V2ConversationListStore(environment: .init(userID: "user", projections: .init(dataSource: source)))
         await store.refresh()
-        #expect(store.items.count == 50)
-        for _ in 0..<25 {
-            show(try #require(store.items.last?.id), in: store)
-            await store.loadMoreConversations()
-            #expect(store.items.count <= 300)
-            consumeRestoration(in: store)
-        }
-        #expect(store.items.count == 300 && store.hasEarlierConversations)
+        #expect(store.items.count == 2_000)
         let anchor = store.items[100]
         show(anchor.id, in: store)
         try await seed(local, range: 2_001...4_000)
         await store.refresh()
-        #expect(store.items.count == 300 && store.hasEarlierConversations)
+        #expect(store.items.count == 4_000)
         #expect(store.viewport.restoration?.itemID == anchor.id)
-        #expect(store.items[50].id == anchor.id)
+        #expect(store.items.contains { $0.id == anchor.id })
         consumeRestoration(in: store)
         let removal = try V2ClientSyncRecord(sequence: 4_001, sourceEventID: .init(UUID().uuidString), projectionKind: "conversation_state", payload: JSONSerialization.data(withJSONObject: [
             "room_id": anchor.id, "is_pinned": false, "is_archived": true, "mute_until_ms": 0, "updated_at_ms": 1_750_010_000_000, "revision": 1
@@ -42,13 +35,8 @@ struct V2ConversationWindowTests {
         let fallback = try #require(store.viewport.restoration?.itemID)
         #expect(store.items.contains { $0.id == fallback })
         consumeRestoration(in: store)
-        let beforeEarlier = try #require(store.items.first?.lastActivity)
-        await store.loadEarlierConversations()
-        #expect(store.items.count == 300)
-        #expect(try #require(store.items.first?.lastActivity) > beforeEarlier)
-        #expect(store.viewport.restoration?.itemID == store.items.first?.id)
         await store.refresh(resetWindow: true)
-        #expect(store.items.count == 50 && !store.hasEarlierConversations)
+        #expect(store.items.count == 3_999)
         #expect(store.items.first?.id == Self.identifier(4_000))
         #expect(store.viewport.anchorID == nil && store.viewport.restoration == nil)
         try await local.close()
@@ -62,7 +50,6 @@ struct V2ConversationWindowTests {
         let source = V2GatedConversationWindows(source: .init(localStore: local, requestLatestVisible: { _ in }), gate: gate)
         let store = V2ConversationListStore(environment: .init(userID: "user", projections: .init(dataSource: source)))
         await store.refresh()
-        for _ in 0..<7 { await store.loadMoreConversations(); consumeRestoration(in: store) }
         let latest = store.items[newIndex].id
         show(store.items[200].id, in: store)
         await gate.arm()
@@ -73,48 +60,8 @@ struct V2ConversationWindowTests {
         await refresh.value
         #expect(store.viewport.restoration?.itemID == latest)
         #expect(store.items.contains { $0.id == latest })
-        #expect(store.items.count == 300)
-        #expect(await gate.reads == (newIndex == 0 ? 2 : 1))
-        try await local.close()
-    }
-
-    enum PageScrollCase: Sendable { case next, earlierInside, earlierOutside }
-
-    @Test("paging cannot evict a newer visible row", arguments: [PageScrollCase.next, .earlierInside, .earlierOutside])
-    func scrollingDuringPagination(scenario: PageScrollCase) async throws {
-        let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-page-scroll-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
-        try await seed(local, range: 1...1_000)
-        let gate = V2ListWindowReadGate()
-        let source = V2GatedConversationWindows(source: .init(localStore: local, requestLatestVisible: { _ in }), gate: gate)
-        let store = V2ConversationListStore(environment: .init(userID: "user", projections: .init(dataSource: source)))
-        await store.refresh()
-        for _ in 0..<7 { await store.loadMoreConversations(); consumeRestoration(in: store) }
-        let before = store.items.map(\.id), cursor = store.conversationNextCursor
-        show(scenario == .next ? before[299] : before[0], in: store)
-        await gate.arm()
-        let page = Task {
-            if scenario == .next { await store.loadMoreConversations() }
-            else { await store.loadEarlierConversations() }
-        }
-        await gate.waitForRead()
-        let latest = scenario == .next ? before[0] : before[scenario == .earlierInside ? 20 : 299]
-        show(latest, in: store)
-        await gate.release()
-        await page.value
-        #expect(store.viewport.anchorID == latest)
-        #expect(store.items.count == 300)
-        if scenario == .earlierInside {
-            #expect(store.items.map(\.id) != before)
-            #expect(store.viewport.restoration?.itemID == latest)
-        } else {
-            #expect(store.items.map(\.id) == before)
-            #expect(store.conversationNextCursor == cursor)
-            #expect(store.viewport.restoration == nil)
-            show(scenario == .next ? before[299] : before[0], in: store)
-            if scenario == .next { await store.loadMoreConversations() }
-            else { await store.loadEarlierConversations() }
-            #expect(store.items.map(\.id) != before)
-        }
+        #expect(store.items.count == 1_000)
+        #expect(await gate.reads == 1)
         try await local.close()
     }
 
@@ -185,18 +132,10 @@ struct V2ConversationWindowTests {
         defer { window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey() }
         host.view.layoutIfNeeded()
         try await waitUntil { store.viewport.anchorID.map(store.viewport.containsVisibleRow) == true }
-        for _ in 0..<7 {
-            let last = try #require(store.items.last?.id)
-            store.viewport.restore(to: last)
-            do { try await waitUntil { store.viewport.restoration == nil && store.viewport.containsVisibleRow(last) } }
-            catch {
-                Issue.record("scroll target=\(last), anchor=\(String(describing: store.viewport.anchorID)), pending=\(String(describing: store.viewport.restoration)), count=\(store.items.count), contains=\(store.items.contains { $0.id == last }), layout=\(store.viewport.layoutDescription(for: last))")
-                throw error
-            }
-            await store.loadMoreConversations()
-            try await waitUntil { store.viewport.restoration == nil }
-        }
-        #expect(store.items.count == 300 && store.hasEarlierConversations)
+        let last = try #require(store.items.last?.id)
+        store.viewport.restore(to: last)
+        try await waitUntil { store.viewport.restoration == nil && store.viewport.containsVisibleRow(last) }
+        #expect(store.items.count == 1_000)
         try await seed(local, range: 1_001...2_000)
         let anchor = try #require(store.viewport.anchorID)
         #expect(store.viewport.containsVisibleRow(anchor))
@@ -207,7 +146,7 @@ struct V2ConversationWindowTests {
             throw error
         }
         #expect(store.items.contains { $0.id == anchor })
-        #expect(store.items.count == 300)
+        #expect(store.items.count == 2_000)
         window.isHidden = true
         window.rootViewController = nil
         await Task.yield()

@@ -19,7 +19,7 @@ protocol V2ConversationSendTimelineReading: Sendable {
     func sendTimelineChanges(in roomID: RoomID, page: Int) async -> AsyncThrowingStream<Void, any Error>
 }
 
-actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDirectoryReading, V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
+actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDirectoryReading, V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
     private let requiresLocalReadAuthorization: Bool
     private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
@@ -94,6 +94,20 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
         )
     }
 
+    func allConversationSummaries(for userID: String, isArchived: Bool) async throws -> [V2ConversationListItem] {
+        let entries = try await localStore.allConversationListEntries(isArchived: isArchived)
+        var items: [V2ConversationListItem] = []
+        for offset in stride(from: 0, to: entries.count, by: 100) {
+            try Task.checkCancellation()
+            let batch = Array(entries[offset..<min(offset + 100, entries.count)])
+            let unread = await displayedUnread(roomIDs: batch.map(\.roomID))
+            let allowed = try await authorizedPage(.init(entries: batch, nextCursor: nil))
+            try await requestMissingSummaries(allowed.entries)
+            items += Self.listPage(allowed, userID: userID, unread: unread).items
+        }
+        return items
+    }
+
     func conversationSummaryPage(
         for userID: String,
         isArchived: Bool,
@@ -111,13 +125,6 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
         return Self.listPage(allowed, userID: userID, unread: unread)
     }
 
-    func conversationWindow(for userID: String, isArchived: Bool, around anchor: V2ClientConversationListCursor, limit: Int, precedingCount: Int) async throws -> V2ConversationListWindow {
-        let result = try await localStore.conversationListWindow(isArchived: isArchived, around: anchor, limit: limit, precedingCount: precedingCount)
-        let unread = await displayedUnread(roomIDs: result.page.entries.map(\.roomID))
-        let allowed = try await authorizedPage(result.page)
-        try await requestMissingSummaries(allowed.entries)
-        return .init(page: Self.listPage(allowed, userID: userID, unread: unread), anchorID: result.anchor?.roomID.rawValue, hasEarlier: result.hasEarlier)
-    }
 
     private func authorizedPage(_ page: V2ClientConversationListPage) async throws -> V2ClientConversationListPage {
         guard requiresLocalReadAuthorization else { return page }

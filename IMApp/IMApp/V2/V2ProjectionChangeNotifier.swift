@@ -3,7 +3,8 @@ import IMV2ClientKit
 
 /// 页面级投影失效通知器。
 ///
-/// 普通提交共享 150 毫秒的合并窗口；安全类变更会立即冲刷待处理并集。
+/// 会话列表变更立即发布；其他普通提交共享 150 毫秒的合并窗口。
+/// 安全类变更立即发布，并要求取消过期读取。
 /// 计时器与 SQLite 读取器都属于当前订阅者集合，不会比该集合存续更久。
 actor V2ProjectionChangeNotifier {
     /// 一次失效请求。
@@ -101,9 +102,10 @@ actor V2ProjectionChangeNotifier {
         pending.formUnion(change.scopes)
         pendingRoomIDs = hadPendingChanges ? Self.mergeRoomIDs(pendingRoomIDs, change.roomIDs) : change.roomIDs
         pendingConversationCommit = V2ConversationCommitMeasurement.earliest(pendingConversationCommit, change.conversationCommit)
-        if change.requiresImmediateRefresh {
+        if change.requiresImmediateRefresh || change.scopes.contains(.conversations) {
             cancelTimer()
-            flush(requiresImmediateRefresh: true)
+            // Removing the wait does not make ordinary list updates cancel active reads.
+            flush(requiresImmediateRefresh: change.requiresImmediateRefresh)
         } else if timer == nil, !subscribers.isEmpty {
             let id = UUID(), sleep = sleep
             timer = (id, Task { [weak self] in

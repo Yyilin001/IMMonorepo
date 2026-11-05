@@ -3124,7 +3124,7 @@ struct V2ConversationStoreTests {
         #expect(store.visibleItems.map(\.id) == ["archive"])
     }
 
-    @Test func conversationListLoadsAdditionalKeysetPagesWithoutDuplicates() async {
+    @Test func conversationListLoadsAllSummariesWithoutDuplicates() async {
         let summaries = (1 ... 51).map { index in
             V2ConversationListItem(
                 id: String(format: "00000000-0000-0000-0000-%012d", index),
@@ -3139,18 +3139,13 @@ struct V2ConversationStoreTests {
         let store = makeConversationListStore(dataSource: source, userID: "current-user")
 
         await store.refresh()
-        #expect(store.items.count == 50)
-        #expect(store.conversationNextCursor != nil)
-        await store.loadMoreConversations()
         #expect(store.items.count == 51)
         #expect(Set(store.items.map(\.id)).count == 51)
-        #expect(store.conversationNextCursor == nil)
         await store.refresh()
         #expect(store.items.count == 51)
-        #expect(store.conversationNextCursor == nil)
     }
 
-    @Test func conversationRefreshRetainsLoadedWindowAndListWhileReading() async {
+    @Test func conversationRefreshRetainsFullListWhileReading() async {
         let summaries = (1...151).map { index in
             V2ConversationListItem(id: String(format: "00000000-0000-0000-0000-%012d", index), title: "Room \(index)", preview: "Message",
                 lastActivity: Date(timeIntervalSince1970: Double(index)), isOutgoing: false, kind: .unknown)
@@ -3158,17 +3153,13 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: summaries, messages: [])
         let store = makeConversationListStore(dataSource: source, userID: "current-user")
         await store.refresh()
-        await store.loadMoreConversations()
-        await store.loadMoreConversations()
         let loadedIDs = store.items.map(\.id)
-        #expect(loadedIDs.count == 150)
+        #expect(loadedIDs.count == 151)
         await source.pauseNextSummaryRead()
         let refreshing = Task { await store.refresh() }
         await source.waitForPausedSummaryRead()
         #expect(store.state == .loaded)
         #expect(store.items.map(\.id) == loadedIDs)
-        await store.loadMoreConversations()
-        #expect(!store.isLoadingMoreConversations)
         await source.resumeSummaryRead()
         await refreshing.value
         #expect(store.items.map(\.id) == loadedIDs)
@@ -3177,32 +3168,24 @@ struct V2ConversationStoreTests {
         #expect(store.items.count == 150)
         #expect(!store.items.contains { $0.id == loadedIDs[75] })
         await store.refresh(resetWindow: true)
-        #expect(store.items.count == 50)
+        #expect(store.items.count == 150)
     }
 
-    @Test func oldConversationPageCannotReleaseReplacementPageOwnership() async {
-        let summaries = (1...101).map { index in
-            V2ConversationListItem(id: String(format: "00000000-0000-0000-0000-%012d", index), title: "Room \(index)", preview: "Message",
-                lastActivity: Date(timeIntervalSince1970: Double(index)), isOutgoing: false, kind: .unknown)
-        }
-        let source = V2ConversationDataSourceFake(summaries: summaries, messages: [])
+    @Test func oldConversationRefreshCannotOverwriteNewerSnapshot() async {
+        let source = V2ConversationDataSourceFake(summaries: [
+            .init(id: "room", title: "Room", preview: "Message", lastActivity: .now, isOutgoing: false, kind: .unknown)
+        ], messages: [])
         let store = makeConversationListStore(dataSource: source, userID: "current-user")
         await store.refresh()
         await source.pauseNextSummaryRead()
-        let oldPage = Task { await store.loadMoreConversations() }
+        let oldRefresh = Task { await store.refresh() }
         await source.waitForPausedSummaryRead()
+        await source.removeSummary(id: "room")
         await store.refresh()
-        await source.pauseNextSummaryRead()
-        let newPage = Task { await store.loadMoreConversations() }
-        await source.waitForPausedSummaryRead(1)
         await source.resumeSummaryRead()
-        await oldPage.value
-        #expect(store.items.count == 50 && store.isLoadingMoreConversations)
-        await store.loadMoreConversations()
-        await source.resumeSummaryRead(1)
-        await newPage.value
-        #expect(store.items.count == 100 && !store.isLoadingMoreConversations)
-        #expect(Set(store.items.map(\.id)).count == 100)
+        await oldRefresh.value
+        #expect(store.items.isEmpty)
+        #expect(store.state == .loaded)
     }
 
     @Test func messageSearchStoreShowsIndexingUntilTheBackgroundBuildCompletes() async {

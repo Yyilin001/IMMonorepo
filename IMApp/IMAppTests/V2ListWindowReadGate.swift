@@ -28,9 +28,14 @@ actor V2ListWindowReadGate {
     func release() { pending?.resume(); pending = nil }
 }
 
-struct V2GatedConversationWindows: V2ConversationDataSource, V2ConversationWindowReading {
+struct V2GatedConversationWindows: V2ConversationDataSource {
     let source: V2GRDBConversationDataSource
     let gate: V2ListWindowReadGate
+    func allConversationSummaries(for userID: String, isArchived: Bool) async throws -> [V2ConversationListItem] {
+        let result = try await source.allConversationSummaries(for: userID, isArchived: isArchived)
+        await gate.holdResult()
+        return result
+    }
     func conversationSummaryPage(for userID: String, isArchived: Bool, before cursor: V2ClientConversationListCursor?, limit: Int) async throws -> V2ConversationListPage {
         let result = try await source.conversationSummaryPage(for: userID, isArchived: isArchived, before: cursor, limit: limit)
         await gate.holdResult()
@@ -42,11 +47,7 @@ struct V2GatedConversationWindows: V2ConversationDataSource, V2ConversationWindo
     func timelinePage(in roomID: String, for userID: String, before cursor: V2ConversationTimelineCursor?, limit: Int) async throws -> V2ConversationTimelinePage {
         try await source.timelinePage(in: roomID, for: userID, before: cursor, limit: limit)
     }
-    func conversationWindow(for userID: String, isArchived: Bool, around anchor: V2ClientConversationListCursor, limit: Int, precedingCount: Int) async throws -> V2ConversationListWindow {
-        let result = try await source.conversationWindow(for: userID, isArchived: isArchived, around: anchor, limit: limit, precedingCount: precedingCount)
-        await gate.holdResult()
-        return result
-    }
+
 }
 
 struct V2GatedContactWindows: V2ContactsReading, V2ContactsWindowReading {
