@@ -16,16 +16,11 @@ struct V2GatewayJournalUserControlTests {
         let socket = try stream(registry: registry, connection: connection)
         try #require(await registry.register(socket, connectionID: connection,
             identity: .init(userID: user, deviceID: device, capabilityProfile: "base"), publicationSuppressed: true))
-        let scans = Mutex(0)
-        let targeted = Mutex<[RoomID]>([])
-        let service = try V2AccountRoomChangeService(states: EmptyMembershipStates(requested: { rooms in targeted.withLock { $0.append(contentsOf: rooms) } }),
-            directoryPage: { _, _ in
-                scans.withLock { $0 += 1 }
-                return .init(rooms: [], nextCursor: nil, topologyGeneration: "stable")
-            }, onlineDelivery: .init(activate: { _, _, _ in }, deactivate: { _ in }))
+        let service = V2AccountRoomChangeService()
         await registry.configureAccountRoomChanges(service)
         let ticket = try await service.begin(userID: user, connectionID: connection, send: { _ in true }, close: {})
-        try await service.bootstrap(ticket)
+        try await service.reserveReadyResponse(ticket)
+        await service.resume(ticket)
         let identity = V2RealtimeJournalSourceIdentity(sourceID: UUID(), databaseIncarnation: UUID())
         let source = V2RealtimeJournalSource(sourceID: "membership", incarnationID: identity.databaseIncarnation, partitionID: 1)
         let captured = await registry.journalUserControlInterests()
@@ -39,14 +34,12 @@ struct V2GatewayJournalUserControlTests {
             isAuthenticationSource: false, minimumControlVersions: [user: 1], credentialChangedDeviceKeys: [],
             requested: captured, requestedAt: .now, deadline: .now + .seconds(30), isCurrent: { true })
         try #require(initial?.versions[user] == 1)
-        try await waitUntil { scans.withLock { $0 } >= 2 }
         for _ in 0..<100 {
             let receipt = await registry.applyAuthoritativeUserControl(snapshot, source: source, expectedIdentity: identity,
                 isAuthenticationSource: false, minimumControlVersions: [user: 1], credentialChangedDeviceKeys: [],
                 requested: captured, requestedAt: .now, deadline: .now + .seconds(30), isCurrent: { true })
             #expect(receipt?.versions[user] == 1)
         }
-        #expect(scans.withLock { $0 } == 2)
         let advanced = V2RealtimeJournalUserSnapshot(identity: identity, observedAt: Date(), cuts: snapshot.cuts,
             requestedUserIDs: snapshot.requestedUserIDs, requestedDeviceKeys: snapshot.requestedDeviceKeys,
             users: [.init(userID: user.uuidValue!, controlVersion: 2, membershipDiscoveryVersion: 2, sessionControlVersion: 0)],
@@ -55,7 +48,6 @@ struct V2GatewayJournalUserControlTests {
             isAuthenticationSource: false, minimumControlVersions: [user: 2], credentialChangedDeviceKeys: [],
             requested: captured, requestedAt: .now, deadline: .now + .seconds(30), isCurrent: { true })
         try #require(changed?.versions[user] == 2)
-        try await waitUntil { scans.withLock { $0 } == 3 }
         let room = RoomID(uuid: UUID())
         let mixed = V2RealtimeJournalUserSnapshot(identity: identity, observedAt: Date(), cuts: snapshot.cuts,
             requestedUserIDs: snapshot.requestedUserIDs, requestedDeviceKeys: snapshot.requestedDeviceKeys,
@@ -66,8 +58,6 @@ struct V2GatewayJournalUserControlTests {
             membershipChangedRooms: [user: [room]], membershipChangeVersions: [user: 3],
             requested: captured, requestedAt: .now, deadline: .now + .seconds(30), isCurrent: { true })
         try #require(mixedApplied?.versions[user] == 4)
-        try await waitUntil { targeted.withLock { $0 } == [room] }
-        #expect(scans.withLock { $0 } == 3)
         let ahead = V2RealtimeJournalUserSnapshot(identity: identity, observedAt: Date(), cuts: snapshot.cuts,
             requestedUserIDs: snapshot.requestedUserIDs, requestedDeviceKeys: snapshot.requestedDeviceKeys,
             users: [.init(userID: user.uuidValue!, controlVersion: 5, membershipDiscoveryVersion: 5, sessionControlVersion: 4)],
@@ -77,9 +67,12 @@ struct V2GatewayJournalUserControlTests {
             membershipChangedRooms: [user: [room]], membershipChangeVersions: [user: 3],
             requested: captured, requestedAt: .now, deadline: .now + .seconds(30), isCurrent: { true })
         try #require(aheadApplied?.versions[user] == 5)
-        try await waitUntil { scans.withLock { $0 } == 4 }
+        // Even advanced membership controls leave the fixed account epoch
+        // intact. Changes are already in the durable personal stream.
+        try await service.reserveReadyResponse(ticket)
+        let metrics = await service.initializationMetricsSnapshot()
+        #expect(metrics.completed == 1 && metrics.active == 0 && metrics.queued == 0)
         await service.shutdown()
-        #expect(scans.withLock { $0 } == 4)
         await registry.unregister(connectionID: connection)
         await socket.closeForAccountRecovery()
         await registry.shutdownRealtimeRecovery()

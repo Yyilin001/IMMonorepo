@@ -29,7 +29,7 @@ private struct ObservedAccountMembershipStates: V2RoomStateReading {
 }
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("committed membership joins and exits update account routes without another directory scan",
+    @Test("committed membership controls preserve the fixed account epoch after replay or journal trim",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"), arguments: [false, true])
     func postgresTargetedAccountMembership(trimControls: Bool) async throws {
         _ = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
@@ -46,26 +46,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let journal = try PostgresV2RealtimeChangeJournalStore(database: database)
             let recovery = try PostgresV2RoomRecoveryStore(database: database)
-            let topology = try PostgresV2RoomRecoveryTopology(database: database,
-                stores: [recovery], orderedStoreIdentities: ["room-a"], atomicStores: [:])
-            let directory = V2UserRoomDirectoryService(snapshotSource: topology,
-                cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
-            let scans = Mutex(0), references = Mutex<Set<UUID>>([])
-            let reads = Mutex<[[RoomID: V2RoomStateReadResult]]>([])
-            let service = try V2AccountRoomChangeService(states: ObservedAccountMembershipStates(read: { rooms, user in
-                let result = try await recovery.states(roomIDs: rooms, actorUserID: user)
-                reads.withLock { $0.append(result) }
-                return result
-            }),
-                directoryPage: { user, cursor in
-                    scans.withLock { $0 += 1 }
-                    return try await directory.list(actorUserID: user, cursor: cursor, pageSize: 100)
-                }, onlineDelivery: .init(activate: { _, _, reference in
-                    references.withLock { $0.insert(reference) }
-                }, deactivate: { reference in references.withLock { $0.remove(reference) } }))
+            let service = V2AccountRoomChangeService()
             let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: try .init(maximumPayloadBytes: 4096,
                 acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])), connection = UUID(), device = DeviceID(uuid: UUID())
-            try await registry.installDeviceRoomProgressStore(PostgresV2DeviceRoomProgressStore(database: database))
+            try await registry.installDeviceRoomProgressStore(PostgresV2DeviceRoomProgressStore(database: database), states: recovery)
             let ingress = try await registry.configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority())
             let socket = try V2GatewayJournalUserControlTests().stream(registry: registry, connection: connection)
             try #require(await registry.register(socket, connectionID: connection,
@@ -88,7 +72,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         membershipChangedRooms: controls.membershipRooms, membershipChangeVersions: controls.membershipVersions,
                         requested: captured, requestedAt: .now, deadline: .now + .seconds(5), isCurrent: { true })
                     try #require(receipt != nil)
-                    if !controls.versions.isEmpty { try #require(receipt?.versions[user] == controls.versions[user]) }
+                    if let required = controls.versions[user] {
+                        // Recovery can observe a later committed cut while the
+                        // earlier journal callback is still in flight.
+                        let applied = try #require(receipt?.versions[user])
+                        try #require(applied >= required)
+                    }
             }
             let recoveryIngress = V2GatewayJournalAuthorityIngress(receiver: .init(projection: .init()),
                 recoverControls: recoverControl, recover: { batch, service, minimum in
@@ -116,28 +105,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             do {
                 let ticket = try await service.begin(userID: user, connectionID: connection, send: { _ in true }, close: {})
-                try await service.bootstrap(ticket)
-                #expect(references.withLock { $0.isEmpty })
+                try await service.reserveReadyResponse(ticket)
+                await service.resume(ticket)
                 try await sql.raw("INSERT INTO im_v2.room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: roomID.uuidValue!),\(bind: memberTwoUUID),0)").run()
                 try await applyMembershipControl(1)
-                let joinDeadline = ContinuousClock.now + .seconds(2)
-                while references.withLock({ $0.isEmpty }), .now < joinDeadline { try await Task.sleep(for: .milliseconds(1)) }
-                try #require(references.withLock { $0.count } == 1)
+                try await service.reserveReadyResponse(ticket)
                 try await sql.raw("DELETE FROM im_v2.room_memberships WHERE room_id=\(bind: roomID.uuidValue!) AND user_id=\(bind: memberTwoUUID)").run()
                 try await applyMembershipControl(2)
-                let exitDeadline = ContinuousClock.now + .seconds(2)
-                while (references.withLock({ !$0.isEmpty }) || (!trimControls && reads.withLock({ $0.count < 2 }))), .now < exitDeadline {
-                    try await Task.sleep(for: .milliseconds(1))
-                }
-                if trimControls {
-                    #expect(reads.withLock { $0.isEmpty })
-                    #expect(scans.withLock { $0 } == 3)
-                } else {
-                    #expect(reads.withLock { $0.count } == 2)
-                    #expect(reads.withLock { $0.last?[roomID] } == .unavailable)
-                    #expect(scans.withLock { $0 } == 1)
-                }
-                #expect(references.withLock { $0.isEmpty })
+                try await service.reserveReadyResponse(ticket)
+                let metrics = await service.initializationMetricsSnapshot()
+                #expect(metrics.completed == 1 && metrics.active == 0 && metrics.queued == 0)
                 await service.shutdown()
                 await router.stop()
                 await recoveryIngress.shutdown()
@@ -156,7 +133,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("a durable send automatically reaches both recipient devices through the Owner and remote Gateway",
+    @Test("a durable send reaches two foreground recipient devices through the Owner and remote Gateway",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func durableSendAutomaticRecipientCoverage() async throws {
         _ = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
@@ -188,7 +165,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 do {
                     try await V2AccountDeliveryTCPTests().exercise(
                         store: PostgresV2DeviceRoomProgressStore(database: database), user: recipient, rooms: [roomID],
-                        actorRouting: true, automaticAccountCoverage: true, automaticOwner: (owner, token, lifetime),
+                        actorRouting: true, foregroundSubscription: true, automaticOwner: (owner, token, lifetime),
                         automaticHost: host,
                         directoryPage: { user, cursor in
                             try await directory.list(actorUserID: user, cursor: cursor, pageSize: 100)

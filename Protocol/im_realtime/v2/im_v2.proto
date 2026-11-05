@@ -60,6 +60,8 @@ message Envelope {
     MemberRemovedByModerator member_removed_by_moderator = 56;
     ListRoomMembers list_room_members = 59;
     RoomMembersPage room_members_page = 60;
+    GroupEventPullBatch group_event_pull_batch = 139;
+    GroupEventPageBatch group_event_page_batch = 140;
     GroupEventPull group_event_pull = 61;
     GroupEventPage group_event_page = 62;
     GroupEventSubscribe group_event_subscribe = 63;
@@ -765,6 +767,16 @@ message GroupEventPull {
   uint64 after_room_sequence = 2;
   uint32 page_size = 3;
 }
+
+// Bounded read aggregation; every room retains independent authorization,
+// ordering, visibility and durable cursors. Maximum 16 unique rooms, each
+// requesting 1...32 events. Errors belong to individual rooms.
+message GroupEventPullBatch { repeated GroupEventPull rooms = 1; }
+message GroupEventPageResult {
+  string room_id = 1;
+  oneof result { GroupEventPage page = 2; Error error = 3; }
+}
+message GroupEventPageBatch { repeated GroupEventPageResult rooms = 1; }
 
 // Protocol 27 message.edited payloads include replacement schema 1: accepted
 // event identity, accepted membership revision, and complete authorized state.

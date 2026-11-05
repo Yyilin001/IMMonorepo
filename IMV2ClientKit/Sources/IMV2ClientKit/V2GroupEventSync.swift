@@ -123,6 +123,49 @@ public struct V2GroupEventPageCommit: Equatable, Sendable {
 public protocol V2ClientGroupEventTransport: Sendable {
     /// 从给定房间水位之后拉取一页事件，调用者提供页大小预算；失败抛出传输或服务端错误。
     func pullGroupEvents(roomID: RoomID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2ClientGroupEventPage
+    func pullGroupEventPages(_ requests: [V2ClientGroupEventPull]) async throws -> [RoomID: V2ClientGroupEventPageResult]
+}
+
+public struct V2ClientGroupEventPull: Sendable {
+    public let roomID: RoomID
+    public let afterRoomSequence: UInt64
+    public let pageSize: Int
+    public init(roomID: RoomID, afterRoomSequence: UInt64, pageSize: Int) {
+        self.roomID = roomID; self.afterRoomSequence = afterRoomSequence; self.pageSize = pageSize
+    }
+}
+
+public enum V2ClientGroupEventPageResult: Sendable {
+    case page(V2ClientGroupEventPage)
+    case failure(V2RealtimeTransportError)
+}
+
+extension V2ClientGroupEventTransport {
+    // Local adapters can retain the single-page contract. The production
+    // protobuf transport implements the bounded wire batch directly.
+    public func pullGroupEventPages(_ requests: [V2ClientGroupEventPull]) async throws -> [RoomID: V2ClientGroupEventPageResult] {
+        guard (1...16).contains(requests.count), Set(requests.map(\.roomID)).count == requests.count else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return try await withThrowingTaskGroup(of: (RoomID, V2ClientGroupEventPageResult).self) { group in
+            func submit(_ request: V2ClientGroupEventPull) {
+                group.addTask {
+                    try Task.checkCancellation()
+                    do { return (request.roomID, .page(try await self.pullGroupEvents(roomID: request.roomID,
+                        afterRoomSequence: request.afterRoomSequence, pageSize: request.pageSize))) }
+                    catch let error as V2RealtimeTransportError { return (request.roomID, .failure(error)) }
+                }
+            }
+            var next = requests.makeIterator()
+            for _ in 0..<min(4, requests.count) { if let request = next.next() { submit(request) } }
+            var result: [RoomID: V2ClientGroupEventPageResult] = [:]
+            while let (room, page) = try await group.next() {
+                result[room] = page
+                if let request = next.next() { submit(request) }
+            }
+            return result
+        }
+    }
 }
 
 /// 房间事件订阅确认的高水位摘要，不表示该范围的事件已经下载或应用。
@@ -300,6 +343,65 @@ public actor V2GroupEventSyncEngine {
         })
         pageFlights[roomID] = current
         defer { if pageFlights[roomID]?.id == current.id { pageFlights[roomID] = nil } }
+        return try await withTaskCancellationHandler(operation: {
+            let result = await current.task.result
+            try Task.checkCancellation()
+            return try result.get()
+        }, onCancel: { current.task.cancel() })
+    }
+
+    /// Reserve every room before awaiting cursors or the network. Foreground
+    /// single-page reads and online delivery use the same flights, so batching
+    /// cannot race their cursor reads or reorder page commits.
+    func synchronizePages(targets: [(roomID: RoomID, head: UInt64)],
+        commit: @escaping @Sendable (V2ClientGroupEventPage) async throws -> V2GroupEventPageCommit,
+        unavailable: @escaping @Sendable (RoomID) async throws -> Void
+    ) async throws -> V2GroupEventSyncProgress {
+        guard (1...16).contains(targets.count), Set(targets.map(\.roomID)).count == targets.count else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        while let busy = targets.first(where: { pageFlights[$0.roomID] != nil }), let flight = pageFlights[busy.roomID] {
+            _ = await flight.task.result
+            try Task.checkCancellation()
+            if pageFlights[busy.roomID]?.id == flight.id { pageFlights[busy.roomID] = nil }
+        }
+        try Task.checkCancellation()
+        let current = PageFlight(id: UUID(), task: Task { [store, transport] in
+            var requests: [V2ClientGroupEventPull] = []
+            for target in targets {
+                let cursor = try await store.groupEventCursor(roomID: target.roomID)
+                try Task.checkCancellation()
+                // A room watermark is only a scheduling hint. Request sizing
+                // does not grant visibility or advance the durable cursor.
+                let gap = target.head > cursor ? target.head - cursor : 1
+                requests.append(.init(roomID: target.roomID, afterRoomSequence: cursor, pageSize: Int(min(UInt64(min(32, max(1, 64 / targets.count))), gap))))
+            }
+            let results = try await transport.pullGroupEventPages(requests)
+            guard Set(results.keys) == Set(requests.map(\.roomID)) else { throw V2RealtimeTransportError.unexpectedResponse }
+            var applied = 0; var hasMore = false
+            for request in requests {
+                try Task.checkCancellation()
+                switch results[request.roomID]! {
+                case .page(let page):
+                    guard page.roomID == request.roomID, page.events.count <= request.pageSize,
+                          page.nextRoomSequence >= request.afterRoomSequence,
+                          !page.hasMore || page.nextRoomSequence > request.afterRoomSequence
+                    else { throw V2RealtimeTransportError.unexpectedResponse }
+                    let committed = try await commit(page)
+                    applied += committed.insertedEventCount; hasMore = hasMore || page.hasMore
+                case .failure(.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: _, currentRevision: _)):
+                    try await unavailable(request.roomID)
+                case .failure(let error): throw error
+                }
+            }
+            return .init(appliedEventCount: applied, hasMore: hasMore)
+        })
+        for target in targets { pageFlights[target.roomID] = current }
+        defer {
+            for target in targets where pageFlights[target.roomID]?.id == current.id {
+                pageFlights[target.roomID] = nil
+            }
+        }
         return try await withTaskCancellationHandler(operation: {
             let result = await current.task.result
             try Task.checkCancellation()

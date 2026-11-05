@@ -85,8 +85,8 @@ struct V2GatewaySessionTests {
         #expect(await auth.calls == 1)
     }
 
-    @Test("zlib is negotiated explicitly and only group pages use the compressed response path")
-    func negotiatesBoundedGroupPageCompression() async throws {
+    @Test("zlib is negotiated explicitly for individual and batched room pages", arguments: [false, true])
+    func negotiatesBoundedGroupPageCompression(batch: Bool) async throws {
         let session = V2GatewaySession(
             limits: try .init(maximumInFlightRequests: 2),
             authenticator: GatewayAuthFake(userID: try .init("user-a")),
@@ -132,19 +132,14 @@ struct V2GatewaySessionTests {
         request.protocolVersion = UInt32(protocolVersion)
         request.groupEventPull = .init()
         request.groupEventPull.roomID = "group-compression-test"
+        if batch { request.groupEventPullBatch.rooms = [request.groupEventPull] }
         let response = try await session.receiveAuthenticated(
             try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion),
-            handler: GroupPageCommandFake()
+            handler: GroupPageCommandFake(batch: batch)
         )
         #expect(response.flags == [.compressed])
-        #expect(
-            try V2ServerProtobufFrameCodec.decode(
-                response,
-                compression: .zlib,
-                maximumExpansionRatio: 1_024
-            )
-                .groupEventPage.events.count == 1
-        )
+        let decoded = try V2ServerProtobufFrameCodec.decode(response, compression: .zlib, maximumExpansionRatio: 1_024)
+        #expect((batch ? decoded.groupEventPageBatch.rooms[0].page.events.count : decoded.groupEventPage.events.count) == 1)
     }
 
     @Test("authenticated group-page responses reuse the prepared payload without caching authorization")
@@ -575,6 +570,7 @@ private struct GatewayCommandFake: V2GatewayCommandHandler {
 }
 
 private struct GroupPageCommandFake: V2GatewayCommandHandler {
+    var batch = false
     func handle(envelope _: IMV2Envelope, identity _: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         var response = IMV2Envelope()
         response.groupEventPage = .init()
@@ -585,6 +581,10 @@ private struct GroupPageCommandFake: V2GatewayCommandHandler {
         event.projectionKind = "message"
         event.payload = Data(repeating: 0x63, count: 8_192)
         response.groupEventPage.events = [event]
+        if batch {
+            var item = IMV2GroupEventPageResult(); item.roomID = response.groupEventPage.roomID; item.page = response.groupEventPage
+            response.groupEventPageBatch.rooms = [item]
+        }
         return response
     }
 }

@@ -19,7 +19,7 @@ struct V2LocalSchemaContractTests {
         #expect(try migrationIdentifiers(in: primary) == ["createCurrentV2Schema"])
         #expect(try migrationIdentifiers(in: search) == ["createCurrentV2MessageSearchSchema"])
         let primaryObjectCount = try schemaObjectCount(in: primary)
-        #expect(primaryObjectCount == 282)
+        #expect(primaryObjectCount == 283)
         #expect(try schemaObjectExists(named: "v2_local_profile_display_meta", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_room_unread_directory", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_room_unread_rotation", in: primary) == false)
@@ -27,7 +27,7 @@ struct V2LocalSchemaContractTests {
         #expect(try schemaObjectExists(named: "v2_pending_forward_messages", in: primary) == false)
         // The current schema adds the common work/dependency journal and the
         // durable domain intents, message payloads and native background mappings.
-        for table in ["v2_local_profile_display", "v2_operation_work", "v2_member_administration_intents", "v2_member_administration_ready", "v2_member_administration_order", "v2_operation_dependencies", "v2_profile_intents", "v2_own_profile_snapshot", "v2_personal_preference_intents", "v2_personal_preference_confirmed", "v2_name_operations", "v2_name_confirmed", "v2_contact_alias_invalidations", "v2_message_send_operations", "v2_message_mutation_operations", "v2_message_reaction_intents", "v2_forward_plan_operations", "v2_resource_import_active_admission", "v2_resource_transfer_active_admission", "v2_background_transfer_session", "v2_background_transfer_tasks"] {
+        for table in ["v2_account_room_heads", "v2_local_profile_display", "v2_operation_work", "v2_member_administration_intents", "v2_member_administration_ready", "v2_member_administration_order", "v2_operation_dependencies", "v2_profile_intents", "v2_own_profile_snapshot", "v2_personal_preference_intents", "v2_personal_preference_confirmed", "v2_name_operations", "v2_name_confirmed", "v2_contact_alias_invalidations", "v2_message_send_operations", "v2_message_mutation_operations", "v2_message_reaction_intents", "v2_forward_plan_operations", "v2_resource_import_active_admission", "v2_resource_transfer_active_admission", "v2_background_transfer_session", "v2_background_transfer_tasks"] {
             #expect(try schemaObjectExists(named: table, in: primary))
         }
         #expect(try schemaObjectExists(named: "v2_pending_conversation_states", in: primary) == false)
@@ -37,7 +37,7 @@ struct V2LocalSchemaContractTests {
         }
         let primaryFingerprint = try schemaFingerprint(in: primary)
         // One canonical baseline includes durable account-local display facts.
-        #expect(primaryFingerprint == 0x3c3f_f48c_6904_1c62)
+        #expect(primaryFingerprint == 0xb0963d0349fbaef1)
         #expect(try schemaObjectCount(in: search) == 6)
         #expect(try schemaFingerprint(in: search) == 0xc865_0994_a5ba_24a3)
 
@@ -64,7 +64,7 @@ struct V2LocalSchemaContractTests {
         #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 0, 'remove', NULL, 1, 1, zeroblob(32))"))
         #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'role', NULL, 1, 1, zeroblob(32))"))
         #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'remove', 'admin', 1, 1, zeroblob(32))"))
-        #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'role', 'owner', 1, 1, zeroblob(32))"))
+        #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'role', 'unknown', 1, 1, zeroblob(32))"))
         #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'add', NULL, 0, 1, zeroblob(32))"))
         #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'add', NULL, 1, 1, zeroblob(31))"))
         #expect(rejects(database, sql: "INSERT INTO v2_room_membership_states VALUES ('room', 0, 'event', 1)"))

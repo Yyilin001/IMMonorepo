@@ -307,6 +307,8 @@ public enum V2ServerProtobufFrameCodec {
         case .readReceiptRecorded?: return .readReceiptRecorded
         case .listRoomMembers?: return .listRoomMembers
         case .roomMembersPage?: return .roomMembersPage
+        case .groupEventPullBatch?: return .groupEventPullBatch
+        case .groupEventPageBatch?: return .groupEventPageBatch
         case .groupEventPull?: return .groupEventPull
         case .groupEventPage?: return .groupEventPage
         case .groupEventSubscribe?: return .groupEventSubscribe

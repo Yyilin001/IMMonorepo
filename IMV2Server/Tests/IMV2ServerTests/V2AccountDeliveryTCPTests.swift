@@ -37,7 +37,7 @@ struct V2AccountDeliveryTCPTests {
                     activation: token, deadline: .now + .seconds(5), trackedUserIDs: [user])
                 do {
                     try await exercise(store: PostgresV2DeviceRoomProgressStore(database: database, schema: schema),
-                        user: user, rooms: [room], actorRouting: true, automaticAccountCoverage: true, automaticOwner: (owner, token, lifetime),
+                        user: user, rooms: [room], actorRouting: true, foregroundSubscription: true, automaticOwner: (owner, token, lifetime),
                         directoryPage: { user, cursor in
                             try await directory.list(actorUserID: user, cursor: cursor, pageSize: 100)
                         },
@@ -75,8 +75,9 @@ struct V2AccountDeliveryTCPTests {
         let registries = (0..<2).map { _ in V2DeviceConnectionRegistry(foregroundFrameLimits: limits) }
         var ingresses: [V2GatewayRoomSubscriptionIngress] = []
         for registry in registries {
-            try await registry.installDeviceRoomProgressStore(TCPDeviceProgressStore())
-            ingresses.append(try await registry.configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority()))
+            let authority = V2GatewayRoomSubscriptionAuthority()
+            try await registry.installDeviceRoomProgressStore(TCPDeviceProgressStore(), states: TCPProgressStates(authority: authority))
+            ingresses.append(try await registry.configureRoomSubscriptionIngress(authority: authority))
         }
         let handlers = [TCPMembershipProjectionProbe(), TCPMembershipProjectionProbe()]
         let router = try await TCPAccountClusterRouter.start(ingresses: ingresses, journalHandlers: handlers)
@@ -97,21 +98,21 @@ struct V2AccountDeliveryTCPTests {
         for registry in registries { await registry.shutdownRealtimeRecovery() }
     }
 
-    @Test("TCP account startup establishes shared room coverage before Ready without per-room client requests")
-    func automaticAccountCoverageOverTCP() async throws {
-        try await exercise(store: TCPDeviceProgressStore(), automaticAccountCoverage: true)
+    @Test("TCP account startup is independent of an explicitly requested foreground room")
+    func foregroundSubscriptionOverTCP() async throws {
+        try await exercise(store: TCPDeviceProgressStore(), foregroundSubscription: true)
     }
 
-    @Test("two TLS devices rebuild account coverage without authenticating again", arguments: [false, true])
+    @Test("two TLS devices rebuild the account epoch without reinstalling their foreground room", arguments: [false, true])
     func coverageRecoveryOverTLS(separateGateways: Bool) async throws {
         let tls = try makeGatewayTestTLSContexts()
         try await exercise(store: TCPDeviceProgressStore(), separateGateways: separateGateways, actorRouting: separateGateways,
-            automaticAccountCoverage: true, tls: tls, rebuildCoverage: true)
+            foregroundSubscription: true, tls: tls, rebuildCoverage: true)
     }
 
     @Test("two online devices receive two unopened rooms and confirm independently")
     func unopenedRoomsAcrossDevices() async throws {
-        try await exercise(store: TCPDeviceProgressStore())
+        try await exercise(store: TCPDeviceProgressStore(), rooms: [.init(uuid: UUID()), .init(uuid: UUID())])
     }
 
     @Test("devices on separate Gateway registries receive all unopened rooms")
@@ -127,7 +128,7 @@ struct V2AccountDeliveryTCPTests {
     @Test("remote Actor delivery rejects an old activation fence while new events reach both Gateway devices")
     func oldActivationRejectedAcrossActorGateways() async throws {
         try await exercise(store: TCPDeviceProgressStore(), separateGateways: true,
-            actorRouting: true, automaticAccountCoverage: true, injectOldActivation: true)
+            actorRouting: true, foregroundSubscription: true, injectOldActivation: true)
     }
 
     @Test("TCP device confirmations persist through the production PostgreSQL store",
@@ -139,10 +140,10 @@ struct V2AccountDeliveryTCPTests {
     }
 
     func exercise(store: any V2DeviceRoomProgressStoring, user: UserID = .init(uuid: UUID()),
-                  rooms: [RoomID] = [.init(uuid: UUID()), .init(uuid: UUID())],
+                  rooms: [RoomID] = [.init(uuid: UUID())],
                   committed: (activation: V2RoomActivationToken, event: V2RealtimeRoomEvent,
                               member: V2RoomSubscriptionMember)? = nil,
-                  separateGateways: Bool = false, actorRouting: Bool = false, automaticAccountCoverage: Bool = false,
+                  separateGateways: Bool = false, actorRouting: Bool = false, foregroundSubscription: Bool = false,
                   injectOldActivation: Bool = false, retiredActivation: V2RoomActivationToken? = nil,
                   automaticOwner: (owner: V2RoomSubscriptionOwner, activation: V2RoomActivationToken, lifetime: V2RoomActivationLifetime)? = nil,
                   automaticHost: V2RoomSubscriptionHost? = nil,
@@ -158,17 +159,18 @@ struct V2AccountDeliveryTCPTests {
         let registries = (0..<(separateGateways ? 2 : 1)).map { _ in V2DeviceConnectionRegistry(foregroundFrameLimits: limits) }
         var ingresses: [V2GatewayRoomSubscriptionIngress] = []
         for registry in registries {
-            try await registry.installDeviceRoomProgressStore(store)
-            ingresses.append(try await registry.configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority()))
+            let authority = V2GatewayRoomSubscriptionAuthority()
+            try await registry.installDeviceRoomProgressStore(store, states: TCPProgressStates(authority: authority))
+            ingresses.append(try await registry.configureRoomSubscriptionIngress(authority: authority))
         }
-        let scans = Mutex(0), subscriptions = Mutex(0)
-        let scannedAccounts = Mutex([UserID]()), subscribedAccounts = Mutex([UserID]())
+        let subscriptions = Mutex(0)
+        let subscribedAccounts = Mutex([UserID]())
         let installedFences = Mutex<[String: V2RoomSubscriptionFence]>([:])
         var ownerPumps: [V2RoomSubscriptionDeliveryPump] = []
         var router: TCPAccountClusterRouter?
         let fixtureHost = V2ActorHostIdentity(hostID: try .init("tcp-owner"), incarnationID: UUID())
         var gatewayIdentities: [V2GatewayRealtimeIdentity] = []
-        let automaticFences = try Dictionary(uniqueKeysWithValues: (automaticAccountCoverage ? rooms : []).map { room in
+        let automaticFences = try Dictionary(uniqueKeysWithValues: (foregroundSubscription ? rooms : []).map { room in
             let activation = try automaticOwner?.activation ?? V2RoomActivationToken(roomID: room, owner: .init(shardID: "tcp-rooms", epoch: 1),
                 activationEpoch: try .init(1), host: fixtureHost)
             return (room, V2RoomSubscriptionFence(activation: activation, subscriptionID: UUID(), generation: 1, baselineSequence: 0))
@@ -177,7 +179,7 @@ struct V2AccountDeliveryTCPTests {
         var clients: [any Channel] = []
         var listeners: [any Channel] = []
         do {
-        if automaticAccountCoverage {
+        if foregroundSubscription {
             precondition(committed == nil && (automaticOwner == nil || !separateGateways))
             if actorRouting { router = try await TCPAccountClusterRouter.start(ingresses: ingresses) }
             let deliveryRouter = router
@@ -242,17 +244,7 @@ struct V2AccountDeliveryTCPTests {
                     #expect(result == .appliedThrough(1))
                     return .activated
                 }, unsubscribe: { _, _, _ in .unsubscribed }), ingress: ingress)
-            let entries = try rooms.map { try V2UserRoomDirectoryEntry(roomID: $0, roomKind: .group, viewerMembershipRevision: 1, ownerEpoch: 1) }
-            let service = try V2AccountRoomChangeService(states: TCPAccountUnusedStates(),
-                directoryPage: { user, cursor in
-                    scans.withLock { $0 += 1 }
-                    scannedAccounts.withLock { $0.append(user) }
-                    if let directoryPage { return try await directoryPage(user, cursor) }
-                    return .init(rooms: entries, nextCursor: nil, topologyGeneration: "tcp-auto")
-                }, onlineDelivery: .init(activate: { [weak registry] user, room, reference in
-                    guard let registry else { throw V2AccountRoomChangeService.Failure.closed }
-                    try await registry.acquireAccountRoomDelivery(userID: user, roomID: room, reference: reference)
-                }, deactivate: { [weak registry] reference in await registry?.releaseAccountRoomDelivery(reference: reference) }))
+            let service = V2AccountRoomChangeService()
             await registry.configureAccountRoomChanges(service)
             }
         }
@@ -302,7 +294,7 @@ struct V2AccountDeliveryTCPTests {
                 auth.authenticate.accessToken = try await credentials(device); auth.authenticate.deviceID = device.rawValue
                 try await send(auth, version: version, limits: limits, channel: client)
                 guard case .authenticated? = try await reader.next()?.body else { throw V2RoomRecoveryReadError.corruptPersistence }
-                if automaticAccountCoverage {
+                if foregroundSubscription {
                     var start = IMV2Envelope(); start.requestID = 10; start.protocolVersion = UInt32(version)
                     start.accountRoomChangesStart = .init()
                     var ready = false
@@ -321,11 +313,22 @@ struct V2AccountDeliveryTCPTests {
                         await Task.yield()
                     }
                     try #require(ready)
+                    if index == 0 { #expect(subscriptions.withLock { $0 } == 0) }
+                    try #require(rooms.count == 1, "foreground fixture has one visible room")
+                    var subscribe = IMV2Envelope(); subscribe.requestID = 30; subscribe.protocolVersion = UInt32(version)
+                    subscribe.groupEventSubscribe.roomID = rooms[0].rawValue
+                    subscribe.groupEventSubscribe.afterRoomSequence = 0
+                    try await send(subscribe, version: version, limits: limits, channel: client)
+                    var subscribed = false
+                    while let response = try await reader.next() {
+                        if case .groupEventSubscribed = response.body { subscribed = true; break }
+                        if case .error = response.body { Issue.record("foreground subscription rejected: \(response.error.code)"); break }
+                    }
+                    try #require(subscribed)
                 }
                 receivers.append(reader)
             }
-            if automaticAccountCoverage {
-                #expect(scans.withLock { $0 } == registries.count, "scanned accounts: \(scannedAccounts.withLock { $0 })")
+            if foregroundSubscription {
                 #expect(subscriptions.withLock { $0 } == rooms.count * registries.count, "subscribed accounts: \(subscribedAccounts.withLock { $0 })")
             }
             if rebuildCoverage {
@@ -337,7 +340,11 @@ struct V2AccountDeliveryTCPTests {
                             #expect(reset.connectionEpoch == coverageEpochs[index])
                             resetReceived = true; break
                         }
-                        guard case .realtimeCoverage = frame.body else { throw V2RoomRecoveryReadError.corruptPersistence }
+                        if case .realtimeCoverage = frame.body { continue }
+                        guard case .groupEventAvailable(let hint) = frame.body,
+                              hint.eventPayload.isEmpty, hint.highWatermark == 0 else {
+                            throw V2RoomRecoveryReadError.corruptPersistence
+                        }
                     }
                     try #require(resetReceived)
                     var start = IMV2Envelope(); start.protocolVersion = UInt32(version); start.requestID = 100
@@ -362,8 +369,7 @@ struct V2AccountDeliveryTCPTests {
                     try #require(ready)
                     #expect(clients[index].isActive)
                 }
-                #expect(scans.withLock { $0 } == registries.count * 2)
-                #expect(subscriptions.withLock { $0 } == rooms.count * registries.count * 2)
+                #expect(subscriptions.withLock { $0 } == rooms.count * registries.count)
             }
             let committedOnline = try await commitOnline?(try #require(listeners.first?.localAddress?.port))
             if let automaticOwner, automaticHost == nil {
@@ -380,8 +386,8 @@ struct V2AccountDeliveryTCPTests {
                 let shard = activation.owner.shardID
                 #expect(activation.roomID == room)
                 for (index, ingress) in ingresses.enumerated() {
-                    var fence = automaticAccountCoverage ? (installedFences.withLock { $0["\(index):\(room.rawValue)"] } ?? automaticFences[room]!) : V2RoomSubscriptionFence(activation: activation, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-                    if !automaticAccountCoverage {
+                    var fence = foregroundSubscription ? (installedFences.withLock { $0["\(index):\(room.rawValue)"] } ?? automaticFences[room]!) : V2RoomSubscriptionFence(activation: activation, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+                    if !foregroundSubscription {
                         #expect(await ingress.installTestSession(fence: fence, sourceShardID: shard, serviceID: "owner"))
                         let member = committed?.member ?? V2RoomSubscriptionMember(userID: user, memberRevision: 1)
                         let baseline = V2RoomSubscriptionDelivery(fence: fence, deliverySequence: 1,
@@ -401,7 +407,7 @@ struct V2AccountDeliveryTCPTests {
                                 owner: oldFence.activation.owner, activationEpoch: try .init(2),
                                 host: oldFence.activation.host),
                                 subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-                            if automaticAccountCoverage {
+                            if foregroundSubscription {
                                 let session = testDeliverySession(fence: replacement, gateway: gatewayIdentities[index],
                                     authority: ingress.authority)
                                 try #require(await ingress.install(fence: replacement, sourceShardID: shard,
@@ -437,18 +443,14 @@ struct V2AccountDeliveryTCPTests {
                     }
                 }
                 for index in receivers.indices {
-                    var delivered = try await receivers[index].next()
-                    while let body = delivered?.body {
-                        switch body {
-                        case .groupEventAvailable(let hint) where hint.eventPayload.isEmpty:
-                            #expect(rooms.contains(where: { $0.rawValue == hint.roomID }) && hint.highWatermark == 1)
-                            delivered = try await receivers[index].next()
+                    var delivered: IMV2Envelope?
+                    while let frame = try await receivers[index].next() {
+                        if case .realtimeCoverage = frame.body { continue }
+                        if case .groupEventAvailable(let hint) = frame.body, hint.eventPayload.isEmpty {
+                            #expect(rooms.contains(where: { $0.rawValue == hint.roomID }) && hint.highWatermark <= 1)
                             continue
-                        case .realtimeCoverage: delivered = try await receivers[index].next()
-                        default: break
                         }
-                        if case .groupEventAvailable? = delivered?.body { break }
-                        if case .realtimeCoverage? = delivered?.body { continue }
+                        delivered = frame
                         break
                     }
                     guard case .groupEventAvailable(let hint)? = delivered?.body else {
@@ -532,9 +534,10 @@ struct V2AccountDeliveryTCPTests {
         requestID: UInt64, rooms: [RoomID]) async throws -> IMV2Envelope {
         while let envelope = try await reader.next() {
             if envelope.requestID == requestID { return envelope }
+            if case .realtimeCoverage = envelope.body { continue }
             guard case .groupEventAvailable(let hint) = envelope.body,
                   rooms.contains(where: { $0.rawValue == hint.roomID }),
-                  hint.highWatermark == 1, hint.eventPayload.isEmpty else {
+                  hint.highWatermark <= 1, hint.eventPayload.isEmpty else {
                 throw V2RoomRecoveryReadError.corruptPersistence
             }
         }
@@ -651,5 +654,21 @@ private actor TCPDeviceProgressStore: V2DeviceRoomProgressStoring {
 private struct TCPAccountUnusedStates: V2RoomStateReading {
     func states(roomIDs: [RoomID], actorUserID: UserID) async throws -> [RoomID: V2RoomStateReadResult] {
         throw V2RoomRecoveryReadError.invalidRequest
+    }
+}
+
+// Transport-only fixture authority. Production uses the Room query service,
+// including rooms with no live Owner subscription; separate tests cover it.
+private struct TCPProgressStates: V2RoomStateReading {
+    let authority: V2GatewayRoomSubscriptionAuthority
+    func states(roomIDs: [RoomID], actorUserID: UserID) async throws -> [RoomID: V2RoomStateReadResult] {
+        var result: [RoomID: V2RoomStateReadResult] = [:]
+        for room in roomIDs {
+            let permits = await authority.captureOnlinePermits(roomID: room)
+            result[room] = permits.contains { $0.userID == actorUserID }
+                ? .state(try .init(roomID: room, ownerEpoch: 1, viewerMembershipRevision: 1,
+                    head: 1, trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0)) : .unavailable
+        }
+        return result
     }
 }

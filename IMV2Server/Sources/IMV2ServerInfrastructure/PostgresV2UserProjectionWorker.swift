@@ -299,6 +299,20 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                     return
                 }
             }
+        case "room_head":
+            let incoming = try JSONDecoder().decode(V2AccountRoomHead.self, from: record.payload)
+            key = try projectionKey(record.projectionKind, incoming.roomID.rawValue)
+            if let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) {
+                let current = try JSONDecoder().decode(V2AccountRoomHead.self, from: jsonData(prior.object))
+                if incoming.roomSequence < current.roomSequence { return }
+                if incoming.roomSequence == current.roomSequence {
+                    guard incoming == current else { throw V2UserProjectionWorkerError.invalidPayload }
+                    return
+                }
+                guard incoming.membershipRevision >= current.membershipRevision else {
+                    throw V2UserProjectionWorkerError.invalidPayload
+                }
+            }
         case "own_read_watermark":
             let incoming = try ownReadWatermark(record.payload)
             key = try projectionKey(record.projectionKind, incoming.roomID.uuidString.lowercased())

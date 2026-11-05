@@ -16,6 +16,7 @@ func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand
     case .roomSyncStateBatch: .roomSyncStateBatch
     case .roomLatestVisibleBatch: .roomLatestVisibleBatch
     case .getGroupRolePolicyBaseline: .getGroupRolePolicyBaseline
+    case .groupEventPullBatch: .groupEventPullBatch
     case .groupEventPull: .groupEventPull
     case .groupEventSubscribe: .groupEventSubscribe
     case .groupEventUnsubscribe: .groupEventUnsubscribe

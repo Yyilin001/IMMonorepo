@@ -189,6 +189,54 @@ struct V2RoomRecoveryPersistenceTests {
         #expect(try await store.groupEventCursor(roomID: newer) == 0)
     }
 
+    @Test func newlyArrivingRoomsCannotStarvePartiallyRecoveredWork() async throws {
+        let (store, _, _, user) = try fixture()
+        let scope = try await store.beginRoomRecoveryScan(userID: user)
+        let old = RoomID(uuid: UUID()), newcomer = RoomID(uuid: UUID())
+        let start = Date(timeIntervalSince1970: 100)
+        try await store.enqueueRoomRecovery(roomID: old, targetHead: 100, priority: 1, scope: scope, now: start)
+        let first = try #require(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: start).first)
+        try await store.databasePool.write { try GRDBV2LocalSyncStore.recordRoomRecoveryService(first, db: $0) }
+        // Even with an uninterrupted stream of newly created tasks, the old
+        // room gets its next page before those newer arrivals, then yields.
+        for turn in 1...12 {
+            let date = start.addingTimeInterval(Double(turn))
+            try await store.enqueueRoomRecovery(roomID: newcomer, targetHead: UInt64(turn), priority: 1, scope: scope, now: date)
+            for oldest in [false, true] {
+                #expect(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: oldest, now: date).first?.roomID == old)
+            }
+            let work = try #require(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: date).first)
+            try await store.databasePool.write { try GRDBV2LocalSyncStore.recordRoomRecoveryService(work, db: $0) }
+            #expect(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: date).first?.roomID == newcomer)
+            try await store.databasePool.write { try $0.execute(sql: "DELETE FROM v2_room_recovery_work WHERE room_id = ?", arguments: [newcomer.rawValue]) }
+        }
+        #expect(try await store.groupEventCursor(roomID: old) == 0)
+    }
+
+    @Test(arguments: [false, true])
+    func stateRefreshDoesNotInvalidateItselfThroughSummaryTrigger(newerHint: Bool) async throws {
+        let (store, _, _, user) = try fixture()
+        let scope = try await store.beginRoomRecoveryScan(userID: user)
+        try await store.databasePool.write { try $0.execute(sql: "INSERT INTO v2_sync_cursor(singleton,state,generation,applied_sequence,server_acknowledged_sequence,sync_token) VALUES(1,'ready',1,0,0,'initial')") }
+        let room = RoomID(uuid: UUID())
+        try await store.enqueueRoomRecovery(roomID: room, targetHead: 8, priority: 1, scope: scope, now: .now)
+        let first = try #require(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: .now).first)
+        _ = try await store.commitRoomRecoveryState(.init(roomID: room, ownerEpoch: 1, viewerMembershipRevision: 1, head: 8,
+            trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0), work: first, now: .now)
+        let summary = try await store.beginRoomLatestVisibleRequest(scope: scope)
+        #expect(try await store.commitRoomLatestVisible(.init(roomID: room, ownerEpoch: 1, membershipRevision: 1, head: 8, latest: nil), request: summary))
+        try await store.enqueueRoomRecovery(roomID: room, targetHead: 9, priority: 1, scope: scope, now: .now)
+        let captured = try #require(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: .now).first)
+        if newerHint { try await store.enqueueRoomRecovery(roomID: room, targetHead: 10, priority: 1, scope: scope, now: .now) }
+        _ = try await store.commitRoomRecoveryState(.init(roomID: room, ownerEpoch: 1, viewerMembershipRevision: 1, head: 9,
+            trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0), work: captured, now: .now)
+        let pending = try #require(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: .now).first)
+        #expect(pending.requiresSummary)
+        #expect(pending.requiresState == newerHint)
+        #expect(pending.targetHead == (newerHint ? 10 : 9))
+        #expect(try await store.groupEventCursor(roomID: room) == 0)
+    }
+
     @Test(arguments: ["head", "revoked", "reset", "unavailable"])
     func invalidatedSummaryQueuesOnlyAuthorizedCurrentGeneration(change: String) async throws {
         let (store, _, _, user) = try fixture()
@@ -421,7 +469,7 @@ struct V2RoomRecoveryPersistenceTests {
         let head = try await reopened.databasePool.read { try Int64.fetchOne($0, sql: "SELECT target_head FROM v2_room_recovery_work") }
         #expect(head == 12)
         let fresh = try await reopened.beginRoomRecoveryScan(userID: user)
-        #expect(try await reopened.roomRecoveryScan(scope: fresh).cursor == nil)
+        #expect(try await reopened.roomRecoveryScan(scope: fresh).cursor == "next")
         await #expect(throws: V2RoomRecoveryPersistenceError.staleScope) {
             try await store.commitRoomRecoveryDirectoryPage(page, expectedCursor: nil, request: try await store.roomRecoveryScan(scope: scope), now: .now)
         }

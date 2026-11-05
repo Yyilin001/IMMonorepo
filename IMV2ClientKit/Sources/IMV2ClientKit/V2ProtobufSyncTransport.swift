@@ -892,13 +892,19 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         request.groupEventPull.afterRoomSequence = afterRoomSequence
         request.groupEventPull.pageSize = UInt32(pageSize)
         let response = try await requestEnvelope(request)
-        guard case .groupEventPage(let page)? = response.body,
-              page.roomID == roomID.rawValue,
+        guard case .groupEventPage(let page)? = response.body else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return try decodeGroupEventPage(page, roomID: roomID, afterRoomSequence: afterRoomSequence, pageSize: pageSize)
+    }
+
+    func decodeGroupEventPage(_ page: IMV2GroupEventPage, roomID: RoomID, afterRoomSequence: UInt64, pageSize: Int) throws -> V2ClientGroupEventPage {
+        guard page.roomID == roomID.rawValue,
               page.events.count <= pageSize,
               page.nextRoomSequence >= afterRoomSequence,
               page.nextRoomSequence <= UInt64(Int64.max)
         else {
-            try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }
         let events: [V2ClientGroupEvent] = try page.events.map {

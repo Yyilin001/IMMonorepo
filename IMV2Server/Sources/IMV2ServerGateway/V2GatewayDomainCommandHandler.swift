@@ -374,6 +374,7 @@ public struct V2GatewayDomainCommandHandler:
              .userRoomDirectoryList,
              .roomSyncStateBatch,
              .roomLatestVisibleBatch,
+             .groupEventPullBatch,
              .groupEventPull,
              .groupEventSubscribe,
              .listReadReceiptReaders,
@@ -403,7 +404,7 @@ public struct V2GatewayDomainCommandHandler:
                  .messageSendOperation, .messageSendOperationRecover,
                  .getGroupRolePolicyBaseline, .listRoomMembers,
                  .roomSyncStateBatch, .roomLatestVisibleBatch,
-                 .groupEventPull, .groupEventSubscribe, .listReadReceiptReaders:
+                 .groupEventPullBatch, .groupEventPull, .groupEventSubscribe, .listReadReceiptReaders:
                 return .roomHost
             default: break
             }
@@ -416,6 +417,16 @@ public struct V2GatewayDomainCommandHandler:
         default:
             return .gateway
         }
+    }
+
+    private func handleGroupEventBatch(_ request: IMV2GroupEventPullBatch,
+        identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        try await V2GroupEventBatchReader.read(request,
+            maximumPayloadBytes: groupEventCommands.maximumGroupEventPagePayloadBytes) { single in
+                var envelope = IMV2Envelope(); envelope.groupEventPull = single
+                return try await self.handleWithoutTelemetry(envelope: envelope,
+                    identity: identity, originatingConnectionID: nil)
+            }
     }
 
     private func handleWithoutTelemetry(
@@ -439,6 +450,8 @@ public struct V2GatewayDomainCommandHandler:
             case .userRoomDirectoryList(let request): return try await roomRecovery.list(request, actorUserID: identity.userID)
             case .roomLatestVisibleBatch(let request): return try await roomRecovery.batch(request, actorUserID: identity.userID)
             case .roomSyncStateBatch(let request): return try await roomRecovery.batch(request, actorUserID: identity.userID)
+            case .groupEventPullBatch(let request):
+                return try await handleGroupEventBatch(request, identity: identity)
             case .groupEventPull(let request): return try await groupEventCommands.handleGroupEventPull(request, identity: identity)
             case .groupEventSubscribe:
                 // Subscription authority belongs to the connection registry and signed Room Owner.

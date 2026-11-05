@@ -10,9 +10,9 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-80"
+    public static let currentSchemaID = "im-v2-current-81"
     private static let requiredTables = [
-        "schema_contract", "author_presentation_change_head", "author_presentation_control_changes", "control_housekeeping_cursor", "realtime_device_control_versions", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
+        "schema_contract", "room_dispatch_outbox", "account_notification_outbox", "author_presentation_change_head", "author_presentation_control_changes", "control_housekeeping_cursor", "realtime_device_control_versions", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "profile_security_invalidation_outbox", "public_profile_update_operations", "user_contact_aliases", "contact_alias_operation_receipts", "room_member_nicknames", "group_nickname_operation_receipts", "group_rooms", "group_invitation_admissions", "group_invitation_receipts", "group_invitation_control_commands", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
         "group_join_quota_aliases", "group_join_submission_receipts", "user_relationships", "user_blocks", "user_stranger_message_preferences", "user_add_preferences", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_reactions", "message_reaction_key_revisions", "message_reaction_receipts", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_presence_leases", "room_admission",
         "shard_admission_pools", "messages", "message_send_completions", "message_mutation_receipts", "message_content_versions", "message_edit_visibility", "message_projection_states", "message_projection_state_values", "room_events", "realtime_partition_leases", "user_sync_wake_outbox", "durable_work_replay_audit", "forward_work_replay_audit",
@@ -20,7 +20,7 @@ public enum V2SchemaReadiness {
         "user_state_event_outbox", "user_state_event_receipts", "user_sync_sequences", "user_sync_log", "user_projection_effects", "device_sync_cursors", "revoked_device_projection_tombstones",
         "user_projection_versions", "user_projection_checkpoints", "user_projection_ready", "user_sync_retention", "sync_snapshot_artifacts",
         "sync_snapshot_pages", "device_snapshot_resets", "sync_tokens", "sync_receipts", "push_campaigns",
-        "push_device_budgets", "push_wake_outbox", "mention_push_wake_intents", "mention_push_wake_receipts", "push_device_endpoints", "push_device_intents",
+        "push_device_budgets", "push_wake_outbox", "push_device_endpoints", "push_device_intents",
         "resource_group_avatar_closures", "resource_group_avatars", "resource_group_avatar_operations", "resource_catalog", "resource_forward_outputs", "resource_upload_sessions", "resource_blob_placements", "resource_variants", "resource_imports", "resource_import_holds", "resource_import_source_closures", "resource_storage_migrations",
         "media_objects", "media_scan_outbox", "media_download_grants", "media_purge_outbox", "message_media_references", "message_mentions", "moderation_operations", "moderation_audit_entries", "content_review_jobs", "content_review_decisions", "content_review_findings", "content_review_cases",
         "room_recovery_topology", "user_shard_router_configuration", "user_shard_route_overrides",
@@ -75,62 +75,14 @@ public enum V2SchemaReadiness {
                 throw V2SchemaReadinessError.unavailableTable(name)
             }
         }
+        try await verifyRoomDispatch(sql: sql, schema: schema)
         try await verifyProfilePublication(sql: sql, schema: schema)
-        guard let notifications = try await sql.raw("""
-            WITH scoped_indexes AS MATERIALIZED (
-                SELECT i.oid, i.relname AS indexname
-                FROM pg_class i JOIN pg_namespace n ON n.oid = i.relnamespace
-                WHERE n.nspname = \(bind: schema) AND i.relkind = 'i'
-            ), scoped_constraints AS MATERIALIZED (
-                SELECT c.* FROM pg_constraint c
-                JOIN pg_class r ON r.oid = c.conrelid
-                JOIN pg_namespace n ON n.oid = r.relnamespace
-                WHERE n.nspname = \(bind: schema)
-            )
-            SELECT (SELECT count(*) = 3 FROM scoped_indexes WHERE (
-                (indexname = 'mention_push_wake_intents_claim_idx' AND pg_get_indexdef(oid) LIKE '%USING btree (created_at, source_event_id, target_user_id)')
-                OR (indexname = 'mention_push_wake_receipts_cleanup_idx' AND pg_get_indexdef(oid) LIKE '%USING btree (recorded_at, source_event_id, target_user_id)')
-                OR (indexname = 'account_password_login_rate_limits_cleanup_idx' AND pg_get_indexdef(oid) LIKE '%USING btree (updated_at, account_handle)')
-            )) AND NOT EXISTS (
-                SELECT 1 FROM (VALUES
-                    ('mention_push_wake_intents','source_event_id','uuid','NO'),
-                    ('mention_push_wake_intents','room_id','uuid','NO'),
-                    ('mention_push_wake_intents','target_user_id','uuid','NO'),
-                    ('mention_push_wake_intents','created_at','timestamptz','NO'),
-                    ('mention_push_wake_intents','claim_token','uuid','YES'),
-                    ('mention_push_wake_intents','lease_expires_at','timestamptz','YES'),
-                    ('mention_push_wake_receipts','source_event_id','uuid','NO'),
-                    ('mention_push_wake_receipts','target_user_id','uuid','NO'),
-                    ('mention_push_wake_receipts','recorded_at','timestamptz','NO'),
-                    ('push_wake_outbox','source_room_id','uuid','NO')
-                ) expected(table_name,column_name,udt_name,is_nullable)
-                WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns c
-                    WHERE c.table_schema = \(bind: schema) AND c.table_name = expected.table_name
-                      AND c.column_name = expected.column_name AND c.udt_name = expected.udt_name
-                      AND c.is_nullable = expected.is_nullable)
-            ) AND NOT EXISTS (
-                SELECT 1 FROM (VALUES
-                    ('mention_push_wake_intents','PRIMARY KEY (source_event_id, target_user_id)'),
-                    ('mention_push_wake_intents','CHECK (isfinite(created_at))'),
-                    ('mention_push_wake_intents','CHECK (((claim_token IS NULL) = (lease_expires_at IS NULL)))'),
-                    ('mention_push_wake_receipts','PRIMARY KEY (source_event_id, target_user_id)'),
-                    ('mention_push_wake_receipts','CHECK (isfinite(recorded_at))')
-                ) expected(table_name,definition)
-                WHERE NOT EXISTS (SELECT 1 FROM scoped_constraints c
-                    WHERE c.conrelid = to_regclass(\(bind: schema + ".") || expected.table_name)
-                      AND c.convalidated AND NOT c.condeferrable
-                      AND pg_get_constraintdef(c.oid) = expected.definition)
-            ) AND NOT EXISTS (
-                SELECT 1 FROM scoped_constraints WHERE contype = 'f'
-                  AND conrelid IN (to_regclass(\(bind: schema + ".mention_push_wake_intents")),
-                                   to_regclass(\(bind: schema + ".mention_push_wake_receipts")))
-            ) AND NOT EXISTS (
-                SELECT 1 FROM scoped_constraints WHERE contype = 'f'
-                  AND conrelid = to_regclass(\(bind: schema + ".push_wake_outbox"))
-                  AND confrelid = to_regclass(\(bind: schema + ".room_events"))
-            ) AS valid
-            """).first(decoding: ProfileOperationContractRow.self), notifications.valid else {
-            throw V2SchemaReadinessError.unavailableTable(schema + ".mention_push_wake.contract")
+        guard try await sql.raw("""
+            SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname=\(bind: schema)
+                AND indexname='account_password_login_rate_limits_cleanup_idx'
+                AND indexdef LIKE '%USING btree (updated_at, account_handle)') AS valid
+            """).first(decoding: ProfileOperationContractRow.self)?.valid == true else {
+            throw V2SchemaReadinessError.unavailableTable(schema + ".account_password_login_rate_limits.index")
         }
         // Both revocation consumers use an ID watermark. The database must
         // serialize statements before allocating IDs and keep the lock through

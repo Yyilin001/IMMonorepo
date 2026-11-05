@@ -205,6 +205,7 @@ public enum V2GatewayTelemetryCommand: String, CaseIterable, Hashable, Sendable 
     case roomSyncStateBatch = "room_sync_state_batch"
     case roomLatestVisibleBatch = "room_latest_visible_batch"
     case getGroupRolePolicyBaseline = "get_group_role_policy_baseline"
+    case groupEventPullBatch = "group_event_pull_batch"
     case groupEventPull = "group_event_pull"
     case groupEventSubscribe = "group_event_subscribe"
     case groupEventUnsubscribe = "group_event_unsubscribe"

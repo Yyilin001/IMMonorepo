@@ -6,6 +6,14 @@
 
 Docker 部署使用独立的 `IMV2RoomHostSupervisorApp` 管理本节点容器。监督服务是专门的 caller，只获得 Placement 读、写和排除权限，不承载房间。通过配置生成器的 `--caller` 和 `--exclusion-supervisor` 创建身份，三个投票节点由各自独立的进程和持久目录运行。
 
+## 停机顺序与异常退出
+
+单 Host 测试环境必须先停止 Gateway，确认进程正常退出，再停止 Account/Operator，最后停止三个 Placement 节点。不得把这些服务放在同一次 `docker stop` 或无序的 Compose 停机调用中；Host 排空期间仍需要多数派提交退役记录。
+
+使用 `bash IMV2/scripts/stop_v2_actor_stack.sh --compose <配置文件>`。默认项目名为 `imtest`，可通过 `IM_V2_COMPOSE_PROJECT` 指定。脚本针对固定单 Gateway 拓扑；多 Host 部署仍使用监督服务的逐 Host 排空流程。Docker 的 stop 命令成功不代表应用完成排空：脚本还检查容器退出码和 OOM 状态，异常时保留调用方和 Placement，不继续关闭多数派。
+
+已登记的旧 Host 未退役时，新 incarnation 被拒绝是正确保护。此时不得删除 Placement 存储、降低 epoch、伪造托管启动记录，或把 TCP 端口可连接当成业务恢复。先完成旧进程不可重启的排除与数据库会话结清，再提交退役记录；恢复后验证认证、实时订阅就绪及消息收发。普通 Docker 自动重启部署缺少托管启动记录，不能依据当前容器名反推出旧 incarnation 的托管绑定。
+
 ## 部署文档
 
 通过 `IMV2_HOST_SUPERVISOR_CONFIGURATION_FILE` 指定绝对路径。私有文档不要提交到仓库；数据库凭据、签名密钥和启动意图目录由部署环境保存。

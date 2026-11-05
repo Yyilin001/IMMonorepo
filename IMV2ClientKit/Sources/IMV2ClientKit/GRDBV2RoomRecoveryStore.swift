@@ -62,9 +62,9 @@ extension GRDBV2LocalSyncStore {
         );
         """
 
-    /// A new connection must reinstall coverage from the beginning. Durable
-    /// content work survives; a prior connection's directory cursor proves no
-    /// coverage on the replacement gateway.
+    /// Reconnect replaces only the in-flight response fence. The account log
+    /// owns changes since the last durable personal cursor, so an unchanged
+    /// installation can resume directory discovery or reuse its completed scan.
     public func beginRoomRecoveryScan(userID: UserID) async throws -> V2RoomRecoveryScope {
         try await databasePool.write { db in
             guard let row = try Row.fetchOne(db, sql: "SELECT binding, user_id FROM v2_local_installation WHERE singleton = 1"),
@@ -82,9 +82,7 @@ extension GRDBV2LocalSyncStore {
                     (singleton, scan_id, user_id, installation_binding, directory_round, cursor, topology_generation, directory_complete)
                 VALUES (1, ?, ?, ?, ?, NULL, NULL, 0)
                 ON CONFLICT(singleton) DO UPDATE SET scan_id = excluded.scan_id,
-                    user_id = excluded.user_id, installation_binding = excluded.installation_binding,
-                    directory_round = excluded.directory_round,
-                    cursor = NULL, topology_generation = NULL, directory_complete = 0
+                    user_id = excluded.user_id, installation_binding = excluded.installation_binding
                 """, arguments: [scope.scanID.uuidString, userID.rawValue, scope.installationBinding, UUID().uuidString])
             return scope
         }
@@ -221,7 +219,7 @@ extension GRDBV2LocalSyncStore {
         return row
     }
 
-    private static func enqueueRoomRecovery(roomID: RoomID, head: UInt64, priority: Int, now: Date, db: Database) throws {
+    static func enqueueRoomRecovery(roomID: RoomID, head: UInt64, priority: Int, now: Date, db: Database) throws {
         guard roomID.uuidValue != nil, head <= UInt64(Int64.max), (0...2).contains(priority),
               now.timeIntervalSince1970.isFinite else { throw V2RoomRecoveryPersistenceError.invalidWork }
         try validateStoredRecoveryWork(roomID: roomID, db: db)
@@ -233,14 +231,28 @@ extension GRDBV2LocalSyncStore {
                 sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?",
                 arguments: [roomID.rawValue]),
            try storageUnsigned(cursor, column: "applied_room_sequence") >= head { return }
+        if priority == 1, head > 0,
+           let existing = try Row.fetchOne(db, sql: "SELECT target_head FROM v2_room_recovery_work WHERE room_id = ?", arguments: [roomID.rawValue]),
+           try recoveryInteger(existing, "target_head") >= Int64(head) {
+            try db.execute(sql: "UPDATE v2_room_recovery_work SET priority = MAX(priority, ?) WHERE room_id = ?", arguments: [priority, roomID.rawValue])
+            return
+        }
+        let coveredByState = try priority == 1 && head > 0 &&
+            (Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM v2_room_sync_states s
+                WHERE s.room_id = ? AND s.head >= ?
+                AND NOT EXISTS(SELECT 1 FROM v2_room_membership_states m WHERE m.room_id = s.room_id
+                    AND (m.membership_revision > s.membership_revision
+                         OR (m.membership_revision = s.membership_revision AND m.is_member = 0))))
+                """, arguments: [roomID.rawValue, Int64(head)])) == true
         try db.execute(sql: """
             INSERT INTO v2_room_recovery_work
-                (room_id, target_head, request_revision, requires_state, priority, enqueued_at, next_attempt_at)
-            VALUES (?, ?, ?, 1, ?, ?, ?)
+                (room_id, target_head, request_revision, requires_state, priority, enqueued_at, next_attempt_at, last_served_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT service_sequence FROM v2_room_recovery_scan WHERE singleton = 1), 0))
             ON CONFLICT(room_id) DO UPDATE SET target_head = MAX(target_head, excluded.target_head),
-                request_revision = excluded.request_revision, requires_state = 1,
+                request_revision = excluded.request_revision, requires_state = MAX(requires_state, excluded.requires_state),
                 priority = MAX(priority, excluded.priority), next_attempt_at = MIN(next_attempt_at, excluded.next_attempt_at)
-            """, arguments: [roomID.rawValue, Int64(head), UUID().uuidString, priority,
+            """, arguments: [roomID.rawValue, Int64(head), UUID().uuidString, !coveredByState, priority,
                 now.timeIntervalSince1970, now.timeIntervalSince1970])
     }
 }

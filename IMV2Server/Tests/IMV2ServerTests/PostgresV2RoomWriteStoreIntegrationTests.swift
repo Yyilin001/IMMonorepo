@@ -368,37 +368,15 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 )
             }
 
-            // 没有启用的推送活动时，提及仍然只是一条普通房间事件：不接受、不失败、不建投递。
-            guard case .accepted = try await service.send(message(clientID: "00000000-0000-0000-0000-00000000c101")) else {
-                Issue.record("expected the mention to be accepted")
-                return
+            // Both messages retain one source dispatch fact. APNs configuration
+            // does not participate in acceptance or duplicate the old mention path.
+            for clientID in ["00000000-0000-0000-0000-00000000c101", "00000000-0000-0000-0000-00000000c102"] {
+                guard case .accepted = try await service.send(message(clientID: clientID)) else {
+                    Issue.record("expected the mention to be accepted"); return
+                }
             }
-            #expect(try await count("im_v2.mention_push_wake_intents", on: sql) == 1)
-            #expect(try await PostgresV2MentionPushWakeRelay(owner: database, control: database)
-                .runOnce(now: base, limit: 10) == 1)
+            #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM im_v2.room_dispatch_outbox WHERE message_id IS NOT NULL AND \(bind: mentioned)=ANY(mentioned_user_ids)").first(decoding: CountRow.self)?.value == 2)
             #expect(try await count("im_v2.push_wake_outbox", on: sql) == 0)
-
-            // 配置并启用通知活动后，被 @ 成员的**有效**设备各自收到一条唤醒通知；
-            // 已撤销设备不在其中，也不会因此产生任何逐用户投递。
-            try await sql.raw("""
-                INSERT INTO im_v2.push_campaigns (campaign_id, state, updated_at)
-                VALUES ('mention_wake', 'enabled', \(bind: base))
-                """).run()
-            guard case .accepted = try await service.send(message(clientID: "00000000-0000-0000-0000-00000000c102")) else {
-                Issue.record("expected the mention to be accepted")
-                return
-            }
-            #expect(try await PostgresV2MentionPushWakeRelay(owner: database, control: database)
-                .runOnce(now: base, limit: 10) == 1)
-            let wakes = try await sql.raw("""
-                SELECT target_device_id, target_user_id, campaign_id, state
-                FROM im_v2.push_wake_outbox ORDER BY target_device_id
-                """).all(decoding: MentionWakeAssertionRow.self)
-            #expect(wakes.count == 1)
-            #expect(wakes.first?.targetDeviceID == secondDevice)
-            #expect(wakes.first?.targetUserID == mentioned)
-            #expect(wakes.first?.campaignID == "mention_wake")
-            #expect(wakes.first?.state == "pending")
             // 提及内容仍可按房间游标恢复：权威副本没有因为通知路径而改变。
             let page = try await PostgresV2GroupEventLogStore(database: database)
                 .pull(roomID: room, actorUserID: senderID, afterRoomSequence: 0, pageSize: 10)

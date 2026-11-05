@@ -80,6 +80,8 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 成员目录分页响应。
     public static let roomMembersPage = Self(rawValue: 60)
     /// 房间事件增量拉取。
+    public static let groupEventPullBatch = Self(rawValue: 139)
+    public static let groupEventPageBatch = Self(rawValue: 140)
     public static let groupEventPull = Self(rawValue: 61)
     /// 房间事件分页响应。
     public static let groupEventPage = Self(rawValue: 62)

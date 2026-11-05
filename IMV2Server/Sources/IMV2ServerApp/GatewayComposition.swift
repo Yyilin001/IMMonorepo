@@ -76,8 +76,6 @@ struct GatewayComposition {
             )
             durableOwnerResources = Array(prepared.roomOwners.physicalResources.values)
             preparedConnectionRegistry = prepared.frontdoor.connectionRegistry
-            try await prepared.frontdoor.connectionRegistry.installDeviceRoomProgressStore(
-                PostgresV2DeviceRoomProgressStore(database: prepared.topology.deliveryDatabase))
             databaseTopology = prepared.topology
             let deployment = PostgresV2PolicyDeploymentPlacementStore(database: prepared.topology.roomIdentityControlDatabase)
             guard let placement = prepared.roomOwners.actorConfiguration.policyPlacement else {
@@ -145,6 +143,8 @@ struct GatewayComposition {
                 prepared: prepared,
                 actors: actors
             )
+            try await prepared.frontdoor.connectionRegistry.installDeviceRoomProgressStore(
+                PostgresV2DeviceRoomProgressStore(database: prepared.topology.deliveryDatabase), states: roomServices.roomQueries)
             // 4. 装配 Actor 前台唤醒通道，并把兴趣订阅、在线活动回调和提交后提示
             // 接入连接注册表与事件流；这里是适配器装配，不启动客户端 TLS 监听。
             let realtime = try await GatewayActorRealtimeRuntime.build(
@@ -158,7 +158,7 @@ struct GatewayComposition {
             prepared.registerMetrics(on: app, actors: actors, actorRealtimeMetrics: actorRealtime)
             // 实时阶段就绪后记录其生命周期，供后续失败关闭。
             // 5. 装配房间恢复查询及账号房间变更服务，并把后者登记到连接注册表；
-            // 认证响应写出后建立账号成员覆盖；客户端 Ready 只开启账号变更通知消费。
+            // 认证响应写出后建立固定账号恢复纪元；房间变化通过持久化个人流补读。
             let recoveryDirectory = try GatewayRoomRecoveryDirectory.build(
                 configuration: configuration, topology: prepared.topology
             )
@@ -168,23 +168,7 @@ struct GatewayComposition {
                 states: roomServices.roomQueries,
                 latestVisible: latestVisible
             )
-            let initializationDirectory = try GatewayRoomRecoveryDirectory.build(
-                configuration: configuration, topology: prepared.topology, initialization: true)
-            let accountChanges = try V2AccountRoomChangeService(
-                states: roomServices.roomQueries,
-                directoryPage: { user, cursor in
-                    try await initializationDirectory.list(actorUserID: user, cursor: cursor, pageSize: 100)
-                }, maximumConcurrentInitializations: min(configuration.maximumConnections,
-                    configuration.initializationConnectionsPerEventLoop * configuration.databaseNonMessagePoolEventLoopThreads * 8),
-                maximumInitializationJobs: configuration.maximumConnections,
-                onlineDelivery: .init(
-                    activate: { [weak registry = prepared.frontdoor.connectionRegistry] user, room, reference in
-                        guard let registry else { throw V2AccountRoomChangeService.Failure.closed }
-                        try await registry.acquireAccountRoomDelivery(userID: user, roomID: room, reference: reference)
-                    }, deactivate: { [weak registry = prepared.frontdoor.connectionRegistry] reference in
-                        await registry?.releaseAccountRoomDelivery(reference: reference)
-                    })
-            )
+            let accountChanges = V2AccountRoomChangeService()
             accountRoomChangeService = accountChanges
             await prepared.frontdoor.connectionRegistry.configureAccountRoomChanges(accountChanges)
             // 6. 将房间、同步、社交和在线活动等命令接到统一处理器，再构造撤销、

@@ -5,6 +5,72 @@ WITH schema_visibility AS MATERIALIZED (
  SELECT pg_catalog.set_config('search_path', '', true) AS active_path
 )
 SELECT (
+(NOT EXISTS (SELECT 1 FROM (VALUES ('source_event_id','uuid','NO'),
+('room_id','uuid','NO'),
+('room_sequence','int8','NO'),
+('membership_revision','int8','NO'),
+('created_at','timestamptz','NO'),
+('next_attempt_at','timestamptz','NO'),
+('claim_token','uuid','YES'),
+('lease_expires_at','timestamptz','YES'),
+('attempt','int4','NO'),
+('message_id','uuid','YES'),
+('sender_user_id','uuid','YES'),
+('mentioned_user_ids','_uuid','NO'),
+('mentions_everyone','bool','NO'),
+('recipient_cursor','uuid','YES')) AS required(name,type,nullable)
+    WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns c
+        WHERE c.table_schema='im_v2' AND c.table_name='room_dispatch_outbox' AND c.column_name=required.name
+          AND c.udt_name=required.type AND c.is_nullable=required.nullable))
+AND NOT EXISTS (SELECT 1 FROM (VALUES ('CHECK ((room_sequence > 0))'),('CHECK ((membership_revision >= 0))'),('CHECK ((attempt >= 0))'),('CHECK (isfinite(created_at))'),('CHECK (isfinite(next_attempt_at))'),('CHECK (((claim_token IS NULL) = (lease_expires_at IS NULL)))'),('PRIMARY KEY (source_event_id)'),('UNIQUE (message_id)'),('CHECK (((message_id IS NULL) OR (sender_user_id IS NOT NULL)))'),('CHECK (((lease_expires_at IS NULL) OR isfinite(lease_expires_at)))')) AS required(definition)
+    WHERE NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('im_v2.room_dispatch_outbox')
+        AND c.convalidated AND NOT c.condeferrable AND pg_get_constraintdef(c.oid)=required.definition
+        AND (c.contype='c' OR EXISTS (SELECT 1 FROM pg_index i WHERE i.indexrelid=c.conindid AND i.indisvalid AND i.indisready))))
+AND NOT EXISTS (SELECT 1 FROM (VALUES ('source_event_id','uuid','NO'),
+('room_id','uuid','NO'),
+('room_sequence','int8','NO'),
+('membership_revision','int8','NO'),
+('created_at','timestamptz','NO'),
+('next_attempt_at','timestamptz','NO'),
+('claim_token','uuid','YES'),
+('lease_expires_at','timestamptz','YES'),
+('attempt','int4','NO'),
+('user_id','uuid','NO'),
+('message_id','uuid','NO'),
+('sender_user_id','uuid','NO'),
+('is_mention','bool','NO')) AS required(name,type,nullable)
+    WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns c
+        WHERE c.table_schema='im_v2' AND c.table_name='account_notification_outbox' AND c.column_name=required.name
+          AND c.udt_name=required.type AND c.is_nullable=required.nullable))
+AND NOT EXISTS (SELECT 1 FROM (VALUES ('CHECK ((room_sequence > 0))'),('CHECK ((membership_revision >= 0))'),('CHECK ((attempt >= 0))'),('CHECK (isfinite(created_at))'),('CHECK (isfinite(next_attempt_at))'),('CHECK (((claim_token IS NULL) = (lease_expires_at IS NULL)))'),('PRIMARY KEY (user_id, source_event_id)'),('CHECK ((user_id <> sender_user_id))'),('CHECK (isfinite(lease_expires_at))')) AS required(definition)
+    WHERE NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('im_v2.account_notification_outbox')
+        AND c.convalidated AND NOT c.condeferrable AND pg_get_constraintdef(c.oid)=required.definition
+        AND (c.contype='c' OR EXISTS (SELECT 1 FROM pg_index i WHERE i.indexrelid=c.conindid AND i.indisvalid AND i.indisready))))
+AND EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=to_regclass('im_v2.room_dispatch_outbox')
+    AND i.indexrelid=to_regclass('im_v2.room_dispatch_due_idx') AND i.indisvalid AND i.indisready AND i.indpred IS NULL
+    AND pg_get_indexdef(i.indexrelid) LIKE '%USING btree (next_attempt_at, created_at, source_event_id)')
+AND EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=to_regclass('im_v2.room_dispatch_outbox')
+    AND i.indexrelid=to_regclass('im_v2.room_dispatch_room_idx') AND i.indisvalid AND i.indisready AND i.indpred IS NULL
+    AND pg_get_indexdef(i.indexrelid) LIKE '%USING btree (room_id, membership_revision, room_sequence)')
+AND EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=to_regclass('im_v2.account_notification_outbox')
+    AND i.indexrelid=to_regclass('im_v2.account_notification_outbox_due_idx') AND i.indisvalid AND i.indisready AND i.indpred IS NULL
+    AND pg_get_indexdef(i.indexrelid) LIKE '%USING btree (next_attempt_at, created_at, user_id, source_event_id)')
+AND EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=to_regclass('im_v2.account_notification_outbox')
+    AND i.indexrelid=to_regclass('im_v2.account_notification_outbox_room_idx') AND i.indisvalid AND i.indisready AND i.indpred IS NULL
+    AND pg_get_indexdef(i.indexrelid) LIKE '%USING btree (user_id, room_id, room_sequence)')
+AND EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=to_regclass('im_v2.account_notification_outbox')
+    AND i.indexrelid=to_regclass('im_v2.account_notification_outbox_expiry_idx') AND i.indisvalid AND i.indisready AND i.indpred IS NULL
+    AND pg_get_indexdef(i.indexrelid) LIKE '%USING btree (created_at, user_id, source_event_id)')
+AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+    WHERE t.tgrelid=to_regclass('im_v2.room_events') AND t.tgname='room_events_account_dispatch'
+      AND t.tgenabled='O' AND NOT t.tgisinternal AND t.tgtype=4 AND t.tgqual IS NULL
+      AND t.tgnewtable='inserted_room_changes' AND p.pronamespace=to_regnamespace('im_v2')
+      AND p.proname='enqueue_room_change_dispatch' AND NOT p.prosecdef
+      AND regexp_replace(p.prosrc, '[[:space:]]', '', 'g')='BEGININSERTINTOim_v2.room_dispatch_outbox(source_event_id,room_id,room_sequence,membership_revision,sender_user_id,created_at,next_attempt_at)SELECTevent_id,room_id,room_sequence,committed_membership_revision,actor_user_id,created_at,created_atFROMinserted_room_changesWHEREevent_type<>''message.accepted'';RETURNNULL;END;')
+AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('im_v2.user_state_event_outbox')
+    AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid) LIKE '%room_head%')
+AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('im_v2.user_state_event_receipts')
+    AND c.contype='c' AND c.convalidated AND pg_get_constraintdef(c.oid) LIKE '%room_head%')) AND
 (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='rooms' AND column_name='dissolved_at' AND udt_name='timestamptz' AND is_nullable='YES')
  AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.rooms') AND conname='rooms_dissolved_check' AND convalidated)
  AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.rooms') AND tgname='rooms_dissolution_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=19)
@@ -699,7 +765,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-80''::text'
+       AND column_default = '''im-v2-current-81''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -709,7 +775,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-80%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-81%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -1106,48 +1172,9 @@ AND (to_regclass('im_v2.forward_plan_operations') IS NOT NULL AND to_regclass('i
  AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='remote_device_revocation_baselines' AND is_nullable='NO' AND (column_name,udt_name) IN (('baseline_id','uuid'),('expires_at','timestamptz')))
  AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='remote_device_revocation_receipts' AND column_name='operation_id' AND udt_name='uuid' AND is_nullable='NO')
  AND EXISTS(SELECT 1 FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid JOIN pg_am am ON am.oid=idx.relam WHERE i.indrelid=to_regclass('im_v2.remote_device_revocation_baselines') AND idx.relname='remote_device_revocation_baseline_expiry_idx' AND am.amname='btree' AND i.indisvalid AND i.indisready AND i.indpred IS NULL AND i.indexprs IS NULL AND pg_get_indexdef(i.indexrelid,1,TRUE)='expires_at')
- AND (SELECT (SELECT count(*) = 3 FROM pg_indexes WHERE schemaname = 'im_v2' AND (
-                (indexname = 'mention_push_wake_intents_claim_idx' AND indexdef LIKE '%USING btree (created_at, source_event_id, target_user_id)')
-                OR (indexname = 'mention_push_wake_receipts_cleanup_idx' AND indexdef LIKE '%USING btree (recorded_at, source_event_id, target_user_id)')
-                OR (indexname = 'account_password_login_rate_limits_cleanup_idx' AND indexdef LIKE '%USING btree (updated_at, account_handle)')
-            )) AND NOT EXISTS (
-                SELECT 1 FROM (VALUES
-                    ('mention_push_wake_intents','source_event_id','uuid','NO'),
-                    ('mention_push_wake_intents','room_id','uuid','NO'),
-                    ('mention_push_wake_intents','target_user_id','uuid','NO'),
-                    ('mention_push_wake_intents','created_at','timestamptz','NO'),
-                    ('mention_push_wake_intents','claim_token','uuid','YES'),
-                    ('mention_push_wake_intents','lease_expires_at','timestamptz','YES'),
-                    ('mention_push_wake_receipts','source_event_id','uuid','NO'),
-                    ('mention_push_wake_receipts','target_user_id','uuid','NO'),
-                    ('mention_push_wake_receipts','recorded_at','timestamptz','NO'),
-                    ('push_wake_outbox','source_room_id','uuid','NO')
-                ) expected(table_name,column_name,udt_name,is_nullable)
-                WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns c
-                    WHERE c.table_schema = 'im_v2' AND c.table_name = expected.table_name
-                      AND c.column_name = expected.column_name AND c.udt_name = expected.udt_name
-                      AND c.is_nullable = expected.is_nullable)
-            ) AND NOT EXISTS (
-                SELECT 1 FROM (VALUES
-                    ('mention_push_wake_intents','PRIMARY KEY (source_event_id, target_user_id)'),
-                    ('mention_push_wake_intents','CHECK (isfinite(created_at))'),
-                    ('mention_push_wake_intents','CHECK (((claim_token IS NULL) = (lease_expires_at IS NULL)))'),
-                    ('mention_push_wake_receipts','PRIMARY KEY (source_event_id, target_user_id)'),
-                    ('mention_push_wake_receipts','CHECK (isfinite(recorded_at))')
-                ) expected(table_name,definition)
-                WHERE NOT EXISTS (SELECT 1 FROM pg_constraint c
-                    WHERE c.conrelid = to_regclass('im_v2.' || expected.table_name)
-                      AND c.convalidated AND NOT c.condeferrable
-                      AND pg_get_constraintdef(c.oid) = expected.definition)
-            ) AND NOT EXISTS (
-                SELECT 1 FROM pg_constraint WHERE contype = 'f'
-                  AND conrelid IN (to_regclass('im_v2.mention_push_wake_intents'),
-                                   to_regclass('im_v2.mention_push_wake_receipts'))
-            ) AND NOT EXISTS (
-                SELECT 1 FROM pg_constraint WHERE contype = 'f'
-                  AND conrelid = to_regclass('im_v2.push_wake_outbox')
-                  AND confrelid = to_regclass('im_v2.room_events')
-            ) )
+ AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='im_v2'
+     AND indexname='account_password_login_rate_limits_cleanup_idx'
+     AND indexdef LIKE '%USING btree (updated_at, account_handle)')
 AND NOT EXISTS (
  SELECT 1 FROM (VALUES
 ('PRIMARY KEY (partition_id)'),

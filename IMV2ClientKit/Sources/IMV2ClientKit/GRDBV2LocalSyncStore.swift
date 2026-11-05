@@ -127,7 +127,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         do {
             try databasePool.write { db in try db.execute(sql: "PRAGMA journal_mode = WAL") }
             try Self.migrator.migrate(databasePool)
-            try databasePool.read { try Self.validateCurrentResourceSchema($0) }
+            try databasePool.read {
+                try Self.validateCurrentResourceSchema($0)
+                try Self.validateCurrentAccountRoomHeadSchema($0)
+            }
             try databasePool.write { db in
                 try Self.establishInstallationBinding(installationBinding, userID: userID, db: db)
                 // 待建索引任务只是一种派生状态；直接从消息重建，不迁移旧任务。
@@ -173,6 +176,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                     throw V2OfflineReadBootstrapError.installationBindingMismatch
                 }
                 try Self.validateCurrentResourceSchema(db)
+                try Self.validateCurrentAccountRoomHeadSchema(db)
             }
             // 离线授权只打开就绪且版本和代次匹配的派生库；缺失或损坏时仍可读取账号消息。
             var search: DatabasePool?
@@ -674,6 +678,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                     try Self.applyLiveActivityPreference(record,db:db)
                 } else if record.projectionKind == "direct_read_receipt" {
                     try Self.applyDirectReadReceipt(record, db: db)
+                } else if record.projectionKind == "room_head" {
+                    try Self.applyAccountRoomHead(record, db: db)
                 } else if record.projectionKind == "own_read_watermark" {
                     try Self.applyOwnReadWatermark(record, db: db)
                 } else if record.projectionKind == "read_receipt_preferences" {
@@ -1114,6 +1120,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
                 pendingAcknowledgementSequence: nil,
                 pendingReset: nil
             ), db: db)
+            // Snapshot heads cannot enqueue live work while shadows are being
+            // imported. A new bounded reconciliation covers the activated bank;
+            // the account stream retains changes beyond this snapshot's cursor.
+            try db.execute(sql: "UPDATE v2_room_recovery_scan SET cursor = NULL, topology_generation = NULL, directory_complete = 0, directory_round = ? WHERE singleton = 1", arguments: [UUID().uuidString])
             try db.execute(sql: "DELETE FROM v2_sync_rebuild_requests")
             try db.execute(sql: "DELETE FROM v2_snapshot_import WHERE snapshot_id = ?", arguments: [manifest.reset.snapshotID.rawValue])
             try db.execute(sql: "DELETE FROM v2_reset_rollback WHERE singleton = 1")
@@ -1212,6 +1222,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         "v2_direct_room_profile_projections",
         "v2_direct_read_receipt_projections",
         "v2_room_read_watermarks",
+        "v2_account_room_heads",
         "v2_read_receipt_preference",
         "v2_profile_views",
         "v2_profile_invalidations",
@@ -1884,6 +1895,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         case "conversation_state": try persist(V2ClientConversationState(record: record), target: .snapshotShadow, db: db)
         case "message_favorite": try persist(V2ClientMessageFavorite(record: record), target: .snapshotShadow, db: db)
         case "contact_alias": try applyContactAliasInvalidation(record, target: .snapshotShadow, db: db)
+        case "room_head": try applyAccountRoomHead(record, target: .snapshotShadow, db: db)
         case "room": try applyMembershipAwareRoomProjection(record, target: .snapshotShadow, db: db)
         case "direct_room_profile": try persist(V2ClientDirectRoomProfileProjection(record: record), target: .snapshotShadow, db: db)
         case "timeline_activity": try persist(V2ClientTimelineActivityProjection(record: record), target: .snapshotShadow, db: db)
@@ -1905,13 +1917,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             return value
         }
         switch kind {
-        case "room": return try string("room_id")
+        case "room", "room_head": return try string("room_id")
         // The personal projection worker canonicalizes this entity key to
         // lowercase UUID text, independently of the original payload spelling.
-        case "own_read_watermark": return try string("room_id").lowercased()
+        case "own_read_watermark", "direct_read_receipt": return try string("room_id").lowercased()
         case "relationship", "user_block", "contact_alias": return try string("target_user_id")
         case "stranger_message_permission", "user_add_permission", "read_receipt_preferences", "live_activity_preferences": return "singleton"
-        case "direct_room_profile", "direct_read_receipt", "conversation_state", "direct_sending_capability":
+        case "direct_room_profile", "conversation_state", "direct_sending_capability":
             return try string("room_id")
         case "message_favorite": return try string("message_id")
         case "timeline_activity": return sourceEventID.rawValue
@@ -3651,7 +3663,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         }
         for table in [
             "v2_message_reactions", "v2_reaction_versions", "v2_reaction_effects", "v2_message_effects", "v2_message_tombstones", "v2_message_projections",
-            "v2_moderation_projections", "v2_room_control_projections", "v2_room_profile_projections",
+            "v2_moderation_projections", "v2_room_control_projections", "v2_room_profile_projections", "v2_account_room_heads",
             "v2_conversation_states", "v2_message_favorites", "v2_timeline_activity_projections",
             "v2_group_pinned_messages", "v2_pin_effects", "v2_group_announcements", "v2_announcement_effects", "v2_group_avatar_invalidations", "v2_group_avatar_effects", "v2_group_nickname_invalidations", "v2_group_nickname_effects", "v2_group_role_policies", "v2_role_policy_effects", "v2_group_role_policy_baselines", "v2_role_policy_recovery_requests",
             "v2_group_member_roles", "v2_member_effects", "v2_group_permission_revisions", "v2_group_events",
@@ -5277,6 +5289,7 @@ public enum V2LocalBackupExclusion {
 
 public enum V2ClientLocalStorageError: Error, Equatable, Sendable {
     case unsupportedResourceSchema
+    case unsupportedAccountRecoverySchema
     case backupExclusionVerificationFailed
     case installationBindingMismatch
 }

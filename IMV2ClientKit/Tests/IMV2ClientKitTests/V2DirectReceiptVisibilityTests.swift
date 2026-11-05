@@ -62,7 +62,8 @@ struct V2DirectReceiptVisibilityTests {
         if snapshot {
             let reset = try V2ClientResetRequired(snapshotID: .init("receipt-snapshot"), generation: 2, baseSequence: 2, expiresAt: .distantFuture)
             let page = try V2SnapshotProjectionV3Page(items: [.init(
-                key: .init(projectionKind: hidden.projectionKind, entityKey: room.rawValue),
+                // Match the server projection key: lowercase UUID, even when payload uses uppercase.
+                key: .init(projectionKind: hidden.projectionKind, entityKey: room.rawValue.lowercased()),
                 sourceEventID: hidden.sourceEventID, sequence: hidden.sequence, payload: hidden.payload)])
             let bytes = try V2SnapshotProjectionV3Codec.encode(page)
             let digest = V2SnapshotV3Digest.page(bytes)

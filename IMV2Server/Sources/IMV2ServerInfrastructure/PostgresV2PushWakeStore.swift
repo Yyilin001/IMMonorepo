@@ -61,7 +61,7 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
                 ORDER BY created_at, dispatch_id LIMIT \(bind: limit)
                 """).all(decoding: PushMuteCandidateRow.self)
             for candidate in candidates {
-                if candidate.createdAt > now.addingTimeInterval(-V2MentionPushWakeLimits.lifetime) {
+                if candidate.createdAt > now.addingTimeInterval(-V2AccountNotificationLimits.lifetime) {
                     muteDecisions[candidate.dispatchID] = try await conversationMuted(
                         candidate.sourceRoomID, candidate.targetUserID, now
                     )
@@ -165,7 +165,7 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
         checkedMutes: [UUID: Bool],
         on sql: any SQLDatabase
     ) async throws -> V2PushWakeLease? {
-        if pending.createdAt <= now.addingTimeInterval(-V2MentionPushWakeLimits.lifetime) {
+        if pending.createdAt <= now.addingTimeInterval(-V2AccountNotificationLimits.lifetime) {
             try await suppress(pending.dispatchID, reason: .endpointUnavailable, on: sql)
             return nil
         }

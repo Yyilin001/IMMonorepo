@@ -267,6 +267,7 @@ extension GRDBV2LocalSyncStore {
         \(rolePolicyRecoverySchemaSQL);
         \(pushIntentSchemaSQL);
         \(roomRecoverySchemaSQL)
+        \(accountRoomHeadSchemaSQL)
         \(roomLatestVisibleSchemaSQL)
 
         CREATE TABLE v2_local_installation (

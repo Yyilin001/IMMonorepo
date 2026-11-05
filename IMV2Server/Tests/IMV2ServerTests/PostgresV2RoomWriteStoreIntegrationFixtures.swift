@@ -265,6 +265,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 SELECT 1 FROM im_v2.message_send_completions AS completion
                 LEFT JOIN im_v2.messages AS message ON message.message_id = completion.message_id
                 WHERE message.message_id IS NULL
+            ) AND NOT EXISTS (
+                SELECT 1 FROM im_v2.message_send_completions AS completion
+                LEFT JOIN im_v2.room_dispatch_outbox AS dispatch
+                  ON dispatch.source_event_id = completion.event_id
+                 AND dispatch.message_id = completion.message_id
+                 AND dispatch.room_id = completion.room_id
+                 AND dispatch.room_sequence = completion.room_sequence
+                 AND dispatch.membership_revision = completion.accepted_membership_revision
+                 AND dispatch.sender_user_id = completion.sender_user_id
+                 AND dispatch.created_at = completion.created_at
+                WHERE dispatch.source_event_id IS NULL
             ) AS exists
             """).first(decoding: ExistsRow.self))
         #expect(result.exists)

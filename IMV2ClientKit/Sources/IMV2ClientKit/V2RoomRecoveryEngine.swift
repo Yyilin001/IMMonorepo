@@ -28,8 +28,8 @@ public actor V2RoomRecoveryEngine {
     private let transport: any V2ClientRoomRecoveryTransport
     private let store: GRDBV2LocalSyncStore
     private let latestVisible: any V2ClientRoomLatestVisibleTransport
+    private let contentRecoveryBatchSize: Int
     private let groupEvents: V2GroupEventSyncEngine
-    private let contentRecoveryConcurrency: Int
     private let didPersistProgress: @Sendable (RoomID, UInt64) async throws -> Void
     private let observe: (@Sendable (V2RoomRecoveryObservation) -> Void)?
     private let now: @Sendable () -> Date
@@ -45,13 +45,13 @@ public actor V2RoomRecoveryEngine {
     public private(set) var phase: V2RoomRecoveryPhase = .idle
 
     public init(transport: any V2ClientRoomRecoveryTransport, latestVisible: any V2ClientRoomLatestVisibleTransport, store: GRDBV2LocalSyncStore,
-                groupEvents: V2GroupEventSyncEngine, contentRecoveryConcurrency: Int = 4,
+                groupEvents: V2GroupEventSyncEngine, contentRecoveryBatchSize: Int = 16,
                 now: @escaping @Sendable () -> Date = Date.init,
                 didPersistProgress: @escaping @Sendable (RoomID, UInt64) async throws -> Void = { _, _ in },
                 observe: (@Sendable (V2RoomRecoveryObservation) -> Void)? = nil) {
-        precondition((1...16).contains(contentRecoveryConcurrency), "contentRecoveryConcurrency must be between 1 and 16")
+        precondition((1...16).contains(contentRecoveryBatchSize), "contentRecoveryBatchSize must be between 1 and 16")
+        self.contentRecoveryBatchSize = contentRecoveryBatchSize
         self.transport = transport; self.latestVisible = latestVisible; self.store = store; self.groupEvents = groupEvents; self.now = now
-        self.contentRecoveryConcurrency = contentRecoveryConcurrency
         self.didPersistProgress = didPersistProgress
         self.observe = observe
     }
@@ -89,7 +89,7 @@ public actor V2RoomRecoveryEngine {
         return try await store.roomRecoveryProgress(scope: scope)
     }
 
-    public func runBudget(userID: UserID, maximumDirectoryPages: Int = 1, maximumRooms: Int = 20) async throws -> V2RoomRecoveryBudgetResult {
+    public func runBudget(userID: UserID, maximumDirectoryPages: Int = 1, maximumRooms: Int = 100) async throws -> V2RoomRecoveryBudgetResult {
         guard (0...100).contains(maximumDirectoryPages), (0...100).contains(maximumRooms),
               maximumDirectoryPages > 0 || maximumRooms > 0 else { throw V2RoomRecoveryEngineError.invalidBudget }
         return try await executeBudget(userID: userID, maximumDirectoryPages: maximumDirectoryPages, maximumRooms: maximumRooms)
@@ -296,38 +296,22 @@ public actor V2RoomRecoveryEngine {
         }
         if !contentWork.isEmpty {
             phase = .catchingUp
-            // A sliding window keeps independent rooms busy while bounding network
-            // and projection work. Per-room ordering remains owned by groupEvents.
-            try await withThrowingTaskGroup(of: ContentRecoveryResult.self) { group in
-                var next = contentWork.makeIterator()
-                func submit(_ item: V2RoomRecoveryWork) {
-                    group.addTask { [groupEvents, store, didPersistProgress] in
-                        do {
-                            let content = try await groupEvents.synchronizeOnePage(roomID: item.roomID) { [store] page in
-                                try await store.applyRoomRecoveryPage(page, work: item)
-                            }
-                            try await didPersistProgress(item.roomID, store.groupEventCursor(roomID: item.roomID))
-                            return .applied(content.appliedEventCount)
-                        } catch V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: _, currentRevision: _) {
-                            try Task.checkCancellation()
-                            _ = try await store.commitRoomRecoveryUnavailable(item)
-                            return .denied
-                        }
-                    }
-                }
-                for _ in 0..<min(contentRecoveryConcurrency, contentWork.count) {
-                    guard let item = next.next() else { break }
-                    submit(item)
-                }
-                while let result = try await group.next() {
-                    processed += 1
-                    switch result {
-                    case .applied(let count): appliedEvents += count
-                    case .denied: break
-                    }
-                    try Task.checkCancellation()
-                    if let item = next.next() { submit(item) }
-                }
+            // Bounded wire batches reduce request overhead; each room still
+            // commits its page and authorization fence in its own transaction.
+            for offset in stride(from: 0, to: contentWork.count, by: contentRecoveryBatchSize) {
+                let batch = Array(contentWork[offset..<min(offset + contentRecoveryBatchSize, contentWork.count)])
+                let byRoom = Dictionary(uniqueKeysWithValues: batch.map { ($0.roomID, $0) })
+                let content = try await groupEvents.synchronizePages(targets: batch.map { ($0.roomID, $0.targetHead) },
+                    commit: { [store, didPersistProgress] page in
+                        guard let item = byRoom[page.roomID] else { throw V2RealtimeTransportError.unexpectedResponse }
+                        let committed = try await store.applyRoomRecoveryPage(page, work: item)
+                        try await didPersistProgress(item.roomID, committed.appliedThrough)
+                        return committed
+                    }, unavailable: { [store] room in
+                        guard let item = byRoom[room] else { throw V2RealtimeTransportError.unexpectedResponse }
+                        _ = try await store.commitRoomRecoveryUnavailable(item)
+                    })
+                appliedEvents += content.appliedEventCount; processed += batch.count
             }
         }
         let scan = try await store.roomRecoveryScan(scope: scope)
@@ -335,9 +319,4 @@ public actor V2RoomRecoveryEngine {
         // and all delayed/unfinished work must also be proven complete.
         return .init(directoryPages: scanned, processedRooms: processed, directoryComplete: scan.directoryComplete, appliedEventCount: appliedEvents)
     }
-}
-
-private enum ContentRecoveryResult: Sendable {
-    case applied(Int)
-    case denied
 }

@@ -110,7 +110,6 @@ enum V2RoomWriteScalarPersistencePath {
             UPDATE im_v2.rooms SET room_sequence = \(bind: roomSequence), timeline_sequence = \(bind: timelineSequence)
             WHERE room_id = \(bind: roomID)
             """).run()
-        let mentionTargets = hybridMentionTargetIDs(message.mentions, excluding: senderID)
         try await sql.raw("""
             WITH message_insert AS (
             INSERT INTO im_v2.messages
@@ -176,14 +175,11 @@ enum V2RoomWriteScalarPersistencePath {
                  )),
                  \(bind: room.membershipRevision), \(bind: message.createdAt))
             """).run()
-        // @ 提及会唤醒客户端；内容从此房间事件恢复。
-        try await v2EnqueueMentionPushWakes(
-            sourceEventID: eventID,
-            roomID: roomID,
-            mentionedUserIDs: mentionTargets,
-            now: message.createdAt,
-            sql: sql
-        )
+        try await v2EnqueueMessageDispatch(
+            eventID: eventID, messageID: messageID, roomID: roomID, roomSequence: roomSequence,
+            membershipRevision: room.membershipRevision, senderID: senderID,
+            mentionedUserIDs: hybridMentionTargetIDs(message.mentions, excluding: senderID),
+            mentionsEveryone: message.mentions.contains(.everyone), createdAt: message.createdAt, sql: sql)
         try await PostgresV2MessageProjectionStateRepository().persist(
             messageProjectionState,
             storage: .roomEvent,
@@ -353,6 +349,11 @@ enum V2RoomWriteScalarPersistencePath {
         else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        try await v2EnqueueMessageDispatch(
+            eventID: eventID, messageID: messageID, roomID: roomID, roomSequence: roomSequence,
+            membershipRevision: room.membershipRevision, senderID: senderID,
+            mentionedUserIDs: hybridMentionTargetIDs(message.mentions, excluding: senderID),
+            mentionsEveryone: message.mentions.contains(.everyone), createdAt: message.createdAt, sql: sql)
     }
 
     /// 单命令持久化复用集合式追加 SQL，保持消息、事件和完成记录原子提交。

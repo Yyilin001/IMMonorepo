@@ -16,6 +16,7 @@ struct GatewayProjectionAssembly {
     let preparedGroupEventPageCache: V2PreparedGroupEventPageCache?
     let roomShardRouter: V2CachedRoomShardRouter
     let userStateWorkers: [V2UserStateEventWorker]
+    let roomDispatchWorkers: [V2RoomDispatchWorker]
 
     /// 先建立默认用户路由，再为各数据库角色构造独立路由句柄。
     /// 投影 Worker 按物理房间归属库创建，以消费各库的持久 outbox。
@@ -91,6 +92,15 @@ struct GatewayProjectionAssembly {
                 projector: userStateProjector
             )
         }
+        let roomDispatchProjector = V2RoutedRoomDispatchProjector(
+            routeFence: userStateRouter, registry: deliveryUserShardStorage)
+        let roomDispatchWorkers = try roomOwnerDatabaseURLs.map { ownerURL in
+            guard let owner = topology.databaseForRole(for: .delivery, url: ownerURL) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return V2RoomDispatchWorker(outbox: PostgresV2RoomDispatchStore(database: owner),
+                projector: roomDispatchProjector)
+        }
         return .init(
             syncUserShardRouter: syncUserShardRouter,
             maintenanceUserShardRouter: maintenanceUserShardRouter,
@@ -99,7 +109,8 @@ struct GatewayProjectionAssembly {
             directRoomLogEventCache: directRoomLogEventCache,
             preparedGroupEventPageCache: preparedGroupEventPageCache,
             roomShardRouter: roomShardRouter,
-            userStateWorkers: userStateWorkers
+            userStateWorkers: userStateWorkers,
+            roomDispatchWorkers: roomDispatchWorkers
         )
     }
 }

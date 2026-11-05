@@ -65,7 +65,7 @@ public actor V2DeviceConnectionRegistry {
     private var directoryGenerations: [UUID: UInt64] = [:]
     private nonisolated let directoryDeliveryFences = Mutex<[UUID: UInt64]>([:])
     private var accountCoverageInstallations: [UUID: UInt64] = [:]
-    private var accountChangeTickets: [UUID: V2AccountRoomCoverageIndex.Ticket] = [:]
+    private var accountChangeTickets: [UUID: V2AccountRoomChangeService.Ticket] = [:]
     /// 每次注册都会获得一个新令牌。
     ///
     /// actor 方法会在外部 await 之后重新校验它，
@@ -81,12 +81,14 @@ public actor V2DeviceConnectionRegistry {
     private var leaseController: V2ConnectionLeaseController?
     private let maximumConnections: Int
     private var deviceRoomProgressStore: (any V2DeviceRoomProgressStoring)?
+    private var deviceRoomProgressValidator: V2DeviceRoomProgressValidator?
 
-    public func installDeviceRoomProgressStore(_ store: any V2DeviceRoomProgressStoring) throws {
+    public func installDeviceRoomProgressStore(_ store: any V2DeviceRoomProgressStoring, states: any V2RoomStateReading) throws {
         guard !hasStartedRegistrations, deviceRoomProgressStore == nil else {
             throw V2ResourceProviderError.configurationInvalid
         }
         deviceRoomProgressStore = store
+        deviceRoomProgressValidator = .init(states: states)
     }
 
     func handleDeviceRoomProgress(_ envelope: IMV2Envelope, connectionID: UUID,
@@ -99,14 +101,15 @@ public actor V2DeviceConnectionRegistry {
                 throw V2RoomRecoveryReadError.invalidRequest
             }
             guard let store = deviceRoomProgressStore,
-                  let authority = roomSubscriptionAuthority.withLock({ $0 }),
+                  let validator = deviceRoomProgressValidator,
                   let lifecycle = directory.lifecycleByConnection[connectionID],
                   directory.identityByConnection[connectionID]?.userID == identity.userID,
                   directory.identityByConnection[connectionID]?.deviceID == identity.deviceID else {
                 throw V2RoomRecoveryReadError.invalidCursor
             }
-            let progress = try await authority.validateDeviceProgress(connectionID: connectionID, userID: identity.userID,
+            let progress = try await validator.validate(userID: identity.userID,
                 reports: report.rooms.map { (try RoomID($0.roomID), $0.appliedThrough) })
+            guard directory.lifecycleByConnection[connectionID] == lifecycle else { throw CancellationError() }
             try await store.record(userID: identity.userID, deviceID: identity.deviceID, progress: progress)
             guard directory.lifecycleByConnection[connectionID] == lifecycle else { throw CancellationError() }
             response.deviceRoomProgressRecorded = .init()
@@ -235,30 +238,6 @@ public actor V2DeviceConnectionRegistry {
         ingress.configureSessionChanged { host in await coordinator.sessionChanged(host: host) }
         ingress.configureBaselineRequired { room in await coordinator.requestBaselineIfRequired(roomID: room) }
         await coordinator.start()
-    }
-
-    public func acquireAccountRoomDelivery(userID: UserID, roomID: RoomID, reference: UUID) async throws {
-        guard !realtimeRecoveryClosed, let coordinator = roomSubscriptionCoordinator else {
-            throw V2GatewayRoomSubscriptionCoordinationError.closed
-        }
-        // Physical removal precedes the account ticket's asynchronous cleanup.
-        // That short gap is online unavailability, not a closed coordinator.
-        guard directory.streamsByUser[userID]?.isEmpty == false else {
-            throw V2GatewayRoomSubscriptionCoordinationError.refused(.unavailable)
-        }
-        _ = try await coordinator.acquire(roomID: roomID, userID: userID, reference: reference)
-        guard !realtimeRecoveryClosed, directory.streamsByUser[userID]?.isEmpty == false else {
-            await coordinator.release(reference: reference)
-            if realtimeRecoveryClosed { throw V2GatewayRoomSubscriptionCoordinationError.closed }
-            throw V2GatewayRoomSubscriptionCoordinationError.refused(.unavailable)
-        }
-        // A later device may reuse the existing account grant without a new
-        // Owner callback. Resignal its persisted baseline for unopened recovery.
-        await roomSubscriptionBaselineInstalled(roomID: roomID)
-    }
-
-    public func releaseAccountRoomDelivery(reference: UUID) async {
-        await roomSubscriptionCoordinator?.release(reference: reference)
     }
 
     /// Room subscription commands belong to the connection registry.
@@ -949,15 +928,6 @@ public actor V2DeviceConnectionRegistry {
                 revoked.append((interest, stream))
             }
         }
-        var membershipUsers: Set<UserID> = []
-        for control in snapshot.users {
-            // A satisfied control floor is not a new membership change. Replayed
-            // cuts and session-only changes must reuse the account's coverage.
-            let advanced = control.membershipDiscoveryVersion > (old[control.userID]?.membershipDiscoveryVersion ?? 0)
-            if advanced {
-                membershipUsers.insert(UserID(uuid: control.userID))
-            }
-        }
         for (interest, stream) in revoked {
             await stream.closeForAccountRecovery()
             if directory.lifecycleByConnection[interest.connectionID] == interest.lifecycle { await unregister(connectionID: interest.connectionID) }
@@ -982,12 +952,9 @@ public actor V2DeviceConnectionRegistry {
                 }
             }
         }
-        for user in membershipUsers {
-            let version = userControls[user]?.membershipDiscoveryVersion
-            let exact = version.flatMap { UInt64(exactly: $0) } == membershipChangeVersions[user]
-            await accountChangeService?.requestServerMembershipRefresh(userID: user,
-                rooms: exact ? membershipChangedRooms[user] : nil)
-        }
+        // Membership effects are durably delivered through user_sync_log.
+        // Active room subscriptions keep their independent Owner authorization;
+        // this control cut must never start an account-wide directory/Owner scan.
         return .init(source: source, versions: Dictionary(uniqueKeysWithValues: snapshot.users.map { (UserID(uuid: $0.userID), UInt64($0.controlVersion)) }))
     }
 
@@ -1714,8 +1681,6 @@ extension V2DeviceConnectionRegistry: V2AccountRoomChangesStarting {
     private func startAccountRoomChanges(connectionID: UUID, userID: UserID, requiresReady: Bool) async throws -> String {
         if let ticket = accountChangeTickets[connectionID], ticket.userID == userID,
            directory.identityByConnection[connectionID]?.userID == userID, let service = accountChangeService {
-            try await service.bootstrap(ticket, waitForCompletion: false)
-            if requiresReady { try await service.requireBootstrapReady(ticket) }
             guard accountChangeTickets[connectionID]?.epoch == ticket.epoch,
                   directory.identityByConnection[connectionID]?.userID == userID else {
                 throw V2AccountRoomChangeService.Failure.staleConnection
@@ -1762,26 +1727,12 @@ extension V2DeviceConnectionRegistry: V2AccountRoomChangesStarting {
             throw V2AccountRoomChangeService.Failure.staleConnection
         }
         accountChangeTickets[connectionID] = ticket
-        do {
-            try await service.bootstrap(ticket, waitForCompletion: false)
-            guard accountChangeTickets[connectionID]?.epoch == ticket.epoch,
-                  directory.lifecycleByConnection[connectionID] == lifecycle else {
-                throw V2AccountRoomChangeService.Failure.staleConnection
-            }
-        } catch {
-            if accountChangeTickets[connectionID]?.epoch == ticket.epoch {
-                accountChangeTickets.removeValue(forKey: connectionID)
-            }
-            await service.stop(ticket)
-            throw error
-        }
-        if requiresReady { try await service.requireBootstrapReady(ticket) }
         if requiresReady { try await service.reserveReadyResponse(ticket) }
         return ticket.epoch.uuidString.lowercased()
     }
 
-    /// Authentication establishes message coverage even before the client starts
-    /// consuming directory changes. That consumer's Ready still gates its notifications.
+    /// Authentication reserves one account recovery epoch. Room membership
+    /// cardinality does not affect this path; personal sync provides durable changes.
     func installAuthenticatedAccountCoverage(connectionID: UUID) async throws {
         guard accountChangeService != nil,
               let identity = directory.identityByConnection[connectionID] else { return }

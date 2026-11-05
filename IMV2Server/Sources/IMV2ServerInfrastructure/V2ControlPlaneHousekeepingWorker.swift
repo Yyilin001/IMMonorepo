@@ -135,7 +135,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     private let database: any Database
 
     // 供启动就绪检查与事务执行共用。
-    private static let categoryCount = 13
+    private static let categoryCount = 12
     static var housekeepingRotationPeriod: Int64 { Int64(categoryCount * idempotencyTables.count) }
 
     /// 组合数据库。
@@ -169,7 +169,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         }
         guard let cutoff = v2PostgresPastTimestamp(now: now, interval: retention),
               let notificationCutoff = v2PostgresPastTimestamp(now: now, interval: max(retention, 7 * 86_400)),
-              let notificationExpiry = v2PostgresPastTimestamp(now: now, interval: V2MentionPushWakeLimits.lifetime),
+              let notificationExpiry = v2PostgresPastTimestamp(now: now, interval: V2AccountNotificationLimits.lifetime),
               let idempotencyCutoff = v2PostgresPastTimestamp(now: now, interval: idempotencyRetention) else {
             throw V2ControlPlaneHousekeepingError.corruptPersistenceState
         }
@@ -295,13 +295,6 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 // 避免取模产生周期重合。
                 rotation: limit < Self.categoryCount ? rotation / UInt(Self.categoryCount) : rotation,
                 limit: budget.take()
-            )
-            // Owner intents expire after 24 hours; retain control receipts longer so
-            // a lost acknowledgement cannot admit the same notification twice.
-            count += try await deleteSimple(
-                sql: sql, table: "mention_push_wake_receipts", identity: "ctid",
-                where: "recorded_at <= ", order: "recorded_at, ctid",
-                cutoff: notificationCutoff, limit: budget.take()
             )
             count += credentialReplays + refreshHistory + connectionLeases + remoteBaselines + idempotencyRows
             return .init(

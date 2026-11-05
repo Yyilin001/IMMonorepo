@@ -1602,24 +1602,76 @@ CREATE TABLE im_v2.push_device_endpoints (
     CONSTRAINT push_device_endpoints_provider_check CHECK ((provider = 'apns'::text))
 );
 
--- 房间通知意图不引用日志事件，裁剪不会等待可选推送。
-CREATE TABLE im_v2.mention_push_wake_intents (
+-- Required durable dispatch work, independent of online room subscriptions.
+-- No FK to messages/room_events: retention cannot erase pending dispatch facts.
+-- Target-account responsibility commits with the account sync hint. APNs
+-- endpoint selection and delivery happen later; no socket/session dependency.
+CREATE TABLE im_v2.account_notification_outbox (
+    user_id uuid NOT NULL,
     source_event_id uuid NOT NULL,
+    message_id uuid NOT NULL,
     room_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL CHECK (isfinite(created_at)),
+    room_sequence bigint NOT NULL CHECK (room_sequence > 0),
+    membership_revision bigint NOT NULL CHECK (membership_revision >= 0),
+    sender_user_id uuid NOT NULL,
+    is_mention boolean NOT NULL,
+    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
+    next_attempt_at timestamptz NOT NULL CHECK (isfinite(next_attempt_at)),
     claim_token uuid,
-    lease_expires_at timestamp with time zone,
-    PRIMARY KEY (source_event_id, target_user_id),
+    lease_expires_at timestamptz CHECK (isfinite(lease_expires_at)),
+    attempt integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+    PRIMARY KEY (user_id, source_event_id),
+    CHECK (user_id <> sender_user_id),
     CHECK ((claim_token IS NULL) = (lease_expires_at IS NULL))
 );
+CREATE INDEX account_notification_outbox_due_idx ON im_v2.account_notification_outbox
+    (next_attempt_at, created_at, user_id, source_event_id);
+CREATE INDEX account_notification_outbox_expiry_idx ON im_v2.account_notification_outbox
+    (created_at, user_id, source_event_id);
+CREATE INDEX account_notification_outbox_room_idx ON im_v2.account_notification_outbox
+    (user_id, room_id, room_sequence);
 
-CREATE TABLE im_v2.mention_push_wake_receipts (
-    source_event_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    recorded_at timestamp with time zone NOT NULL CHECK (isfinite(recorded_at)),
-    PRIMARY KEY (source_event_id, target_user_id)
+CREATE TABLE im_v2.room_dispatch_outbox (
+    source_event_id uuid PRIMARY KEY,
+    message_id uuid UNIQUE,
+    room_id uuid NOT NULL,
+    room_sequence bigint NOT NULL CHECK (room_sequence > 0),
+    membership_revision bigint NOT NULL CHECK (membership_revision >= 0),
+    sender_user_id uuid,
+    mentioned_user_ids uuid[] NOT NULL DEFAULT '{}',
+    mentions_everyone boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
+    next_attempt_at timestamptz NOT NULL CHECK (isfinite(next_attempt_at)),
+    recipient_cursor uuid,
+    claim_token uuid,
+    lease_expires_at timestamptz CHECK (lease_expires_at IS NULL OR isfinite(lease_expires_at)),
+    attempt integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+    CHECK (message_id IS NULL OR sender_user_id IS NOT NULL),
+    CHECK ((claim_token IS NULL) = (lease_expires_at IS NULL))
 );
+CREATE INDEX room_dispatch_due_idx ON im_v2.room_dispatch_outbox
+    (next_attempt_at, created_at, source_event_id);
+CREATE INDEX room_dispatch_room_idx ON im_v2.room_dispatch_outbox
+    (room_id, membership_revision, room_sequence);
+
+-- Non-message changes also wake account recovery (edits, withdrawals,
+-- reactions and room controls). Only committed metadata is copied. Message
+-- acceptance supplies its richer intent explicitly in its existing CTE/TX.
+CREATE FUNCTION im_v2.enqueue_room_change_dispatch() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO im_v2.room_dispatch_outbox
+        (source_event_id, room_id, room_sequence, membership_revision, sender_user_id,
+         created_at, next_attempt_at)
+    SELECT event_id, room_id, room_sequence, committed_membership_revision, actor_user_id,
+           created_at, created_at
+    FROM inserted_room_changes WHERE event_type <> 'message.accepted';
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER room_events_account_dispatch AFTER INSERT ON im_v2.room_events
+    REFERENCING NEW TABLE AS inserted_room_changes FOR EACH STATEMENT
+    EXECUTE FUNCTION im_v2.enqueue_room_change_dispatch();
 
 CREATE TABLE im_v2.push_wake_outbox (
     dispatch_id uuid NOT NULL,
@@ -2001,14 +2053,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-80'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-80'::text))
+    schema_id text DEFAULT 'im-v2-current-81'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-81'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-80');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-81');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2347,7 +2399,7 @@ CREATE TABLE im_v2.user_state_event_outbox (
     CONSTRAINT user_state_event_outbox_room_binding CHECK (source_room_id IS NULL OR COALESCE(lower(payload->>'room_id') = source_room_id::text, false)),
     source_event_id uuid NOT NULL,
     user_id uuid NOT NULL,
-    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'message_favorite', 'contact_alias', 'timeline_activity', 'direct_sending_capability')),
+    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'room_head', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'message_favorite', 'contact_alias', 'timeline_activity', 'direct_sending_capability')),
     payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
     created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
     state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'leased', 'delivered', 'paused')),
@@ -2380,7 +2432,7 @@ CREATE INDEX user_state_event_outbox_delivered_idx
 CREATE TABLE im_v2.user_state_event_receipts (
     user_id uuid NOT NULL,
     source_event_id uuid NOT NULL,
-    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'message_favorite', 'contact_alias', 'timeline_activity', 'direct_sending_capability')),
+    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'room_head', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'message_favorite', 'contact_alias', 'timeline_activity', 'direct_sending_capability')),
     payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
     projection_payload jsonb NOT NULL CHECK (jsonb_typeof(projection_payload) = 'object'),
     source_created_at timestamptz NOT NULL CHECK (isfinite(source_created_at)),
@@ -2918,9 +2970,7 @@ CREATE INDEX public_user_profiles_active_handle_idx ON im_v2.public_user_profile
 
 CREATE INDEX push_device_endpoints_active_idx ON im_v2.push_device_endpoints USING btree (device_id, updated_at DESC) WHERE (disabled_at IS NULL);
 
-CREATE INDEX mention_push_wake_intents_claim_idx ON im_v2.mention_push_wake_intents USING btree (created_at, source_event_id, target_user_id);
 
-CREATE INDEX mention_push_wake_receipts_cleanup_idx ON im_v2.mention_push_wake_receipts USING btree (recorded_at, source_event_id, target_user_id);
 
 CREATE INDEX account_password_login_rate_limits_cleanup_idx ON im_v2.account_password_login_rate_limits USING btree (updated_at, account_handle);
 

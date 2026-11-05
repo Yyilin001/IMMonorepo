@@ -34,7 +34,7 @@ struct V2GatewayJournalUserBaselineTests {
             baselineReads.withLock { $0 += 1 }
             return .init(source: source, fence: fence, userID: requestedUser, controlVersion: 0)
         }
-        let account = try V2AccountRoomChangeService(states: UserBaselineStateReader(), onlineDelivery: .init(activate: { _, _, _ in }, deactivate: { _ in }))
+        let account = V2AccountRoomChangeService()
         await registry.configureAccountRoomChanges(account)
         let version = UInt8(IMV2ProtocolVersion.current)
         let limits = try V2FrameLimits(maximumPayloadBytes: 4096, acceptedVersions: [0, version])

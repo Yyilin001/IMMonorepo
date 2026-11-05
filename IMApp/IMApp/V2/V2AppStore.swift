@@ -463,7 +463,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } catch V2OfflineReadBootstrapError.installationBindingUnavailable {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .protectedDataUnavailable
-        } catch V2ClientLocalStorageError.unsupportedResourceSchema {
+        } catch V2ClientLocalStorageError.unsupportedResourceSchema, V2ClientLocalStorageError.unsupportedAccountRecoverySchema {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .unavailable(message: "此版本无法打开本机数据，现有数据已保留。")
         } catch V2OfflineReadBootstrapError.installationBindingMismatch {
@@ -544,7 +544,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             } catch V2AuthSessionError.credentialsUnavailable, V2OfflineReadBootstrapError.installationBindingUnavailable {
                 guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
                 await self.discardAuthenticatedPresentation(route: .protectedDataUnavailable)
-            } catch V2ClientLocalStorageError.unsupportedResourceSchema {
+            } catch V2ClientLocalStorageError.unsupportedResourceSchema, V2ClientLocalStorageError.unsupportedAccountRecoverySchema {
                 guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
                 await self.discardAuthenticatedPresentation(route: .unavailable(message: "此版本无法打开本机数据，现有数据已保留。"))
             } catch V2ClientSessionBootstrapError.localStoreCloseFailed {
@@ -715,7 +715,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             // Keychain boundary as credentials. It can recover after unlock.
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .protectedDataUnavailable
-        } catch V2ClientLocalStorageError.unsupportedResourceSchema {
+        } catch V2ClientLocalStorageError.unsupportedResourceSchema, V2ClientLocalStorageError.unsupportedAccountRecoverySchema {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .unavailable(message: "此版本无法打开本机数据，现有数据已保留。")
         } catch V2ClientLocalStorageError.backupExclusionVerificationFailed {

@@ -1,63 +1,45 @@
-# 推送通知（提及唤醒）运维手册
+# 账号通知待办与预留推送接口
 
-状态：入队、准入、消费与抑制链路均已实现；**默认未配置**，未配置时行为是"不发通知"，
-不影响消息本身。启用需要运维显式创建活动并按窗口给设备预算。
+更新：2026-11-05。APNs 可见提醒按用户要求尚未接入；不要把通知入队当作手机推送成功。
 
-## 这条链路做什么
-
-房间日志是权威副本之后，消息内容只存在于房间事件日志里，客户端按房间游标恢复。被 `@`
-的成员因此**不再**拥有逐用户可靠投递；他们收到的是**通知**：一条通用推送唤醒，唤醒
-客户端去拉取房间。推送失败或未配置都不影响消息可见性——那正是"推送只是加速"的含义。
+## 当前生产组合
 
 ```text
-消息接受事务
-  └─ 事件写入房间日志（权威副本，客户端可恢复）
-  └─ 在房间 owner 写入 mention_push_wake_intents（同一事务）
-        └─ 有界 relay 转交控制库：回执去重、解析有效设备、写入 push_wake_outbox
-              └─ 消费侧查询当前 owner 的静音事实，再按控制域活动和设备预算准入
-              ├─ 是 → 交给推送提供方
-              └─ 否 → 标记 suppressed（不报错、不重试、不阻塞消息）
+房间 Actor 接受事务：房间日志 + room_dispatch_outbox
+  → 有界派发：按提交时成员区间分页
+  → 账号事务：去重回执 + 个人 room_head + 同步唤醒 + account_notification_outbox
+  → 账号通知 Worker：未配置 delivery，只清理 24 小时前的过期项
 ```
 
-## 默认行为
+无在线连接或在线房间订阅，也会产生账号变化和非发送者的通知待办。源确认丢失时，
+目标持久回执防止重复分配个人序号或重新生成已消费通知。通知的成员修订、房间序号
+只是来源事实，不能直接作为未来推送或正文读取的授权。
 
-- owner 意图随消息记录；Gateway 总是运行 relay。推送配置 disabled 时直接关闭意图；控制库 `push_campaigns` 没有启用活动时，relay 记录去重回执但不产生设备通知行。
-- 活动启用但缺少按 `(device_id, campaign_id, window_started_at)` 的预算行时，唤醒会被
-  标记为 `suppressed`（原因 `device_budget_unavailable`），可以观测到"已配置但未供资"。
-- 无论哪种情况，消息接受、幂等重放、房间日志拉取都**不受影响**。
+待办在用户分片，源派发在房间分片。Gateway 为每个物理用户库启动独立清理；一次最多
+128 行，跳过活跃租约，积压时持续分批清理。`account_notification_expired` 只记录计数。
+源派发失败保留任务并退避；`room_dispatch_page_retry` 记录重试页数。
 
-## 启用提及通知
+## 检查
 
-1. 在**控制库**创建并启用活动（活动标识是代码常量 `mention_wake`）：
+在相应分片上检查以下计数和最老年龄，不输出消息内容或设备凭据：
 
 ```sql
-INSERT INTO im_v2.push_campaigns (campaign_id, state, updated_at)
-VALUES ('mention_wake', 'enabled', now())
-ON CONFLICT (campaign_id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at;
+SELECT count(*), min(created_at) FROM im_v2.room_dispatch_outbox;
+SELECT count(*), min(created_at) FROM im_v2.account_notification_outbox;
+SELECT count(*) FROM im_v2.account_notification_outbox WHERE claim_token IS NOT NULL;
 ```
 
-2. 在控制库为每台需要接收通知的设备、每个预算窗口写入预算。窗口按 **UTC 整点**对齐，与入队侧
-   `date_trunc('hour', now())` 一致：
+当前预留模式下，通知待办增长至保留窗口是预期行为；应按实际消息扇出量评估容量。
+不允许通过清空源派发队列来消除积压，这会丢失个人增量责任。通知过期清理不会删
+个人或房间日志，不影响下一次登录后的补读。
 
-```sql
-INSERT INTO im_v2.push_device_budgets
-    (device_id, campaign_id, window_started_at, max_work_units, used_work_units,
-     max_new_key_operations, used_new_key_operations)
-VALUES (:device_id, 'mention_wake', date_trunc('hour', now()), 10, 0, 10, 0)
-ON CONFLICT DO NOTHING;
-```
+## 后续接入
 
-   预算按窗口滚动供应；上一窗口用尽不会外溢到下一窗口，也不会因为缺供资而失败。
+实现并注入 `V2AccountNotificationDelivering` 前，必须实现设备计划去重、当前权限及
+偏好、已读、设备撤销、端点代次和限流策略。返回 `accepted` 表示下游持久接手任务，
+不是终端展示；抛错或返回 retry 会保留任务并退避。取消保留租约供到期恢复，旧租约
+不能确认新工作。
 
-3. 关闭通知：把活动置为 `disabled`（消费侧会把待处理唤醒标记为 `campaignDisabled`）或停止
-   供应新窗口预算。两者都不需要重启进程。
-
-## 边界
-
-- 单条消息最多通知 32 名被 @ 成员，每名成员最多 5 台设备（按最近活跃排序）。
-- 入队只针对**有效**设备：未撤销、会话未过期、账号未停用。
-- 唤醒是通用提示，不携带正文、不携带消息标识的语义保证；客户端必须按房间游标拉取内容。
-- owner 意图与消息原子提交；控制唤醒与去重回执原子提交，目标提交、源删除之间崩溃可安全重放。
-- 意图与唤醒保存独立房间标识，不对 `room_events` 建立外键；消息日志裁剪不等待可选通知。
-- 通知以源创建时间计时，24 小时后终态关闭；控制去重回执至少保留七天。重放不会续期或再次解析新设备。
-- 静音偏好属于房间 owner；准入前按控制目录查询当前 owner，读取失败时不发送通知。
+现有 `V2APNSPushWakeProvider` 仅发送静默 wake，不能直接用它替代 alert。APNs Key ID、
+Team ID、密钥与 endpoint envelope key 沿用配置边界；本轮不要求提供或联网验证。
+旧 `mention_wake` 活动不会自动启用可见通知，旧提及意图和 relay 已删除。

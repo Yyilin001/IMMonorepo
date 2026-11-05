@@ -974,30 +974,19 @@ struct V2GatewayRoomSubscriptionRegistryTests {
                 counts.withLock { $0.unsubscribes += 1 }; return .unsubscribed
             })
         try await f.registry.configureRoomSubscriptionPorts(ports, ingress: ingress)
-        do {
-            try await f.registry.acquireAccountRoomDelivery(userID: f.user, roomID: f.room, reference: UUID())
-            Issue.record("A user without physical connections cannot acquire delivery")
-        } catch V2GatewayRoomSubscriptionCoordinationError.refused(.unavailable) {
-            // Expected transient gap before account ticket cleanup.
-        } catch {
-            Issue.record("Expected online unavailability, received \(error)")
-        }
-        #expect(counts.withLock { $0.subscribes } == 0)
         let first = try await f.socket(), second = try await f.socket()
         _ = try await f.registry.subscribeForegroundRoom(first.stream, connectionID: first.connectionID, roomID: f.room)
         _ = try await f.registry.subscribeForegroundRoom(second.stream, connectionID: second.connectionID, roomID: f.room)
         try await waitUntil { first.writer.readyHeads == [10] && second.writer.readyHeads == [10] }
         #expect(counts.withLock { $0.subscribes } == 1)
         #expect(counts.withLock { $0.activates } == 1)
-        // A later device reuses the account grant without another Owner baseline.
-        // It must still recover an unopened room before another message arrives.
-        let later = try await f.socket(), accountReference = UUID()
-        try await f.registry.acquireAccountRoomDelivery(userID: f.user, roomID: f.room, reference: accountReference)
-        try await waitUntil { later.writer.hints.contains(10) }
-        #expect(later.writer.readyHeads.isEmpty)
+        // A later device explicitly opening the room shares the existing grant.
+        let later = try await f.socket()
+        _ = try await f.registry.subscribeForegroundRoom(later.stream, connectionID: later.connectionID, roomID: f.room)
+        try await waitUntil { later.writer.readyHeads == [10] }
         #expect(counts.withLock { $0.subscribes } == 1)
         #expect(counts.withLock { $0.activates } == 1)
-        await f.registry.releaseAccountRoomDelivery(reference: accountReference)
+        await f.registry.unsubscribeForegroundGroup(connectionID: later.connectionID, roomID: f.room)
         try await later.stream.finish()
         await f.registry.unsubscribeForegroundGroup(connectionID: first.connectionID, roomID: f.room)
         #expect(counts.withLock { $0.unsubscribes } == 0)

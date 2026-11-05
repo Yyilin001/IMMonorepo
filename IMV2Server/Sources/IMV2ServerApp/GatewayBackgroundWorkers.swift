@@ -18,10 +18,11 @@ struct GatewayBackgroundWorkers {
         let directRoomLogEventCache: V2DirectRoomLogEventCache?
         let syncWakeCoalescer: V2SyncWakeCoalescer
         let userStateWorkers: [V2UserStateEventWorker]
+        let roomDispatchWorkers: [V2RoomDispatchWorker]
         let userSyncWakeRelays: [V2UserSyncWakeRelay]
         let contentReviewWorker: V2RoutedContentReviewWorker?
         let pushWakeWorker: V2PushWakeWorker?
-        let mentionPushWakeRelays: [PostgresV2MentionPushWakeRelay]
+        let accountNotificationWorkers: [V2AccountNotificationWorker]
     }
 
     let delivery: Delivery
@@ -78,12 +79,13 @@ struct GatewayBackgroundWorkers {
                 directRoomLogEventCache: projection.directRoomLogEventCache,
                 syncWakeCoalescer: frontdoor.syncWakeCoalescer,
                 userStateWorkers: projection.userStateWorkers,
+                roomDispatchWorkers: projection.roomDispatchWorkers,
                 userSyncWakeRelays: realtime.userSyncWakeStores.map {
                     V2UserSyncWakeRelay(store: $0, publisher: realtime.publisher)
                 },
                 contentReviewWorker: commands.contentReviewWorker,
                 pushWakeWorker: maintenance.pushWakeWorker,
-                mentionPushWakeRelays: maintenance.mentionPushWakeRelays
+                accountNotificationWorkers: maintenance.accountNotificationWorkers
             ),
             projection: .init(
                 userProjectionWorkers: userShardWork.userProjectionWorkers,

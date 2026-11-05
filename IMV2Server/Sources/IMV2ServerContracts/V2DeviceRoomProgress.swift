@@ -1,7 +1,7 @@
 import IMV2Core
 
 /// A device's reported durable cursor. It never grants room access or permits
-/// deletion of the room log. The Gateway must check its live room grant first.
+/// deletion of the room log. The Gateway checks current membership and the authoritative room head first.
 public struct V2DeviceRoomProgress: Equatable, Sendable {
     public let roomID: RoomID
     public let appliedThrough: UInt64

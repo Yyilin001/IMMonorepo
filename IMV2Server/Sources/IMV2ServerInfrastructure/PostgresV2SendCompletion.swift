@@ -58,6 +58,16 @@ func roomLogSendCompletionCTE(
     return """
     \(eventCTE)
     \(metadataCTE)
+    , dispatch_insert AS (
+        INSERT INTO im_v2.room_dispatch_outbox
+            (source_event_id, message_id, room_id, room_sequence, membership_revision,
+             sender_user_id, created_at, next_attempt_at)
+        SELECT accepted.event_id, message.message_id, message.room_id, message.room_sequence,
+               accepted.\(membershipColumn), message.sender_user_id, message.created_at, message.created_at
+        FROM message_insert AS message
+        JOIN \(acceptedSource) AS accepted ON accepted.message_id = message.message_id
+        RETURNING source_event_id
+    )
     , completion_insert AS (
         INSERT INTO im_v2.message_send_completions
             (room_id, sender_user_id, client_message_id,

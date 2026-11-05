@@ -8,47 +8,50 @@ struct V2ConnectionStatusButton: View {
     @State private var showsDetails = false
 
     private var title: String {
-        if store.isResumingAccountWork { return "正在重新连接" }
-        if store.accountWorkPaused { return "同步已暂停" }
-        switch store.realtimeCoverage?.state {
-        case .ready: return "实时通知正常"
-        case .recovering:
-            return store.realtimeCoverage?.reason == .installing ? "正在准备连接" : "实时通知正在恢复"
-        case .disconnected: return "实时通知未连接"
-        case nil: return "正在准备连接"
+        switch store.realtimeCoverage?.connectionState {
+        case .connected: return "已连接"
+        case .disconnected: return "连接已断开"
+        case .connecting, nil: return "正在连接"
         }
     }
 
     private var symbol: String {
-        if store.isResumingAccountWork { return "arrow.triangle.2.circlepath" }
-        if store.accountWorkPaused { return "exclamationmark.icloud" }
-        switch store.realtimeCoverage?.state {
-        case .ready: return "checkmark.icloud"
-        case .recovering, nil: return "arrow.triangle.2.circlepath"
+        switch store.realtimeCoverage?.connectionState {
+        case .connected: return "checkmark.icloud"
         case .disconnected: return "icloud.slash"
+        case .connecting, nil: return "arrow.triangle.2.circlepath"
         }
     }
 
     private var statusColor: Color {
-        if store.isResumingAccountWork { return .blue }
-        if store.accountWorkPaused { return .orange }
-        switch store.realtimeCoverage?.state {
-        case .ready: return .green
-        case .recovering, nil: return .blue
+        switch store.realtimeCoverage?.connectionState {
+        case .connected: return .green
         case .disconnected: return .red
+        case .connecting, nil: return .blue
+        }
+    }
+
+    private var notificationTitle: String {
+        guard store.realtimeCoverage?.connectionState == .connected else { return "实时接收未就绪" }
+        switch store.realtimeCoverage?.state {
+        case .ready: return "实时接收正常"
+        case .recovering where store.realtimeCoverage?.reason != .installing: return "正在恢复实时接收"
+        default: return "正在准备实时接收"
         }
     }
 
     private var notificationDescription: String {
-        switch store.realtimeCoverage?.state {
-        case .ready: return "实时通知已就绪。每条消息是否发送成功，请以聊天中的发送状态为准。"
-        case .recovering:
-            if store.realtimeCoverage?.reason == .installing {
-                return "正在准备实时通知连接，连接状态确认后会自动更新。"
-            }
-            return "实时通知正在恢复，可继续发送消息。新消息和状态变化可能延迟显示，请以聊天中的发送状态为准。"
-        case .disconnected: return "实时通知连接已断开，暂时无法及时接收新消息和状态变化。应用会在连接恢复后继续同步。"
-        case nil: return "正在准备实时通知连接，连接状态确认后会自动更新。"
+        "实时订阅就绪后才能及时接收新消息和状态变化。网络已连接不代表订阅或历史消息同步已经完成。"
+    }
+
+    private var syncTitle: String {
+        if store.accountWorkPaused { return "同步已暂停" }
+        guard store.realtimeCoverage?.connectionState == .connected else { return "等待连接后继续同步" }
+        switch store.realtimeCoverage?.syncPhase {
+        case .live: return "已同步"
+        case .retryWaiting: return "等待重试同步"
+        case .reconciling, .catchingUp: return "正在同步"
+        case .idle, .establishingCoverage, nil: return "正在准备同步"
         }
     }
 
@@ -81,10 +84,12 @@ struct V2ConnectionStatusButton: View {
                         }
                         .font(.headline)
                     }
-                    Section("实时通知") {
+                    Section("实时订阅") {
+                        Text(notificationTitle)
                         Text(notificationDescription).foregroundStyle(.secondary)
                     }
-                    Section("账户同步") {
+                    Section("数据同步") {
+                        Text(syncTitle)
                         if store.accountWorkPaused {
                             Text("账户后台同步已暂停，已保存的操作会保留。你可以尝试重新连接。")
                                 .foregroundStyle(.secondary)
@@ -94,7 +99,7 @@ struct V2ConnectionStatusButton: View {
                             .disabled(store.isResumingAccountWork)
                             .accessibilityIdentifier("v2.account-work.resume")
                         } else {
-                            Text("账户同步未暂停，已保存的操作将按当前连接状态继续处理。")
+                            Text("此状态表示当前消息同步进度。每条消息是否发送成功，请以聊天中的发送状态为准。")
                                 .foregroundStyle(.secondary)
                         }
                     }

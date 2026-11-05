@@ -138,8 +138,8 @@ struct V2RoomRecoveryEngineTests {
         }
         await engine.stop()
     }
-    @Test("reconnect reconstructs confirmation work from durable room cursors without opening rooms")
-    func reconnectRebuildsDeviceConfirmations() async throws {
+    @Test("unchanged reconnect does not recreate room recovery or confirmation work")
+    func reconnectDoesNotRepeatDeviceConfirmations() async throws {
         let (store, wire, engine, user) = try await fixture()
         _ = try await engine.runBudget(userID: user, maximumDirectoryPages: 1, maximumRooms: 1)
         _ = try await engine.runBudget(userID: user, maximumDirectoryPages: 1, maximumRooms: 1)
@@ -153,13 +153,14 @@ struct V2RoomRecoveryEngineTests {
                 confirmed.withLock { $0[room] = cursor }
             })
         _ = try await reconnect.runBudget(userID: user, maximumDirectoryPages: 2, maximumRooms: 2)
-        #expect(confirmed.withLock { $0 } == Dictionary(uniqueKeysWithValues: wire.rooms.map { ($0, UInt64(5)) }))
+        #expect(confirmed.withLock { $0.isEmpty })
+        #expect(await wire.directoryCursors == [nil, "next"])
         await reconnect.stop()
     }
 
     @Test(arguments: ["state", "content"], [false, true])
     func rejoinPreservesNewWorkWhenOldRecoveryResponseArrives(stage: String, nonempty: Bool) async throws {
-        let (store, wire, engine, user) = try await fixture()
+        let (store, wire, engine, user) = try await fixture(now: Date.init)
         let room = wire.rooms[0]
         let oldMessage = MessageID(uuid: UUID()), newMessage = MessageID(uuid: UUID())
         func event(message: MessageID, sequence: UInt64, text: String) throws -> V2ClientGroupEvent {
@@ -638,7 +639,7 @@ struct V2RoomRecoveryEngineTests {
         writer.yield(.resyncRequired(epoch: wire.epoch))
         _ = await completions.next()
         #expect(await wire.starts == 2)
-        #expect(await wire.directoryCursors == [nil, "next", nil, "next"])
+        #expect(await wire.directoryCursors == [nil, "next"])
         await wire.setHead(8)
         try await runner.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 8, userID: user)
         _ = await completions.next()
@@ -720,6 +721,22 @@ struct V2RoomRecoveryEngineTests {
         _ = try await engine.runBudget(userID: user)
         #expect(try await store.groupEventCursor(roomID: wire.rooms[0]) == 8)
         #expect(await wire.starts == 1)
+        await engine.stop()
+    }
+
+    @Test func coveredWatermarksPreserveStateAndPendingRevision() async throws {
+        let (store, wire, engine, user) = try await fixture()
+        await wire.setHead(100); await wire.setPageAdvance(1)
+        _ = try await engine.runBudget(userID: user, maximumRooms: 1)
+        let scope = try await store.beginRoomRecoveryScan(userID: user)
+        let before = try #require(try await store.roomRecoveryWork(scope: scope, limit: 100, oldestFirst: false, now: .distantFuture).first { $0.roomID == wire.rooms[0] })
+        #expect(!before.requiresState)
+        for _ in 0..<10 { try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 100, userID: user) }
+        let after = try #require(try await store.roomRecoveryWork(scope: scope, limit: 100, oldestFirst: false, now: .distantFuture).first { $0.roomID == wire.rooms[0] })
+        #expect(!after.requiresState && after.requestRevision == before.requestRevision)
+        try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 101, userID: user)
+        let newer = try #require(try await store.roomRecoveryWork(scope: scope, limit: 100, oldestFirst: false, now: .distantFuture).first { $0.roomID == wire.rooms[0] })
+        #expect(newer.requiresState && newer.requestRevision != before.requestRevision)
         await engine.stop()
     }
 
@@ -825,7 +842,7 @@ struct V2RoomRecoveryEngineTests {
         await engine.stop()
     }
 
-    private func fixture(contentConcurrency: Int = 4) async throws -> (GRDBV2LocalSyncStore, RecoveryDriverWire, V2RoomRecoveryEngine, UserID) {
+    private func fixture(contentConcurrency: Int = 4, now: @escaping @Sendable () -> Date = { .init(timeIntervalSince1970: 10) }) async throws -> (GRDBV2LocalSyncStore, RecoveryDriverWire, V2RoomRecoveryEngine, UserID) {
         let user = UserID(uuid: UUID())
         let store = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "recovery-driver-\(UUID()).sqlite"),
             installationBinding: .init(value: UUID()), userID: user)
@@ -836,8 +853,8 @@ struct V2RoomRecoveryEngineTests {
         let wire = RecoveryDriverWire()
         let group = V2GroupEventSyncEngine(transport: wire, store: store)
         let engine = V2RoomRecoveryEngine(transport: wire, latestVisible: wire, store: store, groupEvents: group,
-            contentRecoveryConcurrency: contentConcurrency,
-            now: { .init(timeIntervalSince1970: 10) })
+            contentRecoveryBatchSize: contentConcurrency,
+            now: now)
         return (store, wire, engine, user)
     }
 }

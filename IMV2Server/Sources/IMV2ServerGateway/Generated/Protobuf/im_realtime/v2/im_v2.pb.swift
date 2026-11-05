@@ -860,6 +860,22 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .roomMembersPage(newValue)}
   }
 
+  public var groupEventPullBatch: IMV2GroupEventPullBatch {
+    get {
+      if case .groupEventPullBatch(let v)? = body {return v}
+      return IMV2GroupEventPullBatch()
+    }
+    set {body = .groupEventPullBatch(newValue)}
+  }
+
+  public var groupEventPageBatch: IMV2GroupEventPageBatch {
+    get {
+      if case .groupEventPageBatch(let v)? = body {return v}
+      return IMV2GroupEventPageBatch()
+    }
+    set {body = .groupEventPageBatch(newValue)}
+  }
+
   public var groupEventPull: IMV2GroupEventPull {
     get {
       if case .groupEventPull(let v)? = body {return v}
@@ -1315,6 +1331,8 @@ public nonisolated struct IMV2Envelope: Sendable {
     case memberRemovedByModerator(IMV2MemberRemovedByModerator)
     case listRoomMembers(IMV2ListRoomMembers)
     case roomMembersPage(IMV2RoomMembersPage)
+    case groupEventPullBatch(IMV2GroupEventPullBatch)
+    case groupEventPageBatch(IMV2GroupEventPageBatch)
     case groupEventPull(IMV2GroupEventPull)
     case groupEventPage(IMV2GroupEventPage)
     case groupEventSubscribe(IMV2GroupEventSubscribe)
@@ -3209,6 +3227,69 @@ public nonisolated struct IMV2GroupEventPull: Sendable {
   public init() {}
 }
 
+/// Bounded read aggregation; every room retains independent authorization,
+/// ordering, visibility and durable cursors. Maximum 16 unique rooms, each
+/// requesting 1...32 events. Errors belong to individual rooms.
+public nonisolated struct IMV2GroupEventPullBatch: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var rooms: [IMV2GroupEventPull] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct IMV2GroupEventPageResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var roomID: String = String()
+
+  public var result: IMV2GroupEventPageResult.OneOf_Result? = nil
+
+  public var page: IMV2GroupEventPage {
+    get {
+      if case .page(let v)? = result {return v}
+      return IMV2GroupEventPage()
+    }
+    set {result = .page(newValue)}
+  }
+
+  public var error: IMV2Error {
+    get {
+      if case .error(let v)? = result {return v}
+      return IMV2Error()
+    }
+    set {result = .error(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum OneOf_Result: Equatable, Sendable {
+    case page(IMV2GroupEventPage)
+    case error(IMV2Error)
+
+  }
+
+  public init() {}
+}
+
+public nonisolated struct IMV2GroupEventPageBatch: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var rooms: [IMV2GroupEventPageResult] = []
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 /// Protocol 27 message.edited payloads include replacement schema 1: accepted
 /// event identity, accepted membership revision, and complete authorized state.
 /// Only this explicit contract permits content revision gaps; legacy text deltas
@@ -4297,7 +4378,7 @@ nonisolated extension IMV2UserBlockAction: SwiftProtobuf._ProtoNameProviding {
 
 nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Envelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}protocol_version\0\u{4}\u{8}client_hello\0\u{3}server_hello\0\u{1}authenticate\0\u{1}authenticated\0\u{1}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{6}message_accepted\0\u{4}\u{2}membership_changed\0\u{4}\u{2}message_withdrawn\0\u{4}\u{2}message_reaction_changed\0\u{4}\u{2}message_edited\0\u{3}sync_pull\0\u{3}sync_batch\0\u{3}sync_ack\0\u{3}reset_required\0\u{3}snapshot_ack\0\u{1}acknowledged\0\u{3}sync_snapshot\0\u{3}snapshot_manifest\0\u{3}snapshot_page_pull\0\u{3}snapshot_page\0\u{3}sync_available\0\u{3}record_read_receipt\0\u{3}read_receipt_recorded\0\u{4}\u{4}stranger_message_permission_set\0\u{4}\u{2}relationship_changed\0\u{4}\u{2}user_block_changed\0\u{4}\u{4}member_muted\0\u{4}\u{2}member_removed_by_moderator\0\u{4}\u{3}list_room_members\0\u{3}room_members_page\0\u{3}group_event_pull\0\u{3}group_event_page\0\u{3}group_event_subscribe\0\u{3}group_event_subscribed\0\u{3}group_event_unsubscribe\0\u{3}group_event_available\0\u{4}\u{9}user_add_permission_set\0\u{4}\u{2}read_receipt_preferences_set\0\u{3}list_read_receipt_readers\0\u{3}read_receipt_readers_page\0\u{4}\u{2}live_activity_preferences_set\0\u{3}subscribe_presence\0\u{3}presence_subscribed\0\u{3}unsubscribe_presence\0\u{3}subscribe_typing\0\u{3}unsubscribe_typing\0\u{3}set_typing_state\0\u{3}typing_state_changed\0\u{3}presence_changed\0\u{1}error\0\u{3}get_live_activity_preferences\0\u{3}live_activity_preferences\0\u{3}set_conversation_state\0\u{3}conversation_state_set\0\u{3}set_message_favorite\0\u{3}message_favorite_changed\0\u{4}\u{2}pinned_message_changed\0\u{4}\u{2}group_announcement_changed\0\u{4}\u{2}group_role_permissions_changed\0\u{4}\u{2}group_member_role_changed\0\u{4}\u{3}get_group_role_policy_baseline\0\u{3}group_role_policy_baseline\0\u{4}\u{3}user_room_directory_list\0\u{3}user_room_directory_page\0\u{3}room_sync_state_batch\0\u{3}room_sync_state_batch_result\0\u{3}account_room_changes_start\0\u{3}account_room_changes_ready\0\u{4}\u{2}account_room_resync_required\0\u{3}room_latest_visible_batch\0\u{3}room_latest_visible_batch_result\0\u{3}author_presentation_delta\0\u{3}author_presentation_end\0\u{3}author_presentation_ended\0\u{3}personal_preference_receipt\0\u{3}presence_publication_control\0\u{3}presence_publication_controlled\0\u{3}message_send_operation\0\u{3}message_send_operation_recover\0\u{3}message_send_operation_result\0\u{3}realtime_coverage\0\u{3}device_room_progress_report\0\u{3}device_room_progress_recorded\0\u{3}author_presentation_receipt\0\u{3}author_presentation_receipted\0\u{3}author_presentation_interests\0\u{3}author_presentation_interests_received\0\u{3}author_presentation_start\0\u{3}author_presentation_started\0\u{b}begin_group_room_creation\0\u{b}append_group_room_creation_members\0\u{b}finalize_group_room_creation\0\u{b}cancel_group_room_creation\0\u{b}group_room_created\0\u{b}group_room_creation_prepared\0\u{b}group_room_creation_members_appended\0\u{b}group_room_creation_cancelled\0\u{b}set_stranger_message_permission\0\u{b}change_relationship\0\u{b}change_user_block\0\u{b}set_user_add_permission\0\u{b}set_read_receipt_preferences\0\u{b}set_live_activity_preferences\0\u{b}change_room_membership\0\u{b}mute_member\0\u{b}moderate_member_removal\0\u{b}set_pinned_message\0\u{b}set_group_announcement\0\u{b}set_group_role_permissions\0\u{b}change_group_member_role\0\u{b}open_direct_room\0\u{b}direct_room_opened\0\u{b}moderate_message\0\u{b}message_redacted\0\u{b}send_message\0\u{b}withdraw_message\0\u{b}change_message_reaction\0\u{b}edit_message\0\u{b}forward_messages\0\u{b}messages_forwarded\0\u{c}\u{16}\u{1}\u{c}-\u{1}\u{c}/\u{1}\u{c}1\u{1}\u{c}5\u{1}\u{c}7\u{1}\u{c}:\u{1}\u{c}C\u{1}\u{1}\u{c}D\u{1}\u{1}\u{c}E\u{1}\u{1}\u{c}F\u{1}\u{1}\u{c}G\u{1}\u{1}\u{c}H\u{1}\u{1}\u{c}I\u{1}\u{1}\u{c}J\u{1}\u{1}\u{c}L\u{1}\u{1}\u{c}P\u{1}\u{1}\u{c}a\u{1}\u{1}\u{c}c\u{1}\u{1}\u{c}e\u{1}\u{1}\u{c}g\u{1}\u{1}\u{c}+\u{1}\u{c},\u{1}\u{c}3\u{1}\u{c}4\u{1}\u{c}\u{14}\u{1}\u{c}\u{18}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1c}\u{1}\u{c}i\u{1}\u{1}\u{c}j\u{1}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}protocol_version\0\u{4}\u{8}client_hello\0\u{3}server_hello\0\u{1}authenticate\0\u{1}authenticated\0\u{1}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{6}message_accepted\0\u{4}\u{2}membership_changed\0\u{4}\u{2}message_withdrawn\0\u{4}\u{2}message_reaction_changed\0\u{4}\u{2}message_edited\0\u{3}sync_pull\0\u{3}sync_batch\0\u{3}sync_ack\0\u{3}reset_required\0\u{3}snapshot_ack\0\u{1}acknowledged\0\u{3}sync_snapshot\0\u{3}snapshot_manifest\0\u{3}snapshot_page_pull\0\u{3}snapshot_page\0\u{3}sync_available\0\u{3}record_read_receipt\0\u{3}read_receipt_recorded\0\u{4}\u{4}stranger_message_permission_set\0\u{4}\u{2}relationship_changed\0\u{4}\u{2}user_block_changed\0\u{4}\u{4}member_muted\0\u{4}\u{2}member_removed_by_moderator\0\u{4}\u{3}list_room_members\0\u{3}room_members_page\0\u{3}group_event_pull\0\u{3}group_event_page\0\u{3}group_event_subscribe\0\u{3}group_event_subscribed\0\u{3}group_event_unsubscribe\0\u{3}group_event_available\0\u{4}\u{9}user_add_permission_set\0\u{4}\u{2}read_receipt_preferences_set\0\u{3}list_read_receipt_readers\0\u{3}read_receipt_readers_page\0\u{4}\u{2}live_activity_preferences_set\0\u{3}subscribe_presence\0\u{3}presence_subscribed\0\u{3}unsubscribe_presence\0\u{3}subscribe_typing\0\u{3}unsubscribe_typing\0\u{3}set_typing_state\0\u{3}typing_state_changed\0\u{3}presence_changed\0\u{1}error\0\u{3}get_live_activity_preferences\0\u{3}live_activity_preferences\0\u{3}set_conversation_state\0\u{3}conversation_state_set\0\u{3}set_message_favorite\0\u{3}message_favorite_changed\0\u{4}\u{2}pinned_message_changed\0\u{4}\u{2}group_announcement_changed\0\u{4}\u{2}group_role_permissions_changed\0\u{4}\u{2}group_member_role_changed\0\u{4}\u{3}get_group_role_policy_baseline\0\u{3}group_role_policy_baseline\0\u{4}\u{3}user_room_directory_list\0\u{3}user_room_directory_page\0\u{3}room_sync_state_batch\0\u{3}room_sync_state_batch_result\0\u{3}account_room_changes_start\0\u{3}account_room_changes_ready\0\u{4}\u{2}account_room_resync_required\0\u{3}room_latest_visible_batch\0\u{3}room_latest_visible_batch_result\0\u{3}author_presentation_delta\0\u{3}author_presentation_end\0\u{3}author_presentation_ended\0\u{3}personal_preference_receipt\0\u{3}presence_publication_control\0\u{3}presence_publication_controlled\0\u{3}message_send_operation\0\u{3}message_send_operation_recover\0\u{3}message_send_operation_result\0\u{3}realtime_coverage\0\u{3}device_room_progress_report\0\u{3}device_room_progress_recorded\0\u{3}author_presentation_receipt\0\u{3}author_presentation_receipted\0\u{3}author_presentation_interests\0\u{3}author_presentation_interests_received\0\u{3}author_presentation_start\0\u{3}author_presentation_started\0\u{3}group_event_pull_batch\0\u{3}group_event_page_batch\0\u{b}begin_group_room_creation\0\u{b}append_group_room_creation_members\0\u{b}finalize_group_room_creation\0\u{b}cancel_group_room_creation\0\u{b}group_room_created\0\u{b}group_room_creation_prepared\0\u{b}group_room_creation_members_appended\0\u{b}group_room_creation_cancelled\0\u{b}set_stranger_message_permission\0\u{b}change_relationship\0\u{b}change_user_block\0\u{b}set_user_add_permission\0\u{b}set_read_receipt_preferences\0\u{b}set_live_activity_preferences\0\u{b}change_room_membership\0\u{b}mute_member\0\u{b}moderate_member_removal\0\u{b}set_pinned_message\0\u{b}set_group_announcement\0\u{b}set_group_role_permissions\0\u{b}change_group_member_role\0\u{b}open_direct_room\0\u{b}direct_room_opened\0\u{b}moderate_message\0\u{b}message_redacted\0\u{b}send_message\0\u{b}withdraw_message\0\u{b}change_message_reaction\0\u{b}edit_message\0\u{b}forward_messages\0\u{b}messages_forwarded\0\u{c}\u{16}\u{1}\u{c}-\u{1}\u{c}/\u{1}\u{c}1\u{1}\u{c}5\u{1}\u{c}7\u{1}\u{c}:\u{1}\u{c}C\u{1}\u{1}\u{c}D\u{1}\u{1}\u{c}E\u{1}\u{1}\u{c}F\u{1}\u{1}\u{c}G\u{1}\u{1}\u{c}H\u{1}\u{1}\u{c}I\u{1}\u{1}\u{c}J\u{1}\u{1}\u{c}L\u{1}\u{1}\u{c}P\u{1}\u{1}\u{c}a\u{1}\u{1}\u{c}c\u{1}\u{1}\u{c}e\u{1}\u{1}\u{c}g\u{1}\u{1}\u{c}+\u{1}\u{c},\u{1}\u{c}3\u{1}\u{c}4\u{1}\u{c}\u{14}\u{1}\u{c}\u{18}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1c}\u{1}\u{c}i\u{1}\u{1}\u{c}j\u{1}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5477,6 +5558,32 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .authorPresentationStarted(v)
         }
       }()
+      case 139: try {
+        var v: IMV2GroupEventPullBatch?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .groupEventPullBatch(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .groupEventPullBatch(v)
+        }
+      }()
+      case 140: try {
+        var v: IMV2GroupEventPageBatch?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .groupEventPageBatch(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .groupEventPageBatch(v)
+        }
+      }()
       default: break
       }
     }
@@ -5853,6 +5960,14 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .authorPresentationStarted?: try {
       guard case .authorPresentationStarted(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 138)
+    }()
+    case .groupEventPullBatch?: try {
+      guard case .groupEventPullBatch(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 139)
+    }()
+    case .groupEventPageBatch?: try {
+      guard case .groupEventPageBatch(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 140)
     }()
     case nil: break
     }
@@ -9345,6 +9460,138 @@ nonisolated extension IMV2GroupEventPull: SwiftProtobuf.Message, SwiftProtobuf._
     if lhs.roomID != rhs.roomID {return false}
     if lhs.afterRoomSequence != rhs.afterRoomSequence {return false}
     if lhs.pageSize != rhs.pageSize {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2GroupEventPullBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".GroupEventPullBatch"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}rooms\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.rooms) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.rooms.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.rooms, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2GroupEventPullBatch, rhs: IMV2GroupEventPullBatch) -> Bool {
+    if lhs.rooms != rhs.rooms {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2GroupEventPageResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".GroupEventPageResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{1}page\0\u{1}error\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
+      case 2: try {
+        var v: IMV2GroupEventPage?
+        var hadOneofValue = false
+        if let current = self.result {
+          hadOneofValue = true
+          if case .page(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.result = .page(v)
+        }
+      }()
+      case 3: try {
+        var v: IMV2Error?
+        var hadOneofValue = false
+        if let current = self.result {
+          hadOneofValue = true
+          if case .error(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.result = .error(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.roomID.isEmpty {
+      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
+    }
+    switch self.result {
+    case .page?: try {
+      guard case .page(let v)? = self.result else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    }()
+    case .error?: try {
+      guard case .error(let v)? = self.result else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2GroupEventPageResult, rhs: IMV2GroupEventPageResult) -> Bool {
+    if lhs.roomID != rhs.roomID {return false}
+    if lhs.result != rhs.result {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2GroupEventPageBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".GroupEventPageBatch"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}rooms\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.rooms) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.rooms.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.rooms, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2GroupEventPageBatch, rhs: IMV2GroupEventPageBatch) -> Bool {
+    if lhs.rooms != rhs.rooms {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

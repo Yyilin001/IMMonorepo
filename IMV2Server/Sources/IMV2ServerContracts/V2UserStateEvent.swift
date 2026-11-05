@@ -4,6 +4,7 @@ import IMV2Core
 /// 只属于用户同步流的持久事件类别；公共聊天内容必须使用房间日志。
 public enum V2UserStateEventKind: String, Codable, CaseIterable, Sendable {
     case room
+    case roomHead = "room_head"
     case membership
     case directRoomProfile = "direct_room_profile"
     case ownReadWatermark = "own_read_watermark"

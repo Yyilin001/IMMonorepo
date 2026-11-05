@@ -878,6 +878,9 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 @MainActor @Observable
 final class V2AppRealtimeCoverage {
     enum State: Equatable { case disconnected, recovering, ready }
+    enum ConnectionState: Equatable { case connecting, connected, disconnected }
+    private(set) var connectionState: ConnectionState = .connecting
+    private(set) var syncPhase: V2RoomRecoveryPhase = .idle
     // Publishing a restored account precedes its first authenticated loop.
     // No connection has failed at this point.
     private(set) var state: State = .recovering
@@ -893,8 +896,15 @@ final class V2AppRealtimeCoverage {
 
     func begin(_ id: UUID) {
         loopID = id; connectionGeneration = nil
+        connectionState = .connected
+        syncPhase = .establishingCoverage
         scopes.removeAll(); revisions.removeAll(); generations.removeAll(); endedScopes.removeAll()
         state = .recovering; reason = .installing
+    }
+
+    func updateSyncPhase(_ phase: V2RoomRecoveryPhase, loop: UUID) {
+        guard loopID == loop else { return }
+        syncPhase = phase
     }
 
     func receive(_ value: V2RealtimeCoverageState, loop: UUID, account: UserID) {
@@ -947,6 +957,8 @@ final class V2AppRealtimeCoverage {
     func end(_ id: UUID) {
         guard loopID == id else { return }
         loopID = nil; connectionGeneration = nil
+        connectionState = .disconnected
+        syncPhase = .idle
         scopes.removeAll(); revisions.removeAll(); generations.removeAll(); endedScopes.removeAll()
         state = .disconnected; reason = nil
     }
@@ -1213,9 +1225,19 @@ struct V2AppRealtimeRuntime {
                 {
                     let loop = UUID()
                     await coverage.begin(loop)
-                    for await value in await connection.realtimeCoverageChanges() {
-                        guard !Task.isCancelled else { break }
-                        await coverage.receive(value, loop: loop, account: actorUserID)
+                    await withTaskGroup(of: Void.self) { group in
+                        group.addTask {
+                            while !Task.isCancelled {
+                                await coverage.updateSyncPhase(roomRecoveryEngine.phase, loop: loop)
+                                do { try await Task.sleep(for: .seconds(1)) }
+                                catch { return }
+                            }
+                        }
+                        for await value in await connection.realtimeCoverageChanges() {
+                            guard !Task.isCancelled else { break }
+                            await coverage.receive(value, loop: loop, account: actorUserID)
+                        }
+                        group.cancelAll()
                     }
                     await coverage.end(loop)
                 },

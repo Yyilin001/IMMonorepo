@@ -806,10 +806,9 @@ public actor V2GatewaySession {
         response.requestID = envelope.requestID
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         response.protocolVersion = UInt32(version)
-        let responseCompression: V2NegotiatedFrameCompression? = if case .groupEventPage? = response.body {
-            negotiatedFrameCompression
-        } else {
-            nil
+        let responseCompression: V2NegotiatedFrameCompression? = switch response.body {
+        case .groupEventPage?, .groupEventPageBatch?: negotiatedFrameCompression
+        default: nil
         }
         let cached = try preparedFrame ?? preparedGroupEventPageCache?.frame(
             for: response,
@@ -864,6 +863,12 @@ public actor V2GatewaySession {
             return min(8, max(1, (request.keys.count + 15) / 16))
         case .listRoomMembers(let request):
             return min(8, max(1, 1 + Int(request.pageSize) / 100))
+        case .groupEventPullBatch(let request):
+            // Charge both room fan-out and requested records; never treat a
+            // batch as a free single read. Bound untrusted arithmetic first.
+            let rooms = min(17, request.rooms.count)
+            let records = request.rooms.prefix(16).reduce(0) { $0 + min(33, Int($1.pageSize)) }
+            return min(16, 1 + (rooms + 15) / 16 + (records + 99) / 100)
         case .groupEventPull(let request):
             return min(8, max(1, 1 + Int(request.pageSize) / 100))
         case .listReadReceiptReaders(let request):

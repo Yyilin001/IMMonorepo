@@ -283,6 +283,8 @@ public enum V2ProtobufFrameCodec {
         case .authorPresentationStarted?: return .authorPresentationStarted
         case .personalPreferenceReceipt?: return .personalPreferenceReceipt
 
+        case .groupEventPullBatch?: return .groupEventPullBatch
+        case .groupEventPageBatch?: return .groupEventPageBatch
         case .groupEventPull?: return .groupEventPull
         case .groupEventPage?: return .groupEventPage
         case .groupEventSubscribe?: return .groupEventSubscribe

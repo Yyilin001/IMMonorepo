@@ -5,7 +5,7 @@ import SQLKit
 import Foundation
 
 /// Account-local device progress; no membership or authentication query occurs
-/// here. Authorization belongs to the Gateway's live delivery grant.
+/// here. Authorization belongs to the Gateway's one-shot room-state validator.
 public struct PostgresV2DeviceRoomProgressStore: V2DeviceRoomProgressStoring {
     private let database: any Database
     private let schema: String

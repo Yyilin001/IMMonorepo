@@ -22,7 +22,7 @@ struct GatewayMaintenanceAssembly {
     let roomMaintenanceWorkers: [V2RoomActorMaintenanceWorker]
     let controlPlaneHousekeepingWorker: V2ControlPlaneHousekeepingWorker
     let pushWakeWorker: V2PushWakeWorker?
-    let mentionPushWakeRelays: [PostgresV2MentionPushWakeRelay]
+    let accountNotificationWorkers: [V2AccountNotificationWorker]
 
     /// 将维护库与房间归属库的处理器接到同一组后台依赖中。
     /// 构造 APNS 凭据或媒体保留策略失败时，错误交由组合根回滚。
@@ -86,7 +86,6 @@ struct GatewayMaintenanceAssembly {
             idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
         )
         let pushWakeWorker: V2PushWakeWorker?
-        let pushEnabled: Bool
         let roomRouter = V2PostgresRoomShardRouter(database: maintenanceDatabase)
         let preferenceOwners = try Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map { storage in
             guard let database = topology.databaseForRole(for: .maintenance, url: storage.databaseURL) else {
@@ -96,10 +95,8 @@ struct GatewayMaintenanceAssembly {
         })
         switch configuration.push {
         case .disabled:
-            pushEnabled = false
             pushWakeWorker = nil
         case .apns(let pushConfiguration):
-            pushEnabled = true
             let authorizer = try V2APNSJWTAuthorizer(
                 teamID: pushConfiguration.teamID,
                 keyID: pushConfiguration.keyID,
@@ -143,8 +140,12 @@ struct GatewayMaintenanceAssembly {
             roomMaintenanceWorkers: roomMaintenanceWorkers,
             controlPlaneHousekeepingWorker: controlPlaneHousekeepingWorker,
             pushWakeWorker: pushWakeWorker,
-            mentionPushWakeRelays: roomOwnerMaintenanceDatabases.map {
-                PostgresV2MentionPushWakeRelay(owner: $0, control: maintenanceDatabase, enabled: pushEnabled)
+            accountNotificationWorkers: try Set(configuration.userShardStorage.map(\.databaseURL)).sorted().map { url in
+                guard let database = topology.databaseForRole(for: .maintenance, url: url) else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                // APNs alert delivery is reserved. Disabled means expiry only.
+                return V2AccountNotificationWorker(store: PostgresV2AccountNotificationStore(database: database))
             }
         )
     }

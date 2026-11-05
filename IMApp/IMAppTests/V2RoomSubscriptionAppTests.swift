@@ -97,7 +97,10 @@ struct V2RoomSubscriptionAppTests {
             if transitions.last != coverage.state { transitions.append(coverage.state) }
         }
         #expect(coverage.reason == .installing)
+        #expect(coverage.connectionState == .connecting)
         coverage.begin(loop)
+        #expect(coverage.connectionState == .connected)
+        #expect(coverage.syncPhase == .establishingCoverage)
         let first: IMV2RealtimeCoverage.Scope = directoryFirst ? .directory : .account
         let second: IMV2RealtimeCoverage.Scope = directoryFirst ? .account : .directory
         try receive(first, .ready, revision: 1, reason: .unspecified)
@@ -106,6 +109,11 @@ struct V2RoomSubscriptionAppTests {
         #expect(coverage.state == .recovering)
         try receive(second, .ready, revision: 3, reason: .unspecified)
         #expect(transitions == [.recovering, .ready])
+        #expect(coverage.connectionState == .connected)
+        // Subscription Ready must not imply that durable catch-up is done.
+        #expect(coverage.syncPhase == .establishingCoverage)
+        coverage.updateSyncPhase(.catchingUp, loop: loop)
+        #expect(coverage.syncPhase == .catchingUp)
 
         // Losing required directory coverage must immediately revoke Ready,
         // including Ended, which cannot be treated as an optional unsubscribe.
@@ -114,8 +122,17 @@ struct V2RoomSubscriptionAppTests {
         try receive(.directory, .ready, revision: 5, reason: .unspecified)
         try receive(.directory, .ended, revision: 6, reason: .cancelled)
         #expect(coverage.state == .recovering && coverage.reason == .cancelled)
+        #expect(coverage.connectionState == .connected)
         coverage.end(loop)
         #expect(coverage.state == .disconnected)
+        #expect(coverage.connectionState == .disconnected)
+        let successor = UUID()
+        coverage.begin(successor)
+        coverage.updateSyncPhase(.live, loop: loop)
+        coverage.end(loop)
+        #expect(coverage.connectionState == .connected)
+        #expect(coverage.syncPhase == .establishingCoverage)
+        coverage.end(successor)
     }
 
     @MainActor @Test("coverage presentation waits for every active scope and discards ended and old generations")

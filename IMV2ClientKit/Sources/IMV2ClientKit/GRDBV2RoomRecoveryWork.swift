@@ -76,6 +76,14 @@ extension GRDBV2LocalSyncStore {
                 try Self.recordRoomRecoveryService(work, db: db)
                 return disposition
             }
+            // The state write itself can invalidate a cached summary and its
+            // trigger renews the work revision. That transaction-local change
+            // must not force a second identical authoritative state read.
+            // A newer request committed while network I/O was in flight still
+            // retains its fence and cannot be completed by this older response.
+            let ownsRequest = try Bool.fetchOne(db,
+                sql: "SELECT request_revision = ? FROM v2_room_recovery_work WHERE room_id = ?",
+                arguments: [work.requestRevision.uuidString, work.roomID.rawValue]) == true
             try db.execute(sql: """
                 INSERT INTO v2_room_sync_states VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(room_id) DO UPDATE SET owner_epoch = excluded.owner_epoch,
@@ -89,9 +97,9 @@ extension GRDBV2LocalSyncStore {
                     requires_state = CASE WHEN target_head <= ?
                         AND COALESCE(directory_membership_revision, 0) <= ?
                         AND COALESCE(directory_owner_epoch, 0) <= ? THEN 0 ELSE 1 END
-                WHERE room_id = ? AND request_revision = ?
+                WHERE room_id = ? AND (request_revision = ? OR ?)
                 """, arguments: [Int64(state.head), Int64(state.head), Int64(state.viewerMembershipRevision),
-                    Int64(state.ownerEpoch), work.roomID.rawValue, work.requestRevision.uuidString])
+                    Int64(state.ownerEpoch), work.roomID.rawValue, work.requestRevision.uuidString, ownsRequest])
             return disposition
         }
     }

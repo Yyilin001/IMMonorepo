@@ -11,6 +11,25 @@ extension GatewayBackgroundWorkers {
         let logger = self.logger
         let contentReviewWorker = delivery.contentReviewWorker
         let pushWakeWorker = delivery.pushWakeWorker
+        for worker in delivery.roomDispatchWorkers {
+            _ = workers.start {
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds)
+                while !Task.isCancelled {
+                    var didWork = false
+                    do {
+                        let report = try await worker.runOnce(limit: cadence.claimLimit(configuredLimit: configuration.workerBatchSize))
+                        didWork = report.claimedPages > 0
+                        if report.failedPages > 0 {
+                            logger.warning("room_dispatch_page_retry", metadata: ["count": .stringConvertible(report.failedPages)])
+                        }
+                    } catch is CancellationError { break }
+                    catch { V2ServiceLogging.logWorkerFailure(logger, worker: "room_dispatch", error: error) }
+                    do { try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork)) }
+                    catch { break }
+                }
+            }
+        }
         for relay in delivery.userSyncWakeRelays {
             _ = workers.start {
                 var cadence = V2AdaptiveWorkerCadence(
@@ -59,24 +78,19 @@ extension GatewayBackgroundWorkers {
                 }
             }
         }
-        // 每个物理 owner 独立转交通知，故障不会推迟消息日志或其他 owner 的恢复。
-        for relay in delivery.mentionPushWakeRelays {
+        // Unconfigured alerts retain responsibility for a bounded lifetime.
+        // Sweep each user store independently without touching room Actors.
+        for worker in delivery.accountNotificationWorkers {
             _ = workers.start {
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                )
                 while !Task.isCancelled {
-                    var didWork = false
+                    var expired = 0
                     do {
-                        didWork = try await relay.runOnce(now: Date(), limit: configuration.workerBatchSize) > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        V2ServiceLogging.logWorkerFailure(logger, worker: "mention_push_wake_relay", error: error)
-                    }
-                    do {
-                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
-                    } catch { break }
+                        expired = try await worker.runOnce(limit: 128).expired
+                        if expired > 0 { logger.info("account_notification_expired", metadata: ["count": .stringConvertible(expired)]) }
+                    } catch is CancellationError { break }
+                    catch { V2ServiceLogging.logWorkerFailure(logger, worker: "account_notification_retention", error: error) }
+                    do { try await v2Sleep(for: .milliseconds(expired == 128 ? 10 : 30_000)) }
+                    catch { break }
                 }
             }
         }
