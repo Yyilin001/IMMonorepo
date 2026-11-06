@@ -291,7 +291,7 @@ def main():
             elif args.partition_handoff:
                 assert all(receiver.get(key) is True for key in ("higherEpoch", "newIncarnation", "oldLeaseRenewRejected", "actualLeaseReleased")), receiver
                 assert all(sender.get(key) is True for key in ("singleDesiredActivation", "automaticDesiredRecovery", "lostCoverageObserved", "freshHeadBarrier", "oldDeliveryRejected", "oldReferenceRejectedBeforeDispatch", "actualDrain")), sender
-                assert sender["hotAcceptedCallbacks"] == 10_000 and sender["hotCacheHits"] >= 10_000 and sender["hotCacheMisses"] == 0 and sender["hotCacheInvalidations"] == 0 and sender["hotForegroundReceptionistLookups"] == 0 and sender["perCallReceptionistMeasured"] is True
+                assert sender["hotAcceptedCallbacks"] == 10_000 and sender["hotCacheHits"] >= 10_000 and sender["hotCacheMisses"] == 0 and sender["hotCacheInvalidations"] == 0 and sender["hotForegroundDirectoryLookups"] == 0 and sender["perCallDirectoryMeasured"] is True
                 assert sender["productionControllerUsed"] is False and sender["fabricatedLateReply"] is False
                 initial = json.loads((evidence / "gateway-before-kill.json").read_text())
                 rebuilt = json.loads((evidence / "gateway-rebuilt.json").read_text())

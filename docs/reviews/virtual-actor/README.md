@@ -1,5 +1,9 @@
 # Virtual Actor 实施与验证工件
 
+> 当前分支已替换为[项目自定义 Actor 运行时](custom-runtime.md)。下列 DistributedCluster、Linux 和性能记录属于标注 commit 的历史证据，不自动适用于新实现。
+
+2026-11-06 新运行时的[同机固定负载对照与入口隔离修复](custom-runtime-benchmark.md)已完成：首次对照 ACK P99 从 103 ms 增至 396 ms，后续定位到同步请求阻塞消息入口。隔离修复后的同条件完整对照为 **169 → 69 ms**，两版均完成 10,000 在线 / 2,000 msg/s、120,000 条确认及全员前台追平；首次失败对照另行保留。该结果验证网关入口修复，尚不证明自定义运行时本身的容量优势。
+
 2026-09-24 按用户要求先完成功能、暂缓性能调优，**Room Virtual Actor 本轮功能落地已完成**。业务入口、生命周期与房间写者已接入；[#19 单 owner 故障批查询](g5-owner-fault-functional-evidence.md)和[最新冻结源码的完整 Linux/Vapor 5 回归](g5-linux-regression-evidence.md)通过。首次完整回归曾出现未定位的测试进程停滞，同产物隔离复现及第二次完整回归均通过；原失败与诊断保留，不称根因已修复。
 
 业务基线固定为 `f1cdd78d6a21bf0ae23da627c0710c65115236aa`（Vapor 5 beta.2 / Swift 6.4）；原工作目录未提交的 Distributed Actor 改动不参与。子代理统一 GPT-6 Sol / High。整体设计见[并行实施方案](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/00-foundation/virtual-actor-parallel-plan.md)，当前行为以[房间 Virtual Actor 合同](../room-virtual-actor-contract.md)为准。
@@ -38,5 +42,5 @@
 
 - 数据 ownerEpoch 在 canonical schema 和 route 中允许零，与从一开始的 activationEpoch 分开建模。
 - 逻辑 shardID 沿用 trim 后非空的规则；不额外收紧业务身份。
-- DistributedCluster 使用已验证的固定 revision，不靠降低 Vapor/ServiceLifecycle 版本绕过兼容问题。
+- 当前使用项目自定义 IMActorSystem；旧 DistributedCluster 的固定 revision 仅对应上述历史证据，Vapor/ServiceLifecycle 版本保持。
 - Actor 换 Host 不等于房间迁移数据库；PostgreSQL 继续决定数据 owner、写入资格和持久结果。

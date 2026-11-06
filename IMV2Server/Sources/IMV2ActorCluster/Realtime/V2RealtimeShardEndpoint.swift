@@ -1,7 +1,7 @@
 import Crypto
 import Synchronization
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 
@@ -32,9 +32,9 @@ struct ShardReply: Codable, Sendable {
 }
 
 public distributed actor V2RealtimeShardEndpoint {
-    public typealias ActorSystem = ClusterSystem
+    public typealias ActorSystem = IMActorSystem
     private let service: V2RealtimeShardInbound
-    init(actorSystem: ClusterSystem, service: V2RealtimeShardInbound) {
+    init(actorSystem: IMActorSystem, service: V2RealtimeShardInbound) {
         self.actorSystem = actorSystem; self.service = service
     }
     public distributed func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
@@ -200,7 +200,7 @@ actor V2RealtimeShardInbound {
 }
 
 actor V2RealtimeShardSender {
-    private let system: ClusterSystem
+    private let system: IMActorSystem
     private let signer: V2ActorSigningIdentity
     private let trust: V2ActorTrustStore
     private let limits: V2RealtimeTransportLimits
@@ -218,7 +218,7 @@ actor V2RealtimeShardSender {
         let expires: ContinuousClock.Instant
         var sequence: UInt64
     }
-    init(system: ClusterSystem, signer: V2ActorSigningIdentity, trust: V2ActorTrustStore, limits: V2RealtimeTransportLimits, incarnation: UUID, initialReference: V2GatewayRealtimeDescriptor? = nil) throws {
+    init(system: IMActorSystem, signer: V2ActorSigningIdentity, trust: V2ActorTrustStore, limits: V2RealtimeTransportLimits, incarnation: UUID, initialReference: V2GatewayRealtimeDescriptor? = nil) throws {
         self.system = system; self.signer = signer; self.trust = trust; self.limits = limits; self.incarnation = incarnation
         if let initialReference {
             try initialReference.validate(); try trust.validateRealtimeReceiver(initialReference.identity)
@@ -415,7 +415,7 @@ actor V2RealtimeShardSender {
         let packet = try session.mac.seal(call, reply: false, maximumBytes: limits.maximumPacketBytes)
         do {
             let endpoint = session.endpoint
-            let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.exchange(packet) }
+            let response = try await IMRemoteCall.with(timeout: limits.callTimeout) { try await endpoint.exchange(packet) }
             let peer = try trust.configuredService(try V2ActorServiceID(target.identity.serviceID))
             let reply = try session.mac.open(response, as: ShardReply.self, reply: true, maximumBytes: 16_384)
             try validatePeer(peer, target: target)
@@ -444,14 +444,14 @@ actor V2RealtimeShardSender {
         let limits = self.limits; let incarnation = self.incarnation
         let started = ContinuousClock.now
         let task = Task<Session, Error> {
-            let id = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: target.endpointReference)
+            let id = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: target.endpointReference)
             guard id.node.endpoint.host == target.address, id.node.endpoint.port == target.port else { throw V2ActorAuthenticationError.wrongRecipient }
             let endpoint = try V2RealtimeShardEndpoint.resolve(id: id, using: system)
             let agreement = Curve25519.KeyAgreement.PrivateKey()
             let hello = RealtimeHello(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation, recipient: target.identity, handshakeID: UUID(),
                                       endpointDigest: Data(SHA256.hash(data: target.endpointReference)), agreementKey: agreement.publicKey.rawRepresentation)
             let packet = try signer.sign(hello, maximumBytes: 16_384)
-            let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.openSession(packet) }
+            let response = try await IMRemoteCall.with(timeout: limits.callTimeout) { try await endpoint.openSession(packet) }
             let (grant, peer) = try trust.verify(response, as: RealtimeGrant.self, maximumBytes: 16_384)
             guard peer.serviceID.rawValue == target.identity.serviceID, peer.permissions.contains(.realtimeReceive),
                   peer.gatewayNodeIDs.contains(target.identity.nodeID) || peer.serviceID.rawValue == target.identity.nodeID,

@@ -7,6 +7,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 python3 "${repo_root}/scripts/check_v2_postgres_vendor.py"
 python3 "${repo_root}/scripts/check_v2_server_boundaries.py"
 python3 "${repo_root}/scripts/check_actor_serialization_boundaries.py"
+python3 "${repo_root}/IMV2Server/Protocol/generate_actor_rpc.py" --check
 python3 "${repo_root}/scripts/test_v2_protocol_documentation.py"
 
 for package in IMV2Core IMV2ClientKit IMV2Server; do
@@ -20,6 +21,11 @@ for package in IMV2Core IMV2ClientKit IMV2Server; do
   fi
   swift test "${test_args[@]}"
 done
+
+# A small real-process TLS check covers the custom Actor transport without a DB.
+swift build --disable-automatic-resolution --package-path "${repo_root}/IMV2Server" --product IMActorRuntimeProbe
+actor_probe_bin="$(swift build --disable-automatic-resolution --package-path "${repo_root}/IMV2Server" --show-bin-path)"
+python3 "${repo_root}/IMV2Server/Tests/IMActorRuntimeProbe/run-smoke.py" "${actor_probe_bin}/IMActorRuntimeProbe"
 
 # Keep generated protocol code, clean PostgreSQL bootstrap, startup schema
 # coverage and strict deployment examples in the same required gate as the

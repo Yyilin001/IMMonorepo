@@ -1,6 +1,6 @@
 import Crypto
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
@@ -10,11 +10,11 @@ import Testing
 @testable import IMV2ActorCluster
 
 /// Uses the production signed distributed callback path between separate TCP nodes.
-/// The owning TCP fixture joins every transport and ClusterSystem during cleanup.
+/// The owning TCP fixture joins every transport and IMActorSystem during cleanup.
 actor TCPAccountClusterRouter {
-    private let systems: [ClusterSystem]
+    private let systems: [IMActorSystem]
     private let transports: [V2RealtimeTransportHandle]
-    private init(systems: [ClusterSystem], transports: [V2RealtimeTransportHandle]) {
+    private init(systems: [IMActorSystem], transports: [V2RealtimeTransportHandle]) {
         self.systems = systems; self.transports = transports
     }
 
@@ -27,18 +27,18 @@ actor TCPAccountClusterRouter {
             try .init(serviceID: pair.0, publicKey: pair.1.publicKey.rawRepresentation,
                 permissions: index == 0 ? [.realtimePublish, .realtimeReceive] : [.realtimeReceive])
         })
-        var systems: [ClusterSystem] = [], transports: [V2RealtimeTransportHandle] = []
+        var systems: [IMActorSystem] = [], transports: [V2RealtimeTransportHandle] = []
         var ports: Set<Int> = []
         do {
             for index in ids.indices {
                 var port = Int.random(in: 30_000...60_000)
                 while !ports.insert(port).inserted { port = Int.random(in: 30_000...60_000) }
                 let name = "account-tcp-\(UUID().uuidString)"
-                var settings = ClusterSystemSettings(name: name, host: "127.0.0.1", port: port)
-                settings.threadPoolSize = 1; settings.downingStrategy = .none; settings.onDownAction = .none
-                settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-                settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-                let system = await ClusterSystem(name, settings: settings)
+                var settings = IMActorSystemSettings(name: name, host: "127.0.0.1", port: port)
+                settings.threadPoolSize = 1;
+                settings.errorTypes = [V2ActorAuthenticationError.self]
+
+                let system = try await V2ActorRPCManifest.makeSystem(name, settings: settings)
                 systems.append(system)
                 let signer = try V2ActorSigningIdentity(serviceID: ids[index], privateKey: keys[index].rawRepresentation)
                 let transport = try buildRealtimeTransport(system: system,
@@ -49,16 +49,16 @@ actor TCPAccountClusterRouter {
                 if index > 0 {
                     try await transport.configureRoomSubscription(ingresses[index - 1])
                     if !journalHandlers.isEmpty { try await transport.configureJournalProjection(journalHandlers[index - 1]) }
-                    let actorID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: transport.descriptor.endpointReference)
+                    let actorID = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: transport.descriptor.endpointReference)
                     let remote = try V2GatewayRealtimeEndpoint.resolve(id: actorID, using: systems[0])
                     try #require(__isRemoteActor(remote))
-                    systems[0].cluster.join(host: "127.0.0.1", port: port)
+                    systems[0].connect(host: "127.0.0.1", port: port)
                 }
             }
             return .init(systems: systems, transports: transports)
         } catch {
             for transport in transports { _ = await transport.stop(deadline: .now + .seconds(2)) }
-            for system in systems { try? await system.shutdown().wait() }
+            for system in systems { try? await system.shutdown() }
             throw error
         }
     }
@@ -78,7 +78,7 @@ actor TCPAccountClusterRouter {
 
     func stop() async {
         for transport in transports { #expect(await transport.stop(deadline: .now + .seconds(2))) }
-        for system in systems { try? await system.shutdown().wait() }
+        for system in systems { try? await system.shutdown() }
     }
     func sendMembership(user: IMV2Core.UserID, room: IMV2Core.RoomID, gateway: Int,
                         version: UInt64 = 1, source: V2RealtimeJournalSource? = nil,

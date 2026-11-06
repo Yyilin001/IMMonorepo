@@ -1,6 +1,6 @@
 import Foundation
 import Crypto
-import DistributedCluster
+import IMActorSystem
 import IMV2Core
 @testable import IMV2ActorCluster
 import FluentKit
@@ -157,12 +157,12 @@ struct GatewayRealtimePartitionControlTests {
             logger: Logger(label: "imv2.control.outage.tests"), ownsEventLoopGroup: true, threadPoolThreads: 1)
         let schema = "imv2_outage_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let hostPort = Int.random(in: 30_000...44_999), viewerPort = Int.random(in: 45_000...60_000)
-        var hostSettings = ClusterSystemSettings(name: "control-outage-host", host: "127.0.0.1", port: hostPort)
-        hostSettings.threadPoolSize = 1; hostSettings.downingStrategy = .none; hostSettings.onDownAction = .none
-        var viewerSettings = ClusterSystemSettings(name: "control-outage-viewer", host: "127.0.0.1", port: viewerPort)
-        viewerSettings.threadPoolSize = 1; viewerSettings.downingStrategy = .none; viewerSettings.onDownAction = .none
-        let hostSystem = await ClusterSystem("control-outage-host", settings: hostSettings)
-        let viewerSystem = await ClusterSystem("control-outage-viewer", settings: viewerSettings)
+        var hostSettings = IMActorSystemSettings(name: "control-outage-host", host: "127.0.0.1", port: hostPort)
+        hostSettings.threadPoolSize = 1;
+        var viewerSettings = IMActorSystemSettings(name: "control-outage-viewer", host: "127.0.0.1", port: viewerPort)
+        viewerSettings.threadPoolSize = 1;
+        let hostSystem = try await V2ActorRPCManifest.makeSystem("control-outage-host", settings: hostSettings)
+        let viewerSystem = try await V2ActorRPCManifest.makeSystem("control-outage-viewer", settings: viewerSettings)
         var controller: GatewayRealtimePartitionControl?
         var hostShard: V2RealtimeShardTransportHandle?, viewerShard: V2RealtimeShardTransportHandle?
         var hostDelivery: V2RealtimeTransportHandle?, viewerDelivery: V2RealtimeTransportHandle?
@@ -214,7 +214,7 @@ struct GatewayRealtimePartitionControlTests {
                 signer: viewerSigner, trust: trust, serving: PartitionOutageUnusedServing(), serviceOwnerAccess: access,
                 discoveryPeers: peers, limits: .init())
             viewerShard = vs
-            await hs.start(); await vs.start()
+            try await hs.start(); try await vs.start()
             let qualifiedDeadline = ContinuousClock.now + .seconds(10)
             while qualification.snapshot() == nil {
                 guard ContinuousClock.now < qualifiedDeadline else { throw V2ActorAuthenticationError.sessionExpired }
@@ -315,7 +315,7 @@ struct GatewayRealtimePartitionControlTests {
             #expect(try await actual.confirm(await failing.initialLeases).isEmpty)
             try await sql.raw("DROP SCHEMA \(unsafeRaw:schema) CASCADE").run()
             try await resources.shutdown()
-            try await hostSystem.shutdown().wait(); try await viewerSystem.shutdown().wait()
+            try await hostSystem.shutdown(); try await viewerSystem.shutdown()
         } catch {
             await outage?.restoreForCleanup()
             try? await controller?.shutdown(); await service?.shutdown()
@@ -323,7 +323,7 @@ struct GatewayRealtimePartitionControlTests {
             _ = await hostDelivery?.stop(deadline: .now + .seconds(3)); _ = await viewerDelivery?.stop(deadline: .now + .seconds(3))
             if let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS \(unsafeRaw:schema) CASCADE").run() }
             try? await resources.shutdown()
-            try? await hostSystem.shutdown().wait(); try? await viewerSystem.shutdown().wait()
+            try? await hostSystem.shutdown(); try? await viewerSystem.shutdown()
             throw error
         }
     }

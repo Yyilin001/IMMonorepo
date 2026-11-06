@@ -5,12 +5,12 @@ import IMV2Core
 import Logging
 @preconcurrency import NIOCore
 import Synchronization
+import IMV2ActorContracts
 
 /// 单条已完成 TLS 解码的 NIO 通道。
 ///
-/// 工作在进入由 actor 支撑的字节流之前先被串行化，因此异步认证或数据库操作
-/// 不会把同一连接上的应答顺序打乱。队列显式按字节限量：过载应由可续传的同步吸收，
-/// 而不是让内存无上限增长。
+/// 分帧与准入串行交给 ByteStream；认证后消息发送与有界控制 FIFO 分开执行。
+/// 同步控制之间保持顺序，慢同步不再占住后续消息的入口。
 public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     public typealias InboundIn = ByteBuffer
     public typealias OutboundOut = ByteBuffer
@@ -23,8 +23,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private let logger = Logger(label: "imv2.gateway.transport")
     private var decoder: V2NIOInboundFrameDecoder
     private var pending: V2GatewayInboundQueue
+    private let maximumControlBytes: Int
+    private let maximumControlBatches: Int
     private var processing = false
-    /// 通道唯一的请求任务。
+    /// 通道唯一的分帧准入任务；控制执行任务由 ByteStream 持有并回收。
     ///
     /// EOF、超时、吊销以及所有显式关闭路径都会在丢弃排队输入之前先取消它，
     /// 因此对已经消失的客户端不会继续执行数据库或连接池获取。
@@ -54,6 +56,9 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private var callbacksReady = false
     private var lastInboundAt: NIODeadline?
     private var decodeChunkReceivedAt: UInt64 = 0
+    private var decodeSendPathReceivedAt: ContinuousClock.Instant?
+    private var processingCommands: [UInt16] = []
+    private var decodeBlockingCommands: [UInt16] = []
     private var idleCheck: Scheduled<Void>?
     private var authenticationDeadline: Scheduled<Void>?
     private var closeReason: V2GatewayConnectionClosure?
@@ -99,6 +104,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             maximumQueuedInboundChunks > 0
         )
         self.stream = stream
+        self.maximumControlBytes = maximumQueuedInboundBytes
+        self.maximumControlBatches = maximumQueuedInboundChunks
         self.decoder = .init(limits: stream.frameLimits)
         self.pending = .init(
             maximumBytes: maximumQueuedInboundBytes,
@@ -287,7 +294,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         lastInboundAt = now()
         let buffer = unwrapInboundIn(data)
-        guard pending.append(buffer, observedAt: V2GatewayHeartbeatDiagnostics.enabled ? NIODeadline.now().uptimeNanoseconds : 0) else {
+        guard pending.append(buffer,
+            observedAt: V2GatewayHeartbeatDiagnostics.enabled ? NIODeadline.now().uptimeNanoseconds : 0,
+            sendPathReceivedAt: V2SendPathTrace.enabled ? .now : nil,
+            blockingCommands: V2SendPathTrace.enabled && processing ? processingCommands : []) else {
             close(context: context, reason: .inboundQueueLimit)
             return
         }
@@ -373,6 +383,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     guard let next = pending.popFirstObserved() else { return }
                     inbound = next.bytes
                     decodeChunkReceivedAt = next.observedAt
+                    decodeSendPathReceivedAt = next.sendPathReceivedAt
+                    decodeBlockingCommands = next.blockingCommands
                 }
                 frames = try decoder.append(inbound)
                 needsFrameDrain = frames.count == stream.frameLimits.maximumFramesPerAppend
@@ -383,6 +395,20 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             return
         }
         guard !frames.isEmpty else { return }
+        if V2SendPathTrace.enabled {
+            for index in frames.indices where frames[index].command == .messageSendOperation {
+                let trace = V2SendPathTrace(operations: [], segment: "gateway")
+                if let receivedAt = decodeSendPathReceivedAt {
+                    // Last contributing TCP chunk, excluding client/kernel/TLS time.
+                    trace.record("gateway_chunk_to_dispatch", from: receivedAt)
+                }
+                trace.mark("gateway_frame_dispatched")
+                for command in decodeBlockingCommands {
+                    trace.mark("gateway_queued_behind_command_\(command)")
+                }
+                frames[index].sendTrace = trace
+            }
+        }
         if V2GatewayHeartbeatDiagnostics.enabled, stream.heartbeatDiagnosticsSelected {
             for index in frames.indices where frames[index].command == .heartbeat {
                 let probe = V2GatewayHeartbeatProbe(chunkReceivedAt: decodeChunkReceivedAt)
@@ -391,15 +417,18 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             }
         }
         processing = true
+        if V2SendPathTrace.enabled { processingCommands = Array(Set(frames.map { $0.command.rawValue })) }
         let inboundFrames = frames
         let stream = stream
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
         let eventLoop = context.eventLoop
         let logger = logger
+        let maximumControlBytes = maximumControlBytes
+        let maximumControlBatches = maximumControlBatches
         processingTask = Task {
+            for frame in inboundFrames { frame.sendTrace?.mark("gateway_frame_task_entered") }
             for frame in inboundFrames { frame.heartbeatProbe?.mark(.taskEntered) }
-            defer { for frame in inboundFrames { frame.heartbeatProbe?.finish(success: false) } }
             let outcome: V2GatewayProcessingOutcome
             do {
                 try Task.checkCancellation()
@@ -413,7 +442,9 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         )
                     }.get()
                 }
-                try await stream.receiveInboundFrames(inboundFrames, authenticationCompleted: { allowsLargeFrames in
+                try await stream.receiveTransportFrames(inboundFrames,
+                    maximumControlBytes: maximumControlBytes, maximumControlBatches: maximumControlBatches,
+                    authenticationCompleted: { allowsLargeFrames in
                     await withCheckedContinuation { continuation in
                         eventLoop.execute {
                             let handler = boundHandler.value
@@ -423,7 +454,17 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                             continuation.resume()
                         }
                     }
-                }, concurrentMessageSendRespond: writeResponse, respond: writeResponse)
+                }, respond: writeResponse, controlFailed: { error in
+                    eventLoop.execute {
+                        let handler = boundHandler.value
+                        guard !handler.closed else { return }
+                        let reason = v2GatewayClosureReason(for: error)
+                        var metadata = v2GatewayTransportFailureMetadata(error)
+                        metadata["closure_reason"] = "\(reason.rawValue)"
+                        logger.warning("gateway control processing failed", metadata: metadata)
+                        handler.close(context: boundContext.value, reason: reason)
+                    }
+                })
                 try Task.checkCancellation()
                 outcome = .success(
                     authenticated: await stream.isAuthenticated()
@@ -519,8 +560,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         if context.channel.isWritable {
             write(frame, promise: promise, context: context)
         } else if pendingResponseWrite == nil {
-            // 流在分发下一帧前会等待此 promise，
-            // 因此停滞通道至多保留一个完整响应。
+            // 停滞通道只保留一个完整响应；其他并发写入按既有规则失败关闭。
             pendingResponseWrite = .init(frame: frame, promise: promise)
         } else {
             promise.fail(V2GatewayTransportWriteError.responseAlreadyPending)
@@ -1089,6 +1129,8 @@ struct V2GatewayInboundQueue {
     struct Chunk {
         var bytes: ByteBuffer
         let observedAt: UInt64
+        let sendPathReceivedAt: ContinuousClock.Instant?
+        let blockingCommands: [UInt16]
     }
     private let maximumBytes: Int
     private let maximumChunks: Int
@@ -1107,7 +1149,9 @@ struct V2GatewayInboundQueue {
     var isEmpty: Bool { chunks.isEmpty }
     var count: Int { chunks.count }
 
-    mutating func append(_ bytes: ByteBuffer, observedAt: UInt64 = 0) -> Bool {
+    mutating func append(_ bytes: ByteBuffer, observedAt: UInt64 = 0,
+                         sendPathReceivedAt: ContinuousClock.Instant? = nil,
+                         blockingCommands: [UInt16] = []) -> Bool {
         guard chunks.count < maximumChunks,
               bytes.readableBytes <= maximumBytes,
               queuedBytes <= maximumBytes - bytes.readableBytes
@@ -1118,7 +1162,8 @@ struct V2GatewayInboundQueue {
             owned.writeBuffer(&bytes)
             bytes = owned
         }
-        chunks.append(.init(bytes: bytes, observedAt: observedAt))
+        chunks.append(.init(bytes: bytes, observedAt: observedAt, sendPathReceivedAt: sendPathReceivedAt,
+            blockingCommands: blockingCommands))
         queuedBytes += bytes.readableBytes
         return true
     }
@@ -1162,6 +1207,7 @@ private enum V2GatewayProcessingOutcome: Sendable {
 }
 
 func v2GatewayClosureReason(for error: Error) -> V2GatewayConnectionClosure {
+    if error is V2GatewayControlQueueError { return .inboundQueueLimit }
     if let frameError = error as? V2FrameCodecError {
         switch frameError {
         case .declaredPayloadTooLarge, .payloadTooLarge, .tooManyFramesInBatch:

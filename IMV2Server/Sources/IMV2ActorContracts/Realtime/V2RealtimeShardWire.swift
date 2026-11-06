@@ -166,9 +166,9 @@ public struct V2RealtimeShardTransportMetricsSnapshot: Sendable {
     public let cacheHits: UInt64
     public let cacheMisses: UInt64
     public let cacheInvalidations: UInt64
-    /// Actual Receptionist invocations, classified by the shared pass creator.
-    public let backgroundReceptionistLookups: UInt64
-    public let foregroundReceptionistLookups: UInt64
+    /// Actual Directory invocations, classified by the shared pass creator.
+    public let backgroundDirectoryLookups: UInt64
+    public let foregroundDirectoryLookups: UInt64
     public let discoveryPasses: UInt64
     public let discoveryActive: Int
     public let cachedPartitions: Int
@@ -191,10 +191,10 @@ public struct V2RealtimeShardTransportMetricsSnapshot: Sendable {
                 publishStarted: UInt64, publishSettled: UInt64, publishActive: Int,
                 rpcRejected: UInt64, pendingHandshakes: Int,
                 capacityRejections: [V2RealtimeRPCAdmissionLane: [V2RealtimeRPCAdmissionRejection: UInt64]] = [:],
-                backgroundReceptionistLookups: UInt64 = 0, foregroundReceptionistLookups: UInt64 = 0,
+                backgroundDirectoryLookups: UInt64 = 0, foregroundDirectoryLookups: UInt64 = 0,
                 controlQueued: Int = 0, controlQueueSeconds: Double = 0, controlQueueSettled: UInt64 = 0) {
         self.cacheHits = cacheHits; self.cacheMisses = cacheMisses; self.cacheInvalidations = cacheInvalidations
-        self.backgroundReceptionistLookups = backgroundReceptionistLookups; self.foregroundReceptionistLookups = foregroundReceptionistLookups
+        self.backgroundDirectoryLookups = backgroundDirectoryLookups; self.foregroundDirectoryLookups = foregroundDirectoryLookups
         self.discoveryPasses = discoveryPasses; self.discoveryActive = discoveryActive
         self.cachedPartitions = cachedPartitions; self.reachableNodes = reachableNodes
         self.controlStarted = controlStarted; self.controlSettled = controlSettled; self.controlActive = controlActive

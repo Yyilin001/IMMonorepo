@@ -1,5 +1,5 @@
 import Crypto
-import DistributedCluster
+import IMActorSystem
 import FluentKit
 import Foundation
 import IMV2ActorContracts
@@ -95,9 +95,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let pairs = V2RoomForwardPairService(executors: ["room-a": executor])
             let replies = RemotePairReplyGate(service: pairs)
             let ports = [Int.random(in: 30_000...39_999), Int.random(in: 40_000...49_999), Int.random(in: 50_000...60_000)]
-            let system = await ClusterSystem("pair-host", settings: remotePairSettings("pair-host", port: ports[0]))
-            let callerSystem = await ClusterSystem("pair-caller", settings: remotePairSettings("pair-caller", port: ports[1]))
-            let sourceSystem = await ClusterSystem("pair-source", settings: remotePairSettings("pair-source", port: ports[2]))
+            let system = try await V2ActorRPCManifest.makeSystem("pair-host", settings: remotePairSettings("pair-host", port: ports[0]))
+            let callerSystem = try await V2ActorRPCManifest.makeSystem("pair-caller", settings: remotePairSettings("pair-caller", port: ports[1]))
+            let sourceSystem = try await V2ActorRPCManifest.makeSystem("pair-source", settings: remotePairSettings("pair-source", port: ports[2]))
             let inbound = try V2RoomClusterInboundService(identity: identity, host: host,
                 authenticator: .init(host: identity, trust: trust, limits: authentication), signer: hostSigner, limits: authentication,
                 allowedShards: ["room-a"], serviceShardAccess: [callerSigner.serviceID: ["room-a"], hostSigner.serviceID: ["room-a"]],
@@ -241,7 +241,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(await hostClient.quiesce(deadline: .now + .seconds(10)))
                 await policies.shutdown(); await owners.shutdown(); try await control.close()
                 await routes.shutdown()
-                try await callerSystem.shutdown().wait(); try await sourceSystem.shutdown().wait(); try await system.shutdown().wait()
+                try await callerSystem.shutdown(); try await sourceSystem.shutdown(); try await system.shutdown()
             } catch {
                 Issue.record("Remote forward pair failed during \(phase)")
                 await replies.release()
@@ -251,7 +251,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 _ = await hostClient.quiesce(deadline: .now + .seconds(10))
                 await policies.shutdown(); await owners.shutdown(); try await control.close()
                 await routes.shutdown()
-                try? await callerSystem.shutdown().wait(); try? await sourceSystem.shutdown().wait(); try? await system.shutdown().wait(); throw error
+                try? await callerSystem.shutdown(); try? await sourceSystem.shutdown(); try? await system.shutdown(); throw error
             }
         }
     }
@@ -396,11 +396,11 @@ private actor RemotePairReplyGate: V2RoomForwardPairServing {
     }
 }
 
-private func remotePairSettings(_ name: String, port: Int) -> ClusterSystemSettings {
-    var settings = ClusterSystemSettings(name: name, host: "127.0.0.1", port: port)
+private func remotePairSettings(_ name: String, port: Int) -> IMActorSystemSettings {
+    var settings = IMActorSystemSettings(name: name, host: "127.0.0.1", port: port)
     settings.threadPoolSize = 1
-    settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-    settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+    settings.errorTypes = [V2ActorAuthenticationError.self]
+
     return settings
 }
 private struct RemotePairCount: Decodable { let value: Int64 }

@@ -107,7 +107,7 @@ struct V2VaporMetricsRoutesTests {
             discoveryPasses: 0, discoveryActive: 0, cachedPartitions: 0, reachableNodes: 0,
             controlStarted: 0, controlSettled: 0, controlActive: 0,
             publishStarted: 0, publishSettled: 0, publishActive: 0, rpcRejected: 0, pendingHandshakes: 0,
-            backgroundReceptionistLookups: 13, foregroundReceptionistLookups: 2)
+            backgroundDirectoryLookups: 13, foregroundDirectoryLookups: 2)
         realtime.skew.partitionRetainedBindingsMax = 19
         realtime.skew.partitionRetainedBindingsPeakLifetime = 23
         realtime.skew.recipientSets[.roomEvents, default: .init()].sets = 2
@@ -126,8 +126,8 @@ struct V2VaporMetricsRoutesTests {
         #expect(realtimeText.contains("im_v2_actor_realtime_publication_recipient_empty_sets_total{kind=\"room_typing\"} 0\n"))
         #expect(realtimeText.contains("im_v2_actor_realtime_skew_observation_ownership_violations_total 0\n"))
         #expect(!realtimeText.contains("partition_id="))
-        #expect(realtimeText.contains("im_v2_actor_realtime_receptionist_lookups_total{source=\"background_discovery\"} 13\n"))
-        #expect(realtimeText.contains("im_v2_actor_realtime_receptionist_lookups_total{source=\"foreground_resolve\"} 2\n"))
+        #expect(realtimeText.contains("im_v2_actor_realtime_directory_lookups_total{source=\"background_discovery\"} 13\n"))
+        #expect(realtimeText.contains("im_v2_actor_realtime_directory_lookups_total{source=\"foreground_resolve\"} 2\n"))
         let app = try await Application(.testing)
         defer { Task { try? await app.shutdown() } }
         let telemetry = V2PrometheusTelemetrySink()

@@ -1,5 +1,5 @@
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import Synchronization
 import IMV2ActorContracts
@@ -49,10 +49,10 @@ public protocol V2ActorHostInboundServing: Sendable {
 
 /// 已认证的控制／房间 RPC 入口。ActorID 通过可信发现或配置分发。
 public distributed actor V2RoomHostEndpoint {
-    public typealias ActorSystem = ClusterSystem
+    public typealias ActorSystem = IMActorSystem
     private let service: any V2ActorHostInboundServing
 
-    public init(actorSystem: ClusterSystem, service: any V2ActorHostInboundServing) {
+    public init(actorSystem: IMActorSystem, service: any V2ActorHostInboundServing) {
         self.actorSystem = actorSystem
         self.service = service
     }
@@ -67,17 +67,23 @@ public distributed actor V2RoomHostEndpoint {
     public distributed func exchange(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         try await service.exchange(packet, boundToken: nil)
     }
+    public distributed func control(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
+        try await service.exchange(packet, boundToken: nil)
+    }
+    public distributed func transfer(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
+        try await service.exchange(packet, boundToken: nil)
+    }
 }
 
 /// 每个本地就绪的激活对应一个物理分布式 Actor。
 /// 精确令牌退役后，其身份不再拥有权限，
 /// 即使远程进程仍保留该 ActorID。
 public distributed actor V2RoomClusterActor {
-    public typealias ActorSystem = ClusterSystem
+    public typealias ActorSystem = IMActorSystem
     private let token: V2RoomActivationToken
     private let service: V2RoomClusterInboundService
 
-    public init(actorSystem: ClusterSystem, token: V2RoomActivationToken,
+    public init(actorSystem: IMActorSystem, token: V2RoomActivationToken,
                 service: V2RoomClusterInboundService) {
         self.actorSystem = actorSystem
         self.token = token
@@ -106,7 +112,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
     private let placementDrain: (any V2ActorPlacementDraining)?
     private let maximumInboundRequests: Int
     private let localGeneration: UUID
-    private let actorSystem: ClusterSystem
+    private let actorSystem: IMActorSystem
     private struct RoomActorEntry {
         let token: V2RoomActivationToken
         let actor: V2RoomClusterActor
@@ -133,7 +139,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
                 serviceShardAccess: [V2ActorServiceID: Set<String>],
                 maximumInboundRequests: Int,
                 localGeneration: UUID = UUID(),
-                actorSystem: ClusterSystem,
+                actorSystem: IMActorSystem,
                 policyOwnership: (any V2PolicyOwnershipServing)? = nil,
                 policyMutations: (any V2PolicyMutationServing)? = nil,
                 forwardPairs: (any V2RoomForwardPairServing)? = nil,
@@ -384,7 +390,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
 
     @discardableResult
     func removePhysicalReference(for token: V2RoomActivationToken,
-                                 actorID: ClusterSystem.ActorID) -> Bool {
+                                 actorID: IMActorSystem.ActorID) -> Bool {
         guard let current = roomActors[token.roomID], current.token == token,
               current.actor.id == actorID else { return false }
         roomActors.removeValue(forKey: token.roomID)

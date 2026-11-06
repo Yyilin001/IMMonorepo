@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send only an oversized length header through the real ClusterSystem TLS socket."""
+"""Send only an oversized length header through the real IMActorSystem TLS socket."""
 import argparse
 import socket
 import ssl
@@ -19,7 +19,7 @@ with socket.create_connection((args.host, args.port), timeout=5) as plain:
     with context.wrap_socket(plain, server_hostname=args.host) as secured:
         secured.settimeout(5)
         print("TLS_ESTABLISHED", flush=True)
-        secured.sendall(b"\x5a\xc7" + struct.pack("!I", args.maximum_frame_bytes + 1))
+        secured.sendall(struct.pack("!I", args.maximum_frame_bytes + 1))
         try:
             received = secured.recv(1)
         except (ConnectionResetError, BrokenPipeError, ssl.SSLEOFError):

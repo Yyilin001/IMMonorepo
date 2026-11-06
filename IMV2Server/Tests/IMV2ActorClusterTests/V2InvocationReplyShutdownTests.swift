@@ -1,5 +1,5 @@
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import IMV2ActorContracts
 import IMV2ActorCluster
 import Testing
@@ -8,22 +8,23 @@ import Testing
 struct V2InvocationReplyShutdownTests {
     @Test(arguments: [false, true])
     func lateReplyAfterShutdown(throwing: Bool) async throws {
-        func system(_ port: Int) async -> ClusterSystem {
-            var settings = ClusterSystemSettings(name: "late-reply", host: "127.0.0.1", port: port)
+        func system(_ port: Int) async throws -> IMActorSystem {
+            var settings = IMActorSystemSettings(name: "late-reply", host: "127.0.0.1", port: port)
             settings.threadPoolSize = 1
-            settings.downingStrategy = .none; settings.onDownAction = .none
-            settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-            settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-            return await ClusterSystem("late-reply", settings: settings)
+            settings.methods = [try await IMActorSystem.register(id: 1, actor: LateReplyEndpoint.self) { _ = try await $0.held(throwing: false) }]
+
+            settings.errorTypes = [V2ActorAuthenticationError.self]
+
+            return try await V2ActorRPCManifest.makeSystem("late-reply", settings: settings)
         }
-        let host = await system(Int.random(in: 30_000...44_000))
-        let caller = await system(Int.random(in: 45_000...60_000))
+        let host = try await system(Int.random(in: 30_000...44_000))
+        let caller = try await system(Int.random(in: 45_000...60_000))
         let gate = LateReplyGate()
         let local = LateReplyEndpoint(actorSystem: host, gate: gate)
         let remote = try LateReplyEndpoint.resolve(id: local.id, using: caller)
         let request = Task {
             do {
-                _ = try await RemoteCall.with(timeout: .seconds(3)) {
+                _ = try await IMRemoteCall.with(timeout: .seconds(3)) {
                     try await remote.held(throwing: throwing)
                 }
             } catch {}
@@ -34,16 +35,17 @@ struct V2InvocationReplyShutdownTests {
                 try await Task.sleep(for: .milliseconds(5))
             }
             #expect(await gate.started)
-            try await host.shutdown().wait()
+            let shutdown = Task { try await host.shutdown() }
             await gate.release()
+            try await shutdown.value
             await request.value
             #expect(await gate.finished)
-            try await caller.shutdown().wait()
+            try await caller.shutdown()
         } catch {
             await gate.release()
             await request.value
-            try? await host.shutdown().wait()
-            try? await caller.shutdown().wait()
+            try? await host.shutdown()
+            try? await caller.shutdown()
             throw error
         }
     }
@@ -64,9 +66,9 @@ private actor LateReplyGate {
     }
 }
 private distributed actor LateReplyEndpoint {
-    typealias ActorSystem = ClusterSystem
+    typealias ActorSystem = IMActorSystem
     let gate: LateReplyGate
-    init(actorSystem: ClusterSystem, gate: LateReplyGate) {
+    init(actorSystem: IMActorSystem, gate: LateReplyGate) {
         self.actorSystem = actorSystem; self.gate = gate
     }
     distributed func held(throwing: Bool) async throws -> Int {

@@ -107,7 +107,7 @@ rg -q 'STALE_REF_FAILED' "$VA_EVIDENCE_DIR/client.log"
 docker logs imv2-va-p0-host > "$VA_EVIDENCE_DIR/host-new.log" 2>&1
 rg -q 'ALL_STOPPED' "$VA_EVIDENCE_DIR/host-new.log"
 
-# A bad database endpoint must fail after creating ClusterSystem and must close
+# A bad database endpoint must fail after creating IMActorSystem and must close
 # its own resources. This uses only the isolated probe Compose project.
 export VA_DATABASE_URL=postgres://probe:probe@does-not-exist:5432/probe
 "${compose[@]}" up -d --force-recreate host

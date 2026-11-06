@@ -1,6 +1,6 @@
 import Crypto
 import Distributed
-@testable import DistributedCluster
+@testable import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
@@ -42,7 +42,7 @@ struct V2RoomClusterDiscoveryTests {
             // The real Cluster listener and its accepted sockets use SO_REUSEADDR.
             // Match both here: on Linux an accepted fake-peer socket can remain
             // in TIME_WAIT after the handshake watchdog closes it, otherwise
-            // the replacement ClusterSystem cannot bind this same port.
+            // the replacement IMActorSystem cannot bind this same port.
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
@@ -52,7 +52,7 @@ struct V2RoomClusterDiscoveryTests {
             }
             .bind(host: "127.0.0.1", port: port).get()
         do {
-            let callerSystem = await makeSystem(port: callerPort)
+            let callerSystem = try await makeSystem(port: callerPort)
             let caller = V2RoomClusterClient(system: callerSystem, signer: callerSigner,
                                              trust: trust, limits: try .init(), configuration: runtime)
             let peer = try V2RoomDiscoveryPeer(hostID: hostID, serviceID: hostSigner.serviceID,
@@ -69,7 +69,7 @@ struct V2RoomClusterDiscoveryTests {
             }
             try await dropper.close().get()
 
-            let hostSystem = await makeSystem(port: port)
+            let hostSystem = try await makeSystem(port: port)
             let published = try await publish(hostID: hostID, signer: hostSigner,
                                               system: hostSystem, port: port, availableRooms: 1)
             defer { withExtendedLifetime(published) {} }
@@ -81,8 +81,8 @@ struct V2RoomClusterDiscoveryTests {
             #expect(await discovery.quiesce(deadline: .now + .seconds(5)))
             await caller.stop()
             #expect(await caller.quiesce(deadline: .now + .seconds(2)))
-            try await callerSystem.shutdown().wait()
-            try await hostSystem.shutdown().wait()
+            try await callerSystem.shutdown()
+            try await hostSystem.shutdown()
             try await group.shutdownGracefully()
         } catch {
             try? await dropper.close().get()
@@ -91,7 +91,7 @@ struct V2RoomClusterDiscoveryTests {
         }
     }
 
-    @Test("two real ClusterSystems discover a signed endpoint and replace its incarnation",
+    @Test("two real IMActorSystems discover a signed endpoint and replace its incarnation",
           arguments: ["127.0.0.1", "localhost"])
     func discoversRestartedHost(address: String) async throws {
         let port = Int.random(in: 30_000...60_000)
@@ -116,7 +116,7 @@ struct V2RoomClusterDiscoveryTests {
             maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 2,
             maximumConcurrentReservations: 2, maximumResolveAttempts: 2
         )
-        let callerSystem = await makeSystem(port: callerPort, address: address)
+        let callerSystem = try await makeSystem(port: callerPort, address: address)
         let caller = V2RoomClusterClient(system: callerSystem, signer: callerSigner,
                                          trust: trust, limits: limits, configuration: runtime)
         let peer = try V2RoomDiscoveryPeer(hostID: hostID, serviceID: hostSigner.serviceID,
@@ -125,7 +125,7 @@ struct V2RoomClusterDiscoveryTests {
         let discovery = V2RoomClusterDiscovery(system: callerSystem, client: caller,
             trust: trust, configuration: try .init(peers: [peer], pollInterval: .milliseconds(100)))
 
-        var hostSystem = await makeSystem(port: port, address: address)
+        var hostSystem = try await makeSystem(port: port, address: address)
         let first = try await publish(hostID: hostID, signer: hostSigner,
                                       system: hostSystem, port: port, availableRooms: 4)
         defer { withExtendedLifetime(first) {} }
@@ -140,41 +140,17 @@ struct V2RoomClusterDiscoveryTests {
         for _ in 0..<3 { await discovery.pollOnce() }
         #expect(try await caller.candidates(for: owner).count == 1)
 
-        // The signed advertisement above proves that the remote endpoint is
-        // usable. For this restart test the old exact Node only needs to be
-        // present in membership. Promotion from .joining to .up additionally
-        // waits for leader election and gossip convergence, which is unrelated
-        // to replacing the host's process incarnation.
         #expect(first.descriptor.endpointID.node == first.beacon.id.node)
+        #expect(callerSystem.peerSnapshot.available[first.beacon.id.node] == true)
+        // Close real connections without changing the peer's physical identity.
+        callerSystem.retire(node: first.beacon.id.node)
         try await waitUntil(discovery: discovery) {
-            guard let member = await callerSystem.cluster.membershipSnapshot.member(first.beacon.id.node) else {
-                return false
-            }
-            return member.status == .joining || member.status == .up
-        }
-
-        // Close the actual transport channel, keeping both systems and the
-        // exact signed beacon/endpoint alive. Cached remote controls must use
-        // a newly handshaken channel without a membership down/replacement.
-        let association = try #require(callerSystem._cluster?.getSpecificExistingAssociation(with: first.beacon.id.node))
-        let oldChannel = try #require(association.lock.withLock { () -> (any Channel)? in
-            if case .associated(let channel) = association.state { return channel }; return nil
-        })
-        try await oldChannel.close().get()
-        try await waitUntil(discovery: discovery) {
-            guard let current = callerSystem._cluster?.getSpecificExistingAssociation(with: first.beacon.id.node) else { return false }
-            let reconnected = current.lock.withLock { () -> Bool in
-                guard case .associated(let channel) = current.state else { return false }
-                return channel.isActive && channel !== oldChannel
-            }
-            guard reconnected else { return false }
+            guard callerSystem.peerSnapshot.available[first.beacon.id.node] == true else { return false }
             return try await caller.candidates(for: owner).first?.identity == first.descriptor.identity
         }
-        let sameMember = try #require(await callerSystem.cluster.membershipSnapshot.member(first.beacon.id.node))
-        #expect(sameMember.status < .down)
 
-        try await hostSystem.shutdown().wait()
-        hostSystem = await makeSystem(port: port, address: address)
+        try await hostSystem.shutdown()
+        hostSystem = try await makeSystem(port: port, address: address)
         let second = try await publish(hostID: hostID, signer: hostSigner,
                                        system: hostSystem, port: port, availableRooms: 1)
         defer { withExtendedLifetime(second) {} }
@@ -186,8 +162,8 @@ struct V2RoomClusterDiscoveryTests {
         #expect(replacement.availableRooms == 1)
         #expect(try await caller.candidates(for: owner).count == 1)
 
-        try await hostSystem.shutdown().wait()
-        hostSystem = await makeSystem(port: port, address: address)
+        try await hostSystem.shutdown()
+        hostSystem = try await makeSystem(port: port, address: address)
         let third = try await publish(hostID: hostID, signer: hostSigner,
                                       system: hostSystem, port: port, availableRooms: 2)
         defer { withExtendedLifetime(third) {} }
@@ -203,8 +179,8 @@ struct V2RoomClusterDiscoveryTests {
         #expect(await discovery.quiesce(deadline: .now + .seconds(5)))
         await caller.stop()
         #expect(await caller.quiesce(deadline: .now + .seconds(2)))
-        try await callerSystem.shutdown().wait()
-        try await hostSystem.shutdown().wait()
+        try await callerSystem.shutdown()
+        try await hostSystem.shutdown()
     }
 
     @Test("lookup over its hard candidate limit skips all probes and registration")
@@ -225,8 +201,8 @@ struct V2RoomClusterDiscoveryTests {
             maximumActivationWaitersPerHost: 2, maximumConcurrentResolutions: 1,
             maximumConcurrentReservations: 1
         )
-        let hostSystem = await makeSystem(port: port)
-        let callerSystem = await makeSystem(port: callerPort)
+        let hostSystem = try await makeSystem(port: port)
+        let callerSystem = try await makeSystem(port: callerPort)
         let first = try await publish(hostID: hostID, signer: signer, system: hostSystem,
                               port: port, availableRooms: 1)
         let second = try await publish(hostID: hostID, signer: signer, system: hostSystem,
@@ -239,12 +215,12 @@ struct V2RoomClusterDiscoveryTests {
                                            accessibleShardIDs: ["pinned-shard"], maximumRooms: 1)
         let discovery = V2RoomClusterDiscovery(system: callerSystem, client: caller,
             trust: trust, configuration: try .init(peers: [peer], maximumCandidatesPerHost: 1))
-        callerSystem.cluster.join(host: "127.0.0.1", port: port)
+        callerSystem.connect(host: "127.0.0.1", port: port)
         let keyForHost = V2RoomDiscoveryBeacon.key(for: hostID)
         let deadline = ContinuousClock.now + .seconds(10)
-        while await callerSystem.receptionist.lookup(keyForHost).count < 2 {
+        while try await callerSystem.lookup(keyForHost, at: .init(host: "127.0.0.1", port: port)).count < 2 {
             guard ContinuousClock.now < deadline else {
-                Issue.record("two Receptionist registrations did not arrive"); break
+                Issue.record("two Directory registrations did not arrive"); break
             }
             try await Task.sleep(for: .milliseconds(50))
         }
@@ -254,11 +230,11 @@ struct V2RoomClusterDiscoveryTests {
         await discovery.stop()
         await caller.stop()
         #expect(await caller.quiesce(deadline: .now + .seconds(2)))
-        try await callerSystem.shutdown().wait()
-        try await hostSystem.shutdown().wait()
+        try await callerSystem.shutdown()
+        try await hostSystem.shutdown()
     }
 
-    @Test("a receptionist ActorID signed by a different service grants no candidate")
+    @Test("a directory ActorID signed by a different service grants no candidate")
     func rejectsWrongSigner() async throws {
         let port = Int.random(in: 30_000...60_000)
         let callerPort = Int.random(in: 30_000...60_000)
@@ -274,8 +250,8 @@ struct V2RoomClusterDiscoveryTests {
             .init(serviceID: rogue.serviceID, publicKey: rogueKey.publicKey.rawRepresentation,
                   permissions: [])
         ])
-        let hostSystem = await makeSystem(port: port)
-        let callerSystem = await makeSystem(port: callerPort)
+        let hostSystem = try await makeSystem(port: port)
+        let callerSystem = try await makeSystem(port: callerPort)
         let published = try await publish(hostID: hostID, signer: rogue,
                                           system: hostSystem, port: port, availableRooms: 1)
         defer { withExtendedLifetime(published) {} }
@@ -292,16 +268,16 @@ struct V2RoomClusterDiscoveryTests {
                                            accessibleShardIDs: ["pinned-shard"], maximumRooms: 1)
         let discovery = V2RoomClusterDiscovery(system: callerSystem, client: caller,
             trust: trust, configuration: try .init(peers: [peer]))
-        callerSystem.cluster.join(host: "127.0.0.1", port: port)
+        callerSystem.connect(host: "127.0.0.1", port: port)
         try await waitForLookup(system: callerSystem,
-                                key: V2RoomDiscoveryBeacon.key(for: hostID), count: 1)
+                                key: V2RoomDiscoveryBeacon.key(for: hostID), endpoint: .init(host: "127.0.0.1", port: port), count: 1)
         await discovery.pollOnce()
         #expect(try await caller.candidates(for: .init(shardID: "pinned-shard", epoch: 0)).isEmpty)
         await discovery.stop()
         await caller.stop()
         #expect(await caller.quiesce(deadline: .now + .seconds(2)))
-        try await callerSystem.shutdown().wait()
-        try await hostSystem.shutdown().wait()
+        try await callerSystem.shutdown()
+        try await hostSystem.shutdown()
     }
 
     @Test("authorized live peers add, remove and rejoin without downing the process")
@@ -319,8 +295,8 @@ struct V2RoomClusterDiscoveryTests {
             .init(serviceID: callerSigner.serviceID, publicKey: callerKey.publicKey.rawRepresentation,
                   permissions: [.roomCoordination]),
         ])
-        let callerSystem = await makeSystem(port: callerPort)
-        let hostSystem = await makeSystem(port: port)
+        let callerSystem = try await makeSystem(port: callerPort)
+        let hostSystem = try await makeSystem(port: port)
         let caller = V2RoomClusterClient(system: callerSystem, signer: callerSigner,
             trust: trust, limits: try .init(), configuration: try .init())
         let peer = try V2RoomDiscoveryPeer(hostID: hostID, serviceID: hostSigner.serviceID,
@@ -373,47 +349,45 @@ struct V2RoomClusterDiscoveryTests {
             }
             #expect(await discovery.snapshot().activeHosts == 0)
             try await discovery.installAuthorizedPeers([], revision: 3) // exact retry
-            let member = try #require(await callerSystem.cluster.membershipSnapshot.member(published.beacon.id.node))
-            #expect(member.status < .down)
+            #expect(callerSystem.peerSnapshot.available[published.beacon.id.node] == true)
             try await discovery.installAuthorizedPeers([peer], revision: 4)
             try await waitUntil(discovery: discovery) {
                 try await caller.candidates(for: owner).first(where: \.isHealthy)?.identity == published.descriptor.identity
             }
             #expect(await discovery.quiesce(deadline: .now + .seconds(5)))
             #expect(await caller.quiesce(deadline: .now + .seconds(5)))
-            try await callerSystem.shutdown().wait()
-            try await hostSystem.shutdown().wait()
+            try await callerSystem.shutdown()
+            try await hostSystem.shutdown()
         } catch {
             _ = await discovery.quiesce(deadline: .now + .seconds(5))
             _ = await caller.quiesce(deadline: .now + .seconds(5))
-            try? await callerSystem.shutdown().wait()
-            try? await hostSystem.shutdown().wait()
+            try? await callerSystem.shutdown()
+            try? await hostSystem.shutdown()
             throw error
         }
     }
 
-    private func makeSystem(port: Int, address: String = "127.0.0.1") async -> ClusterSystem {
-        var settings = ClusterSystemSettings(name: "v2-discovery-test", host: address, port: port)
+    private func makeSystem(port: Int, address: String = "127.0.0.1") async throws -> IMActorSystem {
+        var settings = IMActorSystemSettings(name: "v2-discovery-test", host: address, port: port)
         settings.threadPoolSize = 1
-        settings.downingStrategy = .none
-        settings.onDownAction = .none
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance =
-            .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        return await ClusterSystem("v2-discovery-test", settings: settings)
+
+
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        return try await V2ActorRPCManifest.makeSystem("v2-discovery-test", settings: settings)
     }
 
     private func publish(hostID: V2ActorHostID, signer: V2ActorSigningIdentity,
-                         system: ClusterSystem, port: Int,
+                         system: IMActorSystem, port: Int,
                          availableRooms: Int) async throws -> Published {
         let endpoint = DiscoveryTestEndpoint(actorSystem: system)
         let descriptor = try V2RoomClusterHostDescriptor(
             identity: .init(hostID: hostID, incarnationID: UUID()), endpointID: endpoint.id,
-            address: endpoint.id.node.host, port: port,
+            address: endpoint.id.node.endpoint.host, port: port,
             accessibleShardIDs: ["untrusted-claim"], availableRooms: availableRooms, isHealthy: true)
         let beacon = V2RoomDiscoveryBeacon(actorSystem: system, descriptor: descriptor,
                                             signer: signer, state: .init())
-        await system.receptionist.checkIn(beacon, with: V2RoomDiscoveryBeacon.key(for: hostID))
+        try system.publish(beacon, as: V2RoomDiscoveryBeacon.key(for: hostID))
         return .init(descriptor: descriptor, endpoint: endpoint, beacon: beacon)
     }
 
@@ -430,11 +404,11 @@ struct V2RoomClusterDiscoveryTests {
         }
     }
 
-    private func waitForLookup(system: ClusterSystem,
-                               key: DistributedReception.Key<V2RoomDiscoveryBeacon>,
-                               count: Int) async throws {
+    private func waitForLookup(system: IMActorSystem,
+                               key: IMServiceKey<V2RoomDiscoveryBeacon>,
+                               endpoint: IMEndpoint, count: Int) async throws {
         let deadline = ContinuousClock.now + .seconds(10)
-        while await system.receptionist.lookup(key).count < count {
+        while try await system.lookup(key, at: endpoint).count < count {
             guard ContinuousClock.now < deadline else {
                 throw V2ActorAuthenticationError.overloaded
             }
@@ -450,5 +424,5 @@ private struct Published {
 }
 
 private distributed actor DiscoveryTestEndpoint {
-    typealias ActorSystem = ClusterSystem
+    typealias ActorSystem = IMActorSystem
 }

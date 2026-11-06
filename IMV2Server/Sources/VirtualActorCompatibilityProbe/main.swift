@@ -3,7 +3,7 @@ import IMV2ServerContracts
 import Dispatch
 import Crypto
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import FluentKit
 import FluentPostgresDriver
 import Foundation
@@ -17,12 +17,13 @@ import IMV2Server
 import IMV2ServerInfrastructure
 import IMV2ServerHTTP
 import Logging
+import NIOCore
 import NIOPosix
 import NIOSSL
 import SQLKit
 import Vapor
 
-// Intentionally small wire types: this target checks the real ClusterSystem
+// Intentionally small wire types: this target checks the real IMActorSystem
 // serializer while preserving the application's RoomID representation.
 struct ProbeRequest: Codable, Sendable {
     let protocolVersion: Int
@@ -76,7 +77,7 @@ func canonical(_ value: some Encodable) throws -> Data {
 }
 
 distributed actor ProbeRoom {
-    typealias ActorSystem = ClusterSystem
+    typealias ActorSystem = IMActorSystem
     let incarnation: UUID
     let signingKey: Data
     let trustedClientKey: Data
@@ -161,7 +162,7 @@ enum VirtualActorCompatibilityProbe {
         }
     }
 
-    static func makeSystem(host: String, port: Int) async throws -> ClusterSystem {
+    static func makeSystem(host: String, port: Int) async throws -> IMActorSystem {
         let certName = environment["VA_CERT_NAME"] ?? "host"
         let caName = environment["VA_CA_FILE"] ?? "ca.pem"
         let cert = try NIOSSLCertificate(
@@ -178,14 +179,24 @@ enum VirtualActorCompatibilityProbe {
         )
         tls.certificateVerification = .fullVerification
         tls.trustRoots = .certificates([ca])
-        var settings = ClusterSystemSettings(name: "imv2-va-p0", host: host, port: port, tls: tls)
+        var settings = IMActorSystemSettings(name: "imv2-va-p0", host: host, port: port, tls: tls)
         // Keep the transport envelope larger than the 64 KiB application
         // request while making the real TLS header-only rejection observable.
-        settings.maximumInboundFrameBytes = try .init(bytes: 1_048_576)
+        settings.maximumInboundFrameBytes = 1_048_576
         settings.threadPoolSize = 2
-        settings.serialization.registerInbound(ProbeDomainError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [ProbeDomainError.self])
-        return await ClusterSystem("imv2-va-p0", settings: settings)
+        settings.errorTypes = [ProbeDomainError.self]
+
+        settings.methods = [
+            try await IMActorSystem.register(id: 1, actor: ProbeRoom.self) {
+                _ = try await $0.execute(.init(protocolVersion: 1, roomID: roomID, text: "", delayMilliseconds: 0))
+            },
+            try await IMActorSystem.register(id: 2, actor: ProbeRoom.self) {
+                _ = try await $0.signedExecute(.init(body: .init(serviceID: "", role: "", recipientIncarnation: UUID(),
+                    attemptID: UUID(), remainingMilliseconds: 1, method: "",
+                    payload: .init(protocolVersion: 1, roomID: roomID, text: "", delayMilliseconds: 0)), signature: Data()))
+            }
+        ]
+        return try await IMActorSystem("imv2-va-p0", settings: settings)
     }
 
     static func host() async throws {
@@ -242,12 +253,12 @@ enum VirtualActorCompatibilityProbe {
             if let app { try? await app.shutdown() }
             try? await databaseResources.shutdown()
             try? await group.shutdownGracefully()
-            try? await system.shutdown().wait()
+            try? await system.shutdown()
             throw error
         }
         try await databaseResources.shutdown()
         try await group.shutdownGracefully()
-        try await system.shutdown().wait()
+        try await system.shutdown()
         printLine("ALL_STOPPED")
     }
 
@@ -255,7 +266,7 @@ enum VirtualActorCompatibilityProbe {
         let clientHost = environment["VA_CLIENT_NAME"] ?? "imv2-va-p0-client"
         let system = try await makeSystem(host: clientHost, port: 19082)
         do {
-            system.cluster.join(host: environment["VA_HOST_NAME"] ?? "imv2-va-p0-host", port: 19081)
+            system.connect(host: environment["VA_HOST_NAME"] ?? "imv2-va-p0-host", port: 19081)
             let oldID = try readID("actor-old.json")
             let old = try ProbeRoom.resolve(id: oldID, using: system)
             let reply = try await retryCall(old, request: request(text: "hello"))
@@ -305,7 +316,7 @@ enum VirtualActorCompatibilityProbe {
                 try await old.execute(request(text: "hello", version: 2))
             }
             do {
-                _ = try await RemoteCall.with(timeout: .milliseconds(150)) {
+                _ = try await IMRemoteCall.with(timeout: .milliseconds(150)) {
                     try await old.execute(request(text: "slow", delayMilliseconds: 1_000))
                 }
                 throw ProbeFailure.unexpectedError("timeout call succeeded")
@@ -315,7 +326,7 @@ enum VirtualActorCompatibilityProbe {
             try mark("stage1")
             try await waitForMarker("continue1")
             do {
-                _ = try await RemoteCall.with(timeout: .seconds(2)) {
+                _ = try await IMRemoteCall.with(timeout: .seconds(2)) {
                     try await old.execute(request(text: "stale"))
                 }
                 throw ProbeFailure.staleReferenceSucceeded
@@ -326,7 +337,7 @@ enum VirtualActorCompatibilityProbe {
             guard try JSONEncoder().encode(oldID) != JSONEncoder().encode(newID) else {
                 throw ProbeFailure.wrongResult
             }
-            system.cluster.join(host: environment["VA_HOST_NAME"] ?? "imv2-va-p0-host", port: 19081)
+            system.connect(host: environment["VA_HOST_NAME"] ?? "imv2-va-p0-host", port: 19081)
             let fresh = try ProbeRoom.resolve(id: newID, using: system)
             let freshReply = try await retryCall(fresh, request: request(text: "fresh"))
             guard freshReply.incarnation != reply.incarnation, freshReply.roomID == roomID else {
@@ -334,30 +345,30 @@ enum VirtualActorCompatibilityProbe {
             }
             printLine("NEW_REF_OK \(freshReply.incarnation)")
         } catch {
-            try? await system.shutdown().wait()
+            try? await system.shutdown()
             throw error
         }
-        try await system.shutdown().wait()
+        try await system.shutdown()
         printLine("CLIENT_STOPPED")
     }
 
     static func negativeTLS() async throws {
         let system = try await makeSystem(host: "imv2-va-p0-badclient", port: 19083)
         do {
-            system.cluster.join(host: "imv2-va-p0-host", port: 19081)
+            system.connect(host: "imv2-va-p0-host", port: 19081)
             let old = try ProbeRoom.resolve(id: readID("actor-old.json"), using: system)
             do {
-                _ = try await RemoteCall.with(timeout: .seconds(2)) {
+                _ = try await IMRemoteCall.with(timeout: .seconds(2)) {
                     try await old.execute(request(text: "must-fail"))
                 }
                 throw ProbeFailure.unexpectedError("untrusted TLS call succeeded")
             } catch let failure as ProbeFailure { throw failure }
               catch { printLine("UNTRUSTED_TLS_REJECTED \(type(of: error))") }
         } catch {
-            try? await system.shutdown().wait()
+            try? await system.shutdown()
             throw error
         }
-        try await system.shutdown().wait()
+        try await system.shutdown()
     }
 
     static func request(text: String, version: Int = 1, delayMilliseconds: Int = 0) -> ProbeRequest {
@@ -415,15 +426,15 @@ enum VirtualActorCompatibilityProbe {
         }
     }
 
-    static func readID(_ name: String) throws -> ClusterSystem.ActorID {
-        try JSONDecoder().decode(ClusterSystem.ActorID.self, from: Data(contentsOf: directory.appendingPathComponent(name)))
+    static func readID(_ name: String) throws -> IMActorSystem.ActorID {
+        try JSONDecoder().decode(IMActorSystem.ActorID.self, from: Data(contentsOf: directory.appendingPathComponent(name)))
     }
 
     static func retryCall(_ room: ProbeRoom, request: ProbeRequest) async throws -> ProbeReply {
         var latest: (any Error)?
         for _ in 0..<20 {
             do {
-                return try await RemoteCall.with(timeout: .seconds(2)) { try await room.execute(request) }
+                return try await IMRemoteCall.with(timeout: .seconds(2)) { try await room.execute(request) }
             } catch {
                 latest = error
                 try await Task.sleep(for: .milliseconds(250))

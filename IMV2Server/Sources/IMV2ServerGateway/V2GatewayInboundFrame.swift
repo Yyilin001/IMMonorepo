@@ -1,11 +1,13 @@
 import Foundation
 import IMV2Core
 import NIOCore
+import IMV2ActorContracts
 
 /// Own the payload across actor/task boundaries; borrow it only while decoding.
 /// The header has no payload and is used by the connection state machine.
 struct V2GatewayInboundFrame: Sendable {
     var heartbeatProbe: V2GatewayHeartbeatProbe?
+    var sendTrace: V2SendPathTrace?
     let header: V2Frame
     private enum Storage: Sendable { case data(Data), buffer(ByteBuffer) }
     private let storage: Storage

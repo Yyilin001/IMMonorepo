@@ -1,31 +1,22 @@
 import Crypto
 import Synchronization
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 
-/// Project the library's actor-confined membership into Sendable lifecycle data.
-/// Cluster.Event itself must never be sent across our Actor boundaries.
+/// Complete bounded snapshots preserve reachability changes when a consumer lags.
 struct V2RealtimePeerLifecycleChange: Sendable {
-    let available: [Cluster.Node: Bool]
-    let invalidatesOpening: Bool
-
-    init(event: Cluster.Event, membership: inout Cluster.Membership) {
-        try? membership.apply(event: event)
-        var available = Dictionary(uniqueKeysWithValues: membership.members(atLeast: .joining).map {
-            ($0.node, $0.status < .down && $0.reachability == .reachable)
+    let available: [IMNode: Bool]
+    let invalidated: Set<IMNode>
+    var invalidatesOpening: Bool { !invalidated.isEmpty }
+    init(event: IMPeerSnapshot, previous: IMPeerSnapshot?) {
+        available = event.available
+        var changed = Set(event.lossRevisions.compactMap { node, revision in
+            previous?.lossRevisions[node] != revision ? node : nil
         })
-        switch event {
-        case .membershipChange(let change) where change.status >= .down:
-            // Removed members can already be absent from the snapshot.
-            available[change.node] = false
-        case .reachabilityChange(let change) where change.reachability == .unreachable:
-            available[change.member.node] = false
-        default: break
-        }
-        self.available = available
-        self.invalidatesOpening = available.values.contains(false)
+        if let previous { changed.formUnion(previous.available.keys.filter { event.available[$0] == nil }) }
+        invalidated = changed
     }
 }
 
@@ -137,7 +128,7 @@ struct RoomDeliverySessionCall: Codable, Equatable, Sendable {
     let sessionID: UUID
     let sequence: UInt64
     let attemptID: UUID
-    let sourceNode: Cluster.Node
+    let sourceNode: IMNode
     let sourceShardID: String
     let pulse: V2RoomDeliverySessionPulse
 }
@@ -150,9 +141,9 @@ struct RoomDeliverySessionReply: Codable, Equatable, Sendable {
 }
 
 public distributed actor V2GatewayRealtimeEndpoint {
-    public typealias ActorSystem = ClusterSystem
+    public typealias ActorSystem = IMActorSystem
     private let service: V2GatewayRealtimeInbound
-    init(actorSystem: ClusterSystem, service: V2GatewayRealtimeInbound) {
+    init(actorSystem: IMActorSystem, service: V2GatewayRealtimeInbound) {
         self.actorSystem = actorSystem; self.service = service
     }
     public distributed func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
@@ -188,16 +179,16 @@ actor V2GatewayRealtimeInbound {
     private var accepting = true
     private var roomSubscriptionHandler: (any V2RoomSubscriptionHandler)?
     private var projectionHandler: (any V2RealtimeJournalProjectionHandler)?
-    private var clusterSystem: ClusterSystem?
+    private var clusterSystem: IMActorSystem?
     private var lifecycleWorker: Task<Void, Never>?
-    private var peerAvailability: [Cluster.Node: Bool] = [:]
+    private var peerAvailability: [IMNode: Bool] = [:]
     package private(set) var deliveryPeerJoinRequestCount: UInt64 = 0
-    private var deliveryPeerJoinRetryAt: [Cluster.Node: ContinuousClock.Instant] = [:]
+    private var deliveryPeerJoinRetryAt: [IMNode: ContinuousClock.Instant] = [:]
     private var lifecycleRevision: UInt64 = 0
     private struct DeliveryPeer {
         let session: V2RoomDeliverySession
         let serviceID: String
-        let node: Cluster.Node
+        let node: IMNode
     }
     private var deliveryPeers: [V2ActorHostIdentity: DeliveryPeer] = [:]
     // Actor-confined reference state avoids copying the replay window on every RPC.
@@ -241,14 +232,15 @@ actor V2GatewayRealtimeInbound {
             digest = Data(SHA256.hash(data: bytes))
         }
     }
-    func startDeliveryLifecycle(system: ClusterSystem, sender: V2RealtimeClusterSender) {
+    func startDeliveryLifecycle(system: IMActorSystem, sender: V2RealtimeClusterSender) {
         guard lifecycleWorker == nil, accepting else { return }
         clusterSystem = system
         lifecycleWorker = Task { [weak self] in
-            var membership = Cluster.Membership.empty
-            for await event in system.cluster.events {
+            var previous: IMPeerSnapshot?
+            for await event in system.peerEvents {
                 guard !Task.isCancelled, let self else { return }
-                let change = V2RealtimePeerLifecycleChange(event: event, membership: &membership)
+                let change = V2RealtimePeerLifecycleChange(event: event, previous: previous)
+                previous = event
                 await self.clusterChanged(change)
                 await sender.clusterChanged(change)
             }
@@ -258,8 +250,8 @@ actor V2GatewayRealtimeInbound {
         peerAvailability = change.available
         for node in change.available.keys { deliveryPeerJoinRetryAt.removeValue(forKey: node) }
         if change.invalidatesOpening { lifecycleRevision &+= 1 }
-        let localUnavailable = clusterSystem.map { change.available[$0.cluster.node] == false } ?? false
-        let failed = deliveryPeers.values.filter { localUnavailable || change.available[$0.node] == false }
+        let localUnavailable = clusterSystem.map { change.available[$0.node] == false || change.invalidated.contains($0.node) } ?? false
+        let failed = deliveryPeers.values.filter { localUnavailable || change.available[$0.node] == false || change.invalidated.contains($0.node) }
         for peer in failed {
             deliveryPeers.removeValue(forKey: peer.session.host)
             _ = await roomSubscriptionHandler?.applyDeliverySession(.init(session: peer.session, kind: .retire, sequence: 2),
@@ -398,9 +390,9 @@ actor V2GatewayRealtimeInbound {
             // peer must not occupy the entire remote-call budget waiting for
             // gossip; reject this open without installing any authorization.
             guard peerAvailability[call.sourceNode] == true,
-                  peerAvailability[system.cluster.node] != false else {
+                  peerAvailability[system.node] != false else {
                 if peerAvailability[call.sourceNode] == nil,
-                   peerAvailability[system.cluster.node] != false {
+                   peerAvailability[system.node] != false {
                     requestDeliveryPeerJoin(call.sourceNode, system: system)
                 }
                 return try deliverySessionReply(.resetRequired, call: call, session: session)
@@ -429,7 +421,7 @@ actor V2GatewayRealtimeInbound {
             sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: 16_384)
     }
 
-    private func requestDeliveryPeerJoin(_ node: Cluster.Node, system: ClusterSystem) {
+    private func requestDeliveryPeerJoin(_ node: IMNode, system: IMActorSystem) {
         let now = ContinuousClock.now
         if let retryAt = deliveryPeerJoinRetryAt[node], retryAt > now { return }
         // Bounded establishment state, not a growing per-room or per-request
@@ -440,7 +432,7 @@ actor V2GatewayRealtimeInbound {
         guard deliveryPeerJoinRetryAt[node] != nil || deliveryPeerJoinRetryAt.count < 128 else { return }
         deliveryPeerJoinRetryAt[node] = now + .seconds(1)
         deliveryPeerJoinRequestCount &+= 1
-        system.cluster.join(host: node.endpoint.host, port: node.endpoint.port)
+        system.connect(host: node.endpoint.host, port: node.endpoint.port)
     }
     func deliverRoomSubscription(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
@@ -505,7 +497,7 @@ actor V2GatewayRealtimeInbound {
 }
 
 public actor V2RealtimeClusterSender {
-    private let system: ClusterSystem
+    private let system: IMActorSystem
     private let signer: V2ActorSigningIdentity
     private let trust: V2ActorTrustStore
     private let limits: V2RealtimeTransportLimits
@@ -513,16 +505,16 @@ public actor V2RealtimeClusterSender {
     private let incarnation = UUID()
     private var stopped = false
     private var active = 0
-    private var roomDeliveryPeers: [V2RoomDeliverySession: Cluster.Node] = [:]
+    private var roomDeliveryPeers: [V2RoomDeliverySession: IMNode] = [:]
     private var peerFailure: (@Sendable (V2ActorHostIdentity, V2GatewayRealtimeIdentity) async -> Void)?
-    private var peerAvailability: [Cluster.Node: Bool] = [:]
+    private var peerAvailability: [IMNode: Bool] = [:]
     public func configureRoomDeliveryPeerFailure(_ notify: @escaping @Sendable (V2ActorHostIdentity, V2GatewayRealtimeIdentity) async -> Void) {
         precondition(peerFailure == nil && !stopped); peerFailure = notify
     }
     func clusterChanged(_ change: V2RealtimePeerLifecycleChange) async {
         peerAvailability = change.available
-        let localUnavailable = change.available[system.cluster.node] == false
-        let failed = roomDeliveryPeers.filter { localUnavailable || change.available[$0.value] == false }
+        let localUnavailable = change.available[system.node] == false
+        let failed = roomDeliveryPeers.filter { localUnavailable || change.available[$0.value] == false || change.invalidated.contains($0.value) }
         for (session, _) in failed {
             roomDeliveryPeers.removeValue(forKey: session)
             await peerFailure?(session.host, session.gateway)
@@ -542,7 +534,7 @@ public actor V2RealtimeClusterSender {
         let expires: ContinuousClock.Instant
         var sequence: UInt64
     }
-    init(system: ClusterSystem, signer: V2ActorSigningIdentity, trust: V2ActorTrustStore, limits: V2RealtimeTransportLimits,
+    init(system: IMActorSystem, signer: V2ActorSigningIdentity, trust: V2ActorTrustStore, limits: V2RealtimeTransportLimits,
          local: (V2GatewayRealtimeDescriptor, V2GatewayRealtimeInbound)? = nil) {
         self.system = system; self.signer = signer; self.trust = trust; self.limits = limits
         self.local = local
@@ -568,7 +560,7 @@ public actor V2RealtimeClusterSender {
         let packet = try session.mac.seal(call, reply: false, maximumBytes: limits.maximumPacketBytes)
         do {
             let endpoint = session.endpoint
-            let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.exchange(packet) }
+            let response = try await IMRemoteCall.with(timeout: limits.callTimeout) { try await endpoint.exchange(packet) }
             let peer = try trust.configuredService(try V2ActorServiceID(target.identity.serviceID))
             let reply = try session.mac.open(response, as: RealtimeReply.self, reply: true, maximumBytes: 16_384)
             try validatePeer(peer, target: target)
@@ -603,7 +595,7 @@ public actor V2RealtimeClusterSender {
         let packet = try session.mac.seal(call, reply: false, maximumBytes: limits.maximumPacketBytes)
         do {
             let endpoint = session.endpoint
-            let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.projectJournal(packet) }
+            let response = try await IMRemoteCall.with(timeout: limits.callTimeout) { try await endpoint.projectJournal(packet) }
             let peer = try trust.configuredService(try V2ActorServiceID(target.identity.serviceID))
             let reply = try session.mac.open(response, as: JournalProjectionReply.self, reply: true, maximumBytes: 16_384)
             try validatePeer(peer, target: target)
@@ -639,7 +631,7 @@ public actor V2RealtimeClusterSender {
         let packet = try session.mac.seal(call, reply: false, maximumBytes: limits.maximumPacketBytes)
         do {
             let endpoint = session.endpoint
-            let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.deliverRoomSubscription(packet) }
+            let response = try await IMRemoteCall.with(timeout: limits.callTimeout) { try await endpoint.deliverRoomSubscription(packet) }
             let peer = try trust.configuredService(try V2ActorServiceID(target.identity.serviceID))
             let reply = try session.mac.open(response, as: RoomSubscriptionReply.self, reply: true, maximumBytes: 16_384)
             try validatePeer(peer, target: target)
@@ -670,7 +662,7 @@ public actor V2RealtimeClusterSender {
         }
         if let local, target == local.descriptor {
             let serviceID = signer.serviceID
-            return try await RemoteCall.with(timeout: limits.callTimeout) {
+            return try await IMRemoteCall.with(timeout: limits.callTimeout) {
                 try await local.inbound.deliverLocalRoomSubscriptionBatch(validated,
                     serviceID: serviceID, sourceShardID: sourceShardID)
             }
@@ -687,7 +679,7 @@ public actor V2RealtimeClusterSender {
         let packet = try session.mac.seal(call, reply: false, maximumBytes: limits.maximumPacketBytes)
         do {
             let endpoint = session.endpoint
-            let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.deliverRoomSubscriptionBatch(packet) }
+            let response = try await IMRemoteCall.with(timeout: limits.callTimeout) { try await endpoint.deliverRoomSubscriptionBatch(packet) }
             let peer = try trust.configuredService(try V2ActorServiceID(target.identity.serviceID))
             let reply = try session.mac.open(response, as: RoomSubscriptionBatchReply.self, reply: true, maximumBytes: limits.maximumPacketBytes)
             try validatePeer(peer, target: target)
@@ -719,11 +711,11 @@ public actor V2RealtimeClusterSender {
         session.sequence += 1; sessions[target] = session
         let call = RoomDeliverySessionCall(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation,
             recipient: target.identity, sessionID: session.id, sequence: session.sequence, attemptID: UUID(),
-            sourceNode: system.cluster.node, sourceShardID: sourceShardID, pulse: pulse)
+            sourceNode: system.node, sourceShardID: sourceShardID, pulse: pulse)
         let packet = try session.mac.seal(call, reply: false, maximumBytes: 16_384)
         do {
         let endpoint = session.endpoint
-        let response = try await RemoteCall.with(timeout: .seconds(2)) { try await endpoint.deliverySession(packet) }
+        let response = try await IMRemoteCall.with(timeout: .seconds(2)) { try await endpoint.deliverySession(packet) }
         let peer = try trust.configuredService(try V2ActorServiceID(target.identity.serviceID))
         try validatePeer(peer, target: target)
         let reply = try session.mac.open(response, as: RoomDeliverySessionReply.self, reply: true, maximumBytes: 16_384)
@@ -731,7 +723,7 @@ public actor V2RealtimeClusterSender {
               reply.sequence == call.sequence, reply.attemptID == call.attemptID else { throw V2ActorAuthenticationError.wrongRecipient }
         if reply.result == .accepted, pulse.kind == .open {
             guard !stopped, peerAvailability[endpoint.id.node] != false,
-                  peerAvailability[system.cluster.node] != false else {
+                  peerAvailability[system.node] != false else {
                 throw V2ActorAuthenticationError.overloaded
             }
             roomDeliveryPeers = roomDeliveryPeers.filter { $0.key.host != pulse.session.host || $0.key.gateway != pulse.session.gateway }
@@ -782,15 +774,15 @@ public actor V2RealtimeClusterSender {
         let limits = self.limits; let incarnation = self.incarnation
         let started = ContinuousClock.now
         let task = Task<Session, Error> {
-            let id = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: target.endpointReference)
+            let id = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: target.endpointReference)
             guard id.node.endpoint.host == target.address, id.node.endpoint.port == target.port else { throw V2ActorAuthenticationError.wrongRecipient }
-            system.cluster.join(host: target.address, port: target.port)
+            system.connect(host: target.address, port: target.port)
             let endpoint = try V2GatewayRealtimeEndpoint.resolve(id: id, using: system)
             let agreement = Curve25519.KeyAgreement.PrivateKey()
             let hello = RealtimeHello(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation, recipient: target.identity, handshakeID: UUID(),
                                       endpointDigest: Data(SHA256.hash(data: target.endpointReference)), agreementKey: agreement.publicKey.rawRepresentation)
             let packet = try signer.sign(hello, maximumBytes: 16_384)
-            let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.openSession(packet) }
+            let response = try await IMRemoteCall.with(timeout: limits.callTimeout) { try await endpoint.openSession(packet) }
             let (grant, peer) = try trust.verify(response, as: RealtimeGrant.self, maximumBytes: 16_384)
             guard peer.serviceID.rawValue == target.identity.serviceID, peer.permissions.contains(.realtimeReceive),
                   peer.gatewayNodeIDs.contains(target.identity.nodeID) || peer.serviceID.rawValue == target.identity.nodeID,
@@ -836,8 +828,8 @@ public final class V2RealtimeTransportHandle: Sendable {
     public let sender: V2RealtimeClusterSender
     private let endpoint: V2GatewayRealtimeEndpoint
     private let inbound: V2GatewayRealtimeInbound
-    private let system: ClusterSystem
-    init(system: ClusterSystem, descriptor: V2GatewayRealtimeDescriptor, sender: V2RealtimeClusterSender,
+    private let system: IMActorSystem
+    init(system: IMActorSystem, descriptor: V2GatewayRealtimeDescriptor, sender: V2RealtimeClusterSender,
          endpoint: V2GatewayRealtimeEndpoint, inbound: V2GatewayRealtimeInbound) {
         self.system = system; self.descriptor = descriptor; self.sender = sender; self.endpoint = endpoint; self.inbound = inbound
     }
@@ -877,7 +869,7 @@ public final class V2RealtimeTransportHandle: Sendable {
     }
 }
 
-func buildRealtimeTransport(system: ClusterSystem, identity: V2GatewayRealtimeIdentity,
+func buildRealtimeTransport(system: IMActorSystem, identity: V2GatewayRealtimeIdentity,
                            address: String, port: Int, signer: V2ActorSigningIdentity,
                            trust: V2ActorTrustStore, ingress: any V2RealtimeIngress,
                            serviceOwnerAccess: [V2ActorServiceID: Set<String>],

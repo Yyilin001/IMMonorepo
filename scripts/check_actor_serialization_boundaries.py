@@ -5,7 +5,7 @@ import re
 import sys
 root = Path(__file__).resolve().parents[1] / 'IMV2Server/Sources'
 failures = []
-for target in ('IMV2ActorContracts', 'IMV2ActorCluster', 'IMV2ActorRuntime'):
+for target in ('IMV2ActorContracts', 'IMV2ActorCluster', 'IMV2ActorRuntime', 'IMActorWire', 'IMActorTransport', 'IMActorSystem'):
     forbidden = r'\b(?:JSONEncoder|JSONDecoder|JSONSerialization)\b'
     if target == 'IMV2ActorRuntime':
         forbidden = r'\b(?:JSONEncoder|JSONDecoder|JSONSerialization|V2ActorProtobuf)\b'

@@ -1,4 +1,4 @@
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import SwiftProtobuf
@@ -202,7 +202,7 @@ extension RoomDeliverySessionCall: V2ActorProtobufMessage {
         let h = wire.header; try validate(h)
         return try .init(serviceID: .init(h.serviceID), version: Int(h.version), callerIncarnation: V2HotPB.uuid(h.callerIncarnation),
             recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID),
-            sourceNode: V2ActorProtobuf.decode(Cluster.Node.self, from: wire.sourceNode), sourceShardID: wire.sourceShardID, pulse: .init(session: wire.pulse.session.model(), kind: kind, sequence: wire.pulse.sequence))
+            sourceNode: V2ActorProtobuf.decode(IMNode.self, from: wire.sourceNode), sourceShardID: wire.sourceShardID, pulse: .init(session: wire.pulse.session.model(), kind: kind, sequence: wire.pulse.sequence))
     }
 }
 extension RoomDeliverySessionReply: V2ActorProtobufMessage {

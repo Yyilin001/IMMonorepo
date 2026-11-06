@@ -1,5 +1,5 @@
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
@@ -7,14 +7,14 @@ import IMV2Core
 
 public struct V2RoomClusterHostDescriptor: Sendable {
     public let identity: V2ActorHostIdentity
-    public let endpointID: ClusterSystem.ActorID
+    public let endpointID: IMActorSystem.ActorID
     public let address: String
     public let port: Int
     public let accessibleShardIDs: Set<String>
     public let availableRooms: Int
     public let isHealthy: Bool
 
-    public init(identity: V2ActorHostIdentity, endpointID: ClusterSystem.ActorID,
+    public init(identity: V2ActorHostIdentity, endpointID: IMActorSystem.ActorID,
                 address: String, port: Int, accessibleShardIDs: Set<String>,
                 availableRooms: Int, isHealthy: Bool) throws {
         guard !address.isEmpty, (1...65_535).contains(port), !accessibleShardIDs.isEmpty,
@@ -35,13 +35,13 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
     private let control: V2RoomClusterDirectoryControl
     public let callerIncarnation: UUID
 
-    public convenience init(system: ClusterSystem, signer: V2ActorSigningIdentity,
+    public convenience init(system: IMActorSystem, signer: V2ActorSigningIdentity,
         trust: V2ActorTrustStore, limits: V2ActorAuthenticationLimits,
         configuration: V2RoomRuntimeConfiguration, callerIncarnation: UUID = UUID()) {
         self.init(system: system, signer: signer, trust: trust, limits: limits,
             configuration: configuration, callerIncarnation: callerIncarnation, localPort: nil)
     }
-    init(system: ClusterSystem, signer: V2ActorSigningIdentity,
+    init(system: IMActorSystem, signer: V2ActorSigningIdentity,
         trust: V2ActorTrustStore, limits: V2ActorAuthenticationLimits,
         configuration: V2RoomRuntimeConfiguration, callerIncarnation: UUID = UUID(),
         localPort: V2RoomLocalPort?) {
@@ -51,7 +51,7 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         let budget = V2RoomClusterBudget(configuration: configuration, maximumSessions: limits.maximumSessions)
         let references = V2RoomClusterReferenceCache(capacity: configuration.maximumCachedLocations)
         self.control = V2RoomClusterDirectoryControl(directory: directory, maximumPeers: limits.maximumSessions,
-            join: { system.cluster.join(host: $0.address, port: $0.port) }, factory: { hostID in
+            join: { system.connect(host: $0.address, port: $0.port) }, factory: { hostID in
                 V2RoomClusterPeer(system: system, signer: signer, trust: trust, limits: limits,
                     configuration: configuration, callerIncarnation: callerIncarnation,
                     localPort: localPort, stableHostID: hostID, budget: budget, references: references)

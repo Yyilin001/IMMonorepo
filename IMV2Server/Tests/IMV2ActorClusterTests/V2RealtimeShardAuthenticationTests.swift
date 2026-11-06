@@ -1,5 +1,5 @@
 import Crypto
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import Synchronization
 import IMV2ActorContracts
@@ -30,9 +30,9 @@ struct V2RealtimeShardAuthenticationTests {
     @Test func standbyRefreshesCommittedMembershipBeforeJoining() async throws {
         let f = try Fixture()
         let port = Int.random(in: 30_000...44_999)
-        var settings = ClusterSystemSettings(name: "standby-refresh", host: "127.0.0.1", port: port)
-        settings.threadPoolSize = 1; settings.downingStrategy = .none; settings.onDownAction = .none
-        let system = await ClusterSystem("standby-refresh", settings: settings)
+        var settings = IMActorSystemSettings(name: "standby-refresh", host: "127.0.0.1", port: port)
+        settings.threadPoolSize = 1;
+        let system = try await V2ActorRPCManifest.makeSystem("standby-refresh", settings: settings)
         let existing = V2RealtimeShardDiscoveryPeer(nodeID: f.token.host.nodeID,
             serviceID: f.token.host.serviceID, address: "127.0.0.1", port: port + 1)
         let local = V2RealtimeShardDiscoveryPeer(nodeID: f.gateway.nodeID,
@@ -45,7 +45,7 @@ struct V2RealtimeShardAuthenticationTests {
             serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]],
             discoveryPeers: [existing], limits: .init(), serviceQualification: qualification)
         do {
-            await transport.start()
+            try await transport.start()
             try await transport.installCommittedMembership(record)
             try await transport.installCommittedMembership(record)
             #expect(qualification.snapshot() == nil)
@@ -72,10 +72,10 @@ struct V2RealtimeShardAuthenticationTests {
             #expect(qualification.membership.revision == 2)
             #expect(qualification.snapshot() == nil) // The absent old voter still cannot authorize service.
             #expect(await transport.stop(deadline: .now + .seconds(5)))
-            try await system.shutdown().wait()
+            try await system.shutdown()
         } catch {
             _ = await transport.stop(deadline: .now + .seconds(5))
-            try? await system.shutdown().wait()
+            try? await system.shutdown()
             throw error
         }
     }
@@ -218,10 +218,10 @@ struct V2RealtimeShardAuthenticationTests {
     @Test func softReferenceSuspensionDrainsAndReauthenticatesSameIncarnation() async throws {
         let f = try Fixture(held: true)
         let port = Int.random(in: 30_000...60_000)
-        var settings = ClusterSystemSettings(name: "shard-soft-reference", host: "127.0.0.1", port: port)
+        var settings = IMActorSystemSettings(name: "shard-soft-reference", host: "127.0.0.1", port: port)
         settings.threadPoolSize = 1
-        settings.downingStrategy = .none; settings.onDownAction = .none
-        let system = await ClusterSystem("shard-soft-reference", settings: settings)
+
+        let system = try await V2ActorRPCManifest.makeSystem("shard-soft-reference", settings: settings)
         let inbound = V2RealtimeShardInbound(identity: f.token.host, signer: f.receiver, trust: f.trust,
             serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], limits: .init())
         let endpoint = V2RealtimeShardEndpoint(actorSystem: system, service: inbound)
@@ -256,19 +256,19 @@ struct V2RealtimeShardAuthenticationTests {
         #expect(await f.serving.calls == 2)
         #expect(await sender.stop(deadline: .now + .seconds(2)))
         #expect(await inbound.stop(deadline: .now + .seconds(2)))
-        try await system.shutdown().wait()
+        try await system.shutdown()
     }
 
     @Test(arguments: [UInt64(1), UInt64(7)])
     func samePartitionMissesShareSignedDiscoveryDespitePartialCancellation(revision: UInt64) async throws {
         let f = try Fixture()
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
-        var callerSettings = ClusterSystemSettings(name: "shard-miss-caller", host: "127.0.0.1", port: callerPort)
-        callerSettings.threadPoolSize = 1; callerSettings.downingStrategy = .none; callerSettings.onDownAction = .none
-        var peerSettings = ClusterSystemSettings(name: "shard-miss-peer", host: "127.0.0.1", port: peerPort)
-        peerSettings.threadPoolSize = 1; peerSettings.downingStrategy = .none; peerSettings.onDownAction = .none
-        let callerSystem = await ClusterSystem("shard-miss-caller", settings: callerSettings)
-        let peerSystem = await ClusterSystem("shard-miss-peer", settings: peerSettings)
+        var callerSettings = IMActorSystemSettings(name: "shard-miss-caller", host: "127.0.0.1", port: callerPort)
+        callerSettings.threadPoolSize = 1;
+        var peerSettings = IMActorSystemSettings(name: "shard-miss-peer", host: "127.0.0.1", port: peerPort)
+        peerSettings.threadPoolSize = 1;
+        let callerSystem = try await V2ActorRPCManifest.makeSystem("shard-miss-caller", settings: callerSettings)
+        let peerSystem = try await V2ActorRPCManifest.makeSystem("shard-miss-peer", settings: peerSettings)
         let peers: [V2RealtimeShardDiscoveryPeer] = [
             .init(nodeID: f.gateway.nodeID, serviceID: f.gateway.serviceID, address: "127.0.0.1", port: callerPort),
             .init(nodeID: f.token.host.nodeID, serviceID: f.token.host.serviceID, address: "127.0.0.1", port: peerPort)
@@ -285,8 +285,8 @@ struct V2RealtimeShardAuthenticationTests {
             endpointReference: reference, trust: f.trust, roster: roster, rosterDigest: digest, membershipRevision: revision)
         try await publisher.install([.init(token: f.token, remainingLeaseMilliseconds: 30_000)], membershipRevision: revision)
         let beacon = V2RealtimeShardDiscoveryBeacon(actorSystem: peerSystem, publisher: publisher)
-        await peerSystem.receptionist.checkIn(beacon, with: V2RealtimeShardDiscoveryBeacon.key(nodeID: f.token.host.nodeID))
-        callerSystem.cluster.join(host: "127.0.0.1", port: peerPort)
+        try peerSystem.publish(beacon, as: V2RealtimeShardDiscoveryBeacon.key(nodeID: f.token.host.nodeID))
+        callerSystem.connect(host: "127.0.0.1", port: peerPort)
         let transport = try buildRealtimeShardTransport(system: callerSystem, identity: f.gateway,
             address: "127.0.0.1", port: callerPort, signer: f.caller, trust: f.trust,
             serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], discoveryPeers: peers, limits: .init(),
@@ -296,13 +296,13 @@ struct V2RealtimeShardAuthenticationTests {
         var calls: [Task<V2RealtimeShardDescriptor, any Error>] = []
         do {
             let readyDeadline = ContinuousClock.now + .seconds(10)
-            while await callerSystem.receptionist.lookup(V2RealtimeShardDiscoveryBeacon.key(nodeID: f.token.host.nodeID)).isEmpty {
+            while try await callerSystem.lookup(V2RealtimeShardDiscoveryBeacon.key(nodeID: f.token.host.nodeID), at: peerSystem.node.endpoint).isEmpty {
                 guard ContinuousClock.now < readyDeadline else { throw V2ActorAuthenticationError.sessionExpired }
                 await Task.yield()
             }
             held = Task { await publisher.holdExecutorForSignedDiscovery(barrier) }
             while !barrier.entered.withLock({ $0 }) { await Task.yield() }
-            await transport.start()
+            try await transport.start()
             calls = (0..<100).map { _ in Task { try await transport.resolve(partitionID: f.token.partitionID) } }
             let entryDeadline = ContinuousClock.now + .seconds(1)
             while await transport.metricsSnapshot().cacheMisses < 100 {
@@ -396,7 +396,7 @@ struct V2RealtimeShardAuthenticationTests {
             let settled = await transport.metricsSnapshot()
             #expect(settled.discoveryActive == 0 && settled.pendingHandshakes == 0)
             #expect(await inbound.stop(deadline: .now + .seconds(2)))
-            try await callerSystem.shutdown().wait(); try await peerSystem.shutdown().wait()
+            try await callerSystem.shutdown(); try await peerSystem.shutdown()
         } catch {
             barrier.release.signal()
             _ = await held?.value
@@ -404,7 +404,7 @@ struct V2RealtimeShardAuthenticationTests {
             for call in calls { _ = await call.result }
             _ = await transport.stop(deadline: .now + .seconds(2))
             _ = await inbound.stop(deadline: .now + .seconds(2))
-            try? await callerSystem.shutdown().wait(); try? await peerSystem.shutdown().wait()
+            try? await callerSystem.shutdown(); try? await peerSystem.shutdown()
             throw error
         }
     }
@@ -413,10 +413,10 @@ struct V2RealtimeShardAuthenticationTests {
     func controlsWaitForActualPeerCapacity(action: String) async throws {
         let f = try Fixture(held: true)
         let port = Int.random(in: 30_000...60_000)
-        var settings = ClusterSystemSettings(name: "control-admission-\(action)", host: "127.0.0.1", port: port)
+        var settings = IMActorSystemSettings(name: "control-admission-\(action)", host: "127.0.0.1", port: port)
         settings.threadPoolSize = 1
-        settings.downingStrategy = .none; settings.onDownAction = .none
-        let system = await ClusterSystem("control-admission-\(action)", settings: settings)
+
+        let system = try await V2ActorRPCManifest.makeSystem("control-admission-\(action)", settings: settings)
         let inbound = V2RealtimeShardInbound(identity: f.token.host, signer: f.receiver, trust: f.trust,
             serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], limits: .init())
         let endpoint = V2RealtimeShardEndpoint(actorSystem: system, service: inbound)
@@ -475,14 +475,14 @@ struct V2RealtimeShardAuthenticationTests {
             #expect(await sender.metrics().9 == 0)
             #expect(await sender.stop(deadline: .now + .seconds(2)))
             #expect(await inbound.stop(deadline: .now + .seconds(2)))
-            try await system.shutdown().wait()
+            try await system.shutdown()
         } catch {
             for call in calls { call.cancel() }
             await f.serving.release()
             for call in calls { _ = await call.result }
             _ = await sender.stop(deadline: .now + .seconds(2))
             _ = await inbound.stop(deadline: .now + .seconds(2))
-            try? await system.shutdown().wait()
+            try? await system.shutdown()
             throw error
         }
     }

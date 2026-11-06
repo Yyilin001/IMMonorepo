@@ -797,10 +797,6 @@
       "owner": "D3"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomCoverageIndex.swift",
-      "owner": "D3"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerGateway/V2AuthenticatedGatewayAdmission.swift",
       "owner": "I1"
     },
@@ -1329,8 +1325,11 @@
       "owner": "R3"
     },
     {
-      "path": "IMV2Server/Tests/IMV2ActorClusterTests/V2MembershipGossipRestartTests.swift",
-      "owner": "R3"
+      "owner": "R3",
+      "retiredPath": "IMV2Server/Tests/IMV2ActorClusterTests/V2MembershipGossipRestartTests.swift",
+      "replacedBy": [
+        "IMV2Server/Tests/IMV2ActorClusterTests/V2RoomClusterDiscoveryTests.swift"
+      ]
     },
     {
       "path": "IMV2Server/Tests/IMV2ActorClusterTests/V2RoomClusterBridgeTests.swift",
@@ -1616,8 +1615,11 @@
       "owner": "I1"
     },
     {
-      "path": "IMV2Server/Vendor/swift-distributed-actors/Sources/DistributedCluster/Cluster/MembershipGossip/Cluster+MembershipGossip+Serialization.swift",
-      "owner": "R3"
+      "owner": "R3",
+      "retiredPath": "IMV2Server/Vendor/swift-distributed-actors/Sources/DistributedCluster/Cluster/MembershipGossip/Cluster+MembershipGossip+Serialization.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMActorTransport/IMTransport.swift"
+      ]
     },
     {
       "path": "docs/reviews/virtual-actor/g5-credit-refill-fence-evidence.md",
@@ -1654,6 +1656,26 @@
     {
       "path": "IMV2Server/Tests/IMV2ActorContractsTests/V2ProfileProtobufTests.swift",
       "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMActorWire/IMWire.swift",
+      "owner": "R3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMActorTransport/IMTransport.swift",
+      "owner": "R3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMActorTransport/IMConnection.swift",
+      "owner": "R3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMActorSystem/IMActorSystem.swift",
+      "owner": "R3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMActorSystem/IMInvocation.swift",
+      "owner": "R3"
     }
   ]
 }

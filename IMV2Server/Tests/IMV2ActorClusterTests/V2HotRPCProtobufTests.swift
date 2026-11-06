@@ -1,4 +1,4 @@
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2Core
 import IMV2ActorContracts
@@ -57,7 +57,7 @@ struct V2HotRPCProtobufTests {
         for kind in [V2RoomDeliverySessionPulse.Kind.open, .retire] {
             let call = RoomDeliverySessionCall(serviceID: try .init("publisher"), version: 1,
                 callerIncarnation: UUID(), recipient: gateway, sessionID: UUID(), sequence: 13, attemptID: UUID(),
-                sourceNode: .init(systemName: "publisher", host: "127.0.0.1", port: 9001, nid: .init(nodeID)), sourceShardID: "rooms", pulse: .init(session: session, kind: kind, sequence: 7))
+                sourceNode: .init(id: "publisher-\(nodeID)", endpoint: .init(host: "127.0.0.1", port: 9001)), sourceShardID: "rooms", pulse: .init(session: session, kind: kind, sequence: 7))
             let bytes = try V2ActorProtobuf.encode(call)
             let wire = try Im_Actor_V1_HotDeliverySessionCall(serializedBytes: bytes)
             #expect(wire.pulse.kind == kind.rawValue && wire.pulse.sequence == 7)

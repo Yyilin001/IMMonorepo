@@ -1,5 +1,5 @@
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 
@@ -83,13 +83,13 @@ public struct V2RoomDiscoveryAdvertisement: Codable, Sendable {
     public let version: Int
     public let challenge: UUID
     public let identity: V2ActorHostIdentity
-    public let beaconID: ClusterSystem.ActorID
-    public let endpointID: ClusterSystem.ActorID
+    public let beaconID: IMActorSystem.ActorID
+    public let endpointID: IMActorSystem.ActorID
     public let availableRooms: Int
     public let isHealthy: Bool
 
     public init(challenge: UUID, identity: V2ActorHostIdentity,
-                beaconID: ClusterSystem.ActorID, endpointID: ClusterSystem.ActorID,
+                beaconID: IMActorSystem.ActorID, endpointID: IMActorSystem.ActorID,
                 availableRooms: Int, isHealthy: Bool) {
         self.version = Self.version
         self.challenge = challenge
@@ -101,7 +101,7 @@ public struct V2RoomDiscoveryAdvertisement: Codable, Sendable {
     }
 }
 
-/// 每个 ClusterSystem 只有一个本地发布者，使用由配置的稳定宿主 ID
+/// 每个 IMActorSystem 只有一个本地发布者，使用由配置的稳定宿主 ID
 /// 推导出的键登记，绝非每次房间激活都登记一次。
 public actor V2RoomDiscoveryPublisherState {
     private var accepting = true
@@ -112,16 +112,16 @@ public actor V2RoomDiscoveryPublisherState {
 }
 
 public distributed actor V2RoomDiscoveryBeacon {
-    public typealias ActorSystem = ClusterSystem
+    public typealias ActorSystem = IMActorSystem
     private let descriptor: V2RoomClusterHostDescriptor
     private let signer: V2ActorSigningIdentity
     private let state: V2RoomDiscoveryPublisherState
 
-    public static func key(for hostID: V2ActorHostID) -> DistributedReception.Key<V2RoomDiscoveryBeacon> {
+    public static func key(for hostID: V2ActorHostID) -> IMServiceKey<V2RoomDiscoveryBeacon> {
         .init(V2RoomDiscoveryBeacon.self, id: "imv2/room-host/v1/\(hostID.rawValue)")
     }
 
-    public init(actorSystem: ClusterSystem, descriptor: V2RoomClusterHostDescriptor,
+    public init(actorSystem: IMActorSystem, descriptor: V2RoomClusterHostDescriptor,
                 signer: V2ActorSigningIdentity, state: V2RoomDiscoveryPublisherState) {
         self.actorSystem = actorSystem
         self.descriptor = descriptor
@@ -152,7 +152,7 @@ public struct V2RoomDiscoverySnapshot: Sendable {
 /// 使用一个轮询任务和数量有界、可追踪的探测。
 /// 供应商的 GuestListing 使用无界 AsyncStream，因此这里有意不采用。
 public actor V2RoomClusterDiscovery {
-    private let system: ClusterSystem
+    private let system: IMActorSystem
     private let client: V2RoomClusterClient
     private let trust: V2ActorTrustStore
     private let configuration: V2RoomDiscoveryConfiguration
@@ -161,9 +161,9 @@ public actor V2RoomClusterDiscovery {
     private var updatingPeers = false
     private var authorizationSuspended = false
     private var active: [V2ActorHostID: V2RoomClusterHostDescriptor] = [:]
-    private var activeBeaconIDs: [V2ActorHostID: ClusterSystem.ActorID] = [:]
+    private var activeBeaconIDs: [V2ActorHostID: IMActorSystem.ActorID] = [:]
     private var lastVerifiedAt: [V2ActorHostID: ContinuousClock.Instant] = [:]
-    private var failedNodesSuspended: [V2ActorHostID: Cluster.Node] = [:]
+    private var failedNodesSuspended: [V2ActorHostID: IMNode] = [:]
     private var pendingDown: [RetiredNode] = []
     private var nextJoinAllowed: [V2ActorHostID: ContinuousClock.Instant] = [:]
     private var polling = false
@@ -173,7 +173,7 @@ public actor V2RoomClusterDiscovery {
     private var completedPolls: UInt64 = 0
     private var probes: [UUID: ProbeCall] = [:]
 
-    public init(system: ClusterSystem, client: V2RoomClusterClient,
+    public init(system: IMActorSystem, client: V2RoomClusterClient,
                 trust: V2ActorTrustStore, configuration: V2RoomDiscoveryConfiguration) {
         self.system = system
         self.client = client
@@ -185,7 +185,7 @@ public actor V2RoomClusterDiscovery {
     public func start() {
         guard accepting, worker == nil else { return }
         for peer in peers {
-            system.cluster.join(host: peer.address, port: peer.port)
+            system.connect(host: peer.address, port: peer.port)
             nextJoinAllowed[peer.hostID] = .now + .seconds(5)
         }
         worker = Task { [weak self] in
@@ -254,7 +254,7 @@ public actor V2RoomClusterDiscovery {
         authorizationSuspended = false
         guard accepting else { return }
         for peer in peers where nextJoinAllowed[peer.hostID] == nil {
-            system.cluster.join(host: peer.address, port: peer.port)
+            system.connect(host: peer.address, port: peer.port)
             nextJoinAllowed[peer.hostID] = .now + .seconds(5)
         }
     }
@@ -282,7 +282,13 @@ public actor V2RoomClusterDiscovery {
         await reapRetiredNodes()
         for peer in peers {
             guard accepting, !Task.isCancelled else { return }
-            let found = await system.receptionist.lookup(V2RoomDiscoveryBeacon.key(for: peer.hostID))
+            let found: [V2RoomDiscoveryBeacon]
+            do {
+                found = try await system.lookup(V2RoomDiscoveryBeacon.key(for: peer.hostID), at: .init(host: peer.address, port: peer.port))
+            } catch {
+                system.log.debug("Actor directory lookup failed", metadata: ["peer": .string(peer.hostID.rawValue), "reason": .string(String(describing: error))])
+                found = []
+            }
             // 在排序、探测或创建子任务前先检查数量上限。
             guard found.count <= configuration.maximumCandidatesPerHost else {
                 oversizedLookups &+= 1
@@ -296,14 +302,17 @@ public actor V2RoomClusterDiscovery {
                 return $0.id < $1.id
             }
             var accepted: V2RoomClusterHostDescriptor?
-            var acceptedBeaconID: ClusterSystem.ActorID?
+            var acceptedBeaconID: IMActorSystem.ActorID?
             for beacon in candidates {
                 guard accepting, !Task.isCancelled else { return }
                 do {
                     accepted = try await probe(beacon, peer: peer)
                     acceptedBeaconID = beacon.id
                     break
-                } catch { continue }
+                } catch {
+                    system.log.debug("Actor advertisement rejected", metadata: ["peer": .string(peer.hostID.rawValue), "reason": .string(String(describing: error))])
+                    continue
+                }
             }
             if let accepted {
                 guard accepting else { return }
@@ -332,10 +341,10 @@ public actor V2RoomClusterDiscovery {
             } else {
                 await markUnhealthy(peer)
                 await suspendFailedNodeIfSafe(peer)
-                // Cluster.Node 包含进程实例标识。旧进程消失后，
+                // IMNode 包含进程实例标识。旧进程消失后，
                 // 重新加入配置的端点。
                 if ContinuousClock.now >= nextJoinAllowed[peer.hostID, default: .now] {
-                    system.cluster.join(host: peer.address, port: peer.port)
+                    system.connect(host: peer.address, port: peer.port)
                     nextJoinAllowed[peer.hostID] = .now + .seconds(5)
                 }
             }
@@ -385,7 +394,7 @@ public actor V2RoomClusterDiscovery {
                 do {
                     // 传输自身的截止时间略晚于等待中的调用方，
                     // 避免超时让仍在运行的 RPC 从注册表中消失。
-                    result = .success(try await RemoteCall.with(
+                    result = .success(try await IMRemoteCall.with(
                         timeout: transportTimeout) {
                         try await beacon.advertise(challenge)
                     })
@@ -450,7 +459,7 @@ public actor V2RoomClusterDiscovery {
             if await client.retiredIdentityIsDrained(retired.identity) {
                 // 构造旧 Node 的精确标识。仅凭端点的重载方法
                 // 可能意外地把新实例标记为下线。
-                system.cluster.down(member: .init(node: retired.node, status: .up))
+                system.retire(node: retired.node)
             } else {
                 stillPending.append(retired)
             }
@@ -488,7 +497,7 @@ public actor V2RoomClusterDiscovery {
 
     private struct RetiredNode: Sendable {
         let identity: V2ActorHostIdentity
-        let node: Cluster.Node
+        let node: IMNode
     }
 
     private struct ProbeCall {

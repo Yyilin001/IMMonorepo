@@ -1,5 +1,5 @@
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import Crypto
 import Foundation
 import NIOCore
@@ -106,7 +106,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         if case .failure(let failure) = response { throw failure }
         guard case .acknowledged = response else { throw V2RoomCallFailure.outcomeUnknown }
     }
-    private let system: ClusterSystem
+    private let system: IMActorSystem
     private let signer: V2ActorSigningIdentity
     private let trust: V2ActorTrustStore
     private let limits: V2ActorAuthenticationLimits
@@ -163,7 +163,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     private var recoveryBatchesByHost: [V2ActorHostID: Int] = [:]
     private var accepting = true
 
-    init(system: ClusterSystem, signer: V2ActorSigningIdentity,
+    init(system: IMActorSystem, signer: V2ActorSigningIdentity,
          trust: V2ActorTrustStore, limits: V2ActorAuthenticationLimits,
          configuration: V2RoomRuntimeConfiguration,
          callerIncarnation: UUID, localPort: V2RoomLocalPort?,
@@ -185,7 +185,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     /// 在结算前继续保留旧身份。
     public func register(_ descriptor: V2RoomClusterHostDescriptor) throws {
         try installDiscovered(descriptor)
-        system.cluster.join(host: descriptor.address, port: descriptor.port)
+        system.connect(host: descriptor.address, port: descriptor.port)
     }
 
     // Publish within this Peer turn so discovery and suspension cannot overwrite
@@ -328,7 +328,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                         try await port.inbound.closeSession(packet)
                     } else {
                         let endpoint = try V2RoomHostEndpoint.resolve(id: descriptor.endpointID, using: system)
-                        try await RemoteCall.with(timeout: .seconds(2)) {
+                        try await IMRemoteCall.with(timeout: .seconds(2)) {
                             try await endpoint.closeSession(packet)
                         }
                     }
@@ -907,7 +907,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                 }
                 transportReply = try await boundedDispatch(deadline: deadline, request: request,
                                                            host: host, cached: requireCachedReference || requireCachedLocal, local: isLocal) {
-                    let reply = try await RemoteCall.with(timeout: timeout) { try await actor.exchange(packet) }
+                    let reply = try await IMRemoteCall.with(timeout: timeout) { try await actor.exchange(packet) }
                     sendTrace?.mark("rpc_remote_return")
                     return .signed(reply)
                 }
@@ -916,7 +916,13 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                 let endpoint = try V2RoomHostEndpoint.resolve(id: descriptor.endpointID, using: system)
                 transportReply = try await boundedDispatch(deadline: deadline, request: request,
                                                            host: host, cached: requireCachedReference || requireCachedLocal, local: isLocal) {
-                    let reply = try await RemoteCall.with(timeout: timeout) { try await endpoint.exchange(packet) }
+                    let reply = try await IMRemoteCall.with(timeout: timeout) {
+                        switch try request.transportTraffic {
+                        case .control: return try await endpoint.control(packet)
+                        case .bulk: return try await endpoint.transfer(packet)
+                        case .rpc: return try await endpoint.exchange(packet)
+                        }
+                    }
                     if case .policySnapshots = request { V2SendPathTrace.current?.mark("policy_rpc_remote_return") }
                     return .signed(reply)
                 }
@@ -935,7 +941,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         catch {
             logSendFailure(error, request: request, stage: "dispatch", local: isLocal,
                            deadline: deadline)
-            let underlying = (error as? ErrorEnvelope)?.error ?? error
+            let underlying = error
             if underlying as? V2ActorAuthenticationError == .sessionExpired,
                sessions[host]?.grant.sessionID == call.sessionID {
                 // Receiver expiry invalidates this grant even when our local
@@ -1004,12 +1010,12 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     }
 
     nonisolated static func sendFailureReason(_ error: any Error) -> String {
-        let underlying = (error as? ErrorEnvelope)?.error ?? error
+        let underlying = error
         if let authentication = underlying as? V2ActorAuthenticationError {
             return "authentication_" + String(describing: authentication)
         }
-        if underlying is DeadLetterError { return "dead_letter" }
-        if underlying is RemoteCallError { return "remote_call" }
+        if underlying as? IMActorError == .unknownActor { return "unknown_actor" }
+        if underlying is IMActorError { return "remote_call" }
         if underlying is CancellationError { return "cancelled" }
         if let failure = underlying as? V2RoomCallFailure {
             switch failure {
@@ -1132,7 +1138,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                 default: break
                 }
                 completion.install(continuation)
-                let timer = system._eventLoopGroup.next().scheduleTask(
+                let timer = system.eventLoop.scheduleTask(
                     in: TimeAmount(max(.zero, ContinuousClock.now.duration(to: deadline)))
                 ) { [self] in
                     if completion.cancelCaller(with: failure), recoveryBatch {
@@ -1333,7 +1339,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                         packet, generation: port.generation)
                 } else {
                     let endpoint = try V2RoomHostEndpoint.resolve(id: descriptor.endpointID, using: system)
-                    reply = try await RemoteCall.with(timeout: boundedTimeout(deadline)) {
+                    reply = try await IMRemoteCall.with(timeout: boundedTimeout(deadline)) {
                         try await endpoint.openSession(packet)
                     }
                     capability = nil
@@ -1376,7 +1382,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     private func rememberPhysical(_ bytes: Data, token: V2RoomActivationToken) throws {
         pruneReservations()
         guard !bytes.isEmpty, bytes.count <= 16_384 else { throw V2ActorAuthenticationError.oversized }
-        let id = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: bytes)
+        let id = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: bytes)
         if physicalReferences.actor(for: token)?.id == id { return }
         let actor = try V2RoomClusterActor.resolve(id: id, using: system)
         let previous = physicalReferences.actor(for: token)
@@ -1462,7 +1468,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         pinnedReservations.keys.contains(where: { $0.host == host })
     }
 
-    /// 发现组件的所有者只有在旧 Cluster.Node 的原生或远程调用、
+    /// 发现组件的所有者只有在旧 IMNode 的原生或远程调用、
     /// 握手及预留授权均已结算后，才可将其标记为下线。
     public func retiredIdentityIsDrained(_ host: V2ActorHostIdentity) -> Bool {
         pruneReservations()
@@ -1658,7 +1664,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
             let generation = state.descriptorGeneration
             let referenceRevision = beginReferenceInstall(token)
             // A caller's cancellation only removes its waiter. The real probe remains owned.
-            // Recovery must not pin an unreachable old Cluster.Node for the business
+            // Recovery must not pin an unreachable old IMNode for the business
             // call timeout after its location waiter has already stopped waiting.
             // Native dispatch ownership is still retained through its actual exit.
             let probeDeadline = Self.recoveryProbeDeadline(for: deadline)
@@ -1789,6 +1795,21 @@ private extension V2RoomClientPrincipal {
         switch self {
         case .user(let id): .user(id)
         case .service: .service
+        }
+    }
+}
+
+private extension V2ActorRPCRequest {
+    var transportTraffic: IMTrafficClass {
+        get throws {
+            switch self {
+            case .placementRaft(let wire):
+                if case .snapshot = try V2PlacementRaftWireCodec.decodeRequest(wire) { return .bulk }
+                return .control
+            case .placementWrite, .placementRead, .drainPlacement, .activate, .lookup: return .control
+            case .recoveryBatch: return .bulk
+            default: return .rpc
+            }
         }
     }
 }

@@ -1,6 +1,6 @@
 import Crypto
 import Distributed
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import Synchronization
@@ -56,15 +56,15 @@ struct ShardAdvertisement: Codable, Sendable {
     let version: Int
     let challenge: UUID
     let identity: V2GatewayRealtimeIdentity
-    let beaconID: ClusterSystem.ActorID
-    let endpointID: ClusterSystem.ActorID
+    let beaconID: IMActorSystem.ActorID
+    let endpointID: IMActorSystem.ActorID
     let endpointReference: Data
     let partitions: [V2RealtimeShardLeaseAdvertisement]
 }
 actor V2RealtimeShardPublisher {
     let identity: V2GatewayRealtimeIdentity
     let signer: V2ActorSigningIdentity
-    let endpointID: ClusterSystem.ActorID
+    let endpointID: IMActorSystem.ActorID
     let endpointReference: Data
     let trust: V2ActorTrustStore
     private var roster: [String: String]
@@ -72,7 +72,7 @@ actor V2RealtimeShardPublisher {
     private var membershipRevision: UInt64
     private var leases: [Int: (V2RealtimeShardToken, ContinuousClock.Instant)] = [:]
     private var accepting = true
-    init(identity: V2GatewayRealtimeIdentity, signer: V2ActorSigningIdentity, endpointID: ClusterSystem.ActorID, endpointReference: Data, trust: V2ActorTrustStore, roster: [String: String], rosterDigest: Data, membershipRevision: UInt64) {
+    init(identity: V2GatewayRealtimeIdentity, signer: V2ActorSigningIdentity, endpointID: IMActorSystem.ActorID, endpointReference: Data, trust: V2ActorTrustStore, roster: [String: String], rosterDigest: Data, membershipRevision: UInt64) {
         self.trust = trust; self.roster = roster; self.rosterDigest = rosterDigest; self.membershipRevision = membershipRevision
         self.identity = identity; self.signer = signer; self.endpointID = endpointID; self.endpointReference = endpointReference
     }
@@ -90,7 +90,7 @@ actor V2RealtimeShardPublisher {
         let now = ContinuousClock.now
         leases = Dictionary(uniqueKeysWithValues: values.map { ($0.token.partitionID, ($0.token, now + .milliseconds($0.remainingLeaseMilliseconds))) })
     }
-    func advertise(packet: V2ActorSignedPacket, beaconID: ClusterSystem.ActorID) throws -> V2ActorSignedPacket {
+    func advertise(packet: V2ActorSignedPacket, beaconID: IMActorSystem.ActorID) throws -> V2ActorSignedPacket {
         let request = try v2VerifyShardDiscoveryRequest(packet, trust: trust, recipient: identity, roster: roster, rosterDigest: rosterDigest, membershipRevision: membershipRevision)
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let now = ContinuousClock.now
@@ -106,10 +106,10 @@ actor V2RealtimeShardPublisher {
     func stop() { accepting = false; leases.removeAll() }
 }
 public distributed actor V2RealtimeShardDiscoveryBeacon {
-    public typealias ActorSystem = ClusterSystem
+    public typealias ActorSystem = IMActorSystem
     let publisher: V2RealtimeShardPublisher
-    init(actorSystem: ClusterSystem, publisher: V2RealtimeShardPublisher) { self.actorSystem = actorSystem; self.publisher = publisher }
-    static func key(nodeID: String) -> DistributedReception.Key<V2RealtimeShardDiscoveryBeacon> {
+    init(actorSystem: IMActorSystem, publisher: V2RealtimeShardPublisher) { self.actorSystem = actorSystem; self.publisher = publisher }
+    static func key(nodeID: String) -> IMServiceKey<V2RealtimeShardDiscoveryBeacon> {
         .init(Self.self, id: "imv2/realtime-shards/v1/\(nodeID)")
     }
     public distributed func advertise(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
@@ -117,29 +117,58 @@ public distributed actor V2RealtimeShardDiscoveryBeacon {
     }
 }
 
-private distributed actor ShardReferenceWatcher: LifecycleWatch {
-    typealias ActorSystem = ClusterSystem
-    private let notify: @Sendable (ClusterSystem.ActorID) async -> Void
-    private var endpoints: [String: V2RealtimeShardEndpoint] = [:]
-    init(actorSystem: ClusterSystem, notify: @escaping @Sendable (ClusterSystem.ActorID) async -> Void) {
-        self.actorSystem = actorSystem; self.notify = notify
+private actor ShardReferenceWatcher {
+    private let system: IMActorSystem
+    private let notify: @Sendable (IMActorID) async -> Void
+    private var endpoints: [String: (endpoint: V2RealtimeShardEndpoint, token: UUID)] = [:]
+    private struct Notifications {
+        var accepting = true
+        var tasks: [UUID: Task<Void, Never>] = [:]
     }
-    func observe(nodeID: String, endpoint: V2RealtimeShardEndpoint) {
-        if let old = endpoints[nodeID], old.id != endpoint.id { unwatchTermination(of: old) }
-        endpoints[nodeID] = watchTermination(of: endpoint)
+    private nonisolated let notifications = Mutex(Notifications())
+    init(actorSystem: IMActorSystem, notify: @escaping @Sendable (IMActorID) async -> Void) {
+        self.system = actorSystem; self.notify = notify
     }
-    func clear() { for endpoint in endpoints.values { unwatchTermination(of: endpoint) }; endpoints.removeAll() }
-    func forget(nodeID: String, expected: ClusterSystem.ActorID) {
-        guard let endpoint = endpoints[nodeID], endpoint.id == expected else { return }
-        unwatchTermination(of: endpoint); endpoints.removeValue(forKey: nodeID)
+    func observe(nodeID: String, endpoint: V2RealtimeShardEndpoint) async {
+        if let old = endpoints[nodeID] {
+            if old.endpoint.id == endpoint.id { return }
+            system.unwatchRetirement(of: old.endpoint.id, token: old.token)
+        }
+        do {
+            let token = try system.watchRetirement(of: endpoint.id) { [weak self] id in
+                guard let self else { return }
+                let workID = UUID()
+                self.notifications.withLock { state in
+                    guard state.accepting else { return }
+                    state.tasks[workID] = Task { [weak self] in
+                        guard let self else { return }
+                        await self.terminated(id)
+                        self.notifications.withLock { $0.tasks[workID] = nil }
+                    }
+                }
+            }
+            endpoints[nodeID] = (endpoint, token)
+        } catch { await notify(endpoint.id) }
     }
-    func terminated(actor id: ClusterSystem.ActorID) async {
-        endpoints = endpoints.filter { $0.value.id != id }
+    func clear() async {
+        for entry in endpoints.values { system.unwatchRetirement(of: entry.endpoint.id, token: entry.token) }
+        endpoints.removeAll()
+        let tasks = notifications.withLock { $0.accepting = false; let tasks = Array($0.tasks.values); $0.tasks.removeAll(); return tasks }
+        for task in tasks { task.cancel() }
+        for task in tasks { await task.value }
+    }
+    func forget(nodeID: String, expected: IMActorID) {
+        guard let entry = endpoints[nodeID], entry.endpoint.id == expected else { return }
+        system.unwatchRetirement(of: expected, token: entry.token); endpoints[nodeID] = nil
+    }
+    private func terminated(_ id: IMActorID) async {
+        guard !Task.isCancelled else { return }
+        endpoints = endpoints.filter { $0.value.endpoint.id != id }
         await notify(id)
     }
 }
 
-/// Hot calls retain a typed endpoint/session. Receptionist candidates grant no
+/// Hot calls retain a typed endpoint/session. Directory candidates grant no
 /// authority: only challenge-bound signed lease advertisements populate this cache.
 public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     public nonisolated let serviceQualification: V2ActorServiceQualification
@@ -148,7 +177,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     private var membershipRevision: UInt64
     private var qualificationObserver: (@Sendable () async -> Void)?
     public let identity: V2GatewayRealtimeIdentity
-    private let system: ClusterSystem
+    private let system: IMActorSystem
     private let trust: V2ActorTrustStore
     private var peers: [V2RealtimeShardDiscoveryPeer]
     private let localPeer: V2RealtimeShardDiscoveryPeer
@@ -164,28 +193,28 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     private var changingMembership = false
     private var membershipReadSuspended = false
     private var membershipChange: Task<Void, any Error>?
-    private nonisolated let receptionistLookups = Mutex((background: UInt64(0), foreground: UInt64(0)))
+    private nonisolated let directoryLookups = Mutex((background: UInt64(0), foreground: UInt64(0)))
     private var cacheHits: UInt64 = 0, cacheMisses: UInt64 = 0, invalidations: UInt64 = 0, discoveryPasses: UInt64 = 0
     private var watcher: ShardReferenceWatcher?
-    private var watchedReferences: [String: ClusterSystem.ActorID] = [:]
+    private var watchedReferences: [String: IMActorSystem.ActorID] = [:]
     private var watchedDescriptors: [String: V2GatewayRealtimeDescriptor] = [:]
     private var watchedIdentities: [String: V2GatewayRealtimeIdentity] = [:]
     private struct RetiringReference {
         let identity: V2GatewayRealtimeIdentity
-        let id: ClusterSystem.ActorID
+        let id: IMActorSystem.ActorID
         let replaced: Bool
         let reference: Data
     }
-    private var retiringReferences: [ClusterSystem.ActorID: RetiringReference] = [:]
-    private var softSuspendedReferences: Set<ClusterSystem.ActorID> = []
-    private var retiredReferences: [String: ClusterSystem.ActorID] = [:]
+    private var retiringReferences: [IMActorSystem.ActorID: RetiringReference] = [:]
+    private var softSuspendedReferences: Set<IMActorSystem.ActorID> = []
+    private var retiredReferences: [String: IMActorSystem.ActorID] = [:]
     private var rejectedTokens: [Int: V2RealtimeShardToken] = [:]
     private var worker: Task<Void, Never>?
     private struct DiscoveryResult: Sendable {
         let generation: UInt64
         let values: [Cached]
         let reachable: [String: ContinuousClock.Instant]
-        let references: [String: ClusterSystem.ActorID]
+        let references: [String: IMActorSystem.ActorID]
         let identities: [String: V2GatewayRealtimeIdentity]
         let descriptors: [String: V2GatewayRealtimeDescriptor]
     }
@@ -201,7 +230,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         let timer: Task<Void, Never>
     }
     private var resolutionWaiters: [UUID: ResolutionWaiter] = [:]
-    init(system: ClusterSystem, identity: V2GatewayRealtimeIdentity, trust: V2ActorTrustStore, signer: V2ActorSigningIdentity, rosterDigest: Data, membershipRevision: UInt64, qualification: V2ActorServiceQualification,
+    init(system: IMActorSystem, identity: V2GatewayRealtimeIdentity, trust: V2ActorTrustStore, signer: V2ActorSigningIdentity, rosterDigest: Data, membershipRevision: UInt64, qualification: V2ActorServiceQualification,
          localPeer: V2RealtimeShardDiscoveryPeer, peers: [V2RealtimeShardDiscoveryPeer], sender: V2RealtimeShardSender,
          endpoint: V2RealtimeShardEndpoint, inbound: V2RealtimeShardInbound,
          publisher: V2RealtimeShardPublisher, beacon: V2RealtimeShardDiscoveryBeacon, resolutionTimeout: Duration) {
@@ -221,10 +250,10 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         serviceQualification.update(witnesses: reachable, membershipRevision: membershipRevision)
         await qualificationObserver?()
     }
-    func start() async {
+    func start() async throws {
         watcher = ShardReferenceWatcher(actorSystem: system) { [weak self] id in await self?.referenceTerminated(id) }
-        for peer in peers { system.cluster.join(host: peer.address, port: peer.port) }
-        await system.receptionist.checkIn(beacon, with: V2RealtimeShardDiscoveryBeacon.key(nodeID: identity.nodeID))
+        for peer in peers { system.connect(host: peer.address, port: peer.port) }
+        try system.publish(beacon, as: V2RealtimeShardDiscoveryBeacon.key(nodeID: identity.nodeID))
         guard !stopped, worker == nil else { return }
         worker = Task { [weak self] in
             while !Task.isCancelled {
@@ -311,7 +340,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         for (nodeID, id) in watchedReferences where !membership.nodes.contains(nodeID) {
             if let oldIdentity = watchedIdentities[nodeID] { _ = enqueueRetirement(identity: oldIdentity, id: id) }
         }
-        for peer in peers { system.cluster.join(host: peer.address, port: peer.port) }
+        for peer in peers { system.connect(host: peer.address, port: peer.port) }
     }
     public func reachableNodeIDs() -> Set<String> {
         guard !stopped else { return [] }
@@ -416,9 +445,9 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                         // Counts the actual invocation boundary, not misses or
                         // completed passes. Source belongs to the creating pass;
                         // cancelled/shared waiters never relabel its work.
-                        self.recordReceptionistLookup(foreground: foreground)
-                        let candidates = await system.receptionist.lookup(V2RealtimeShardDiscoveryBeacon.key(nodeID: peer.nodeID))
-                        if candidates.isEmpty { system.cluster.join(host: peer.address, port: peer.port) }
+                        self.recordDirectoryLookup(foreground: foreground)
+                        let candidates = (try? await system.lookup(V2RealtimeShardDiscoveryBeacon.key(nodeID: peer.nodeID), at: .init(host: peer.address, port: peer.port))) ?? []
+                        if candidates.isEmpty { system.connect(host: peer.address, port: peer.port) }
                         guard candidates.count <= 4 else { return DiscoveryResult(generation: generation, values: [], reachable: [:], references: [:], identities: [:], descriptors: [:]) }
                         for beacon in candidates.sorted(by: { $0.id < $1.id }) {
                             guard !Task.isCancelled, ContinuousClock.now < peerDeadline else { break }
@@ -426,7 +455,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                                 let started = ContinuousClock.now, challenge = UUID()
                                 let timeout = started.duration(to: peerDeadline)
                                 let request = try signer.sign(ShardDiscoveryRequest(requester: localIdentity, recipientNodeID: peer.nodeID, challenge: challenge, rosterDigest: rosterDigest, membershipRevision: membershipRevision), maximumBytes: 16_384)
-                                let packet = try await RemoteCall.with(timeout: timeout) { try await beacon.advertise(request) }
+                                let packet = try await IMRemoteCall.with(timeout: timeout) { try await beacon.advertise(request) }
                                 let (advertisement, trusted) = try trust.verify(packet, as: ShardAdvertisement.self, maximumBytes: 262_144)
                                 let identity = advertisement.identity
                                 try trust.validateRealtimeReceiver(identity)
@@ -442,7 +471,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                                 // the ActorID is unnecessary and would replace the signed byte identity.
                                 let reference = advertisement.endpointReference
                                 guard !reference.isEmpty, reference.count <= 16_384,
-                                      try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: reference) == advertisement.endpointID else {
+                                      try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: reference) == advertisement.endpointID else {
                                     throw V2ActorAuthenticationError.wrongRecipient
                                 }
                                 let values = try advertisement.partitions.map { lease in
@@ -477,11 +506,11 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         await reapRetiredReferences()
         poll = nil; discoveryPasses &+= 1
         // An empty/unsuccessful discovery pass is not a recipient/authentication
-        // failure. Receptionist replication may still be arriving. Keep each
+        // failure. Directory replication may still be arriving. Keep each
         // waiter under its ORIGINAL deadline; the next shared pass can satisfy it.
         // Its existing timer remains responsible for bounded failure/cancellation.
     }
-    private func referenceTerminated(_ id: ClusterSystem.ActorID) async {
+    private func referenceTerminated(_ id: IMActorSystem.ActorID) async {
         for (nodeID, current) in watchedReferences where current == id {
             if let identity = watchedIdentities[nodeID] { _ = enqueueRetirement(identity: identity, id: id, replaced: true) }
             softSuspendedReferences.remove(id)
@@ -492,7 +521,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
             watchedDescriptors.removeValue(forKey: nodeID)
         }
         await publishQualification()
-        cache = cache.filter { (try? V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference)) != id }
+        cache = cache.filter { (try? V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: $0.value.descriptor.endpointReference)) != id }
     }
     private func installDiscovered(_ result: DiscoveryResult) async {
         guard !stopped, !changingMembership, !membershipReadSuspended, result.generation >= appliedPollGeneration else { return }
@@ -533,7 +562,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
             watchedDescriptors[nodeID] = descriptor
             await qualificationObserver?()
             guard !stopped, !changingMembership, !membershipReadSuspended else { return }
-            await watcher.whenLocal { local in local.observe(nodeID: nodeID, endpoint: endpoint) }
+            await watcher.observe(nodeID: nodeID, endpoint: endpoint)
             guard !stopped, !changingMembership, !membershipReadSuspended, appliedPollGeneration == result.generation else { return }
         }
         let now = ContinuousClock.now
@@ -555,7 +584,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         }
         completeReadyResolutions()
     }
-    private func enqueueRetirement(identity: V2GatewayRealtimeIdentity, id: ClusterSystem.ActorID, replaced: Bool = false) -> Bool {
+    private func enqueueRetirement(identity: V2GatewayRealtimeIdentity, id: IMActorSystem.ActorID, replaced: Bool = false) -> Bool {
         // Membership affects route availability only; it grants no PG ownership.
         guard id.node != endpoint.id.node else { return true }
         if let current = retiringReferences[id] {
@@ -579,7 +608,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
             guard await sender.beginRetirement(retiring.identity, reference: retiring.reference) else { continue }
             guard let current = retiringReferences[id] else { continue }
             if !current.replaced {
-                cache = cache.filter { (try? V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
+                cache = cache.filter { (try? V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
                 softSuspendedReferences.insert(id)
                 retiringReferences.removeValue(forKey: id)
                 if !peers.contains(where: { $0.nodeID == retiring.identity.nodeID }),
@@ -590,14 +619,14 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                     watchedDescriptors.removeValue(forKey: nodeID)
                     reachable.removeValue(forKey: nodeID)
                     softSuspendedReferences.remove(id)
-                    await watcher?.whenLocal { $0.forget(nodeID: nodeID, expected: id) }
+                    await watcher?.forget(nodeID: nodeID, expected: id)
                 }
                 // Keep exact watch/identity; a new authenticated challenge may
                 // reopen it with a new handshake. No membership down/blacklist.
                 continue
             }
             // The await may have installed a new incarnation. Retire only the
-            // exact old physical node; never down this local ClusterSystem.
+            // exact old physical node; never down this local IMActorSystem.
             guard id.node != endpoint.id.node else { retiringReferences.removeValue(forKey: id); continue }
             softSuspendedReferences.remove(id)
             retiredReferences[retiring.identity.nodeID] = id
@@ -607,32 +636,32 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                 watchedDescriptors.removeValue(forKey: retiring.identity.nodeID)
                 reachable.removeValue(forKey: retiring.identity.nodeID)
             }
-            cache = cache.filter { (try? V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
+            cache = cache.filter { (try? V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
             system.log.warning("Realtime shard reference retirement: actual calls settled", metadata: [
                 "realtime/retirement_reason": "authenticated_replacement_or_termination"
             ])
-            system.cluster.down(member: .init(node: id.node, status: .up))
+            system.retire(node: id.node)
             if let peer = peers.first(where: { $0.nodeID == retiring.identity.nodeID }) {
-                system.cluster.join(host: peer.address, port: peer.port)
+                system.connect(host: peer.address, port: peer.port)
             }
             retiringReferences.removeValue(forKey: id)
         }
     }
-    private nonisolated func recordReceptionistLookup(foreground: Bool) {
-        receptionistLookups.withLock {
+    private nonisolated func recordDirectoryLookup(foreground: Bool) {
+        directoryLookups.withLock {
             if foreground { $0.foreground &+= 1 } else { $0.background &+= 1 }
         }
     }
     public func metricsSnapshot() async -> V2RealtimeShardTransportMetricsSnapshot {
         let counters = await sender.metrics()
-        let lookups = receptionistLookups.withLock { $0 }
+        let lookups = directoryLookups.withLock { $0 }
         return .init(cacheHits: cacheHits, cacheMisses: cacheMisses, cacheInvalidations: invalidations,
             discoveryPasses: discoveryPasses, discoveryActive: poll == nil ? 0 : 1,
             cachedPartitions: cache.values.filter { $0.expires > .now }.count,
             reachableNodes: reachableNodeIDs().count,
             controlStarted: counters.0, controlSettled: counters.1, controlActive: counters.2,
             publishStarted: counters.3, publishSettled: counters.4, publishActive: counters.5,
-            rpcRejected: counters.6, pendingHandshakes: counters.7, capacityRejections: counters.8, backgroundReceptionistLookups: lookups.background, foregroundReceptionistLookups: lookups.foreground,
+            rpcRejected: counters.6, pendingHandshakes: counters.7, capacityRejections: counters.8, backgroundDirectoryLookups: lookups.background, foregroundDirectoryLookups: lookups.foreground,
             controlQueued: counters.9, controlQueueSeconds: counters.10, controlQueueSettled: counters.11)
     }
     public func stop(deadline: ContinuousClock.Instant) async -> Bool {
@@ -647,12 +676,12 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         }
         guard inboundDone, senderDone, worker == nil, poll == nil, membershipChange == nil else { return false }
         qualificationObserver = nil
-        if let watcher { await watcher.whenLocal { $0.clear() } }
+        if let watcher { await watcher.clear() }
         watcher = nil; cache.removeAll(); retiringReferences.removeAll(); softSuspendedReferences.removeAll(); return true
     }
 }
 
-func buildRealtimeShardTransport(system: ClusterSystem, identity: V2GatewayRealtimeIdentity,
+func buildRealtimeShardTransport(system: IMActorSystem, identity: V2GatewayRealtimeIdentity,
     address: String, port: Int, signer: V2ActorSigningIdentity, trust: V2ActorTrustStore,
     serving: any V2RealtimeShardServing, serviceOwnerAccess: [V2ActorServiceID: Set<String>],
     discoveryPeers: [V2RealtimeShardDiscoveryPeer], limits: V2RealtimeTransportLimits,

@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "methods": [
+    {
+      "id": 1001,
+      "actor": "V2RoomHostEndpoint",
+      "method": "closeSession",
+      "traffic": "control",
+      "argument": "packet",
+      "void": true
+    },
+    {
+      "id": 1002,
+      "actor": "V2RoomHostEndpoint",
+      "method": "openSession",
+      "traffic": "control",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1003,
+      "actor": "V2RoomHostEndpoint",
+      "method": "exchange",
+      "traffic": "rpc",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1004,
+      "actor": "V2RoomClusterActor",
+      "method": "exchange",
+      "traffic": "rpc",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1005,
+      "actor": "V2RoomDiscoveryBeacon",
+      "method": "advertise",
+      "traffic": "control",
+      "argument": "challenge",
+      "void": false
+    },
+    {
+      "id": 1006,
+      "actor": "V2GatewayRealtimeEndpoint",
+      "method": "openSession",
+      "traffic": "control",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1007,
+      "actor": "V2GatewayRealtimeEndpoint",
+      "method": "deliverySession",
+      "traffic": "control",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1008,
+      "actor": "V2GatewayRealtimeEndpoint",
+      "method": "projectJournal",
+      "traffic": "rpc",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1009,
+      "actor": "V2GatewayRealtimeEndpoint",
+      "method": "deliverRoomSubscriptionBatch",
+      "traffic": "rpc",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1010,
+      "actor": "V2GatewayRealtimeEndpoint",
+      "method": "deliverRoomSubscription",
+      "traffic": "rpc",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1011,
+      "actor": "V2GatewayRealtimeEndpoint",
+      "method": "exchange",
+      "traffic": "rpc",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1012,
+      "actor": "V2RealtimeShardEndpoint",
+      "method": "openSession",
+      "traffic": "control",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1013,
+      "actor": "V2RealtimeShardEndpoint",
+      "method": "exchange",
+      "traffic": "rpc",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1014,
+      "actor": "V2RealtimeShardDiscoveryBeacon",
+      "method": "advertise",
+      "traffic": "control",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1015,
+      "actor": "V2RoomHostEndpoint",
+      "method": "control",
+      "traffic": "control",
+      "argument": "packet",
+      "void": false
+    },
+    {
+      "id": 1016,
+      "actor": "V2RoomHostEndpoint",
+      "method": "transfer",
+      "traffic": "bulk",
+      "argument": "packet",
+      "void": false
+    }
+  ]
+}

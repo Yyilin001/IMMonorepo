@@ -1,5 +1,5 @@
 import Crypto
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import FluentKit
 import IMV2ActorContracts
@@ -94,8 +94,8 @@ struct PostgresV2PolicyFactsSnapshotTests {
             let configuration = try V2RoomRuntimeConfiguration(), limits = try V2ActorAuthenticationLimits()
             let names = ["snapshot-owner", "snapshot-gateway"]
             let ports = [Int.random(in: 30_000...39_999), Int.random(in: 40_000...49_999)]
-            var systems: [ClusterSystem] = []
-            for index in 0..<2 { systems.append(await ClusterSystem(names[index], settings: settings(names[index], ports[index]))) }
+            var systems: [IMActorSystem] = []
+            for index in 0..<2 { systems.append(try await V2ActorRPCManifest.makeSystem(names[index], settings: settings(names[index], ports[index]))) }
             let clients = (0..<2).map { V2RoomClusterClient(system: systems[$0], signer: signers[$0], trust: trust, limits: limits, configuration: configuration) }
             let caches = (0..<2).map { V2NodePolicyStateCache(identity: identities[$0]) }
             let subscriber = try V2PolicySnapshotSubscriberWire(host: identities[1], endpoint: names[1])
@@ -131,7 +131,7 @@ struct PostgresV2PolicyFactsSnapshotTests {
                 for control in controls { try? await control.close() }
                 for directory in directories { await directory.shutdown() }
                 for cache in caches { await cache.shutdown() }
-                for system in systems { try? await system.shutdown().wait() }
+                for system in systems { try? await system.shutdown() }
             }
             do {
                 for index in 0..<2 {
@@ -209,11 +209,11 @@ struct PostgresV2PolicyFactsSnapshotTests {
             } catch { await stop(); throw error }
         }
     }
-    private func settings(_ name: String, _ port: Int) -> ClusterSystemSettings {
-        var settings = ClusterSystemSettings(name: name, host: "127.0.0.1", port: port)
+    private func settings(_ name: String, _ port: Int) -> IMActorSystemSettings {
+        var settings = IMActorSystemSettings(name: name, host: "127.0.0.1", port: port)
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
         return settings
     }
     private struct Count: Decodable { let value: Int64 }

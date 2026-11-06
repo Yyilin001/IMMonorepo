@@ -1,5 +1,5 @@
 import Crypto
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import Synchronization
 import IMV2ActorContracts
@@ -13,12 +13,12 @@ struct V2RoomClusterBridgeTests {
     @Test("100 independent profile viewers cross real TCP in one authenticated invocation")
     func profileCohortAcrossTCP() async throws {
         let fixture = try await Fixture(coordinatorUserCalls: true, profileCohorts: true)
-        var settings = ClusterSystemSettings(name: "v2-profile-caller", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-profile-caller", host: "127.0.0.1",
             port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remote = await ClusterSystem("v2-profile-caller", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remote = try await V2ActorRPCManifest.makeSystem("v2-profile-caller", settings: settings)
         let caller = V2RoomClusterClient(system: remote, signer: fixture.coordinator,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         var failure: (any Error)?
@@ -53,8 +53,8 @@ struct V2RoomClusterBridgeTests {
         #expect(await caller.quiesce(deadline: .now + .seconds(3)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await remote.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remote.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
@@ -62,9 +62,9 @@ struct V2RoomClusterBridgeTests {
     func sendFailureDiagnostics() {
         #expect(V2RoomClusterPeer.sendFailureReason(V2ActorAuthenticationError.sessionExpired)
             == "authentication_sessionExpired")
-        #expect(V2RoomClusterPeer.sendFailureReason(ErrorEnvelope(V2ActorAuthenticationError.replay))
+        #expect(V2RoomClusterPeer.sendFailureReason(V2ActorAuthenticationError.replay)
             == "authentication_replay")
-        #expect(V2RoomClusterPeer.sendFailureReason(ErrorEnvelope(description: "private payload")) == "other")
+        #expect(V2RoomClusterPeer.sendFailureReason(IMActorError.remoteFailure) == "remote_call")
         #expect(V2RoomClusterPeer.sendFailureReason(V2RoomCallFailure.outcomeUnknown) == "outcome_unknown")
         #expect(V2RoomClusterPeer.sendFailureReason(CancellationError()) == "cancelled")
     }
@@ -73,12 +73,12 @@ struct V2RoomClusterBridgeTests {
     func expiredSessionIsReplacedAcrossTCP() async throws {
         let offset = Mutex<Duration>(.zero)
         let fixture = try await Fixture(authenticationNow: { .now + offset.withLock { $0 } })
-        var settings = ClusterSystemSettings(name: "v2-expiry-caller", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-expiry-caller", host: "127.0.0.1",
             port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remote = await ClusterSystem("v2-expiry-caller", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remote = try await V2ActorRPCManifest.makeSystem("v2-expiry-caller", settings: settings)
         let caller = V2RoomClusterClient(system: remote, signer: fixture.client,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         var failure: (any Error)?
@@ -115,8 +115,8 @@ struct V2RoomClusterBridgeTests {
         #expect(await caller.quiesce(deadline: .now + .seconds(3)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await remote.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remote.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
@@ -127,12 +127,12 @@ struct V2RoomClusterBridgeTests {
         let gate = RestoreGate()
         let delayed = DelayedExpiryInbound(service: fixture.inbound, gate: gate)
         let endpoint = V2RoomHostEndpoint(actorSystem: fixture.system, service: delayed)
-        var settings = ClusterSystemSettings(name: "v2-expiry-race", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-expiry-race", host: "127.0.0.1",
             port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remote = await ClusterSystem("v2-expiry-race", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remote = try await V2ActorRPCManifest.makeSystem("v2-expiry-race", settings: settings)
         let caller = V2RoomClusterClient(system: remote, signer: fixture.client,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         var late: Task<V2RoomActivationResolution, any Error>?
@@ -171,20 +171,20 @@ struct V2RoomClusterBridgeTests {
         #expect(await caller.quiesce(deadline: .now + .seconds(3)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await remote.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remote.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
     @Test("small and large authenticated sends use their codec executor policy across real TCP", arguments: [32, 32_768])
     func messageCodecExecutionAcrossTCP(textBytes: Int) async throws {
         let fixture = try await Fixture()
-        var settings = ClusterSystemSettings(name: "v2-codec-caller", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-codec-caller", host: "127.0.0.1",
             port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remote = await ClusterSystem("v2-codec-caller", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remote = try await V2ActorRPCManifest.makeSystem("v2-codec-caller", settings: settings)
         let caller = V2RoomClusterClient(system: remote, signer: fixture.client,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         let observations = Mutex<[V2SendPathTrace.Snapshot]>([])
@@ -223,19 +223,19 @@ struct V2RoomClusterBridgeTests {
         #expect(await caller.quiesce(deadline: .now + .seconds(3)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await remote.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remote.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
     @Test("signed Raft voting RPC binds fixed voter role, shard and group across real TCP")
     func remoteRaftVoting() async throws {
         let fixture = try await Fixture(raft: true), voter = try #require(fixture.raftVoter)
-        var settings = ClusterSystemSettings(name: "v2-raft-caller", host: "127.0.0.1", port: Int.random(in: 30_000...60_000))
+        var settings = IMActorSystemSettings(name: "v2-raft-caller", host: "127.0.0.1", port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remote = await ClusterSystem("v2-raft-caller", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remote = try await V2ActorRPCManifest.makeSystem("v2-raft-caller", settings: settings)
         let caller = V2RoomClusterClient(system: remote, signer: fixture.coordinator,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         var failure: (any Error)?
@@ -292,8 +292,8 @@ struct V2RoomClusterBridgeTests {
         await voter.stop()
         _ = await fixture.host.stop(deadline: .now + .seconds(3))
         await fixture.inbound.stop()
-        try await remote.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remote.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
@@ -302,12 +302,12 @@ struct V2RoomClusterBridgeTests {
         let gate = RestoreGate()
         let fixture = try await Fixture(executeGate: gate, nativePlacement: true)
         let log = try #require(fixture.placementLog)
-        var settings = ClusterSystemSettings(name: "v2-placement-caller", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-placement-caller", host: "127.0.0.1",
             port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remote = await ClusterSystem("v2-placement-caller", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remote = try await V2ActorRPCManifest.makeSystem("v2-placement-caller", settings: settings)
         let caller = V2RoomClusterClient(system: remote, signer: fixture.coordinator,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         let denied = V2RoomClusterClient(system: remote, signer: fixture.client,
@@ -390,8 +390,8 @@ struct V2RoomClusterBridgeTests {
         _ = await denied.quiesce(deadline: .now + .seconds(3))
         _ = await fixture.host.stop(deadline: .now + .seconds(3))
         await fixture.inbound.stop()
-        try await remote.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remote.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
@@ -399,12 +399,12 @@ struct V2RoomClusterBridgeTests {
     func remotePartitionTransfer() async throws {
         let fixture = try await Fixture(nativePlacement: true)
         let runtime = try #require(fixture.placementRuntime), log = try #require(fixture.placementLog)
-        var settings = ClusterSystemSettings(name: "v2-transfer-caller", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-transfer-caller", host: "127.0.0.1",
             port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remote = await ClusterSystem("v2-transfer-caller", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remote = try await V2ActorRPCManifest.makeSystem("v2-transfer-caller", settings: settings)
         let client = V2RoomClusterClient(system: remote, signer: fixture.coordinator,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         var failure: (any Error)?
@@ -444,8 +444,8 @@ struct V2RoomClusterBridgeTests {
         _ = await client.quiesce(deadline: .now + .seconds(3))
         _ = await fixture.host.stop(deadline: .now + .seconds(3))
         await fixture.inbound.stop()
-        try await remote.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remote.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
@@ -478,11 +478,11 @@ struct V2RoomClusterBridgeTests {
             }
         } catch {
             await control.stop()
-            try await fixture.system.shutdown().wait()
+            try await fixture.system.shutdown()
             throw error
         }
         await control.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
     @Test("published routing snapshots retain their version across restart and suspension")
     func routingSnapshotVersions() async throws {
@@ -510,10 +510,10 @@ struct V2RoomClusterBridgeTests {
             }
         } catch {
             await caller.stop()
-            try await fixture.system.shutdown().wait()
+            try await fixture.system.shutdown()
             throw error
         }
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     @Test("signed recovery batches enforce request bytes before caller dispatch and after host authentication")
@@ -524,12 +524,12 @@ struct V2RoomClusterBridgeTests {
         let shard = "allowed-" + String(repeating: "s", count: 1_024)
         let fixture = try await Fixture(coordinatorUserCalls: true, recoveryBatchGate: gate,
             ownerShardID: shard)
-        var settings = ClusterSystemSettings(name: "v2-recovery-byte-caller", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-recovery-byte-caller", host: "127.0.0.1",
             port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remoteSystem = await ClusterSystem("v2-recovery-byte-caller", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remoteSystem = try await V2ActorRPCManifest.makeSystem("v2-recovery-byte-caller", settings: settings)
         let caller = V2RoomClusterClient(system: remoteSystem, signer: fixture.coordinator,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         var failure: (any Error)?
@@ -585,8 +585,8 @@ struct V2RoomClusterBridgeTests {
         #expect(await caller.quiesce(deadline: .now + .seconds(2)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
         await fixture.inbound.stop()
-        try await remoteSystem.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remoteSystem.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
@@ -596,12 +596,12 @@ struct V2RoomClusterBridgeTests {
         let fixture = try await Fixture(maximumInboundRequests: 8, maximumActiveRooms: 3,
             coordinatorUserCalls: true, recoveryBatchGate: gate,
             maximumActivationWaitersPerHost: 16, maximumConcurrentReservations: 3)
-        var settings = ClusterSystemSettings(name: "v2-recovery-batch-caller", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-recovery-batch-caller", host: "127.0.0.1",
             port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let remoteSystem = await ClusterSystem("v2-recovery-batch-caller", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let remoteSystem = try await V2ActorRPCManifest.makeSystem("v2-recovery-batch-caller", settings: settings)
         let caller = V2RoomClusterClient(system: remoteSystem, signer: fixture.coordinator,
             trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
         var running: [Task<[V2RoomRecoveryBatchCallOutcome], any Error>] = []
@@ -692,8 +692,8 @@ struct V2RoomClusterBridgeTests {
         #expect(await fixture.inbound.quiesce(deadline: .now + .seconds(2)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
         await fixture.inbound.stop()
-        try await remoteSystem.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await remoteSystem.shutdown()
+        try await fixture.system.shutdown()
         if let failure { throw failure }
     }
 
@@ -716,7 +716,7 @@ struct V2RoomClusterBridgeTests {
         await fixture.inbound.reconcileActors(roomIDs: [tokens[1].roomID])
         #expect(await fixture.inbound.actorCount() == 0)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     @Test("same-token reconstruction survives cleanup of the previous physical installation")
@@ -727,14 +727,14 @@ struct V2RoomClusterBridgeTests {
             Issue.record("expected ready"); return
         }
         let original = try await fixture.inbound.physicalReference(for: token)
-        let originalID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: original)
+        let originalID = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: original)
         #expect(await fixture.inbound.removePhysicalReference(for: token, actorID: originalID))
         let replacement = try await fixture.inbound.physicalReference(for: token)
-        let replacementID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: replacement)
+        let replacementID = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: replacement)
         #expect(originalID != replacementID)
         #expect(!(await fixture.inbound.removePhysicalReference(for: token, actorID: originalID)))
         let retained = try await fixture.inbound.physicalReference(for: token)
-        let retainedID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: retained)
+        let retainedID = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: retained)
         #expect(retainedID == replacementID)
         #expect(await fixture.inbound.actorCount() == 1)
         #expect(await fixture.host.isReady(token: token))
@@ -748,7 +748,7 @@ struct V2RoomClusterBridgeTests {
         await fixture.inbound.reconcileActors(roomIDs: [token.roomID])
         #expect(await fixture.inbound.actorCount() == 0)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     @Test("node-local exchange uses the signed hello then the same replay, shard and bound-token gate")
@@ -790,7 +790,7 @@ struct V2RoomClusterBridgeTests {
         }
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     @Test("signed local activation publishes a physical actor and denies other shards")
@@ -808,7 +808,7 @@ struct V2RoomClusterBridgeTests {
         #expect(token.roomID == fixture.room)
         #expect(!idBytes.isEmpty)
         let actor = try V2RoomClusterActor.resolve(
-            id: V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: idBytes), using: fixture.system
+            id: V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: idBytes), using: fixture.system
         )
         let wrongShard = try V2RoomDataOwner(shardID: "forbidden", epoch: 0)
         let denied = fixture.call(grant: grant, sequence: 2,
@@ -844,18 +844,18 @@ struct V2RoomClusterBridgeTests {
         #expect(try fixture.trust.verifyReply(staleReply, for: stale, maximumBytes: 10_000)
                 == .failure(.notAccepted(.staleActivation)))
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
-    @Test("two ClusterSystems exchange host-signed room identities over the transport")
+    @Test("two IMActorSystems exchange host-signed room identities over the transport")
     func remoteActivation() async throws {
         let fixture = try await Fixture()
-        var settings = ClusterSystemSettings(name: "v2-room-bridge-test", host: "127.0.0.1",
+        var settings = IMActorSystemSettings(name: "v2-room-bridge-test", host: "127.0.0.1",
                                              port: Int.random(in: 30_000...60_000))
         settings.threadPoolSize = 1
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let callerSystem = await ClusterSystem("v2-room-bridge-test", settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        let callerSystem = try await V2ActorRPCManifest.makeSystem("v2-room-bridge-test", settings: settings)
         let caller = V2RoomClusterClient(system: callerSystem, signer: fixture.client,
                                          trust: fixture.trust, limits: fixture.limits,
                                          configuration: fixture.configuration)
@@ -886,8 +886,8 @@ struct V2RoomClusterBridgeTests {
         await caller.stop()
         #expect((await fixture.host.drain(deadline: deadline)).completed)
         await fixture.inbound.stop()
-        try await callerSystem.shutdown().wait()
-        try await fixture.system.shutdown().wait()
+        try await callerSystem.shutdown()
+        try await fixture.system.shutdown()
     }
 
     @Test("admission bounds calls before authentication, including room execution and session hello", arguments: [false, true])
@@ -943,7 +943,7 @@ struct V2RoomClusterBridgeTests {
         await expectAuthentication(.overloaded) { _ = try await fixture.open() }
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     @Test("a pending remote reservation consumes the caller's global slot")
@@ -990,7 +990,7 @@ struct V2RoomClusterBridgeTests {
         await caller.stop()
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     @Test("cancelling one bounded session waiter leaves its shared hello alive")
@@ -1039,7 +1039,7 @@ struct V2RoomClusterBridgeTests {
         await caller.stop()
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     @Test("native finish timeout retains the dispatch slot until invalidation ends")
@@ -1073,7 +1073,7 @@ struct V2RoomClusterBridgeTests {
         #expect(await caller.quiesce(deadline: .now + .seconds(2)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     @Test("a failed Host activation coalesces recovery while its actual restore remains owned")
@@ -1134,7 +1134,7 @@ struct V2RoomClusterBridgeTests {
         #expect((await caller.callMetricsSnapshot()).activeHostRecoveries == 0)
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
         if let testError { throw testError }
     }
 
@@ -1186,7 +1186,7 @@ struct V2RoomClusterBridgeTests {
         #expect(await caller.quiesce(deadline: .now + .seconds(2)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
         if let testError { throw testError }
     }
 
@@ -1247,7 +1247,7 @@ struct V2RoomClusterBridgeTests {
         }
 
         // Even a failure before gate entry must let a late inbound arrival
-        // finish before stopping the client and shutting down ClusterSystem.
+        // finish before stopping the client and shutting down IMActorSystem.
         await gate.openAndRemainOpen()
         if let inFlight {
             inFlight.cancel()
@@ -1257,7 +1257,7 @@ struct V2RoomClusterBridgeTests {
         let hostDrained = await fixture.host.drain(deadline: .now + .seconds(3))
         await fixture.inbound.stop()
         var shutdownError: (any Error)?
-        do { try await fixture.system.shutdown().wait() }
+        do { try await fixture.system.shutdown() }
         catch { shutdownError = error }
         if let exerciseError { throw exerciseError }
         if let shutdownError { throw shutdownError }
@@ -1300,7 +1300,7 @@ struct V2RoomClusterBridgeTests {
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
         await fixture.inbound.stop()
         #expect(await caller.quiesce(deadline: .now + .seconds(3)))
-        try await fixture.system.shutdown().wait()
+        try await fixture.system.shutdown()
     }
 
     private func waitUntil(_ condition: @escaping @Sendable () async -> Bool) async throws {
@@ -1318,7 +1318,7 @@ struct V2RoomClusterBridgeTests {
     }
 
     private struct Fixture {
-        let system: ClusterSystem
+        let system: IMActorSystem
         let endpoint: V2RoomHostEndpoint
         let inbound: V2RoomClusterInboundService
         let host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>
@@ -1436,12 +1436,12 @@ struct V2RoomClusterBridgeTests {
                 }
             )
             port = Int.random(in: 30_000...60_000)
-            var settings = ClusterSystemSettings(name: "v2-room-bridge-test", host: "127.0.0.1",
+            var settings = IMActorSystemSettings(name: "v2-room-bridge-test", host: "127.0.0.1",
                                                  port: port)
             settings.threadPoolSize = 1
-            settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-            settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-            system = await ClusterSystem("v2-room-bridge-test", settings: settings)
+            settings.errorTypes = [V2ActorAuthenticationError.self]
+
+            system = try await V2ActorRPCManifest.makeSystem("v2-room-bridge-test", settings: settings)
             limits = try V2ActorAuthenticationLimits()
             let raftEndpoint: V2PlacementRaftEndpoint?
             if raft {

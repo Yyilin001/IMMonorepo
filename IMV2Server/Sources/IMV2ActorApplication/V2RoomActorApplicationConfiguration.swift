@@ -264,7 +264,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         self.authentication = try .init(maximumRequestBytes: runtime.maximumRequestBytes)
     }
 
-    /// DistributedCluster 将对端地址作为 SNI 发送。NIOSSL 不接受该字段中的
+    /// IMActorSystem 将对端地址作为 SNI 发送。NIOSSL 不接受该字段中的
     /// IP 字面量，因此在创建活动传输前予以拒绝。
     private static func isDNSName(_ address: String) -> Bool {
         guard (1...253).contains(address.utf8.count),

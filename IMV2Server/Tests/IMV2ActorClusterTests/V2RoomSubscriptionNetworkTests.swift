@@ -1,6 +1,6 @@
 import Crypto
 import Distributed
-@testable import DistributedCluster
+@testable import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
@@ -16,7 +16,7 @@ import Testing
 struct V2RoomSubscriptionNetworkTests {
     @Test("unknown delivery peers return retryable reset without spending the RPC budget on membership")
     func deliveryOpenDoesNotWaitForMembership() async throws {
-        let system = await makeSystem(name: "delivery-membership-budget", port: Int.random(in: 30_000...44_999))
+        let system = try await makeSystem(name: "delivery-membership-budget", port: Int.random(in: 30_000...44_999))
         let keys = try Keys()
         let identity = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "gateway", incarnationID: UUID())
         let inbound = V2GatewayRealtimeInbound(identity: identity, signer: keys.gateway, trust: keys.trust,
@@ -38,7 +38,7 @@ struct V2RoomSubscriptionNetworkTests {
                 gateway: identity, generation: 1)
             // The endpoint is the actual local listener, but incarnation zero
             // can never be a generated native member. No unrelated port is contacted.
-            let absent = Cluster.Node(endpoint: system.cluster.node.endpoint, nid: .init(0))
+            let absent = IMNode(id: system.node.id, incarnationID: UUID(), endpoint: system.node.endpoint)
             let began = ContinuousClock.now
             for sequence in UInt64(1)...4 {
                 let call = RoomDeliverySessionCall(serviceID: keys.publisher.serviceID, version: 1,
@@ -59,7 +59,7 @@ struct V2RoomSubscriptionNetworkTests {
             while !accepted {
                 let call = RoomDeliverySessionCall(serviceID: keys.publisher.serviceID, version: 1,
                     callerIncarnation: hello.callerIncarnation, recipient: identity, sessionID: grant.sessionID,
-                    sequence: sequence, attemptID: UUID(), sourceNode: system.cluster.node, sourceShardID: "rooms",
+                    sequence: sequence, attemptID: UUID(), sourceNode: system.node, sourceShardID: "rooms",
                     pulse: .init(session: delivery, kind: .open, sequence: 1))
                 let packet = try await inbound.deliverySession(keys.publisher.sign(call, maximumBytes: 16_384))
                 let reply = try keys.trust.verify(packet, as: RoomDeliverySessionReply.self, maximumBytes: 16_384).0
@@ -73,13 +73,13 @@ struct V2RoomSubscriptionNetworkTests {
         await inbound.stop()
         #expect(await sender.stop(deadline: .now + .seconds(2)))
         await authority.shutdown()
-        try await system.shutdown().wait()
+        try await system.shutdown()
         if let failure { throw failure }
     }
 
     @Test("ordinary callbacks share global sixteen and per-peer two admission")
     func sharedCallbackAdmission() async throws {
-        let system = await makeSystem(name: "callback-budget", port: Int.random(in: 30_000...44_999))
+        let system = try await makeSystem(name: "callback-budget", port: Int.random(in: 30_000...44_999))
         let keys = try Keys()
         let sender = V2RealtimeClusterSender(system: system, signer: keys.publisher,
             trust: keys.trust, limits: .init(maximumConcurrentCalls: 16))
@@ -114,15 +114,15 @@ struct V2RoomSubscriptionNetworkTests {
         await #expect(throws: V2ActorAuthenticationError.overloaded) {
             try await sender.acquireCallback(to: peers[0])
         }
-        try await system.shutdown().wait()
+        try await system.shutdown()
     }
 
     @Test("signed room callbacks commit actual gateway authority over TCP and reject retired node identity", arguments: [false, true])
     func remoteRoomSubscriptionAuthority(binary: Bool) async throws {
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
         let keys = try Keys()
-        let callerSystem = await makeSystem(name: "room-subscription-caller", port: callerPort, binary: binary)
-        var peerSystem = await makeSystem(name: "room-subscription-peer", port: peerPort)
+        let callerSystem = try await makeSystem(name: "room-subscription-caller", port: callerPort, binary: binary)
+        var peerSystem = try await makeSystem(name: "room-subscription-peer", port: peerPort)
         var callerHandle: V2RealtimeTransportHandle?
         var peerHandle: V2RealtimeTransportHandle?
         var failure: (any Error)?
@@ -157,20 +157,16 @@ struct V2RoomSubscriptionNetworkTests {
             #expect(try await caller.sendDeliverySession(.init(session: session, kind: .open, sequence: 1),
                 sourceShardID: "rooms", to: first.descriptor) == .accepted)
             #expect(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "publisher", session: session))
-            let targetID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: first.descriptor.endpointReference)
+            let targetID = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: first.descriptor.endpointReference)
             let remote = try V2GatewayRealtimeEndpoint.resolve(id: targetID, using: callerSystem)
             #expect(__isRemoteActor(remote))
-            #expect(targetID.node != callerSystem.cluster.node)
-            callerSystem.cluster.join(host: "127.0.0.1", port: peerPort)
+            #expect(targetID.node != callerSystem.node)
+            callerSystem.connect(host: "127.0.0.1", port: peerPort)
             let member = V2RoomSubscriptionMember(userID: user, memberRevision: 1)
             let baseline = V2RoomSubscriptionDelivery(fence: fence, deliverySequence: 1, authorizationSequence: 1, payload: .baseline(members: [member]))
             #expect(try await caller.sendRoomSubscription(baseline, sourceShardID: "rooms", to: first.descriptor) == .appliedThrough(1))
-            let association = try #require(callerSystem._cluster?.getSpecificExistingAssociation(with: targetID.node))
-            let channel = try #require(association.lock.withLock { () -> (any Channel)? in
-                if case .associated(let channel) = association.state { return channel }; return nil
-            })
-            #expect(channel.isActive)
-            #expect(channel.remoteAddress?.port == peerPort)
+            #expect(callerSystem.peerSnapshot.available[targetID.node] == true)
+            #expect(targetID.node.endpoint.port == peerPort)
             let event = V2RealtimeRoomEvent(roomID: room, highWatermark: 1, sourceEventID: EventID(uuid: UUID()),
                 roomSequence: 1, projectionKind: "message", payload: Data("remote".utf8), recipientUserIDs: [user])
             let delivery = V2RoomSubscriptionDelivery(fence: fence, deliverySequence: 2, authorizationSequence: 1, payload: .event(event, members: [member]))
@@ -262,11 +258,11 @@ struct V2RoomSubscriptionNetworkTests {
             let oldDescriptor = first.descriptor
             #expect(await first.stop(deadline: .now + .seconds(2)))
             peerHandle = nil
-            try await peerSystem.shutdown().wait()
-            peerSystem = await makeSystem(name: "room-subscription-peer", port: peerPort)
+            try await peerSystem.shutdown()
+            peerSystem = try await makeSystem(name: "room-subscription-peer", port: peerPort)
             let replacement = try makePeer(system: peerSystem, port: peerPort, keys: keys)
             peerHandle = replacement
-            let newID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: replacement.descriptor.endpointReference)
+            let newID = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: replacement.descriptor.endpointReference)
             #expect(newID.node != targetID.node)
             #expect(replacement.descriptor.identity.incarnationID != oldDescriptor.identity.incarnationID)
             let replacementAuthority = V2GatewayRoomSubscriptionAuthority()
@@ -286,8 +282,8 @@ struct V2RoomSubscriptionNetworkTests {
         } catch { failure = error }
         if let peerHandle { #expect(await peerHandle.stop(deadline: .now + .seconds(2))) }
         if let callerHandle { #expect(await callerHandle.stop(deadline: .now + .seconds(2))) }
-        try await peerSystem.shutdown().wait()
-        try await callerSystem.shutdown().wait()
+        try await peerSystem.shutdown()
+        try await callerSystem.shutdown()
         if let failure { throw failure }
     }
 
@@ -295,8 +291,8 @@ struct V2RoomSubscriptionNetworkTests {
     func nativePeerLifecycleRetiresIdleSession(unilateral: Bool) async throws {
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
         let keys = try Keys(), user = UserID(uuid: UUID())
-        let callerSystem = await makeSystem(name: "session-owner", port: callerPort)
-        let peerSystem = await makeSystem(name: "session-gateway", port: peerPort)
+        let callerSystem = try await makeSystem(name: "session-owner", port: callerPort)
+        let peerSystem = try await makeSystem(name: "session-gateway", port: peerPort)
         let caller = try buildRealtimeTransport(system: callerSystem,
             identity: .init(nodeID: "publisher", serviceID: "publisher", incarnationID: UUID()),
             address: "127.0.0.1", port: callerPort, signer: keys.publisher, trust: keys.trust,
@@ -330,11 +326,10 @@ struct V2RoomSubscriptionNetworkTests {
 
             // Drive the actual native event stream deterministically. This is
             // an unreachable notification, not a fabricated permission change.
-            let sourceNode = callerSystem.cluster.node, gatewayNode = peerSystem.cluster.node
-            _ = try await callerSystem.cluster.waitFor(gatewayNode, atLeast: .joining, within: .seconds(2))
-            await peerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: sourceNode, status: .up).asUnreachable)))
+            let sourceNode = callerSystem.node, gatewayNode = peerSystem.node
+            peerSystem.peerChanged(sourceNode, available: false)
             if !unilateral {
-                await callerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: gatewayNode, status: .up).asUnreachable)))
+                callerSystem.peerChanged(gatewayNode, available: false)
             }
             let limit = ContinuousClock.now + .seconds(3)
             while oldGate.isReady() {
@@ -343,9 +338,9 @@ struct V2RoomSubscriptionNetworkTests {
             #expect(!(await authority.enqueueFixtureIfCurrent(oldPermit) {}))
             #expect(authority.applyDeliverySession(.init(session: old, kind: .open, sequence: 3), serviceID: "publisher") == .resetRequired)
 
-            await peerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: sourceNode, status: .up).asReachable)))
+            peerSystem.peerChanged(sourceNode, available: true)
             if !unilateral {
-                await callerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: gatewayNode, status: .up).asReachable)))
+                callerSystem.peerChanged(gatewayNode, available: true)
             } else {
                 #expect(try await sessions.retain(activation: token, gateway: peer.descriptor) == old)
             }
@@ -369,7 +364,7 @@ struct V2RoomSubscriptionNetworkTests {
                 payload: .baseline(members: [member])), sourceShardID: "rooms", to: peer.descriptor) == .appliedThrough(1))
             let freshGate = try #require(authority.sessionGate(successor, serviceID: "publisher"))
             // Exercise real cluster downing as well as reachability updates.
-            peerSystem.cluster.down(member: .init(node: sourceNode, status: .up))
+            peerSystem.retire(node: sourceNode)
             while freshGate.isReady() {
                 try #require(ContinuousClock.now < limit); try await Task.sleep(for: .milliseconds(1))
             }
@@ -379,7 +374,7 @@ struct V2RoomSubscriptionNetworkTests {
         #expect(await peer.stop(deadline: .now + .seconds(2)))
         #expect(await caller.stop(deadline: .now + .seconds(2)))
         await authority.shutdown()
-        try await peerSystem.shutdown().wait(); try await callerSystem.shutdown().wait()
+        try await peerSystem.shutdown(); try await callerSystem.shutdown()
         if let failure { throw failure }
     }
 
@@ -387,8 +382,8 @@ struct V2RoomSubscriptionNetworkTests {
     func retiredHistoryRealOwnerReset() async throws {
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
         let keys = try Keys(), user = UserID(uuid: UUID())
-        let callerSystem = await makeSystem(name: "retired-owner", port: callerPort)
-        let peerSystem = await makeSystem(name: "retired-gateway", port: peerPort)
+        let callerSystem = try await makeSystem(name: "retired-owner", port: callerPort)
+        let peerSystem = try await makeSystem(name: "retired-gateway", port: peerPort)
         let caller = try buildRealtimeTransport(system: callerSystem,
             identity: .init(nodeID: "publisher", serviceID: "publisher", incarnationID: UUID()),
             address: "127.0.0.1", port: callerPort, signer: keys.publisher, trust: keys.trust,
@@ -411,11 +406,11 @@ struct V2RoomSubscriptionNetworkTests {
         var failure: (any Error)?
         do {
             try await peer.configureRoomSubscription(ingress)
-            let endpointID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: peer.descriptor.endpointReference)
+            let endpointID = try V2ActorProtobuf.decode(IMActorSystem.ActorID.self, from: peer.descriptor.endpointReference)
             let remote = try V2GatewayRealtimeEndpoint.resolve(id: endpointID, using: callerSystem)
             #expect(__isRemoteActor(remote))
-            #expect(endpointID.node != callerSystem.cluster.node)
-            callerSystem.cluster.join(host: "127.0.0.1", port: peerPort)
+            #expect(endpointID.node != callerSystem.node)
+            callerSystem.connect(host: "127.0.0.1", port: peerPort)
             #expect(await authority.registerFixtureConnection(UUID(), userID: user, lifecycle: UUID()))
             let owner = try V2RoomDataOwner(shardID: "rooms", epoch: 0)
             let rooms = (0..<3).map { _ in RoomID(uuid: UUID()) }
@@ -464,12 +459,8 @@ struct V2RoomSubscriptionNetworkTests {
                 }
                 #expect(await authority.captureOnlinePermits(roomID: room).count == 1)
                 if index == 0 {
-                    let association = try #require(callerSystem._cluster?.getSpecificExistingAssociation(with: endpointID.node))
-                    let channel = try #require(association.lock.withLock { () -> (any Channel)? in
-                        if case .associated(let channel) = association.state { return channel }; return nil
-                    })
-                    #expect(channel.isActive)
-                    #expect(channel.remoteAddress?.port == peerPort)
+                    #expect(callerSystem.peerSnapshot.available[endpointID.node] == true)
+                    #expect(endpointID.node.endpoint.port == peerPort)
                 }
                 if index == 2 {
                     #expect(resets.withLock { $0 } == 1)
@@ -488,19 +479,19 @@ struct V2RoomSubscriptionNetworkTests {
         await pump.close()
         #expect(await peer.stop(deadline: .now + .seconds(2)))
         #expect(await caller.stop(deadline: .now + .seconds(2)))
-        try await peerSystem.shutdown().wait(); try await callerSystem.shutdown().wait()
+        try await peerSystem.shutdown(); try await callerSystem.shutdown()
         if let failure { throw failure }
     }
 
-    private func makeSystem(name: String, port: Int, binary: Bool = false) async -> ClusterSystem {
-        var settings = ClusterSystemSettings(name: name, host: "127.0.0.1", port: port)
-        settings.threadPoolSize = 1; settings.downingStrategy = .none; settings.onDownAction = .none
-        settings.serialization.binaryDistributedInvocations = binary
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        return await ClusterSystem(name, settings: settings)
+    private func makeSystem(name: String, port: Int, binary: Bool = false) async throws -> IMActorSystem {
+        var settings = IMActorSystemSettings(name: name, host: "127.0.0.1", port: port)
+        settings.threadPoolSize = 1;
+
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        return try await V2ActorRPCManifest.makeSystem(name, settings: settings)
     }
-    private func makePeer(system: ClusterSystem, port: Int, keys: Keys) throws -> V2RealtimeTransportHandle {
+    private func makePeer(system: IMActorSystem, port: Int, keys: Keys) throws -> V2RealtimeTransportHandle {
         try buildRealtimeTransport(system: system,
             identity: .init(nodeID: "gateway", serviceID: "gateway", incarnationID: UUID()),
             address: "127.0.0.1", port: port, signer: keys.gateway, trust: keys.trust,

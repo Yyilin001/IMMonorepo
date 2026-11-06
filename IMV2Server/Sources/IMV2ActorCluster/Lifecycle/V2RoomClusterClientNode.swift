@@ -1,4 +1,4 @@
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
@@ -41,7 +41,8 @@ public actor V2RoomClusterClientNode {
     private var starting = false
     private var realtime: V2RealtimeTransportHandle?
     private var realtimeShards: V2RealtimeShardTransportHandle?
-    private var system: ClusterSystem?
+    private var system: IMActorSystem?
+    public var transportMetrics: IMTransportMetrics? { system?.transportMetrics }
     private var client: V2RoomClusterClient?
     private var discovery: V2RoomClusterDiscovery?
 
@@ -63,24 +64,19 @@ public actor V2RoomClusterClientNode {
         guard system == nil, !starting, acceptingRealtime else { throw V2ActorAuthenticationError.invalidConfiguration }
         starting = true
         defer { starting = false }
-        var settings = ClusterSystemSettings(name: configuration.name,
+        var settings = IMActorSystemSettings(name: configuration.name,
                                              host: configuration.host, port: configuration.port,
                                              tls: configuration.tls)
         settings.threadPoolSize = configuration.threadPoolSize
-        settings.serialization.binaryDistributedInvocations = true
-        settings.downingStrategy = .none
-        settings.onDownAction = .none
-        settings.maximumInboundFrameBytes = try ClusterInboundFrameLimit(
-            bytes: max(authenticationLimits.maximumRequestBytes,
-                       authenticationLimits.maximumReplyBytes) * 2 + 65_536
+        settings.maximumInboundFrameBytes = ( max(authenticationLimits.maximumRequestBytes,
+                       authenticationLimits.maximumReplyBytes) + 65_536
         )
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance =
-            .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let system = await ClusterSystem(configuration.name, settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+        settings.methods = try await V2ActorRPCManifest.methods()
+        let system = try await IMActorSystem(configuration.name, settings: settings)
         self.system = system
         guard acceptingRealtime else {
-            try await system.shutdown().wait()
+            try await system.shutdown()
             self.system = nil
             throw V2ActorAuthenticationError.invalidConfiguration
         }
@@ -111,7 +107,7 @@ public actor V2RoomClusterClientNode {
             address: configuration.host, port: configuration.port, signer: signer, trust: trust,
             serving: serving, serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits, serviceQualification: serviceQualification)
         realtimeShards = handle
-        await handle.start()
+        try await handle.start()
         if !acceptingRealtime { _ = await handle.stop(deadline: .now + .seconds(2)); throw V2ActorAuthenticationError.overloaded }
         return handle
     }
@@ -145,7 +141,7 @@ public actor V2RoomClusterClientNode {
     }
 
     /// 不配合取消的原生或远程 RPC 仍在运行时返回 false。
-    /// 此节点继续持有 ClusterSystem，供之后重试停止操作。
+    /// 此节点继续持有 IMActorSystem，供之后重试停止操作。
     public func stop(deadline: ContinuousClock.Instant) async throws -> Bool {
         acceptingRealtime = false
         while starting && ContinuousClock.now < deadline {
@@ -165,7 +161,7 @@ public actor V2RoomClusterClientNode {
         realtimeShards = nil
         discovery = nil
         client = nil
-        try await system.shutdown().wait()
+        try await system.shutdown()
         self.system = nil
         return true
     }

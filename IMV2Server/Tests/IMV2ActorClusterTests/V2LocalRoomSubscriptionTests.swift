@@ -1,5 +1,5 @@
 import Crypto
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
@@ -11,13 +11,13 @@ struct V2LocalRoomSubscriptionTests {
     @Test("native delivery requires exact reference, shard permission, valid receipt and open lifecycle")
     func nativeBoundary() async throws {
         let f = try Fixture()
-        let system = await makeSystem()
+        let system = try await makeSystem()
         let inbound = V2GatewayRealtimeInbound(identity: f.identity, signer: f.signer, trust: f.trust,
             ingress: Ingress(), serviceOwnerAccess: [f.signer.serviceID: ["rooms"]], limits: .init())
         // Deliberately not an encoded ActorID: successful delivery proves this
         // capability never attempts resolution, handshake or packet decoding.
         let descriptor = V2GatewayRealtimeDescriptor(identity: f.identity, endpointReference: Data([1]),
-            address: "127.0.0.1", port: system.cluster.node.endpoint.port)
+            address: "127.0.0.1", port: system.node.endpoint.port)
         let sender = V2RealtimeClusterSender(system: system, signer: f.signer, trust: f.trust,
             limits: .init(), local: (descriptor, inbound))
         var failure: (any Error)?
@@ -49,15 +49,15 @@ struct V2LocalRoomSubscriptionTests {
         } catch { failure = error }
         await inbound.stop()
         #expect(await sender.stop(deadline: .now + .seconds(1)))
-        try await system.shutdown().wait()
+        try await system.shutdown()
         if let failure { throw failure }
     }
 
     @Test("production composition binds the local native capability and closes admission")
     func composition() async throws {
-        let f = try Fixture(), system = await makeSystem()
+        let f = try Fixture(), system = try await makeSystem()
         let transport = try buildRealtimeTransport(system: system, identity: f.identity,
-            address: "127.0.0.1", port: system.cluster.node.endpoint.port, signer: f.signer, trust: f.trust,
+            address: "127.0.0.1", port: system.node.endpoint.port, signer: f.signer, trust: f.trust,
             ingress: Ingress(), serviceOwnerAccess: [f.signer.serviceID: ["rooms"]], limits: .init())
         var failure: (any Error)?
         do {
@@ -69,14 +69,14 @@ struct V2LocalRoomSubscriptionTests {
             }
         } catch { failure = error }
         _ = await transport.stop(deadline: .now + .seconds(1))
-        try await system.shutdown().wait()
+        try await system.shutdown()
         if let failure { throw failure }
     }
 
-    private func makeSystem() async -> ClusterSystem {
-        var settings = ClusterSystemSettings(name: "native-delivery", host: "127.0.0.1", port: Int.random(in: 30_000...60_000))
-        settings.threadPoolSize = 1; settings.downingStrategy = .none; settings.onDownAction = .none
-        return await ClusterSystem("native-delivery", settings: settings)
+    private func makeSystem() async throws -> IMActorSystem {
+        var settings = IMActorSystemSettings(name: "native-delivery", host: "127.0.0.1", port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1;
+        return try await V2ActorRPCManifest.makeSystem("native-delivery", settings: settings)
     }
     private struct Fixture {
         let signer: V2ActorSigningIdentity, denied: V2ActorSigningIdentity

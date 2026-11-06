@@ -44,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install native verification dependencies
-        run: apt-get update && apt-get install --yes --no-install-recommends libsqlite3-dev ripgrep postgresql-client python3 imagemagick
+        run: apt-get update && apt-get install --yes --no-install-recommends libsqlite3-dev ripgrep postgresql-client python3 imagemagick openssl
       - name: Run package tests
         env:
           # This job runs inside a Swift container and cannot launch sibling

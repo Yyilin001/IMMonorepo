@@ -7,6 +7,8 @@ import NIOCore
 import Synchronization
 import IMV2ActorContracts
 
+enum V2GatewayControlQueueError: Error { case overloaded }
+
 /// 一份不可变的服务端推送帧，由协商到相同协议版本的每个已授权本地接收者共享。
 ///
 /// 这些字节不携带任何连接特定状态：
@@ -436,6 +438,17 @@ public actor V2GatewayByteStream {
     private var messageSendExecutingRequests = 0
     private var messageSendTasks: [UInt64: Task<Void, Never>] = [:]
     private var messageSendReservedBytes = 0
+    private struct ControlBatch: Sendable {
+        let frames: [V2GatewayInboundFrame]
+        let bytes: Int
+        let respond: @Sendable (V2GatewayOutboundFrame) async throws -> Void
+        let failed: @Sendable (any Error) -> Void
+    }
+    private var controlBatches = CircularBuffer<ControlBatch>(initialCapacity: 1)
+    // Includes the executing batch until its actual work/write settles.
+    private var controlReservedBytes = 0
+    private var controlReservedBatches = 0
+    private var controlTask: Task<Void, Never>?
 
     /// Physical connection revocation is independent of the persisted online projection.
     nonisolated func connectionAllowsDispatch() -> Bool { session.connectionIsActive }
@@ -579,6 +592,84 @@ public actor V2GatewayByteStream {
             respond: { frame in try await respond(frame.dataFrame) })
     }
 
+    /// The NIO ingress task owns framing/admission, not control execution.
+    /// Bootstrap finishes before lanes split; only message operations bypass
+    /// the FIFO control worker, and still use the existing session/budget gates.
+    func receiveTransportFrames(
+        _ inbound: [V2GatewayInboundFrame],
+        maximumControlBytes: Int,
+        maximumControlBatches: Int,
+        authenticationCompleted: (@Sendable (Bool) async -> Void)? = nil,
+        respond: @escaping @Sendable (V2GatewayOutboundFrame) async throws -> Void,
+        controlFailed: @escaping @Sendable (any Error) -> Void
+    ) async throws {
+        do {
+            var index = 0
+            while index < inbound.count, !authenticatedResponseWritten {
+                try Task.checkCancellation()
+                let frame = inbound[index]
+                defer { frame.heartbeatProbe?.finish(success: false) }
+                try await receiveInboundFrames([frame], authenticationCompleted: authenticationCompleted,
+                    concurrentMessageSendRespond: respond, respond: respond)
+                index += 1
+            }
+            try Task.checkCancellation()
+            guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
+            var controls: [V2GatewayInboundFrame] = []
+            var sends: [V2GatewayInboundFrame] = []
+            var bytes = 0
+            for frame in inbound[index...] {
+                if frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
+                    sends.append(frame)
+                } else {
+                    let size = V2Frame.headerLength + frame.payloadCount
+                    guard size <= maximumControlBytes - controlReservedBytes - bytes else {
+                        throw V2GatewayControlQueueError.overloaded
+                    }
+                    bytes += size
+                    controls.append(frame)
+                }
+            }
+            if !controls.isEmpty {
+                guard controlReservedBatches < maximumControlBatches else {
+                    throw V2GatewayControlQueueError.overloaded
+                }
+                controlReservedBytes += bytes
+                controlReservedBatches += 1
+                controlBatches.append(.init(frames: controls, bytes: bytes, respond: respond, failed: controlFailed))
+                startControlWorker()
+            }
+            if !sends.isEmpty {
+                try await receiveInboundFrames(sends, concurrentMessageSendRespond: respond, respond: respond)
+            }
+        } catch {
+            for frame in inbound { frame.heartbeatProbe?.finish(success: false) }
+            // The transport closes immediately; it owns retirement and joining
+            // both the admitted sends and the possibly suspended control worker.
+            throw error
+        }
+    }
+
+    private func startControlWorker() {
+        guard controlTask == nil else { return }
+        controlTask = Task { [self] in
+            defer { controlTask = nil }
+            while !Task.isCancelled, !transportClosed, let batch = controlBatches.popFirst() {
+                defer {
+                    controlReservedBytes -= batch.bytes
+                    controlReservedBatches -= 1
+                    for frame in batch.frames { frame.heartbeatProbe?.finish(success: false) }
+                }
+                do {
+                    try await receiveInboundFrames(batch.frames, respond: batch.respond)
+                } catch {
+                    batch.failed(error)
+                    return
+                }
+            }
+        }
+    }
+
     func receiveInboundFrames(
         _ inbound: [V2GatewayInboundFrame],
         authenticationCompleted: (@Sendable (Bool) async -> Void)? = nil,
@@ -588,8 +679,10 @@ public actor V2GatewayByteStream {
         do {
             guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
             for frame in inbound {
+                try Task.checkCancellation()
                 let heartbeatProbe = frame.heartbeatProbe
                 heartbeatProbe?.mark(.streamEntered)
+                frame.sendTrace?.mark("gateway_stream_entered")
 
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 if let concurrentMessageSendRespond,
@@ -599,6 +692,7 @@ public actor V2GatewayByteStream {
                         throw V2GatewaySessionError.unsupportedCommand
                     }
                     let send = try await session.validateMessageSendDispatch(frame)
+                    frame.sendTrace?.mark("gateway_send_validated")
                     guard messageSendTasks[frame.requestID] == nil else {
                         throw V2GatewaySessionError.unsupportedCommand
                     }
@@ -630,8 +724,9 @@ public actor V2GatewayByteStream {
                     }
                     messageSendReservedBytes += bytes
                     messageSendExecutingRequests += 1
-                    let sendTrace = V2SendPathTrace.enabled && frame.command == .messageSendOperation
-                        ? V2SendPathTrace(operations: [], segment: "gateway") : nil
+                    let sendTrace = frame.sendTrace ?? (V2SendPathTrace.enabled && frame.command == .messageSendOperation
+                        ? V2SendPathTrace(operations: [], segment: "gateway") : nil)
+                    sendTrace?.mark("gateway_send_admitted")
                     messageSendTasks[frame.requestID] = Task { [self] in
                         await V2SendPathTrace.$current.withValue(sendTrace) {
                         defer { sendTrace?.finish() }
@@ -756,6 +851,7 @@ public actor V2GatewayByteStream {
     /// - Throws: 末尾存在不完整帧时抛出。
     public func finish() async throws {
         beginClosing()
+        await controlTask?.value
         await drainMessageSends()
         do {
             try decoder.finish()
@@ -1656,6 +1752,12 @@ public actor V2GatewayByteStream {
     }
 
     private func beginClosing() {
+        controlTask?.cancel()
+        while let batch = controlBatches.popFirst() {
+            controlReservedBytes -= batch.bytes
+            controlReservedBatches -= 1
+            for frame in batch.frames { frame.heartbeatProbe?.finish(success: false) }
+        }
         revokeRoomSubscriptionConnection()
         recoveryOutbound.revoke()
         notificationsReady = false; authenticatedResponseWritten = false

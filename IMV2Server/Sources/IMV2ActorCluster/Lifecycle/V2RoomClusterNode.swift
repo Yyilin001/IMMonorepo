@@ -1,18 +1,18 @@
-import DistributedCluster
+import IMActorSystem
 import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import NIOSSL
 
 /// 只由拥有此精确入站 Actor 和物理端点的节点创建。
-/// 接待组件匹配或共享 ClusterSystem 都不构成权限。
+/// 接待组件匹配或共享 IMActorSystem 都不构成权限。
 struct V2RoomLocalPort: Sendable {
     let identity: V2ActorHostIdentity
-    let endpointID: ClusterSystem.ActorID
+    let endpointID: IMActorSystem.ActorID
     let generation: UUID
     let inbound: V2RoomClusterInboundService
 
-    fileprivate init(identity: V2ActorHostIdentity, endpointID: ClusterSystem.ActorID,
+    fileprivate init(identity: V2ActorHostIdentity, endpointID: IMActorSystem.ActorID,
                      generation: UUID, inbound: V2RoomClusterInboundService) {
         self.identity = identity
         self.endpointID = endpointID
@@ -30,7 +30,7 @@ public struct V2RoomClusterNodeConfiguration: Sendable {
     public let allowedShards: Set<String>
     public let serviceShardAccess: [V2ActorServiceID: Set<String>]
 
-    /// 即使本地调用方在自己的 ClusterSystem 中解析端点，
+    /// 即使本地调用方在自己的 IMActorSystem 中解析端点，
     /// 仍须提供 TLS 材料和私有信任根。
     public init(name: String, host: String, port: Int, tls: TLSConfiguration,
                 threadPoolSize: Int, allowedShards: Set<String>,
@@ -55,7 +55,7 @@ public struct V2RoomClusterNodeConfiguration: Sendable {
     }
 }
 
-/// 持有 ClusterSystem 及其单独分配的传输线程。
+/// 持有 IMActorSystem 及其单独分配的传输线程。
 /// 绝不借用应用的 EventLoopGroup；关闭时先等待房间排空。
 public actor V2RoomClusterNode {
     private let configuration: V2RoomClusterNodeConfiguration
@@ -68,7 +68,8 @@ public actor V2RoomClusterNode {
     private var starting = false
     private var realtime: V2RealtimeTransportHandle?
     private var realtimeShards: V2RealtimeShardTransportHandle?
-    private var system: ClusterSystem?
+    private var system: IMActorSystem?
+    public var transportMetrics: IMTransportMetrics? { system?.transportMetrics }
     private var inbound: V2RoomClusterInboundService?
     private var endpoint: V2RoomHostEndpoint?
     private var discoveryBeacon: V2RoomDiscoveryBeacon?
@@ -109,27 +110,23 @@ public actor V2RoomClusterNode {
         guard system == nil, !starting, acceptingDiscoveries else { throw V2ActorAuthenticationError.invalidConfiguration }
         starting = true
         defer { starting = false }
-        var settings = ClusterSystemSettings(name: configuration.name, host: configuration.host,
+        var settings = IMActorSystemSettings(name: configuration.name, host: configuration.host,
                                              port: configuration.port, tls: configuration.tls)
         settings.threadPoolSize = configuration.threadPoolSize
-        settings.serialization.binaryDistributedInvocations = true
+
         // 集群成员关系只用于发现。对等节点超时不能让本进程
         // 放弃或认领由已提交归属和原生生命周期管理的房间激活。
-        settings.downingStrategy = .none
-        settings.onDownAction = .none
-        // 分布式 Codable 序列化器会再次对 SignedPacket.body 进行 base64 编码。
-        // 将签名消息体上限翻倍，可为这次膨胀、ActorID、调用元数据
-        // 和 protobuf 分帧留出有界空间。
-        settings.maximumInboundFrameBytes = try ClusterInboundFrameLimit(
-            bytes: max(authenticationLimits.maximumRequestBytes,
-                       authenticationLimits.maximumReplyBytes) * 2 + 65_536
+        // 二进制参数不再 base64 膨胀；为签名、身份与帧头保留固定空间。
+        settings.maximumInboundFrameBytes = ( max(authenticationLimits.maximumRequestBytes,
+                       authenticationLimits.maximumReplyBytes) + 65_536
         )
-        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
-        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
-        let system = await ClusterSystem(configuration.name, settings: settings)
+        settings.errorTypes = [V2ActorAuthenticationError.self]
+
+        settings.methods = try await V2ActorRPCManifest.methods()
+        let system = try await IMActorSystem(configuration.name, settings: settings)
         self.system = system
         guard acceptingDiscoveries else {
-            try await system.shutdown().wait()
+            try await system.shutdown()
             self.system = nil
             throw V2ActorAuthenticationError.invalidConfiguration
         }
@@ -162,7 +159,7 @@ public actor V2RoomClusterNode {
         let beacon = V2RoomDiscoveryBeacon(actorSystem: system, descriptor: descriptor,
                                             signer: signer, state: publisherState)
         discoveryBeacon = beacon
-        await system.receptionist.checkIn(beacon, with: V2RoomDiscoveryBeacon.key(for: identity.hostID))
+        try system.publish(beacon, as: V2RoomDiscoveryBeacon.key(for: identity.hostID))
         return descriptor
     }
 
@@ -222,7 +219,7 @@ public actor V2RoomClusterNode {
             address: configuration.host, port: configuration.port, signer: signer, trust: trust,
             serving: serving, serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits, serviceQualification: serviceQualification)
         realtimeShards = handle
-        await handle.start()
+        try await handle.start()
         if !acceptingDiscoveries { _ = await handle.stop(deadline: .now + .seconds(2)); throw V2ActorAuthenticationError.overloaded }
         return handle
     }
@@ -295,7 +292,7 @@ public actor V2RoomClusterNode {
         endpoint = nil
         discoveryBeacon = nil
         discoveryPublisherState = nil
-        if let system { try await system.shutdown().wait() }
+        if let system { try await system.shutdown() }
         system = nil
         return result
     }
