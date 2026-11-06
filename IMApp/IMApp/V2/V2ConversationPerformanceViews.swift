@@ -185,3 +185,41 @@ private struct V2ConversationPerformanceList: UIViewControllerRepresentable {
 
     static func dismantleUIViewController(_ controller: Controller, coordinator: ()) { controller.stop() }
 }
+
+// 旧渲染器保留为性能对照；正式会话页使用 SwiftUI 快照列表。
+@MainActor
+private extension V2ConversationSwipeAction {
+    static func leading(isPinned: Bool, perform: @escaping (Self) async -> Void) -> UISwipeActionsConfiguration {
+        actions([action(isPinned ? "取消置顶" : "置顶", image: isPinned ? "pin.slash" : "pin", color: .systemOrange) {
+            await perform(.pin(!isPinned))
+        }])
+    }
+
+    static func trailing(isArchived: Bool, isMuted: Bool, perform: @escaping (Self) async -> Void) -> UISwipeActionsConfiguration {
+        actions([
+            action(isArchived ? "取消隐藏" : "隐藏", image: "eye.slash", color: .systemIndigo) {
+                await perform(.archive(!isArchived))
+            },
+            action(isMuted ? "恢复提醒" : "免打扰", image: "bell.slash", color: .systemGray) {
+                await perform(.mute(!isMuted))
+            }
+        ])
+    }
+
+    private static func actions(_ actions: [UIContextualAction]) -> UISwipeActionsConfiguration {
+        let configuration = UISwipeActionsConfiguration(actions: actions)
+        configuration.performsFirstActionWithFullSwipe = false
+        return configuration
+    }
+
+    private static func action(_ title: String, image: String, color: UIColor,
+                               perform: @escaping @MainActor () async -> Void) -> UIContextualAction {
+        let action = UIContextualAction(style: .normal, title: title) { _, _, complete in
+            complete(true)
+            Task { await perform() }
+        }
+        action.image = UIImage(systemName: image)
+        action.backgroundColor = color
+        return action
+    }
+}

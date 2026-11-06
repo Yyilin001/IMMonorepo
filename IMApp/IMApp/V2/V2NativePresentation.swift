@@ -53,7 +53,8 @@ struct V2UnreadBadge: View {
     }
 }
 
-struct V2ConversationSummaryRow: View {
+struct V2ConversationSummaryRow: View, Equatable {
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.item == rhs.item }
     let item: V2ConversationListItem
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 52
 

@@ -369,9 +369,9 @@ private struct ColdAvatarLaunchView: View {
     var body: some View {
         Group {
             if let listStore {
-                V2ConversationCollectionView(store: listStore,
+                V2ConversationSnapshotList(store: listStore,
                     conversations: [.init(id: room.rawValue, title: "冷启动测试群", preview: "测试", lastActivity: .now, isOutgoing: false, kind: .group)],
-                    pending: [], navigation: navigation, restoration: nil)
+                    pending: [], query: "", navigation: navigation)
             } else {
                 V2AuthorizedGroupAvatarView(roomID: room, size: 52)
             }

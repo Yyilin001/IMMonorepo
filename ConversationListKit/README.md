@@ -11,6 +11,6 @@
 
 `RankedViewportEngine` 内部使用 `KeyedOrderTree`。移动一个元素的期望复杂度为 O(log n)，读取连续 k 个位置的期望复杂度为 O(log n + k)。
 
-IMApp 使用第一种数据源消费 SQLite 返回的全量有序会话快照。搜索、置顶规则、头像授权、导航和按会话 ID 恢复滚动位置由应用管理；Cell 仍只渲染可见区域。
+迁移前的 IMApp 使用第一种数据源消费 SQLite 返回的全量有序会话快照。该组件已独立保存到 https://github.com/Yyilin001/ConversationListKit 。当前正式会话页使用 `V2ConversationSnapshotList`（后台不可变快照、按帧提交、SwiftUI List）；本包仍供旧性能实验页与组件回归测试作为对照。搜索、置顶规则、头像授权、导航和按会话 ID 恢复滚动位置继续由应用管理。
 
 在本目录运行 `swift test` 可验证排序、区间读取、实时更新合并与结构替换。UIKit 的帧合并、复用、分页恢复及交互测试随 IMApp 在 iOS 模拟器运行。

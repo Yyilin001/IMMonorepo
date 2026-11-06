@@ -113,7 +113,7 @@ struct V2ConversationWindowTests {
         #expect(!viewport.containsVisibleRow("row"))
     }
 
-    @Test("the production collection view reports visible rows and restores the anchor after refresh")
+    @Test("the production snapshot list reports visible rows and restores the anchor after refresh")
     func actualListGeometryAndScrollRestoration() async throws {
         await V2UITestWindowOwnership.acquire()
         defer { V2UITestWindowOwnership.release() }

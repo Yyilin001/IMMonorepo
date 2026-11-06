@@ -1171,9 +1171,9 @@ struct V2ConversationListView: View {
                             description: store.isShowingArchived ? "隐藏的聊天会显示在这里。" : "与朋友聊聊，或创建群聊开启新的讨论。"
                         )
                     } else {
-                        V2ConversationCollectionView(
-                            store: store, conversations: filteredConversations(visible), pending: pending,
-                            navigation: rootNavigation, restoration: store.viewport.restoration
+                        V2ConversationSnapshotList(
+                            store: store, conversations: visible, pending: pending, query: conversationQuery,
+                            navigation: rootNavigation
                         )
                         .id(ObjectIdentifier(store))
                     }
@@ -1306,18 +1306,6 @@ struct V2ConversationListView: View {
         conversationAfterSheetDismissal = nil
         rootNavigation.showConversation(route)
     }
-
-    private func filteredConversations(_ items: [V2ConversationListItem]) -> [V2ConversationListItem] {
-        let query = conversationQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return items }
-        // Private identity strings remain in the expiring presentation pipeline.
-        return items.filter {
-            $0.preview.localizedStandardContains(query)
-                || ($0.kind == .group && $0.title.localizedStandardContains(query))
-        }
-    }
-
-
 }
 
 extension V2AccountKind {
