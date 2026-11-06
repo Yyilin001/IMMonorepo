@@ -128,7 +128,9 @@ ACK 延迟从原始计划发送时刻计算，包含客户端排队和最终确�
 
 镜像、压测器、其他产品、资源限额、场景、逻辑夹具和 owner 分区均已核对。仍只有每版一个完整样本，历史未修复 P99 从 169 到 559 ms 的波动和本次失败轮必须保留；不把约 1% CPU 差异认定为稳定收益，也不声明极限容量提升。不再扩展档位或增加测试轮次。
 
-汇总为本机证据目录的 `ingress-fix-comparison.json`，复核脚本为 `compare-ingress-fix.py`；`ingress-fix-provenance.json`、`ingress-fix-*-sha256.*` 和 `ingress-fix-comparison-commands.json` 保存源码、产品、定向验证及三次运行来源。工作区 Gateway 源码与压测冻结源码一致。原始及修复产品卷保留，专用 VM 在收尾后停止。
+汇总为本机证据目录的 `ingress-fix-comparison.json`，复核脚本为 `compare-ingress-fix.py`；`ingress-fix-provenance.json`、`ingress-fix-*-sha256.*` 和 `ingress-fix-comparison-commands.json` 保存源码、产品、定向验证及三次运行来源。入口隔离压测收尾时的 Gateway 源码与压测冻结源码一致。原始及修复产品卷保留，专用 VM 在收尾后停止。
+
+后续设计回归又修复了观察流关闭、通道数量额度、出站调用 drain，并将心跳与同步 FIFO 分开、减少同步 ACK 的 SQL。上述改动不在本报告的冻结产品中；**69 ms 是入口隔离压测版本的历史结果，不能作为这些后续改动的性能数据**。后续验证范围记录在 [运行时说明](custom-runtime.md)。
 
 ## 初次运行时对照的修复与预检失败
 

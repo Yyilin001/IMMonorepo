@@ -20,6 +20,7 @@ public struct IMActorSystemSettings: Sendable {
     public var methods: [IMMethod] = []
     public var errorTypes: [any IMWireValue.Type] = []
     public var callTimeout: Duration = .seconds(5)
+    public var shutdownTimeout: Duration = .seconds(10)
     public init(name: String, host: String, port: Int, tls: TLSConfiguration? = nil) {
         self.name = name; self.host = host; self.port = port; self.tls = tls
     }
@@ -112,6 +113,7 @@ public final class IMActorSystem: DistributedActorSystem, Sendable {
         configuration.maximumBytesPerConnection = max(settings.maximumBytesPerConnection, settings.maximumInboundFrameBytes)
         configuration.maximumExecutingCalls = settings.maximumExecutingCalls
         configuration.maximumExecutingBytes = max(settings.maximumExecutingBytes, settings.maximumInboundFrameBytes)
+        configuration.shutdownTimeout = settings.shutdownTimeout
         let transport = try IMTransport(configuration: configuration,
             receive: { [weak self] node, lane, frame in
                 guard let self else { throw IMActorError.shuttingDown }
@@ -301,11 +303,14 @@ public final class IMActorSystem: DistributedActorSystem, Sendable {
         let id = UUID()
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             continuation.onTermination = { [weak self] _ in self?.state.withLock { $0.observers[id] = nil } }
-            state.withLock { state in
-                guard !state.stopping else { continuation.finish(); return }
+            let installed = state.withLock { state in
+                guard !state.stopping else { return false }
                 state.observers[id] = continuation
                 continuation.yield(.init(revision: state.revision, available: state.peers, lossRevisions: state.lossRevisions))
+                return true
             }
+            // finish invokes onTermination synchronously; it must not hold state.
+            if !installed { continuation.finish() }
         }
     }
     package func peerChanged(_ node: IMNode, available: Bool) {
@@ -342,12 +347,13 @@ public final class IMActorSystem: DistributedActorSystem, Sendable {
         for callback in callbacks.values { callback(id) }
     }
     public func shutdown() async throws {
-        let tasks = state.withLock { state -> [Task<Void, Never>] in
+        let (tasks, observers) = state.withLock { state in
             state.stopping = true
-            for observer in state.observers.values { observer.finish() }
+            let observers = Array(state.observers.values)
             state.observers.removeAll(); state.watches.removeAll(); state.services.removeAll()
-            return Array(state.connections.values)
+            return (Array(state.connections.values), observers)
         }
+        for observer in observers { observer.finish() }
         for task in tasks { task.cancel() }
         try await transport.withLock { $0 }?.shutdown()
         for task in tasks { await task.value }

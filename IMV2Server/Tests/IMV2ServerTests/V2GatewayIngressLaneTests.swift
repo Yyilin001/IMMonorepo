@@ -17,13 +17,14 @@ struct V2GatewayIngressLaneTests {
         defer { Task { await f.command.release() } }
         var initial = try f.bootstrap()
         initial.append(f.pull())
-        if coalesced { initial += [f.ack(), try f.send()] }
+        if coalesced { initial += [f.ack(), try f.send(), f.heartbeat()] }
         try await f.write(initial)
         try #require(await f.wait { await f.command.pullStarted })
-        if !coalesced { try await f.write([f.ack(), try f.send()]) }
+        if !coalesced { try await f.write([f.ack(), try f.send(), f.heartbeat()]) }
         // Await the actual socket response while sync is deliberately suspended.
-        let received = try await f.responses(until: 5)
+        let received = try await f.responses(until: [5, 6])
         #expect(received.contains(5))
+        #expect(received.contains(6))
         #expect(!received.contains(3) && !received.contains(4))
         #expect(await f.command.controls == [3])
         #expect(await f.command.sends == 1)
@@ -54,7 +55,7 @@ struct V2GatewayIngressLaneTests {
 
     @Test("executing and queued controls retain byte and batch limits", arguments: [false, true])
     func controlQueueIsBounded(byteLimit: Bool) async throws {
-        let f = try await IngressFixture.make(bytes: byteLimit ? 512 : 16_384, batches: byteLimit ? 4 : 1)
+        let f = try await IngressFixture.make(bytes: byteLimit ? 1_024 : 16_384, batches: byteLimit ? 4 : 2)
         defer { Task { await f.command.release() } }
         try await f.write(f.bootstrap())
         _ = try await f.responses(until: 2)
@@ -68,6 +69,24 @@ struct V2GatewayIngressLaneTests {
         await f.command.release()
         try await f.drained.promise.futureResult.get()
         #expect(await f.command.controls == [3])
+        _ = try await f.channel.finish(acceptAlreadyClosed: true)
+    }
+
+    @Test("heartbeat remains ordered behind session subscription changes")
+    func heartbeatKeepsSessionControlOrder() async throws {
+        let f = try await IngressFixture.make()
+        defer { Task { await f.command.release() } }
+        try await f.write(f.bootstrap())
+        _ = try await f.responses(until: 2)
+        var subscription = f.pull()
+        subscription.groupEventSubscribe.roomID = "00000000-0000-0000-0000-000000000b03"
+        try await f.write([subscription, f.heartbeat()])
+        #expect(await f.wait { await f.command.pullStarted })
+        #expect(try await f.channel.readOutbound(as: ByteBuffer.self) == nil)
+        await f.command.release()
+        #expect(try await f.responses(until: 6) == [3, 6])
+        try await f.channel.close().get()
+        try await f.drained.promise.futureResult.get()
         _ = try await f.channel.finish(acceptAlreadyClosed: true)
     }
 }
@@ -133,6 +152,13 @@ private struct IngressFixture: Sendable {
         request.syncAck = .init()
         return request
     }
+    func heartbeat() -> IMV2Envelope {
+        var request = IMV2Envelope()
+        request.requestID = 6
+        request.protocolVersion = UInt32(version)
+        request.heartbeat = .init()
+        return request
+    }
     func send() throws -> IMV2Envelope {
         let command = try V2MessageSendOperationCommand(command: .init(
             roomID: .init("00000000-0000-0000-0000-000000000b03"),
@@ -155,9 +181,12 @@ private struct IngressFixture: Sendable {
         _ = try await channel.writeInbound(input)
     }
     func responses(until id: UInt64) async throws -> [UInt64] {
+        try await responses(until: [id])
+    }
+    func responses(until expected: Set<UInt64>) async throws -> [UInt64] {
         var ids: [UInt64] = []
         let deadline = ContinuousClock.now + .seconds(2)
-        while !ids.contains(id), ContinuousClock.now < deadline {
+        while !expected.isSubset(of: Set(ids)), ContinuousClock.now < deadline {
             if let bytes = try await channel.readOutbound(as: ByteBuffer.self) {
                 ids.append(try V2FrameCodec.decodeExactlyOne(Data(bytes.readableBytesView),
                     limits: .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, version])).requestID)
@@ -185,7 +214,7 @@ private actor IngressCommand: V2GatewayCommandHandler {
     private var resume: CheckedContinuation<Void, Never>?
     func handle(envelope: IMV2Envelope, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         switch envelope.body {
-        case .syncPull:
+        case .syncPull, .groupEventSubscribe:
             controls.append(envelope.requestID)
             pullStarted = true
             await withCheckedContinuation { resume = $0 }

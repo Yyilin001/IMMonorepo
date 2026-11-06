@@ -500,6 +500,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         )
         maximumQueuedInboundBytes = try Self.positive("IM_V2_MAX_QUEUED_INBOUND_BYTES", environment: environment)
         maximumQueuedInboundChunks = try Self.boundedPositive("IM_V2_MAX_QUEUED_INBOUND_CHUNKS", maximum: 4_096, environment: environment)
+        guard maximumQueuedInboundBytes >= 2 * V2Frame.headerLength, maximumQueuedInboundChunks >= 2 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_MAX_QUEUED_INBOUND_BYTES/IM_V2_MAX_QUEUED_INBOUND_CHUNKS")
+        }
         authenticationTimeoutMilliseconds = try Self.boundedPositive("IM_V2_AUTHENTICATION_TIMEOUT_MS", maximum: 300_000, environment: environment)
         idleTimeoutMilliseconds = try Self.boundedPositive("IM_V2_IDLE_TIMEOUT_MS", maximum: V2GatewayConnectionTimeouts.maximumMilliseconds, environment: environment)
         shutdownGraceMilliseconds = try Self.nonNegativeWithDefault(

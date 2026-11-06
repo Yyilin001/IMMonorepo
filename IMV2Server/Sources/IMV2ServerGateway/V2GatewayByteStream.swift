@@ -444,11 +444,27 @@ public actor V2GatewayByteStream {
         let respond: @Sendable (V2GatewayOutboundFrame) async throws -> Void
         let failed: @Sendable (any Error) -> Void
     }
-    private var controlBatches = CircularBuffer<ControlBatch>(initialCapacity: 1)
-    // Includes the executing batch until its actual work/write settles.
-    private var controlReservedBytes = 0
-    private var controlReservedBatches = 0
-    private var controlTask: Task<Void, Never>?
+    private enum ControlLane: CaseIterable { case session, sync }
+    private struct ControlQueue {
+        var batches = CircularBuffer<ControlBatch>(initialCapacity: 1)
+        // Includes execution and the actual response write, not just queued frames.
+        var reservedBytes = 0
+        var reservedBatches = 0
+        var task: Task<Void, Never>?
+    }
+    private struct ControlQueues {
+        var session = ControlQueue()
+        var sync = ControlQueue()
+        subscript(_ lane: ControlLane) -> ControlQueue {
+            _read {
+                switch lane { case .session: yield session; case .sync: yield sync }
+            }
+            _modify {
+                switch lane { case .session: yield &session; case .sync: yield &sync }
+            }
+        }
+    }
+    private var controlQueues = ControlQueues()
 
     /// Physical connection revocation is independent of the persisted online projection.
     nonisolated func connectionAllowsDispatch() -> Bool { session.connectionIsActive }
@@ -593,8 +609,8 @@ public actor V2GatewayByteStream {
     }
 
     /// The NIO ingress task owns framing/admission, not control execution.
-    /// Bootstrap finishes before lanes split; only message operations bypass
-    /// the FIFO control worker, and still use the existing session/budget gates.
+    /// Bootstrap finishes before lanes split. Sync pull/ack/snapshot keep their
+    /// own FIFO; heartbeats remain ordered with session/subscription controls.
     func receiveTransportFrames(
         _ inbound: [V2GatewayInboundFrame],
         maximumControlBytes: Int,
@@ -616,48 +632,53 @@ public actor V2GatewayByteStream {
             try Task.checkCancellation()
             guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
             var controls: [V2GatewayInboundFrame] = []
+            var sync: [V2GatewayInboundFrame] = []
             var sends: [V2GatewayInboundFrame] = []
-            var bytes = 0
             for frame in inbound[index...] {
-                if frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
-                    sends.append(frame)
-                } else {
+                switch frame.command {
+                case .messageSendOperation, .messageSendOperationRecover: sends.append(frame)
+                case .syncPull, .syncAck, .syncSnapshot, .snapshotPagePull, .snapshotAck: sync.append(frame)
+                default: controls.append(frame)
+                }
+            }
+            // Split the existing total budget; slow sync cannot consume the
+            // session lane's reserve, and total per-connection memory stays bounded.
+            for (lane, frames) in [(ControlLane.sync, sync), (.session, controls)] where !frames.isEmpty {
+                guard controlQueues[lane].reservedBatches < maximumControlBatches / 2 else {
+                    throw V2GatewayControlQueueError.overloaded
+                }
+                var bytes = 0
+                for frame in frames {
                     let size = V2Frame.headerLength + frame.payloadCount
-                    guard size <= maximumControlBytes - controlReservedBytes - bytes else {
+                    guard size <= maximumControlBytes / 2 - controlQueues[lane].reservedBytes - bytes else {
                         throw V2GatewayControlQueueError.overloaded
                     }
                     bytes += size
-                    controls.append(frame)
                 }
+                controlQueues[lane].reservedBytes += bytes
+                controlQueues[lane].reservedBatches += 1
+                controlQueues[lane].batches.append(.init(frames: frames, bytes: bytes, respond: respond, failed: controlFailed))
             }
-            if !controls.isEmpty {
-                guard controlReservedBatches < maximumControlBatches else {
-                    throw V2GatewayControlQueueError.overloaded
-                }
-                controlReservedBytes += bytes
-                controlReservedBatches += 1
-                controlBatches.append(.init(frames: controls, bytes: bytes, respond: respond, failed: controlFailed))
-                startControlWorker()
-            }
+            for lane in ControlLane.allCases { startControlWorker(lane) }
             if !sends.isEmpty {
                 try await receiveInboundFrames(sends, concurrentMessageSendRespond: respond, respond: respond)
             }
         } catch {
             for frame in inbound { frame.heartbeatProbe?.finish(success: false) }
             // The transport closes immediately; it owns retirement and joining
-            // both the admitted sends and the possibly suspended control worker.
+            // the admitted sends and both possibly suspended control workers.
             throw error
         }
     }
 
-    private func startControlWorker() {
-        guard controlTask == nil else { return }
-        controlTask = Task { [self] in
-            defer { controlTask = nil }
-            while !Task.isCancelled, !transportClosed, let batch = controlBatches.popFirst() {
+    private func startControlWorker(_ lane: ControlLane) {
+        guard controlQueues[lane].task == nil, !controlQueues[lane].batches.isEmpty else { return }
+        controlQueues[lane].task = Task { [self] in
+            defer { controlQueues[lane].task = nil }
+            while !Task.isCancelled, !transportClosed, let batch = controlQueues[lane].batches.popFirst() {
                 defer {
-                    controlReservedBytes -= batch.bytes
-                    controlReservedBatches -= 1
+                    controlQueues[lane].reservedBytes -= batch.bytes
+                    controlQueues[lane].reservedBatches -= 1
                     for frame in batch.frames { frame.heartbeatProbe?.finish(success: false) }
                 }
                 do {
@@ -851,7 +872,8 @@ public actor V2GatewayByteStream {
     /// - Throws: 末尾存在不完整帧时抛出。
     public func finish() async throws {
         beginClosing()
-        await controlTask?.value
+        let controls = ControlLane.allCases.compactMap { controlQueues[$0].task }
+        for task in controls { await task.value }
         await drainMessageSends()
         do {
             try decoder.finish()
@@ -1752,11 +1774,13 @@ public actor V2GatewayByteStream {
     }
 
     private func beginClosing() {
-        controlTask?.cancel()
-        while let batch = controlBatches.popFirst() {
-            controlReservedBytes -= batch.bytes
-            controlReservedBatches -= 1
-            for frame in batch.frames { frame.heartbeatProbe?.finish(success: false) }
+        for lane in ControlLane.allCases {
+            controlQueues[lane].task?.cancel()
+            while let batch = controlQueues[lane].batches.popFirst() {
+                controlQueues[lane].reservedBytes -= batch.bytes
+                controlQueues[lane].reservedBatches -= 1
+                for frame in batch.frames { frame.heartbeatProbe?.finish(success: false) }
+            }
         }
         revokeRoomSubscriptionConnection()
         recoveryOutbound.revoke()

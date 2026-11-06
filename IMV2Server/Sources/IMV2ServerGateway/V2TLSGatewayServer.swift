@@ -1,6 +1,7 @@
 import IMV2ServerApplication
 import IMV2ServerContracts
 import Foundation
+import IMV2Core
 import Synchronization
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
@@ -275,6 +276,8 @@ public final class V2TLSGatewayServer {
     ) throws {
         _ = try V2GatewayConnectionTimeouts(authenticationMilliseconds: authenticationTimeoutMilliseconds,
                                              idleMilliseconds: idleTimeoutMilliseconds)
+        guard maximumQueuedInboundBytes >= 2 * V2Frame.headerLength,
+              maximumQueuedInboundChunks >= 2 else { throw V2TLSGatewayServerError.invalidConfiguration }
         precondition(
             maximumConnections > 0 &&
             listenBacklog > 0 && listenBacklog <= Int(Int32.max) &&

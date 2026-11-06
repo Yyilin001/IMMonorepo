@@ -9,8 +9,8 @@ import IMV2ActorContracts
 
 /// 单条已完成 TLS 解码的 NIO 通道。
 ///
-/// 分帧与准入串行交给 ByteStream；认证后消息发送与有界控制 FIFO 分开执行。
-/// 同步控制之间保持顺序，慢同步不再占住后续消息的入口。
+/// 分帧与准入串行交给 ByteStream；认证后消息发送、同步 FIFO、会话控制 FIFO 分开执行。
+/// 同步控制之间保持顺序，慢同步不再占住后续消息和心跳的入口。
 public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     public typealias InboundIn = ByteBuffer
     public typealias OutboundOut = ByteBuffer
@@ -99,10 +99,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     ) throws {
         self.timeouts = try .init(authenticationMilliseconds: authenticationTimeoutMilliseconds,
                                   idleMilliseconds: idleTimeoutMilliseconds)
-        precondition(
-            maximumQueuedInboundBytes > 0 &&
-            maximumQueuedInboundChunks > 0
-        )
+        guard maximumQueuedInboundBytes >= 2 * V2Frame.headerLength,
+              maximumQueuedInboundChunks >= 2 else { throw V2TLSGatewayServerError.invalidConfiguration }
         self.stream = stream
         self.maximumControlBytes = maximumQueuedInboundBytes
         self.maximumControlBatches = maximumQueuedInboundChunks

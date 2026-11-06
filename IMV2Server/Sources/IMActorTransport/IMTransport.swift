@@ -68,15 +68,19 @@ public final class IMTransport: Sendable {
         var server: (any Channel)?
         var stopping = false
         var stopped = false
+        var shutdownTask: Task<Void, any Error>?
         var connections: [UUID: IMConnection] = [:]
         var established: [Key: IMConnection] = [:]
         var connecting: [Key: Connecting] = [:]
         var connectionWaiters = 0
+        var connectionWaitersByLane: [IMTrafficClass: Int] = [:]
         var retryAfter: [Key: ContinuousClock.Instant] = [:]
         var pendingCalls = 0
+        var pendingCallsByLane: [IMTrafficClass: Int] = [:]
         var pendingBytes = 0
         var pendingByLane: [IMTrafficClass: Int] = [:]
         var executingCount = 0
+        var executingCallsByLane: [IMTrafficClass: Int] = [:]
         var executingBytes = 0
         var replyBytes = 0
         var replyByLane: [IMTrafficClass: Int] = [:]
@@ -101,7 +105,8 @@ public final class IMTransport: Sendable {
               configuration.maximumBytesPerConnection >= configuration.maximumFrameBytes,
               configuration.maximumBytesPerConnection <= 1_073_741_824,
               configuration.maximumConnections > 0,
-              configuration.maximumExecutingCalls > 0,
+              configuration.maximumExecutingCalls >= 4,
+              configuration.shutdownTimeout > .zero,
               configuration.maximumExecutingBytes >= configuration.maximumFrameBytes else { throw IMActorError.invalidConfiguration }
         if configuration.tls == nil {
             guard Self.isLoopback(configuration.node.endpoint.host) else { throw IMActorError.invalidConfiguration }
@@ -170,9 +175,11 @@ public final class IMTransport: Sendable {
         let choice = try state.withLock { state -> (IMConnection?, EventLoopFuture<IMConnection>?) in
             guard !state.stopping else { throw IMActorError.shuttingDown }
             if let connection = state.established[key] { return (connection, nil) }
-            guard state.connectionWaiters < configuration.maximumExecutingCalls else { throw IMActorError.overloaded }
+            guard state.connectionWaiters < configuration.maximumExecutingCalls,
+                  state.connectionWaitersByLane[lane, default: 0] < callLimit(lane) else { throw IMActorError.overloaded }
             if let connecting = state.connecting[key] {
-                state.connectionWaiters += 1; return (nil, connecting.promise.futureResult)
+                state.connectionWaiters += 1; state.connectionWaitersByLane[lane, default: 0] += 1
+                return (nil, connecting.promise.futureResult)
             }
             guard state.connecting.count < configuration.maximumConnections else { throw IMActorError.overloaded }
             if let retry = state.retryAfter[key], retry > .now { throw IMActorError.connectionLost }
@@ -192,6 +199,7 @@ public final class IMTransport: Sendable {
             }
             state.connecting[key] = Connecting(token: token, task: task, promise: promise)
             state.connectionWaiters += 1
+            state.connectionWaitersByLane[lane, default: 0] += 1
             return (nil, promise.futureResult)
         }
         if let connection = choice.0 { return connection }
@@ -209,7 +217,9 @@ public final class IMTransport: Sendable {
                 }
                 future.whenComplete { [self] result in
                     timer.cancel()
-                    state.withLock { $0.connectionWaiters -= 1 }
+                    state.withLock {
+                        $0.connectionWaiters -= 1; $0.connectionWaitersByLane[lane, default: 0] -= 1
+                    }
                     waiter.finish(result)
                 }
             }
@@ -282,18 +292,27 @@ public final class IMTransport: Sendable {
     private func byteLimit(_ lane: IMTrafficClass) -> Int {
         max(configuration.maximumFrameBytes, configuration.maximumExecutingBytes / (lane == .rpc ? 2 : 4))
     }
+    /// Hard reservations also apply to small calls and cancelled dial waiters.
+    /// RPC gets the remainder so the three limits sum to the configured total.
+    private func callLimit(_ lane: IMTrafficClass) -> Int {
+        let quarter = configuration.maximumExecutingCalls / 4
+        return lane == .rpc ? configuration.maximumExecutingCalls - quarter * 2 : quarter
+    }
     private func acquirePending(bytes: Int, lane: IMTrafficClass) throws {
         try state.withLock { state in
             guard !state.stopping else { throw IMActorError.shuttingDown }
             guard state.pendingCalls < configuration.maximumExecutingCalls,
+                  state.pendingCallsByLane[lane, default: 0] < callLimit(lane),
                   bytes <= byteLimit(lane) - state.pendingByLane[lane, default: 0],
                   bytes <= configuration.maximumExecutingBytes - state.pendingBytes else { throw IMActorError.overloaded }
             state.pendingCalls += 1; state.pendingBytes += bytes; state.pendingByLane[lane, default: 0] += bytes
+            state.pendingCallsByLane[lane, default: 0] += 1
         }
     }
     private func releasePending(bytes: Int, lane: IMTrafficClass) {
         state.withLock {
             $0.pendingCalls -= 1; $0.pendingBytes -= bytes; $0.pendingByLane[lane, default: 0] -= bytes
+            $0.pendingCallsByLane[lane, default: 0] -= 1
         }
     }
     /// Admit encoded replies only when their actual size is known, before
@@ -314,11 +333,13 @@ public final class IMTransport: Sendable {
     func acquireExecution(bytes: Int, lane: IMTrafficClass) -> Bool {
         state.withLock { state in
             guard !state.stopping, state.executingCount < configuration.maximumExecutingCalls,
+                  state.executingCallsByLane[lane, default: 0] < callLimit(lane),
                   bytes <= byteLimit(lane) - state.executingByLane[lane, default: 0],
                   bytes <= configuration.maximumExecutingBytes - state.executingBytes else {
                 state.rejected &+= 1; return false
             }
             state.executingCount += 1; state.executingBytes += bytes
+            state.executingCallsByLane[lane, default: 0] += 1
             state.executingByLane[lane, default: 0] += bytes; state.admitted &+= 1
             return true
         }
@@ -326,6 +347,7 @@ public final class IMTransport: Sendable {
     func releaseExecution(bytes: Int, lane: IMTrafficClass) {
         state.withLock {
             $0.executingCount -= 1; $0.executingBytes -= bytes
+            $0.executingCallsByLane[lane, default: 0] -= 1
             $0.executingByLane[lane, default: 0] -= bytes; $0.completed &+= 1
         }
     }
@@ -357,6 +379,20 @@ public final class IMTransport: Sendable {
         for connection in connections { connection.sendRetirement(id.localID) }
     }
     public func shutdown() async throws {
+        // A shared attempt owns drain and EventLoop shutdown. Concurrent callers
+        // join it; a timed-out attempt releases the handle for a later retry.
+        let task = state.withLock { state in
+            if let task = state.shutdownTask { return task }
+            let task = Task { [self] in
+                defer { self.state.withLock { $0.shutdownTask = nil } }
+                try await performShutdown()
+            }
+            state.shutdownTask = task
+            return task
+        }
+        try await task.value
+    }
+    private func performShutdown() async throws {
         let snapshot = state.withLock { state -> ((any Channel)?, [IMConnection], [Task<Void, Never>], Bool) in
             state.stopping = true
             return (state.server, Array(state.connections.values), state.connecting.values.map(\.task), state.stopped)
@@ -366,7 +402,7 @@ public final class IMTransport: Sendable {
         for task in snapshot.2 { task.cancel() }
         for connection in snapshot.1 { connection.drain() }
         let deadline = ContinuousClock.now + configuration.shutdownTimeout
-        while state.withLock({ $0.executingCount > 0 || $0.writingBytes > 0 || $0.connectionWaiters > 0 }) {
+        while state.withLock({ $0.pendingCalls > 0 || $0.executingCount > 0 || $0.writingBytes > 0 || $0.connectionWaiters > 0 }) {
             guard ContinuousClock.now < deadline else { throw IMActorError.deadlineExceeded }
             try await Task.sleep(for: .milliseconds(10))
         }

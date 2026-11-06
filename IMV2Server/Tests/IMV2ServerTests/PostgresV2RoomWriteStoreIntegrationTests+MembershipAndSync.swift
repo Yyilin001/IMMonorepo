@@ -433,6 +433,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let first = try await sync.pull(userID: user, deviceID: device, syncToken: .init("discarded-token"), requestedMaxRecords: 20, requireSnapshot: true)
             guard case .resetPreparing(let snapshot, let resetGeneration, _) = first else { throw V2SyncStoreError.snapshotCheckpointUnavailable }
             #expect(resetGeneration == 2)
+            if !empty {
+                try await sync.acknowledge(userID: user, deviceID: device, generation: 1,
+                    highestContiguousSequence: 1, receipt: receipt)
+            }
             #expect(try await sync.pull(userID: user, deviceID: device, syncToken: nil, requestedMaxRecords: 20, requireSnapshot: true) == first)
             #expect(try await sync.pull(userID: user, deviceID: device, syncToken: nil, requestedMaxRecords: 20) == first)
             #expect(try await count("im_v2.device_snapshot_resets", on: sql) == 1)

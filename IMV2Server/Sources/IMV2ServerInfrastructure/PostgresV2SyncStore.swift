@@ -232,26 +232,43 @@ public struct PostgresV2SyncStore: V2SyncStore {
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            try await prepareActiveCursor(sql: sql, userID: userUUID, deviceID: deviceUUID)
-            guard let cursorAndReceipt = try await sql.raw("""
-                SELECT cursor.state, cursor.reset_generation, cursor.acknowledged_sequence,
+            // A valid receipt was issued with an existing cursor. ACK never has
+            // to initialize one. Keep advisory waiting in a separate statement
+            // so revocation is checked against a fresh authority snapshot.
+            try await lockDevice(sql: sql, userID: userUUID, deviceID: deviceUUID)
+            guard let row = try await sql.raw("""
+                WITH active AS MATERIALIZED (
+                    SELECT NOT EXISTS (
+                        SELECT 1 FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
+                        WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)
+                    ) AS is_active
+                ), locked_cursor AS MATERIALIZED (
+                    SELECT cursor.* FROM \(unsafeRaw: table("device_sync_cursors")) AS cursor
+                    CROSS JOIN active
+                    WHERE cursor.user_id = \(bind: userUUID) AND cursor.device_id = \(bind: deviceUUID)
+                      AND active.is_active
+                    FOR UPDATE OF cursor
+                )
+                SELECT active.is_active, cursor.state, cursor.reset_generation, cursor.acknowledged_sequence,
                        cursor.pending_snapshot_id, cursor.pending_base_sequence,
                        cursor.completed_snapshot_id, cursor.completed_snapshot_ack_receipt,
                        cursor.completed_snapshot_generation,
                        cursor.completed_snapshot_base_sequence,
                        receipt.first_sequence, receipt.last_sequence
-                FROM \(unsafeRaw: table("device_sync_cursors")) AS cursor
+                FROM active LEFT JOIN locked_cursor AS cursor ON TRUE
                 LEFT JOIN \(unsafeRaw: table("sync_receipts")) AS receipt
                   ON receipt.receipt = \(bind: receipt.rawValue)
                  AND receipt.user_id = cursor.user_id
                  AND receipt.device_id = cursor.device_id
                  AND receipt.reset_generation = \(bind: generation)
                  AND receipt.expires_at > \(bind: now)
-                WHERE cursor.user_id = \(bind: userUUID)
-                  AND cursor.device_id = \(bind: deviceUUID)
-                FOR UPDATE OF cursor
-                """).first(decoding: DeviceCursorAndReceiptRow.self)
+                """).first()
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard try row.decode(column: "is_active", as: Bool.self) else { throw V2SyncStoreError.deviceRevoked }
+            guard try row.decode(column: "state", as: String?.self) != nil else {
+                throw V2SyncStoreError.invalidOrExpiredSyncReceipt
+            }
+            let cursorAndReceipt = try row.decode(model: DeviceCursorAndReceiptRow.self)
             let cursor = cursorAndReceipt.cursor
             guard let firstSequence = cursorAndReceipt.firstSequence,
                 let lastSequence = cursorAndReceipt.lastSequence,
@@ -269,6 +286,9 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 if cursor.state == "ready" { throw V2SyncStoreError.generationMismatch }
                 throw V2SyncStoreError.resetRequired
             }
+            // Repeated confirmations still validate receipt, generation and
+            // revocation above, but need not rewrite the cursor row.
+            guard sequence > cursor.acknowledgedSequence else { return }
             try await sql.raw("""
                 UPDATE \(unsafeRaw: table("device_sync_cursors"))
                 SET acknowledged_sequence = GREATEST(acknowledged_sequence, \(bind: sequence))
@@ -521,33 +541,6 @@ public struct PostgresV2SyncStore: V2SyncStore {
         }
         return (try row.decode(model: DeviceCursorRow.self),
                 try row.decode(column: "retained_floor", as: Int64.self))
-    }
-
-    private func prepareActiveCursor(
-        sql: any SQLDatabase,
-        userID: UUID,
-        deviceID: UUID
-    ) async throws {
-        try await lockDevice(sql: sql, userID: userID, deviceID: deviceID)
-        guard let active = try await sql.raw("""
-            WITH active AS MATERIALIZED (
-                SELECT NOT EXISTS (
-                    SELECT 1
-                    FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
-                    WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)
-                ) AS is_active
-            ), inserted AS (
-                INSERT INTO \(unsafeRaw: table("device_sync_cursors"))
-                    (user_id, device_id, state, reset_generation)
-                SELECT \(bind: userID), \(bind: deviceID), 'ready', 1
-                FROM active WHERE is_active
-                ON CONFLICT (user_id, device_id) DO NOTHING
-                RETURNING 1
-            )
-            SELECT is_active FROM active
-            """).first(decoding: ActiveDeviceRow.self)
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        guard active.isActive else { throw V2SyncStoreError.deviceRevoked }
     }
 
     /// 使游标创建与变更同异步吊销清理串行化。
