@@ -393,6 +393,49 @@ struct V2DatabaseWorkAdmissionTests {
         #expect(await controller.snapshot().interactiveRead.inFlight == 0)
     }
 
+    @Test("sync ACK bypasses pull backlog with bounded reservation and fair pull progress")
+    func syncAcknowledgementScheduling() async throws {
+        let controller = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1, maximumForegroundWriteQueued: 1,
+            maximumInteractiveReadQueued: 1, maximumSyncQueued: 8, timeout: .seconds(2)))
+        #expect(await controller.acquire(.sync) == .admitted)
+        let order = AdmissionOrderRecorder()
+        var tasks: [Task<Void, Never>] = []
+        func enqueue(_ id: Int, _ purpose: V2SyncAdmissionPurpose, count: Int) async throws {
+            tasks.append(Task {
+                if await controller.acquire(.sync, syncPurpose: purpose) == .admitted {
+                    await order.append(id)
+                    await controller.release(.sync)
+                }
+            })
+            let deadline = ContinuousClock.now + .seconds(1)
+            while await controller.snapshot().syncQueued != count {
+                guard ContinuousClock.now < deadline else { throw CoverageAdmissionTestFailure.timeout }
+                await Task.yield()
+            }
+        }
+        for id in 0..<6 { try await enqueue(id, .pull, count: id + 1) }
+        #expect(await controller.acquire(.sync) == .rejected(.queueFull))
+        // Reserved slots survive a full pull queue. Cancellation repairs its own lane.
+        let cancelled = Task { await controller.acquire(.sync, syncPurpose: .acknowledgement) }
+        while await controller.snapshot().syncQueued != 7 { await Task.yield() }
+        cancelled.cancel()
+        #expect(await cancelled.value == .cancelled)
+        tasks[5].cancel(); tasks[4].cancel()
+        await tasks[5].value; await tasks[4].value
+        for id in 6..<10 { try await enqueue(id, .acknowledgement, count: id - 1) }
+        #expect(await controller.acquire(.sync, syncPurpose: .acknowledgement) == .rejected(.queueFull))
+        await controller.release(.sync)
+        for task in tasks { await task.value }
+        #expect(await order.values() == [6, 7, 8, 0, 9, 1, 2, 3])
+        let snapshot = await controller.snapshot().sync
+        #expect(snapshot.inFlight == 0 && snapshot.queued == 0)
+        #expect(snapshot.cancelledRequests == 3)
+        #expect(snapshot.queueFullRejections == 2)
+        #expect(snapshot.admittedRequests == 9)
+    }
+
     private func coverageController() -> V2DatabaseWorkAdmissionController {
         .init(policy: .init(maximumForegroundWriteInFlight: 1,
             maximumInteractiveReadInFlight: 1, maximumSyncInFlight: 1,
@@ -444,4 +487,28 @@ private actor CoverageAdmissionExecutionGate {
         return await withCheckedContinuation { continuation = $0 }
     }
     func release() { continuation?.resume(returning: 1); continuation = nil }
+}
+
+extension V2DatabaseWorkAdmissionTests {
+    @Test("sync burst budget does not extend foreground waits or caller deadlines")
+    func syncHasIndependentWaitBudget() async throws {
+        let controller = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
+            maximumInteractiveReadQueued: 2, maximumSyncQueued: 8,
+            timeout: .milliseconds(20), syncTimeout: .seconds(2)))
+        #expect(await controller.acquire(.foregroundWrite) == .admitted)
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
+        #expect(await controller.acquire(.sync) == .admitted)
+        let foreground = Task { await controller.acquire(.foregroundWrite) }
+        let sync = Task { await controller.acquire(.sync) }
+        #expect(await foreground.value == .rejected(.timeout))
+        #expect(await controller.snapshot().syncQueued == 1)
+        #expect(await controller.acquire(.sync, callerDeadline: .now + .milliseconds(10)) == .rejected(.timeout))
+        await controller.release(.sync)
+        #expect(await sync.value == .admitted)
+        await controller.release(.sync)
+        await controller.release(.foregroundWrite)
+        await controller.release(.interactiveRead)
+    }
 }

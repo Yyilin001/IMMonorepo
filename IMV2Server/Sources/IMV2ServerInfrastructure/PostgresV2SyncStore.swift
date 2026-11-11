@@ -72,7 +72,8 @@ public struct PostgresV2SyncStore: V2SyncStore {
         let deviceUUID = try uuid(deviceID)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let metadata = try await preparePullCursor(sql: sql, userID: userUUID, deviceID: deviceUUID)
+            let metadata = try await preparePullPage(sql: sql, userID: userUUID, deviceID: deviceUUID,
+                syncToken: syncToken, maxRecords: maxRecords, requireSnapshot: requireSnapshot, now: now)
             let cursor = metadata.cursor
             if cursor.state == "reset_preparing" {
                 guard let snapshotID = cursor.pendingSnapshotID else {
@@ -113,17 +114,8 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             let generation = try unsigned(cursor.resetGeneration)
-            let startSequence: Int64
-            if let syncToken, !requireSnapshot {
-                guard let issued = try await sql.raw("""
-                    SELECT watermark FROM \(unsafeRaw: table("sync_tokens"))
-                    WHERE token = \(bind: syncToken.rawValue) AND user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)
-                      AND reset_generation = \(bind: cursor.resetGeneration) AND expires_at > \(bind: now)
-                    """).first(decoding: SyncTokenRow.self)
-                else { throw V2SyncStoreError.invalidOrExpiredSyncToken }
-                startSequence = issued.watermark
-            } else {
-                startSequence = cursor.acknowledgedSequence
+            guard let startSequence = metadata.startSequence else {
+                throw V2SyncStoreError.invalidOrExpiredSyncToken
             }
             let retainedFloor = metadata.retainedFloor
             if requireSnapshot {
@@ -152,13 +144,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
                     generation: try unsigned(reset.generation), retryAfter: 1
                 )
             }
-            let rows = try await sql.raw("""
-                SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
-                       log.payload::text AS payload_json
-                FROM \(unsafeRaw: table("user_sync_log")) AS log
-                WHERE log.user_id = \(bind: userUUID) AND log.user_sync_sequence > \(bind: startSequence)
-                ORDER BY log.user_sync_sequence LIMIT \(bind: maxRecords + 1)
-                """).all(decoding: SyncLogRow.self)
+            let rows = metadata.records
             let candidates = try rows.prefix(maxRecords).map {
                 try V2SyncRecord(sequence: try unsigned($0.sequence), sourceEventID: try EventID($0.sourceEventID.uuidString), projectionKind: $0.projectionKind, payloadJSON: $0.payloadJSON)
             }
@@ -248,8 +234,8 @@ public struct PostgresV2SyncStore: V2SyncStore {
                     WHERE cursor.user_id = \(bind: userUUID) AND cursor.device_id = \(bind: deviceUUID)
                       AND active.is_active
                     FOR UPDATE OF cursor
-                )
-                SELECT active.is_active, cursor.state, cursor.reset_generation, cursor.acknowledged_sequence,
+                ), authority AS MATERIALIZED (
+                SELECT active.is_active, cursor.user_id, cursor.device_id, cursor.state, cursor.reset_generation, cursor.acknowledged_sequence,
                        cursor.pending_snapshot_id, cursor.pending_base_sequence,
                        cursor.completed_snapshot_id, cursor.completed_snapshot_ack_receipt,
                        cursor.completed_snapshot_generation,
@@ -262,6 +248,21 @@ public struct PostgresV2SyncStore: V2SyncStore {
                  AND receipt.device_id = cursor.device_id
                  AND receipt.reset_generation = \(bind: generation)
                  AND receipt.expires_at > \(bind: now)
+                ), advanced AS (
+                    UPDATE \(unsafeRaw: table("device_sync_cursors")) AS target
+                    SET acknowledged_sequence = \(bind: sequence)
+                    FROM authority
+                    WHERE target.user_id = authority.user_id AND target.device_id = authority.device_id
+                      AND authority.is_active
+                      AND \(bind: sequence) BETWEEN authority.first_sequence AND authority.last_sequence
+                      AND \(bind: sequence) > authority.acknowledged_sequence
+                      AND ((authority.state = 'ready' AND authority.reset_generation = \(bind: generation))
+                        OR (authority.state <> 'ready' AND authority.reset_generation > 1
+                            AND authority.reset_generation - 1 = \(bind: generation)
+                            AND authority.pending_base_sequence >= \(bind: sequence)))
+                    RETURNING 1
+                )
+                SELECT authority.*, (SELECT count(*) FROM advanced) AS advanced_count FROM authority
                 """).first()
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             guard try row.decode(column: "is_active", as: Bool.self) else { throw V2SyncStoreError.deviceRevoked }
@@ -289,11 +290,9 @@ public struct PostgresV2SyncStore: V2SyncStore {
             // Repeated confirmations still validate receipt, generation and
             // revocation above, but need not rewrite the cursor row.
             guard sequence > cursor.acknowledgedSequence else { return }
-            try await sql.raw("""
-                UPDATE \(unsafeRaw: table("device_sync_cursors"))
-                SET acknowledged_sequence = GREATEST(acknowledged_sequence, \(bind: sequence))
-                WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)
-                """).run()
+            guard try row.decode(column: "advanced_count", as: Int64.self) == 1 else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
         }
     }
 
@@ -489,14 +488,15 @@ public struct PostgresV2SyncStore: V2SyncStore {
             """).run()
     }
 
-    private func preparePullCursor(
-        sql: any SQLDatabase, userID: UUID, deviceID: UUID
-    ) async throws -> (cursor: DeviceCursorRow, retainedFloor: Int64) {
+    private func preparePullPage(
+        sql: any SQLDatabase, userID: UUID, deviceID: UUID,
+        syncToken: V2SyncToken?, maxRecords: Int, requireSnapshot: Bool, now: Date
+    ) async throws -> (cursor: DeviceCursorRow, retainedFloor: Int64, startSequence: Int64?, records: [SyncLogRow]) {
         try await lockDevice(sql: sql, userID: userID, deviceID: deviceID)
         // Existing rows are actually locked. Newly inserted rows are returned by
         // the modifying CTE, never read back from its older statement snapshot.
         // The device advisory lock serializes every supported cursor creator.
-        guard let row = try await sql.raw("""
+        let rows = try await sql.raw("""
             WITH active AS MATERIALIZED (
                 SELECT NOT EXISTS (
                     SELECT 1 FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
@@ -528,11 +528,30 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 FOR SHARE OF retained
             )
             SELECT active.is_active, cursor_barrier.cursor_count, selected.*,
-                   COALESCE(retention.compacted_through_sequence, 0) AS retained_floor
+                   COALESCE(retention.compacted_through_sequence, 0) AS retained_floor,
+                   position.start_sequence, page.*
             FROM active CROSS JOIN cursor_barrier
             LEFT JOIN selected ON TRUE LEFT JOIN retention ON TRUE
-            """).first()
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            LEFT JOIN \(unsafeRaw: table("sync_tokens")) AS token
+              ON token.token = \(bind: syncToken?.rawValue)
+             AND token.user_id = selected.user_id AND token.device_id = selected.device_id
+             AND token.reset_generation = selected.reset_generation AND token.expires_at > \(bind: now)
+            CROSS JOIN LATERAL (
+                SELECT CASE WHEN \(bind: syncToken == nil || requireSnapshot)
+                            THEN selected.acknowledged_sequence ELSE token.watermark END AS start_sequence
+            ) AS position
+            LEFT JOIN LATERAL (
+                SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
+                       log.payload::text AS payload_json
+                FROM \(unsafeRaw: table("user_sync_log")) AS log
+                WHERE log.user_id = \(bind: userID) AND log.user_sync_sequence > position.start_sequence
+                  AND selected.state = 'ready' AND NOT \(bind: requireSnapshot)
+                  AND position.start_sequence >= COALESCE(retention.compacted_through_sequence, 0)
+                ORDER BY log.user_sync_sequence LIMIT \(bind: maxRecords + 1)
+            ) AS page ON TRUE
+            ORDER BY page.user_sync_sequence
+            """).all()
+        guard let row = rows.first else { throw V2RoomWriteStoreError.corruptPersistenceState }
         guard try row.decode(column: "is_active", as: Bool.self) else {
             throw V2SyncStoreError.deviceRevoked
         }
@@ -540,7 +559,12 @@ public struct PostgresV2SyncStore: V2SyncStore {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         return (try row.decode(model: DeviceCursorRow.self),
-                try row.decode(column: "retained_floor", as: Int64.self))
+                try row.decode(column: "retained_floor", as: Int64.self),
+                try row.decode(column: "start_sequence", as: Int64?.self),
+                try rows.compactMap { row in
+                    guard try row.decode(column: "user_sync_sequence", as: Int64?.self) != nil else { return nil }
+                    return try row.decode(model: SyncLogRow.self)
+                })
     }
 
     /// 使游标创建与变更同异步吊销清理串行化。
@@ -672,7 +696,6 @@ private struct SyncLogRow: Decodable {
     let sequence: Int64; let sourceEventID: UUID; let projectionKind: String; let payloadJSON: String
     enum CodingKeys: String, CodingKey { case sequence = "user_sync_sequence", sourceEventID = "source_event_id", projectionKind = "projection_kind", payloadJSON = "payload_json" }
 }
-private struct SyncTokenRow: Decodable { let watermark: Int64 }
 private struct SnapshotMetadataRow: Decodable {
     let expiresAt: Date
     enum CodingKeys: String, CodingKey { case expiresAt = "expires_at" }

@@ -30,12 +30,12 @@ public struct V2UserSyncWakeRelay: Sendable {
         let leases = try await store.claimPending(now: now(), leaseDuration: 15, limit: limit)
         var published = 0
         var retried = 0
+        var accepted: [V2UserSyncWakeLease] = []
         for lease in leases {
             do {
                 try Task.checkCancellation()
                 try await publisher.publish(lease.wake)
-                try await store.markPublished(lease)
-                published += 1
+                accepted.append(lease)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -48,6 +48,17 @@ public struct V2UserSyncWakeRelay: Sendable {
                 try await store.scheduleRetry(lease, nextAttemptAt: retryAt)
                 retried += 1
             }
+            // A failed confirmation leaves leased rows for idempotent replay.
+            // Never delete a newer revision written during publication.
+            if accepted.count == 32 {
+                try await store.markPublished(accepted)
+                published += accepted.count
+                accepted.removeAll(keepingCapacity: true)
+            }
+        }
+        if !accepted.isEmpty {
+            try await store.markPublished(accepted)
+            published += accepted.count
         }
         return .init(claimed: leases.count, published: published, retryScheduled: retried)
     }

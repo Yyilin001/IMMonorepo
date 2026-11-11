@@ -7,6 +7,12 @@ public enum V2InteractiveReadAdmissionPurpose: String, CaseIterable, Sendable {
     case coverageAuthorization = "coverage_authorization"
 }
 
+/// 由网关命令分类决定，不接受客户端自行声明优先级。
+public enum V2SyncAdmissionPurpose: Sendable {
+    case pull
+    case acknowledgement
+}
+
 public enum V2DatabaseWorkClass: String, CaseIterable, Sendable {
     /// 让客户端可见状态持久化的消息写入；拥有独立排队预算与前台容量预留。
     case foregroundWrite = "foreground_write"
@@ -119,6 +125,8 @@ public struct V2DatabaseWorkAdmissionPolicy: Equatable, Sendable {
     public let maximumSyncQueued: Int
     /// 请求入队后的最大等待时长，必须为正数；不限制获准后的数据库工作耗时。
     public let timeout: Duration
+    /// 同步恢复允许吸收有界突发，不继承交互请求的短等待预算。
+    public let syncTimeout: Duration
 
     /// 创建准入配置。
     ///
@@ -131,7 +139,8 @@ public struct V2DatabaseWorkAdmissionPolicy: Equatable, Sendable {
     ///   - maximumForegroundControlWriteQueued: 控制写入队列长度上限，默认零。
     ///   - maximumInteractiveReadQueued: 交互读取队列长度上限。
     ///   - maximumSyncQueued: 同步工作队列长度上限。
-    ///   - timeout: 入队等待期限。
+    ///   - timeout: 前台入队等待期限。
+    ///   - syncTimeout: 同步入队等待期限；省略时采用 timeout。
     /// - Precondition: 控制写入的两个额度不得为负；其他额度和等待期限必须为正。
     ///   三个前台在途额度之和须可由 `Int` 表示，以供控制器计算总容量。
     public init(
@@ -143,7 +152,8 @@ public struct V2DatabaseWorkAdmissionPolicy: Equatable, Sendable {
         maximumForegroundControlWriteQueued: Int = 0,
         maximumInteractiveReadQueued: Int,
         maximumSyncQueued: Int,
-        timeout: Duration
+        timeout: Duration,
+        syncTimeout: Duration? = nil
     ) {
         precondition(maximumForegroundWriteInFlight > 0)
         precondition(maximumForegroundControlWriteInFlight >= 0)
@@ -153,7 +163,7 @@ public struct V2DatabaseWorkAdmissionPolicy: Equatable, Sendable {
         precondition(maximumForegroundControlWriteQueued >= 0)
         precondition(maximumInteractiveReadQueued > 0)
         precondition(maximumSyncQueued > 0)
-        precondition(timeout > .zero)
+        precondition(timeout > .zero && (syncTimeout ?? timeout) > .zero)
         self.maximumForegroundWriteInFlight = maximumForegroundWriteInFlight
         self.maximumForegroundControlWriteInFlight = maximumForegroundControlWriteInFlight
         self.maximumInteractiveReadInFlight = maximumInteractiveReadInFlight
@@ -163,6 +173,7 @@ public struct V2DatabaseWorkAdmissionPolicy: Equatable, Sendable {
         self.maximumInteractiveReadQueued = maximumInteractiveReadQueued
         self.maximumSyncQueued = maximumSyncQueued
         self.timeout = timeout
+        self.syncTimeout = syncTimeout ?? timeout
     }
 }
 

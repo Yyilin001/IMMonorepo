@@ -44,6 +44,8 @@ public protocol V2RoomDispatchOutbox: Sendable {
     func acknowledgePages(_ pages: [V2RoomDispatchAcknowledgement], now: Date) async throws -> Set<UUID>
 
     func claim(now: Date, limit: Int, leaseDuration: TimeInterval) async throws -> [V2RoomDispatchLease]
+    /// One result per input lease; nil means its lease fence no longer holds.
+    func recipientPages(_ leases: [V2RoomDispatchLease], limit: Int, now: Date) async throws -> [[UserID]?]
     func recipients(_ lease: V2RoomDispatchLease, limit: Int, now: Date) async throws -> [UserID]
     func acknowledgePage(_ lease: V2RoomDispatchLease, through cursor: UUID?, now: Date) async throws -> Bool
     func retry(_ lease: V2RoomDispatchLease, now: Date, after delay: TimeInterval) async throws
@@ -86,6 +88,18 @@ extension V2RoomDispatchProjecting {
 }
 
 extension V2RoomDispatchOutbox {
+    public func recipientPages(_ leases: [V2RoomDispatchLease], limit: Int, now: Date) async throws -> [[UserID]?] {
+        guard leases.count <= 32 else { throw V2RoomDispatchError.invalidInput }
+        var pages: [[UserID]?] = []
+        for lease in leases {
+            try Task.checkCancellation()
+            do { pages.append(try await recipients(lease, limit: limit, now: now)) }
+            catch is CancellationError { throw CancellationError() }
+            catch { pages.append(nil) }
+        }
+        return pages
+    }
+
     public func acknowledgePages(_ pages: [V2RoomDispatchAcknowledgement], now: Date) async throws -> Set<UUID> {
         var accepted = Set<UUID>()
         for page in pages {

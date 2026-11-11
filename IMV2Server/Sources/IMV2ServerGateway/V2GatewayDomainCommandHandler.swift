@@ -153,7 +153,12 @@ public struct V2GatewayDomainCommandHandler:
             if let databaseWorkAdmission,
                let workClass = databaseWorkClass(for: envelope),
                admissionOwner(for: envelope) == .gateway {
-                switch await databaseWorkAdmission.acquire(workClass) {
+                let syncPurpose: V2SyncAdmissionPurpose
+                switch envelope.body {
+                case .syncAck, .snapshotAck: syncPurpose = .acknowledgement
+                default: syncPurpose = .pull
+                }
+                switch await databaseWorkAdmission.acquire(workClass, syncPurpose: syncPurpose) {
                 case .admitted:
                     break
                 case .rejected:

@@ -182,6 +182,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let interactiveReadDatabaseWorkMaximumQueued: Int
     public let syncDatabaseWorkMaximumQueued: Int
     public let databaseWorkAdmissionTimeoutMilliseconds: Int
+    public let syncDatabaseWorkAdmissionTimeoutMilliseconds: Int
     public let databaseWorkAdmissionEnabled: Bool
     /// 尽力而为的同步提示按用户合并；游标拉取仍是权威恢复机制。
     public let syncWakeCoalescingMilliseconds: Int
@@ -630,6 +631,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         databaseWorkAdmissionTimeoutMilliseconds = try Self.boundedPositive(
             "IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS", maximum: 5_000, environment: environment
         )
+        syncDatabaseWorkAdmissionTimeoutMilliseconds = environment.value(for: "IM_V2_SYNC_DATABASE_WORK_ADMISSION_TIMEOUT_MS") == nil
+            ? max(1_000, databaseWorkAdmissionTimeoutMilliseconds)
+            : try Self.boundedPositive("IM_V2_SYNC_DATABASE_WORK_ADMISSION_TIMEOUT_MS", maximum: 5_000, environment: environment)
         databaseWorkAdmissionEnabled = try Self.explicitBoolean(
             "IM_V2_DATABASE_WORK_ADMISSION_ENABLED", environment: environment
         )

@@ -54,9 +54,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             serviceID: actor.signer.serviceID.rawValue, incarnationID: actors.callerIncarnation)
         // Deployment snapshots describe the business source, never recipients.
         // Durable data-owner checks remain in transactions; Actor lifetime governs execution.
-        let userRouter = try await V2DatabaseLoanObservationContext.$source.withValue(.realtimeOwnerSnapshot) {
-            try await V2StaticUserShardRouter.load(database: prepared.topology.database)
-        }
+        let userRouter = prepared.projection.userShardRouter
         let roomRouter = try await V2DatabaseLoanObservationContext.$source.withValue(.realtimeOwnerSnapshot) {
             try await V2DeploymentRoomShardRouter.load(database: prepared.topology.database)
         }

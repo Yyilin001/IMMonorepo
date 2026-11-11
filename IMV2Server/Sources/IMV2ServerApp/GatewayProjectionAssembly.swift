@@ -8,7 +8,7 @@ import IMV2ServerGateway
 /// 初始化用户分片路由栅栏、提交后投影投递器和有界读缓存。
 /// 同一用户路由由前台、投递、维护各自的数据库角色访问。
 struct GatewayProjectionAssembly {
-    let syncUserShardRouter: V2PostgresUserShardRouter
+    let userShardRouter: V2StaticUserShardRouter
     let maintenanceUserShardRouter: V2PostgresUserShardRouter
     let userShardProjectionDelivery: V2PostgresUserShardProjectionDelivery
     let maintenanceUserShardProjectionDelivery: V2PostgresUserShardProjectionDelivery
@@ -27,7 +27,6 @@ struct GatewayProjectionAssembly {
         roomOwnerDatabaseURLs: [String]
     ) async throws -> Self {
         let database = topology.database
-        let syncControlDatabase = topology.syncControlDatabase
         let deliveryDatabase = topology.deliveryDatabase
         let maintenanceDatabase = topology.maintenanceDatabase
         let userStateRouter = topology.userStateRouter
@@ -35,7 +34,7 @@ struct GatewayProjectionAssembly {
         let maintenanceUserShardStorage = topology.maintenanceUserShardStorage
         let userShardRouter = V2PostgresUserShardRouter(database: database)
         try await userShardRouter.bootstrap(defaultRoute: configuration.userShardRoute)
-        let syncUserShardRouter = V2PostgresUserShardRouter(database: syncControlDatabase)
+        let deploymentUserRouter = try await V2StaticUserShardRouter.load(database: database)
         let deliveryUserShardRouter = V2PostgresUserShardRouter(database: deliveryDatabase)
         let maintenanceUserShardRouter = V2PostgresUserShardRouter(
             database: maintenanceDatabase
@@ -102,7 +101,7 @@ struct GatewayProjectionAssembly {
                 projector: roomDispatchProjector)
         }
         return .init(
-            syncUserShardRouter: syncUserShardRouter,
+            userShardRouter: deploymentUserRouter,
             maintenanceUserShardRouter: maintenanceUserShardRouter,
             userShardProjectionDelivery: userShardProjectionDelivery,
             maintenanceUserShardProjectionDelivery: maintenanceUserShardProjectionDelivery,

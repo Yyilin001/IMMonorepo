@@ -10,6 +10,7 @@ extension GatewayBackgroundWorkers {
         let logger = self.logger
         let userProjectionWorkers = projection.userProjectionWorkers
         let databaseWorkAdmission = projection.databaseWorkAdmission
+        let messageWritesAreBusy = projection.messageWritesAreBusy
         let snapshotArtifactBuilders = projection.snapshotArtifactBuilders
         let messageProjectionStateBodyCompactionWorkers = projection.messageProjectionStateBodyCompactionWorkers
         let userStateWorkers = delivery.userStateWorkers
@@ -29,19 +30,17 @@ extension GatewayBackgroundWorkers {
                             .userProjectionBusyDrainBudgetMilliseconds
                     )
                     while !Task.isCancelled {
-                        // 一个预留投影 worker 始终保证持久收敛。额外通道仅在有余量时运行；
-                        // 当前台或 Sync 已在数据库准入边界等待时，它们会让出容量。
-                        if workerIndex > 0,
-                           configuration.databaseWorkAdmissionEnabled,
-                           await databaseWorkAdmission.snapshot().queued > 0 {
+                        // 消息发送使用独立物理调度器，旧准入队列不能反映其压力。
+                        // 繁忙时额外 worker 让出容量，保底 worker 仍限速推进持久投影。
+                        let messagePressure = await messageWritesAreBusy()
+                        let sharedPressure = configuration.databaseWorkAdmissionEnabled
+                            ? await databaseWorkAdmission.snapshot().queued > 0 : false
+                        if messagePressure || sharedPressure {
                             do {
-                                try await v2Sleep(for: .milliseconds(
-                                    configuration.workerPollIntervalMilliseconds
-                                ))
-                            } catch {
-                                break
-                            }
-                            continue
+                                try await v2Sleep(for: .milliseconds(max(25,
+                                    configuration.workerPollIntervalMilliseconds)))
+                            } catch { break }
+                            if workerIndex > 0 { continue }
                         }
                         let passStartedAt = ContinuousClock.now
                         var didWork = false

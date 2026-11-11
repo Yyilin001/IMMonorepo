@@ -88,11 +88,28 @@ public struct PostgresV2UserSyncWakeStore: V2UserSyncWakeStore {
         }
     }
     public func markPublished(_ lease: V2UserSyncWakeLease) async throws {
-        guard let user = UUID(uuidString: lease.wake.userID), lease.revision > 0 else { throw V2RealtimeDirectoryError.invalidInput }
+        try await markPublished([lease])
+    }
+    public func markPublished(_ leases: [V2UserSyncWakeLease]) async throws {
+        guard leases.count <= 32 else { throw V2RealtimeDirectoryError.invalidInput }
+        guard !leases.isEmpty else { return }
+        // Published hints are already accepted. Busy rows retain their lease for
+        // idempotent retry instead of blocking writers or reversing their lock order.
+        let input = try SQLList(leases.map { lease -> SQLQueryString in
+            guard let user = UUID(uuidString: lease.wake.userID), lease.revision > 0 else {
+                throw V2RealtimeDirectoryError.invalidInput
+            }
+            return "(\(bind: user)::uuid,\(bind: lease.claimToken)::uuid,\(bind: lease.revision)::bigint)"
+        })
         try await sql(database).raw("""
-            DELETE FROM \(unsafeRaw: schema).user_sync_wake_outbox
-            WHERE user_id = \(bind: user) AND state = 'leased'
-              AND lease_token = \(bind: lease.claimToken) AND revision = \(bind: lease.revision)
+            WITH published(user_id,token,revision) AS (VALUES \(input)), owned AS MATERIALIZED (
+                SELECT wake.user_id FROM \(unsafeRaw: schema).user_sync_wake_outbox wake
+                JOIN published ON wake.user_id=published.user_id
+                WHERE wake.state='leased' AND wake.lease_token=published.token AND wake.revision=published.revision
+                ORDER BY wake.user_id FOR UPDATE OF wake SKIP LOCKED
+            )
+            DELETE FROM \(unsafeRaw: schema).user_sync_wake_outbox wake USING owned
+            WHERE wake.user_id=owned.user_id
             """).run()
     }
     public func scheduleRetry(_ lease: V2UserSyncWakeLease, nextAttemptAt: Date) async throws {

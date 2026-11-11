@@ -23,6 +23,8 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true',help='Check dependencies without starting processes or creating configuration.')
     parser.add_argument('--hold-seconds',type=int,default=0,help='Keep only this isolated stack alive for an additional test window (max 900s).')
+    parser.add_argument('--author-presentations',action='store_true',help='Enable negotiated author presentation streams only in this isolated gateway.')
+    parser.add_argument('--resource-part-uploads',action='store_true',help='Permit up to 8 MiB only on this isolated edge local-media PUT route for real multipart tests.')
     parser.add_argument('--two-install-ui',action='store_true',help='Run the existing real two-install App scenario against this disposable native stack.')
     parser.add_argument('--multi-device-ui',action='store_true',help='Run real same-account multi-device App stages and owned Operator snapshot reset.')
     parser.add_argument('--account-switch-ui',action='store_true',help='Run real App sign-out, account switching and cold restoration isolation.')
@@ -109,6 +111,8 @@ def main():
                 IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY=str(root/'media'),IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL=f'https://localhost:{ports["edge"]}',
                 IM_V2_ACCOUNT_LISTEN_PORT=str(ports['account']),IM_V2_TLS_HOST='127.0.0.1',IM_V2_TLS_PORT=str(ports['gateway']),
                 IM_V2_TLS_CERTIFICATE_CHAIN_PATH=str(cert),IM_V2_TLS_PRIVATE_KEY_PATH=str(key),IM_V2_METRICS_PORT=str(ports['metrics']))
+            if service == 'gateway' and args.author_presentations:
+                values['IM_V2_AUTHOR_PRESENTATIONS_ENABLED']='true'
             return values
         account_env=environment('account')
         def spawn(name,binary,env):
@@ -137,8 +141,9 @@ def main():
             def log_message(self,*_): pass
             def dispatch(self):
                 length=int(self.headers.get('Content-Length','0'))
-                if not 0 <= length <= 1024*1024: self.send_error(413);return
                 path=urllib.parse.urlsplit(self.path).path
+                body_limit=8*1024*1024 if args.resource_part_uploads and self.command == 'PUT' and path.startswith('/v2/local-media/upload/') else 1024*1024
+                if not 0 <= length <= body_limit: self.send_error(413);return
                 if download_gate is not None and path.startswith('/__fixture__/background-download/'):
                     if self.headers.get('X-Background-Fixture') != background_fixture_token or length > 1024:
                         self.send_error(403);return

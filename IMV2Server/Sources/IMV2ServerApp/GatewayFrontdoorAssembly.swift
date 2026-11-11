@@ -115,7 +115,8 @@ struct GatewayFrontdoorAssembly {
                 maximumSyncQueued: configuration.syncDatabaseWorkMaximumQueued,
                 timeout: .milliseconds(
                     configuration.databaseWorkAdmissionTimeoutMilliseconds
-                )
+                ),
+                syncTimeout: .milliseconds(configuration.syncDatabaseWorkAdmissionTimeoutMilliseconds)
             )
     }
 

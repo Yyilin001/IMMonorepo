@@ -12,8 +12,8 @@ import IMV2Core
 import Testing
 
 struct V2RoutedSyncStoreTests {
-    @Test("routed Sync classifies the first real control borrow and reuses its co-located connection")
-    func syncPurposeCoversRouteBorrowAndNestedOwner() async throws {
+    @Test("routed Sync borrows only its owner connection and restores the loan purpose")
+    func syncPurposeCoversOnlyOwnerBorrow() async throws {
         guard let url = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
               ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
@@ -28,14 +28,13 @@ struct V2RoutedSyncStoreTests {
                 .init(bucket: "sync-owner", database: database, schema: "im_v2")
             ])
             let store = V2RoutedSyncStore(registry: registry,
-                routeFence: BorrowedSyncRouteFence(database: database, route: route, pids: pids),
-                coLocatedControlBuckets: ["sync-owner"]) { location in
+                router: FixedSyncRouter(route: route)) { location in
                     BorrowedSyncOwnerStore(database: location.database, pids: pids)
                 }
             _ = try await store.pull(userID: UserID(uuid: UUID()), deviceID: DeviceID(uuid: UUID()),
                 syncToken: nil, maxRecords: 10, now: Date())
             let identifiers = pids.values.withLock { $0 }
-            #expect(identifiers.count == 2 && identifiers.first == identifiers.last)
+            #expect(identifiers.count == 1)
             let completed = database.loanMetricsSnapshot()
             #expect(completed.classes[.sync]?.granted == 1)
             #expect(completed.classes[.sync]?.inFlight == 0)
@@ -73,7 +72,7 @@ struct V2RoutedSyncStoreTests {
             let recorder = RoutedSyncRecorder()
             let store = V2RoutedSyncStore(
                 registry: registry,
-                routeFence: V2FixedUserShardRouteFence(route: route, database: resources.database(.psql))
+                router: FixedSyncRouter(route: route)
             ) { location in
                 RoutedSyncStoreFake(bucket: location.bucket, recorder: recorder)
             }
@@ -116,22 +115,10 @@ private struct RoutedSyncStoreFake: V2SyncStore {
     func acknowledgeSnapshot(userID _: UserID, deviceID _: DeviceID, snapshotID _: SnapshotID, generation _: UInt64, baseSequence _: UInt64, receipt _: V2SyncReceipt, now _: Date) async throws { fatalError("not used") }
 }
 
-private struct BorrowedSyncRouteFence: V2UserShardRouteFencing {
-    let database: V2EventLoopBalancedDatabase
+private struct FixedSyncRouter: V2UserShardRouter {
     let route: V2UserShardRoute
-    let pids: BorrowedSyncPIDs
-    func withCurrentRoute<Result: Sendable>(for userID: UserID,
-        _ operation: @escaping @Sendable (V2UserShardRoute, any Database) async throws -> Result
-    ) async throws -> Result {
-        try await database.transaction { borrowed in
-            let sql = try #require(borrowed as? any SQLDatabase)
-            let row = try #require(try await sql.raw("SELECT pg_backend_pid() AS pid").first())
-            let pid = try row.decode(column: "pid", as: Int32.self)
-            pids.values.withLock { $0.append(pid) }
-            #expect(database.loanMetricsSnapshot().classes[.sync]?.inFlight == 1)
-            #expect(database.loanMetricsSnapshot().classes[.ordinary]?.inFlight == 0)
-            return try await operation(route, borrowed)
-        }
+    func routes(for users: [UserID]) async throws -> [V2UserShardRoute] {
+        users.map { _ in route }
     }
 }
 

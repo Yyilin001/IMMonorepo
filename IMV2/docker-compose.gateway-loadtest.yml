@@ -56,6 +56,7 @@ services:
       IM_V2_INTERACTIVE_READ_DATABASE_WORK_MAX_QUEUED: 384
       IM_V2_SYNC_DATABASE_WORK_MAX_QUEUED: 1536
       IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS: 5000
+      IM_V2_SYNC_DATABASE_WORK_ADMISSION_TIMEOUT_MS: 5000
       # Measure the single-node throughput ceiling with one shared 64-slot
       # pool. Admission, worker concurrency, batching and bounded queues remain
       # enabled; only hard per-role connection reservations are bypassed so an

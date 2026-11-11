@@ -14,13 +14,12 @@ public struct V2RoomDispatchWorker: Sendable {
     private let outbox: any V2RoomDispatchOutbox
     private let projector: any V2RoomDispatchProjecting
     private let now: @Sendable () -> Date
-    private let concurrency: Int
     private let pageSize: Int
 
     public init(outbox: any V2RoomDispatchOutbox, projector: any V2RoomDispatchProjecting,
-                concurrency: Int = 8, pageSize: Int = 32, now: @escaping @Sendable () -> Date = Date.init) {
-        precondition((1...32).contains(concurrency) && (1...256).contains(pageSize))
-        self.outbox = outbox; self.projector = projector; self.concurrency = concurrency
+                pageSize: Int = 32, now: @escaping @Sendable () -> Date = Date.init) {
+        precondition((1...256).contains(pageSize))
+        self.outbox = outbox; self.projector = projector
         self.pageSize = pageSize; self.now = now
     }
 
@@ -50,22 +49,11 @@ public struct V2RoomDispatchWorker: Sendable {
     }
 
     private func process(_ leases: [V2RoomDispatchLease]) async throws -> [Bool] {
-        var audiences = Array<[UserID]?>(repeating: nil, count: leases.count)
-        try await withThrowingTaskGroup(of: (Int, [UserID]?).self) { tasks in
-            var next = 0
-            func submit(_ index: Int) {
-                tasks.addTask {
-                    do { return (index, try await outbox.recipients(leases[index], limit: pageSize, now: now())) }
-                    catch is CancellationError { throw CancellationError() }
-                    catch { return (index, nil) }
-                }
-            }
-            while next < min(concurrency, leases.count) { submit(next); next += 1 }
-            for try await (index, recipients) in tasks {
-                audiences[index] = recipients
-                if next < leases.count { submit(next); next += 1 }
-            }
-        }
+        let audiences: [[UserID]?]
+        do { audiences = try await outbox.recipientPages(leases, limit: pageSize, now: now()) }
+        catch is CancellationError { throw CancellationError() }
+        catch { for lease in leases { try await retry(lease) }; return leases.map { _ in false } }
+        guard audiences.count == leases.count else { throw V2RoomDispatchError.corruptPersistence }
         var failed = Set(audiences.indices.filter { audiences[$0] == nil })
         var grouped: [UserID: [Int]] = [:]
         for (index, audience) in audiences.enumerated() {

@@ -50,7 +50,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await store.acknowledgePages([.init(lease: old, through: senderUUID)], now: later).isEmpty)
             #expect(try await store.acknowledgePages([.init(lease: current, through: nil)], now: later).isEmpty)
             #expect(current.mentionedUserIDs == [UserID(uuid: memberThreeUUID)])
-            let first = try await store.recipients(current, limit: 1, now: later)
+            let pages = try await store.recipientPages([old, current], limit: 1, now: later)
+            #expect(pages.count == 2 && pages[0] == nil)
+            let first = try #require(pages[1])
+            #expect(first == (try await store.recipients(current, limit: 1, now: later)))
             #expect(first.count == 1)
             #expect(try await store.acknowledgePage(current, through: first[0].uuidValue!, now: later))
             let secondLease = try #require(try await store.claim(now: later, limit: 1).first)
@@ -58,6 +61,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(Set(first + second) == [UserID(uuid: senderUUID), UserID(uuid: memberThreeUUID)])
             #expect(try await store.acknowledgePages([.init(lease: secondLease, through: try #require(second.last?.uuidValue))], now: later) == [secondLease.eventID])
             #expect(try await store.claim(now: later, limit: 1).isEmpty)
+            #expect(try await store.recipientPages([secondLease], limit: 10, now: later)[0] == nil)
             #expect(try await !store.acknowledgePage(secondLease, through: second.last?.uuidValue, now: later))
             #expect(try await count("im_v2.room_dispatch_outbox", on: sql) == 0)
         }
@@ -93,12 +97,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.account_notification_outbox", on: targetSQL) == 0)
             try await source.retry(lease, now: now, after: 0)
             let delivery = DispatchFaultProjector(projector: projector)
-            let firstWorker = V2RoomDispatchWorker(outbox: source, projector: delivery, concurrency: 1, now: { now })
+            let firstWorker = V2RoomDispatchWorker(outbox: source, projector: delivery, now: { now })
             let failed = try await firstWorker.runOnce(limit: 8)
             #expect(failed.failedPages == 1)
             #expect(try await count("im_v2.room_dispatch_outbox", on: ownerSQL) == 1)
             let retryTime = now.addingTimeInterval(10)
-            let retryWorker = V2RoomDispatchWorker(outbox: source, projector: delivery, concurrency: 1, pageSize: 1, now: { retryTime })
+            let retryWorker = V2RoomDispatchWorker(outbox: source, projector: delivery, pageSize: 1, now: { retryTime })
             let retried = try await retryWorker.runOnce(limit: 8)
             #expect(retried.failedPages == 0)
             #expect(try await count("im_v2.room_dispatch_outbox", on: ownerSQL) == 0)
@@ -318,5 +322,38 @@ private actor DispatchBatchLostResponse: V2RoomDispatchProjecting {
         largestBatch = max(largestBatch, leases.count)
         try await projector.projectRoomChanges(leases, to: userID)
         if userID == failUser && !failed { failed = true; throw DispatchRollback.expected }
+    }
+}
+
+extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("batch wake confirmation retains a superseding revision and settles other accepted users")
+    func wakeBatchPreservesSupersededRevision() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { target, owner, sql, ownerSQL, room in
+            let now = Date()
+            try await v2EnqueueMessageDispatch(eventID: UUID(), messageID: UUID(), roomID: room.uuidValue!,
+                roomSequence: 1, membershipRevision: 0, senderID: senderUUID,
+                mentionedUserIDs: [], mentionsEveryone: false, createdAt: now, sql: ownerSQL)
+            let lease = try #require(try await PostgresV2RoomDispatchStore(database: owner).claim(now: now, limit: 1).first)
+            let projector = try PostgresV2UserStateEventProjector(database: target)
+            for user in [memberTwoUUID, memberThreeUUID] {
+                _ = try await projector.projectRoomChange(lease, to: .init(uuid: user))
+            }
+            let store = try PostgresV2UserSyncWakeStore(database: target)
+            let claims = try await store.claimPending(now: now.addingTimeInterval(1), leaseDuration: 15, limit: 32)
+            #expect(claims.count == 2)
+            let superseded = try #require(claims.first)
+            let user = try #require(UUID(uuidString: superseded.wake.userID))
+            try await sql.raw("""
+                UPDATE im_v2.user_sync_wake_outbox SET revision=revision+1, state='pending',
+                    lease_token=NULL, lease_expires_at=NULL WHERE user_id=\(bind: user)
+                """).run()
+            try await store.markPublished(claims)
+            let retained = try await store.claimPending(now: now.addingTimeInterval(2), leaseDuration: 15, limit: 32)
+            #expect(retained.count == 1)
+            #expect(retained.first?.wake.userID == superseded.wake.userID)
+            #expect(retained.first?.revision == superseded.revision + 1)
+            try await store.markPublished(retained)
+            #expect(try await count("im_v2.user_sync_wake_outbox", on: sql) == 0)
+        }
     }
 }

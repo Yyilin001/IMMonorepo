@@ -30,6 +30,7 @@ struct GatewayBackgroundWorkers {
     struct Projection {
         let userProjectionWorkers: [PostgresV2UserProjectionWorker]
         let databaseWorkAdmission: V2DatabaseWorkAdmissionController
+        let messageWritesAreBusy: @Sendable () async -> Bool
         let snapshotArtifactBuilders: [PostgresV2SnapshotArtifactBuilder]
         let messageProjectionStateBodyCompactionWorkers: [PostgresV2MessageProjectionStateBodyCompactionWorker]
     }
@@ -71,6 +72,7 @@ struct GatewayBackgroundWorkers {
         let frontdoor = prepared.frontdoor
         let ownerMaintenance = prepared.ownerMaintenance
         let projection = prepared.projection
+        let messageOwners = Array(prepared.roomOwners.physicalResources.values)
         return .init(
             configuration: configuration,
             logger: logger,
@@ -90,6 +92,14 @@ struct GatewayBackgroundWorkers {
             projection: .init(
                 userProjectionWorkers: userShardWork.userProjectionWorkers,
                 databaseWorkAdmission: frontdoor.databaseWorkAdmission,
+                messageWritesAreBusy: {
+                    for owner in messageOwners {
+                        let pressure = await owner.sendOperationOwnerMetricsSnapshot()
+                        if pressure.queuedTurns > 0 || (pressure.connectionWorkers > 0
+                            && pressure.executingConnectionWorkers >= pressure.connectionWorkers) { return true }
+                    }
+                    return false
+                },
                 snapshotArtifactBuilders: userShardWork.snapshotArtifactBuilders,
                 messageProjectionStateBodyCompactionWorkers: ownerMaintenance.messageProjectionStateBodyCompactionWorkers
             ),

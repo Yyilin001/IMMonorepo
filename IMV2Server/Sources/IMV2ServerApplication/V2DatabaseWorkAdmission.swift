@@ -13,10 +13,14 @@ import Foundation
 /// 因此授予、超时与取消都是 O(1)，即便在 2,000+ 等待者的压测上限下依然如此。
 /// 控制器只管理许可，数据库操作与每次获准后的配对释放由调用方负责。
 public actor V2DatabaseWorkAdmissionController {
+    private enum QueuePurpose: Sendable {
+        case ordinary, coverageAuthorization, acknowledgement
+    }
+
     /// 一个排队请求及其链表位置；超时任务仅在请求仍排队时有效。
     private struct Waiter: Sendable {
         let workClass: V2DatabaseWorkClass
-        let purpose: V2InteractiveReadAdmissionPurpose
+        let purpose: QueuePurpose
         let continuation: CheckedContinuation<V2DatabaseWorkAdmissionResult, Never>
         let enqueuedAt: ContinuousClock.Instant
         let deadline: ContinuousClock.Instant
@@ -52,9 +56,14 @@ public actor V2DatabaseWorkAdmissionController {
     private var interactiveRead = Lane()
     private var interactiveOrdinary = Lane()
     private var interactiveCoverage = Lane()
-    private var nextInteractivePurpose: V2InteractiveReadAdmissionPurpose = .coverageAuthorization
+    private var nextInteractivePurpose: QueuePurpose = .coverageAuthorization
     private let interactiveReadCoverageReservedQueued: Int
     private var sync = Lane()
+    private var syncPull = Lane()
+    private var syncAcknowledgement = Lane()
+    // ACK 使用独立队列；连续最多授予三个 ACK 后服务一个 pull，防止任一侧饥饿。
+    private var consecutiveSyncAcknowledgements = 0
+    private let syncAcknowledgementReservedQueued: Int
     private var waiters: [UUID: Waiter] = [:]
     /// 下一次同优先级选择的轮转起点；只在候选类别已经按预留需求筛选后使用。
     private var nextForegroundTieBreak: V2DatabaseWorkClass = .foregroundWrite
@@ -66,6 +75,7 @@ public actor V2DatabaseWorkAdmissionController {
         precondition(interactiveReadCoverageReservedQueued >= 0
             && interactiveReadCoverageReservedQueued <= max(0, policy.maximumInteractiveReadQueued - 1))
         self.interactiveReadCoverageReservedQueued = interactiveReadCoverageReservedQueued
+        self.syncAcknowledgementReservedQueued = min(32, policy.maximumSyncQueued / 4)
         self.policy = policy
         self.maximumQueueWait = policy.timeout
         self.maximumForegroundCapacity = policy.maximumForegroundWriteInFlight
@@ -86,11 +96,14 @@ public actor V2DatabaseWorkAdmissionController {
     public func acquire(
         _ workClass: V2DatabaseWorkClass,
         callerDeadline: ContinuousClock.Instant? = nil,
-        interactiveReadPurpose: V2InteractiveReadAdmissionPurpose = .ordinary
+        interactiveReadPurpose: V2InteractiveReadAdmissionPurpose = .ordinary,
+        syncPurpose: V2SyncAdmissionPurpose = .pull
     ) async -> V2DatabaseWorkAdmissionResult {
         precondition(workClass == .interactiveRead || interactiveReadPurpose == .ordinary)
-        let purpose = interactiveReadPurpose
-        let policyDeadline = clock.now.advanced(by: policy.timeout)
+        precondition(workClass == .sync || syncPurpose == .pull)
+        let purpose: QueuePurpose = syncPurpose == .acknowledgement ? .acknowledgement
+            : (interactiveReadPurpose == .coverageAuthorization ? .coverageAuthorization : .ordinary)
+        let policyDeadline = clock.now.advanced(by: workClass == .sync ? policy.syncTimeout : policy.timeout)
         let deadline = callerDeadline.map { min($0, policyDeadline) } ?? policyDeadline
         guard deadline > clock.now else {
             mutateAccounting(for: workClass, purpose: purpose) { $0.timeoutRejections = saturatingIncrement($0.timeoutRejections) }
@@ -103,7 +116,8 @@ public actor V2DatabaseWorkAdmissionController {
         let queueLimit = maximumQueued(for: workClass) -
             (workClass == .interactiveRead && purpose == .ordinary ? interactiveReadCoverageReservedQueued : 0)
         guard lane(for: workClass).queued < maximumQueued(for: workClass),
-              workClass != .interactiveRead || purpose != .ordinary || interactiveOrdinary.queued < queueLimit else {
+              workClass != .interactiveRead || purpose != .ordinary || interactiveOrdinary.queued < queueLimit,
+              workClass != .sync || purpose != .ordinary || syncPull.queued < policy.maximumSyncQueued - syncAcknowledgementReservedQueued else {
             mutateAccounting(for: workClass, purpose: purpose) { lane in
                 lane.queueFullRejections = saturatingIncrement(lane.queueFullRejections)
             }
@@ -132,11 +146,12 @@ public actor V2DatabaseWorkAdmissionController {
     public func release(_ workClass: V2DatabaseWorkClass,
         interactiveReadPurpose: V2InteractiveReadAdmissionPurpose = .ordinary) {
         precondition(workClass == .interactiveRead || interactiveReadPurpose == .ordinary)
+        let purpose: QueuePurpose = interactiveReadPurpose == .ordinary ? .ordinary : .coverageAuthorization
         if workClass == .interactiveRead {
-            precondition(queueLane(for: workClass, purpose: interactiveReadPurpose).inFlight > 0)
+            precondition(queueLane(for: workClass, purpose: purpose).inFlight > 0)
         }
         precondition(lane(for: workClass).inFlight > 0)
-        mutateAccounting(for: workClass, purpose: interactiveReadPurpose) { $0.inFlight -= 1 }
+        mutateAccounting(for: workClass, purpose: purpose) { $0.inFlight -= 1 }
         switch workClass {
         case .foregroundWrite, .foregroundControlWrite, .interactiveRead:
             grantNextForegroundIfPossible()
@@ -163,7 +178,7 @@ public actor V2DatabaseWorkAdmissionController {
     private func enqueue(
         _ waiterID: UUID,
         workClass: V2DatabaseWorkClass,
-        purpose: V2InteractiveReadAdmissionPurpose,
+        purpose: QueuePurpose,
         deadline: ContinuousClock.Instant,
         continuation: CheckedContinuation<V2DatabaseWorkAdmissionResult, Never>
     ) {
@@ -192,6 +207,7 @@ public actor V2DatabaseWorkAdmissionController {
             lane.queued += 1
         }
         if workClass == .interactiveRead { interactiveRead.queued += 1 }
+        if workClass == .sync { sync.queued += 1 }
         let timeoutTask = Task { [weak self] in
             do {
                 try await ContinuousClock().sleep(until: deadline)
@@ -213,6 +229,10 @@ public actor V2DatabaseWorkAdmissionController {
             if waiter.deadline <= clock.now { timeOut(waiterID); continue }
             guard let granted = removeWaiter(waiterID) else { return }
             admit(workClass, purpose: granted.purpose)
+            if workClass == .sync {
+                consecutiveSyncAcknowledgements = granted.purpose == .acknowledgement
+                    ? min(3, consecutiveSyncAcknowledgements + 1) : 0
+            }
             if workClass == .interactiveRead {
                 nextInteractivePurpose = granted.purpose == .ordinary ? .coverageAuthorization : .ordinary
             }
@@ -280,6 +300,7 @@ public actor V2DatabaseWorkAdmissionController {
             lane.queued -= 1
         }
         if waiter.workClass == .interactiveRead { interactiveRead.queued -= 1 }
+        if waiter.workClass == .sync { sync.queued -= 1 }
         return waiter
     }
 
@@ -373,7 +394,7 @@ public actor V2DatabaseWorkAdmissionController {
     }
 
     /// 占用一个在途许可并以饱和方式增加累计获准计数；调用方须先检查容量。
-    private func admit(_ workClass: V2DatabaseWorkClass, purpose: V2InteractiveReadAdmissionPurpose) {
+    private func admit(_ workClass: V2DatabaseWorkClass, purpose: QueuePurpose) {
         mutateAccounting(for: workClass, purpose: purpose) { lane in
             lane.inFlight += 1
             lane.admittedRequests = saturatingIncrement(lane.admittedRequests)
@@ -391,6 +412,12 @@ public actor V2DatabaseWorkAdmissionController {
     }
 
     private func nextWaiterID(for workClass: V2DatabaseWorkClass) -> UUID? {
+        if workClass == .sync {
+            if syncAcknowledgement.head != nil && (syncPull.head == nil || consecutiveSyncAcknowledgements < 3) {
+                return syncAcknowledgement.head
+            }
+            return syncPull.head
+        }
         guard workClass == .interactiveRead else { return lane(for: workClass).head }
         if interactiveOrdinary.head != nil && interactiveCoverage.head != nil {
             return nextInteractivePurpose == .ordinary ? interactiveOrdinary.head : interactiveCoverage.head
@@ -399,20 +426,26 @@ public actor V2DatabaseWorkAdmissionController {
     }
 
     private func queueLane(for workClass: V2DatabaseWorkClass,
-        purpose: V2InteractiveReadAdmissionPurpose) -> Lane {
+        purpose: QueuePurpose) -> Lane {
+        if workClass == .sync { return purpose == .acknowledgement ? syncAcknowledgement : syncPull }
         guard workClass == .interactiveRead else { return lane(for: workClass) }
         return purpose == .ordinary ? interactiveOrdinary : interactiveCoverage
     }
 
     private func mutateQueueLane(for workClass: V2DatabaseWorkClass,
-        purpose: V2InteractiveReadAdmissionPurpose, _ mutation: (inout Lane) -> Void) {
+        purpose: QueuePurpose, _ mutation: (inout Lane) -> Void) {
+        if workClass == .sync {
+            if purpose == .acknowledgement { mutation(&syncAcknowledgement) }
+            else { mutation(&syncPull) }
+            return
+        }
         guard workClass == .interactiveRead else { mutateLane(for: workClass, mutation); return }
         if purpose == .ordinary { mutation(&interactiveOrdinary) }
         else { mutation(&interactiveCoverage) }
     }
 
     private func mutateAccounting(for workClass: V2DatabaseWorkClass,
-        purpose: V2InteractiveReadAdmissionPurpose, _ mutation: (inout Lane) -> Void) {
+        purpose: QueuePurpose, _ mutation: (inout Lane) -> Void) {
         mutateLane(for: workClass, mutation)
         if workClass == .interactiveRead { mutateQueueLane(for: workClass, purpose: purpose, mutation) }
     }

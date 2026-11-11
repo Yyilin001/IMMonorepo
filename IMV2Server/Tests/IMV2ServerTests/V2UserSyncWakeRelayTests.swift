@@ -32,7 +32,7 @@ private actor UserSyncWakeStoreFake: V2UserSyncWakeStore {
             revision: 1, claimToken: UUID(), attempt: attempt)
     }
     func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) -> [V2UserSyncWakeLease] { [lease] }
-    func markPublished(_ lease: V2UserSyncWakeLease) { published += 1 }
+    func markPublished(_ leases: [V2UserSyncWakeLease]) { published += leases.count }
     func scheduleRetry(_ lease: V2UserSyncWakeLease, nextAttemptAt: Date) { retryAt = nextAttemptAt }
     func retryDate() -> Date? { retryAt }
     func publicationCount() -> Int { published }
@@ -44,4 +44,31 @@ private struct ControlledUserSyncWakePublisher: V2UserSyncWakePublishing {
         if backpressure { throw V2RealtimePublicationBackpressure.peerRPCs }
         throw UserSyncWakePublisherError.unavailable
     }
+}
+
+extension V2UserSyncWakeRelayTests {
+    @Test("relay confirms bounded cohorts and never confirms failed publications")
+    func boundedConfirmationCohorts() async throws {
+        let fixture = WakeCohortFixture()
+        let report = try await V2UserSyncWakeRelay(store: fixture, publisher: fixture).runOnce(limit: 65)
+        #expect(report == .init(claimed: 65, published: 64, retryScheduled: 1))
+        #expect(await fixture.batchSizes == [32, 32])
+        #expect(await fixture.confirmed == Set((0..<65).filter { $0 != 2 }.map(String.init)))
+    }
+}
+
+private actor WakeCohortFixture: V2UserSyncWakeStore, V2UserSyncWakePublishing {
+    var batchSizes: [Int] = []
+    var confirmed = Set<String>()
+    func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) -> [V2UserSyncWakeLease] {
+        (0..<65).map { .init(wake: .init(userID: String($0), highWatermark: 1), revision: 1, claimToken: UUID(), attempt: 1) }
+    }
+    func publish(_ wake: V2UserSyncWake) throws {
+        if wake.userID == "2" { throw UserSyncWakePublisherError.unavailable }
+    }
+    func markPublished(_ leases: [V2UserSyncWakeLease]) {
+        batchSizes.append(leases.count)
+        confirmed.formUnion(leases.map(\.wake.userID))
+    }
+    func scheduleRetry(_ lease: V2UserSyncWakeLease, nextAttemptAt: Date) {}
 }

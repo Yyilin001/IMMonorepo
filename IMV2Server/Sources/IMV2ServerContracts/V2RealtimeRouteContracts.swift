@@ -27,7 +27,8 @@ public struct V2UserSyncWakeLease: Equatable, Sendable {
 }
 public protocol V2UserSyncWakeStore: Sendable {
     func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2UserSyncWakeLease]
-    func markPublished(_ lease: V2UserSyncWakeLease) async throws
+    /// Confirm at most 32 accepted hints with their original revision/token fences.
+    func markPublished(_ leases: [V2UserSyncWakeLease]) async throws
     func scheduleRetry(_ lease: V2UserSyncWakeLease, nextAttemptAt: Date) async throws
 }
 public protocol V2UserSyncWakePublishing: Sendable {

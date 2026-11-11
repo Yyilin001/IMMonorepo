@@ -64,6 +64,47 @@ public struct PostgresV2RoomDispatchStore: V2RoomDispatchOutbox {
         return rows.compactMap { $0.user_id.map { .init(uuid: $0) } }
     }
 
+    /// Read one bounded cohort in one statement, preserving each lease's fence
+    /// and historical membership. A valid empty page differs from a lost lease.
+    public func recipientPages(_ leases: [V2RoomDispatchLease], limit: Int, now: Date) async throws -> [[UserID]?] {
+        guard leases.count <= 32, (1...256).contains(limit), v2PostgresTimestampCanEncode(now),
+              let sql = database as? any SQLDatabase else { throw V2RoomDispatchError.invalidInput }
+        guard !leases.isEmpty else { return [] }
+        let input = SQLList(leases.enumerated().map { index, lease -> SQLQueryString in
+            "(\(bind: index)::integer,\(bind: lease.eventID)::uuid,\(bind: lease.token)::uuid,\(bind: lease.recipientCursor)::uuid)"
+        })
+        let rows = try await sql.raw("""
+            WITH requested(ordinal,event_id,token,cursor) AS (VALUES \(input))
+            SELECT requested.ordinal, work.source_event_id IS NOT NULL AS owned, audience.user_id
+            FROM requested
+            LEFT JOIN im_v2.room_dispatch_outbox work
+              ON work.source_event_id=requested.event_id AND work.claim_token=requested.token
+             AND work.lease_expires_at>\(bind: now)
+             AND work.recipient_cursor IS NOT DISTINCT FROM requested.cursor
+            LEFT JOIN LATERAL (
+                SELECT DISTINCT membership.user_id FROM im_v2.room_memberships membership
+                WHERE membership.room_id=work.room_id
+                  AND membership.joined_revision<=work.membership_revision
+                  AND (membership.left_revision IS NULL OR membership.left_revision>work.membership_revision)
+                  AND (work.recipient_cursor IS NULL OR membership.user_id>work.recipient_cursor)
+                ORDER BY membership.user_id LIMIT \(bind: limit)
+            ) audience ON true
+            ORDER BY requested.ordinal,audience.user_id
+            """).all(decoding: DispatchRecipientPage.self)
+        var pages = Array<[UserID]?>(repeating: nil, count: leases.count)
+        var observed = Set<Int>()
+        for row in rows {
+            guard pages.indices.contains(row.ordinal) else { throw V2RoomDispatchError.corruptPersistence }
+            observed.insert(row.ordinal)
+            if row.owned {
+                if pages[row.ordinal] == nil { pages[row.ordinal] = [] }
+                if let user = row.user_id { pages[row.ordinal]!.append(.init(uuid: user)) }
+            }
+        }
+        guard observed.count == leases.count else { throw V2RoomDispatchError.corruptPersistence }
+        return pages
+    }
+
     /// Call only after every target in the page has durably accepted the effect.
     /// A crash before this CAS replays the page with stable event/user identities.
     /// An exhausted audience is removed in this acknowledgement, avoiding a
@@ -145,3 +186,5 @@ private struct DispatchRow: Decodable {
     let recipient_cursor: UUID?
 }
 private struct DispatchRecipient: Decodable { let user_id: UUID? }
+
+private struct DispatchRecipientPage: Decodable { let ordinal: Int; let owned: Bool; let user_id: UUID? }

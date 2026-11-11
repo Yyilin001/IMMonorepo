@@ -73,8 +73,7 @@ struct GatewayCommandAssembly {
             accountChanges: frontdoor.connectionRegistry,
             conversationCapabilities: conversationCapabilities,
             sync: .init(store: V2RoutedSyncStore(
-                registry: topology.syncUserShardStorage, routeFence: projection.syncUserShardRouter,
-                coLocatedControlBuckets: prepared.coLocatedControlBuckets,
+                registry: topology.syncUserShardStorage, router: projection.userShardRouter,
                 capabilityProfile: configuration.capabilityProfile,
                 // 为 envelope、不透明令牌、回执、代次、能力配置及 protobuf
                 // 长度前缀预留有界空间；记录本身的大小按实际值精确计算。
