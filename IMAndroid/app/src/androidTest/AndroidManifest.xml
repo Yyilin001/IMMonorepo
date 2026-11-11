@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name="com.xmtx.im.CameraOutputTestActivity" android:exported="true" android:process=":camera" />
+        <activity android:name="com.xmtx.im.DocumentOutputTestActivity" android:exported="true" android:process=":documents" />
+        <provider android:name="com.xmtx.im.DocumentOutputTestProvider" android:authorities="com.xmtx.im.android.test.documents" android:exported="false" android:grantUriPermissions="true" android:process=":documents" />
+        <activity android:name="com.xmtx.im.PhotoSelectionTestActivity" android:exported="true" android:process=":documents" />
+        <activity android:name="com.xmtx.im.DocumentSaveTestActivity" android:exported="true" android:process=":documents" />
+        <activity android:name="com.xmtx.im.DocumentOpenTestActivity" android:exported="true" android:process=":documents" />
+        <activity android:name="com.xmtx.im.TemporaryFileReceiverTestActivity" android:exported="true" android:process=":fileviewer" />
+    </application>
+</manifest>

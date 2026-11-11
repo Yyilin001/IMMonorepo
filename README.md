@@ -7,6 +7,7 @@ IM V2 是使用 Swift 构建的即时通信项目，包含 iOS 客户端、客�
 | 路径 | 职责 |
 | --- | --- |
 | `IMApp/` | iOS SwiftUI 应用与 V2 依赖组装。 |
+| `IMAndroid/` | Android Compose / Navigation 3 开发版本，包含 Kotlin SDK 核心链路与平台存储；功能对齐状态见其 README。 |
 | `ConversationListKit/` | 独立的 Swift 包，提供会话排序索引和 iOS 固定位置列表渲染器。 |
 | `IMV2Core/` | 领域类型、帧与命令规则，以及准入、扇出和同步约束。 |
 | `IMV2ClientKit/` | 设备 Keychain 会话、SQLite 同步投影、持久化客户端发件箱，以及 TLS/HTTPS 传输。 |

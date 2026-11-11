@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/debug_network_security">
+        <!-- Compose instrumentation uses the same keyboard resize policy as MainActivity. -->
+        <activity android:name="androidx.activity.ComponentActivity" android:windowSoftInputMode="adjustResize" />
+    </application>
+</manifest>
