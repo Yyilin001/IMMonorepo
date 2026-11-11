@@ -33,6 +33,10 @@ export ANDROID_HOME="$HOME/Library/Android/sdk"
 
 APK：`app/build/outputs/apk/debug/app-debug.apk`。
 
+Release 和性能测试包启用 [R8 代码优化及资源裁剪](https://developer.android.com/topic/performance/app-optimization/enable-app-optimization)，使用 `proguard-android-optimize.txt`；Protobuf Lite 的反射字段按上游规则保留。`./gradlew :app:assembleRelease :app:assembleBenchmark` 可构建两种包；普通 Release 尚未配置正式证书，输出 unsigned APK，benchmark 使用本机开发证书。混淆映射保存在 `app/build/outputs/mapping/<variant>/`，排查优化包崩溃时须使用对应版本的映射。
+
+会话与消息列表的独立 Macrobenchmark、最高 1,000 msg/s 持续负载、固定数据规模、真机基线比较和 Perfetto 报告说明见 [列表性能测试](benchmark/README.md)。
+
 多台设备连接时，使用显式设备序列号验证最低版本，避免把 API 36 的结果误当作 API 31 验收。先构建并向目标设备安装三个 APK，再分别运行两个测试模块；不要同时启动 instrumentation 或在测试期间运行 Gradle：
 
 ```sh

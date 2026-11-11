@@ -43,12 +43,28 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            applicationIdSuffix = ".benchmark"
+            isDebuggable = false
+            matchingFallbacks += "release"
+        }
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
 }
 if (generateFixtureTrust != null) tasks.configureEach { if (name == "preDebugBuild") dependsOn(generateFixtureTrust) }
 kotlin { jvmToolchain(17) }
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation(project(":platform"))
+    "benchmarkImplementation"("androidx.profileinstaller:profileinstaller:1.4.0")
     implementation(platform("androidx.compose:compose-bom:2025.12.00"))
     implementation("androidx.activity:activity-compose:1.12.1")
     implementation("androidx.compose.material3:material3")

@@ -4,4 +4,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "IMAndroid"
-include(":protocol", ":clientkit", ":platform", ":app")
+include(":protocol", ":clientkit", ":platform", ":app", ":benchmark")

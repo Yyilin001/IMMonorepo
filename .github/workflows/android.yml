@@ -23,12 +23,20 @@ jobs:
       - name: 验证协议、SDK、APK 与 Lint
         working-directory: IMAndroid
         run: ./gradlew :clientkit:test :app:assembleDebug :app:lintDebug :platform:lintDebug --console=plain
+      - name: 构建列表性能测试与校验报告工具
+        working-directory: IMAndroid
+        run: |
+          ./gradlew :app:testBenchmarkUnitTest :app:assembleBenchmark :benchmark:assembleBenchmark --console=plain
+          python3 -m unittest discover -s scripts -p test_benchmark_lists.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: android-verification
           path: |
             IMAndroid/app/build/outputs/apk/debug/*.apk
+            IMAndroid/app/build/outputs/apk/benchmark/*.apk
+            IMAndroid/app/build/outputs/mapping/benchmark/
+            IMAndroid/benchmark/build/outputs/apk/benchmark/*.apk
             IMAndroid/clientkit/build/reports/tests/
             IMAndroid/app/build/reports/lint-results-debug.*
             IMAndroid/platform/build/reports/lint-results-debug.*
