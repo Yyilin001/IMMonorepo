@@ -2,6 +2,9 @@ import Foundation
 import GRDB
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 /// Lifecycle tests use the production freeze/handoff transaction rather than a
 /// test-only legacy outbox. The returned snapshot includes the persisted stage.

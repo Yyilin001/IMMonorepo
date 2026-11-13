@@ -1,8 +1,5 @@
 import Foundation
 import IMV2Core
-#if canImport(Security)
-import Security
-#endif
 
 /// 独立设备撤销意图，包含撤销权限但不包含访问令牌或刷新凭证。
 ///
@@ -63,7 +60,7 @@ public enum V2DeviceRevocationStoreError: Error, Equatable, Sendable {
 
 /// 单个凭证命名空间的撤销队列所有者，最多保存 256 项任务。
 ///
-/// 每次修改同步替换一个 Keychain 项，保存成功后才通知观察者；不在此执行网络请求。
+/// 每次修改通过持久化边界同步替换完整账本，保存成功后才通知观察者；不在此执行网络请求。
 /// 相同 service 必须复用同一所有者，actor 隔离不提供多个实例之间的读改写互斥。
 public actor V2DeviceRevocationStore: V2DeviceRevocationScheduling {
     /// 同步读写完整账本的底层持久化实现。
@@ -79,12 +76,9 @@ public actor V2DeviceRevocationStore: V2DeviceRevocationScheduling {
     /// 创建使用系统 Keychain 的队列所有者，不立即读取账本。
     ///
     /// - Parameter service: Keychain 服务命名空间；同一命名空间应只创建一个所有者。
-    public init(service: String) {
-        persistence = V2KeychainDeviceRevocationPersistence(service: service)
-    }
 
     /// 注入同步持久化边界，供隔离存储实现与测试使用。
-    init(persistence: any V2DeviceRevocationPersisting) { self.persistence = persistence }
+    public init(persistence: any V2DeviceRevocationPersisting) { self.persistence = persistence }
 
     /// 持久化撤销意图；完全相同的操作与内容重复提交时直接成功。
     ///
@@ -283,67 +277,11 @@ public actor V2DeviceRevocationStore: V2DeviceRevocationScheduling {
 }
 
 /// 同步替换完整队列数据的持久化边界，调用期间不得拆分账本写入。
-protocol V2DeviceRevocationPersisting: Sendable {
+public protocol V2DeviceRevocationPersisting: Sendable {
     /// 读取完整账本字节，不存在时返回 nil，访问失败时抛出错误。
     func load() throws -> Data?
     /// 同步保存完整账本字节，失败时通过错误报告。
     func save(_ data: Data) throws
     /// 删除账本存储项，缺失项应视为已删除。
     func delete() throws
-}
-
-/// 在单个通用密码项中保存撤销账本的 Keychain 适配器。
-///
-/// 使用首次解锁后可访问且仅限当前设备的保护级别，支持延迟退出清理；不支持 Security 的平台明确报告存储不可用。
-private struct V2KeychainDeviceRevocationPersistence: V2DeviceRevocationPersisting {
-    /// 隔离撤销账本的 Keychain 服务名。
-    let service: String
-#if canImport(Security)
-    /// 以服务名及固定账户 device-revocation-outbox-v1 定位通用密码项。
-    private var query: [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-         kSecAttrAccount as String: "device-revocation-outbox-v1"]
-    }
-    /// 读取唯一匹配项并要求结果为 Data；缺失返回 nil，状态错误或类型错误明确抛出。
-    func load() throws -> Data? {
-        var request = query
-        request[kSecReturnData as String] = true
-        request[kSecMatchLimit as String] = kSecMatchLimitOne
-        var value: CFTypeRef?
-        let status = SecItemCopyMatching(request as CFDictionary, &value)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw error(status) }
-        guard let data = value as? Data else { throw V2DeviceRevocationStoreError.malformedRecord }
-        return data
-    }
-    /// 先更新既有项，仅在不存在时插入；同时设置设备限定的首次解锁后保护级别。
-    func save(_ data: Data) throws {
-        // This item contains only revocation authority, never login authority.
-        // Device-only availability after first unlock permits deferred cleanup.
-        let attributes: [String: Any] = [kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecSuccess { return }
-        guard status == errSecItemNotFound else { throw error(status) }
-        let inserted = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
-        guard inserted == errSecSuccess else { throw error(inserted) }
-    }
-    /// 删除匹配项，将不存在视为成功，其余系统错误映射为存储错误。
-    func delete() throws {
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw error(status) }
-    }
-    /// 将不可访问状态映射为 unavailable、解码错误映射为 malformedRecord，其余保留原始状态码。
-    private func error(_ status: OSStatus) -> V2DeviceRevocationStoreError {
-        switch status {
-        case errSecInteractionNotAllowed, errSecNotAvailable: .unavailable
-        case errSecDecode: .malformedRecord
-        default: .unexpectedStatus(status)
-        }
-    }
-#else
-    func load() throws -> Data? { throw V2DeviceRevocationStoreError.unavailable }
-    func save(_: Data) throws { throw V2DeviceRevocationStoreError.unavailable }
-    func delete() throws { throw V2DeviceRevocationStoreError.unavailable }
-#endif
 }

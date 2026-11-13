@@ -1,0 +1,28 @@
+[sdk-serial] SHA256=b279b77584a3cad9575f1ad1ce91881847407bdc3c505671bd5d8b6f3de5d912
+	 Executed 53 tests, with 0 failures (0 unexpected) in 0.506 (0.511) seconds
+	 Executed 53 tests, with 0 failures (0 unexpected) in 0.506 (0.512) seconds
+􁁛  Test run with 1528 tests in 232 suites passed after 305.339 seconds.
+
+[network-final] SHA256=8b56903904facf71e82557fd71d2f3aee272de88f93cba6c01a0a98551baf3e9
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.226 (0.228) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.226 (0.228) seconds
+􁁛  Test run with 7 tests in 2 suites passed after 0.644 seconds.
+
+[search] SHA256=55a7e1ea5f8e040383fe06c7c8bfe74a5bb3fba2852330c32dfce482b2be0cf5
+Build complete! (4.84秒)
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+􁁛  Test run with 52 tests in 0 suites passed after 1.937 seconds.
+
+[ios-app-final] SHA256=5f6797dbf7fdbb5d78848a152e5ac7b361560faa0a2c777ffe851a4b71318622
+✔ Test run with 15 tests in 3 suites passed after 1.004 seconds.
+** TEST SUCCEEDED **
+iOS unit tests executed: passed=15, failed=0, skipped=0
+
+[ios-build] SHA256=f5c9d92e65ddcff89bb8d7c2ec29bd47acdc9f03fe41a10d1baed95325d8d98c
+Build complete! (10.28秒)
+
+[android-build] SHA256=d60cfeef142d7a547fede40c771504cc7d8dc05d3dc97216e82907672cea1d20
+Build complete! (60.22秒)
+
+[gradle] SHA256=74736f6afc4f87ea5f09031b53e197d95ff579a78b91ffaf294b2a7ad9703861
+BUILD SUCCESSFUL in 2s

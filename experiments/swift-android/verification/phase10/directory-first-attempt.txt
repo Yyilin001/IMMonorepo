@@ -1,0 +1,104 @@
+INSTRUMENTATION_STATUS: class=com.xmtx.im.SharedSDKDirectoryBackendTests
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=1
+INSTRUMENTATION_STATUS: stream=
+com.xmtx.im.SharedSDKDirectoryBackendTests:
+INSTRUMENTATION_STATUS: test=contactsGroupsPermissionsAndAccountIsolation
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=com.xmtx.im.SharedSDKDirectoryBackendTests
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=1
+INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: Failed to inject touch input.
+Reason: Expected exactly '1' node but could not find any node that satisfies: (TestTag = 'shared_confirm')
+
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchOneOrThrow(SemanticsNodeInteraction.kt:178)
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchOneOrThrow$default(SemanticsNodeInteraction.kt:150)
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchSemanticsNode(SemanticsNodeInteraction.kt:84)
+	at androidx.compose.ui.test.ActionsKt.performTouchInput(Actions.kt:402)
+	at androidx.compose.ui.test.AndroidActions.performClickImpl(Actions.android.kt:23)
+	at androidx.compose.ui.test.ActionsKt.performClick(Actions.kt:60)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$click(SharedSDKDirectoryBackendTests.kt:46)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$click$default(SharedSDKDirectoryBackendTests.kt:43)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$confirm(SharedSDKDirectoryBackendTests.kt:48)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend(SharedSDKDirectoryBackendTests.kt:133)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+	at kotlinx.coroutines.internal.ScopeCoroutine.afterResume(Scopes.kt:35)
+	at kotlinx.coroutines.AbstractCoroutine.resumeWith(AbstractCoroutine.kt:101)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:47)
+	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:100)
+	at kotlinx.coroutines.EventLoopImplBase.processNextEvent(EventLoop.common.kt:263)
+	at kotlinx.coroutines.BlockingCoroutine.joinBlocking(Builders.kt:94)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking(Builders.kt:70)
+	at kotlinx.coroutines.BuildersKt.runBlocking(Unknown Source:1)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking$default(Builders.kt:48)
+	at kotlinx.coroutines.BuildersKt.runBlocking$default(Unknown Source:1)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests.contactsGroupsPermissionsAndAccountIsolation(SharedSDKDirectoryBackendTests.kt:22)
+
+INSTRUMENTATION_STATUS: stream=
+Error in contactsGroupsPermissionsAndAccountIsolation(com.xmtx.im.SharedSDKDirectoryBackendTests):
+java.lang.AssertionError: Failed to inject touch input.
+Reason: Expected exactly '1' node but could not find any node that satisfies: (TestTag = 'shared_confirm')
+
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchOneOrThrow(SemanticsNodeInteraction.kt:178)
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchOneOrThrow$default(SemanticsNodeInteraction.kt:150)
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchSemanticsNode(SemanticsNodeInteraction.kt:84)
+	at androidx.compose.ui.test.ActionsKt.performTouchInput(Actions.kt:402)
+	at androidx.compose.ui.test.AndroidActions.performClickImpl(Actions.android.kt:23)
+	at androidx.compose.ui.test.ActionsKt.performClick(Actions.kt:60)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$click(SharedSDKDirectoryBackendTests.kt:46)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$click$default(SharedSDKDirectoryBackendTests.kt:43)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$confirm(SharedSDKDirectoryBackendTests.kt:48)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend(SharedSDKDirectoryBackendTests.kt:133)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+	at kotlinx.coroutines.internal.ScopeCoroutine.afterResume(Scopes.kt:35)
+	at kotlinx.coroutines.AbstractCoroutine.resumeWith(AbstractCoroutine.kt:101)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:47)
+	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:100)
+	at kotlinx.coroutines.EventLoopImplBase.processNextEvent(EventLoop.common.kt:263)
+	at kotlinx.coroutines.BlockingCoroutine.joinBlocking(Builders.kt:94)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking(Builders.kt:70)
+	at kotlinx.coroutines.BuildersKt.runBlocking(Unknown Source:1)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking$default(Builders.kt:48)
+	at kotlinx.coroutines.BuildersKt.runBlocking$default(Unknown Source:1)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests.contactsGroupsPermissionsAndAccountIsolation(SharedSDKDirectoryBackendTests.kt:22)
+
+INSTRUMENTATION_STATUS: test=contactsGroupsPermissionsAndAccountIsolation
+INSTRUMENTATION_STATUS_CODE: -2
+INSTRUMENTATION_RESULT: stream=
+
+Time: 16.131
+There was 1 failure:
+1) contactsGroupsPermissionsAndAccountIsolation(com.xmtx.im.SharedSDKDirectoryBackendTests)
+java.lang.AssertionError: Failed to inject touch input.
+Reason: Expected exactly '1' node but could not find any node that satisfies: (TestTag = 'shared_confirm')
+
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchOneOrThrow(SemanticsNodeInteraction.kt:178)
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchOneOrThrow$default(SemanticsNodeInteraction.kt:150)
+	at androidx.compose.ui.test.SemanticsNodeInteraction.fetchSemanticsNode(SemanticsNodeInteraction.kt:84)
+	at androidx.compose.ui.test.ActionsKt.performTouchInput(Actions.kt:402)
+	at androidx.compose.ui.test.AndroidActions.performClickImpl(Actions.android.kt:23)
+	at androidx.compose.ui.test.ActionsKt.performClick(Actions.kt:60)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$click(SharedSDKDirectoryBackendTests.kt:46)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$click$default(SharedSDKDirectoryBackendTests.kt:43)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend$confirm(SharedSDKDirectoryBackendTests.kt:48)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests$contactsGroupsPermissionsAndAccountIsolation$1.invokeSuspend(SharedSDKDirectoryBackendTests.kt:133)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+	at kotlinx.coroutines.internal.ScopeCoroutine.afterResume(Scopes.kt:35)
+	at kotlinx.coroutines.AbstractCoroutine.resumeWith(AbstractCoroutine.kt:101)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:47)
+	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:100)
+	at kotlinx.coroutines.EventLoopImplBase.processNextEvent(EventLoop.common.kt:263)
+	at kotlinx.coroutines.BlockingCoroutine.joinBlocking(Builders.kt:94)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking(Builders.kt:70)
+	at kotlinx.coroutines.BuildersKt.runBlocking(Unknown Source:1)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking$default(Builders.kt:48)
+	at kotlinx.coroutines.BuildersKt.runBlocking$default(Unknown Source:1)
+	at com.xmtx.im.SharedSDKDirectoryBackendTests.contactsGroupsPermissionsAndAccountIsolation(SharedSDKDirectoryBackendTests.kt:22)
+
+FAILURES!!!
+Tests run: 1,  Failures: 1
+
+
+INSTRUMENTATION_CODE: -1

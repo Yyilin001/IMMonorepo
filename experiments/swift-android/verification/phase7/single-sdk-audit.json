@@ -1,0 +1,19 @@
+{
+  "removedPackagesAbsent": [
+    "com.xmtx.im.client",
+    "com.xmtx.im.platform",
+    "com.xmtx.im.imclientkit"
+  ],
+  "runtimeProjects": [
+    "app",
+    "sharedsdk",
+    "swiftplatform"
+  ],
+  "dexReportSHA256": "b5cde23b097259107fc3a074dbd71d64127ba23ab56bbff57935a03313a4d833",
+  "dependencyReportSHA256": "5b79cb881aee1497ab19ff695efbac89a898086b9700fff5dbd2cef55a0bf84e",
+  "normalDebugAPK": {
+    "sha256": "1afc735cac22b7de8688582306870e632bd57fe144a5d8cad7b47a20266a71e5",
+    "bundledCertificates": [],
+    "deviceAcceptance": false
+  }
+}

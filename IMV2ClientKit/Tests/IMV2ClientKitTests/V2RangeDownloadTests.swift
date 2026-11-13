@@ -4,6 +4,9 @@ import IMV2Core
 import Testing
 import Synchronization
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 struct V2RangeDownloadTests {
     @Test func responseProgressMeasuresEachAcceptedRangeAndFullResponseRebuildSeparately() async throws {

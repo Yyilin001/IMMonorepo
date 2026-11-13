@@ -1,0 +1,374 @@
+[
+  {
+    "method": "GET",
+    "path": "/v2/group-invites",
+    "status": 200,
+    "count": 13
+  },
+  {
+    "method": "GET",
+    "path": "/v2/group-join-requests",
+    "status": 200,
+    "count": 13
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/02A83BD1-1495-4A8C-BE28-E0C703AFA3E8",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/1A17D482-4397-458E-B267-3FA2345FDCA5",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/2BB1FD13-1D57-4F93-9978-36BE01BA8B67",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/761A5230-0CF6-4E18-8803-75BA60284AA2",
+    "status": 403,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/E98F0ABF-1CFF-41DC-8019-05FC531EDF75",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile/me",
+    "status": 200,
+    "count": 10
+  },
+  {
+    "method": "GET",
+    "path": "/v2/public-identities/resolve",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/31179c62-c75f-497b-8f05-768c0cce554b",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/8c3db358-fcd6-4d99-98e8-55048b8cfa1a",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/9d5417a3-d59b-4f0a-b6b6-afcaa9d62597",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/a9d83c28-4f19-45f6-a7a7-51103eb059ba",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/b97361d3-43ef-43d0-9aaa-d789fb7738b8",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/rooms/D4CCE241-0E0D-4E4C-BC09-5A6A2E0A83DB/avatar",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "GET",
+    "path": "/v2/rooms/F2A8DA4E-B300-4032-BA4B-0E8C5D27845B/avatar",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/02A83BD1-1495-4A8C-BE28-E0C703AFA3E8/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/1A17D482-4397-458E-B267-3FA2345FDCA5/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/2BB1FD13-1D57-4F93-9978-36BE01BA8B67/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/8015B2D4-C0BC-456A-8392-3CA3ACEAC6D7/baseline",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/E8C7F37E-F575-4777-AD8D-985C8C342B71/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/E98F0ABF-1CFF-41DC-8019-05FC531EDF75/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/FA14A110-445B-4517-962D-8978E26E258C/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/FC588AF0-A898-4511-9360-A1849C9314BA/baseline",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/assertion",
+    "status": 200,
+    "count": 16
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/assertion",
+    "status": 401,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/register",
+    "status": 200,
+    "count": 16
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials",
+    "status": 200,
+    "count": 32
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials/cancel-registration",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials/revoke",
+    "status": 204,
+    "count": 13
+  },
+  {
+    "method": "POST",
+    "path": "/v2/direct-room-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/append",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/begin",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/finalize",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-invites/preview",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-invites/preview",
+    "status": 404,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/profile-presentations/batch",
+    "status": 200,
+    "count": 37
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/finalize",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/status",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/targets",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/0075B0B5-DCFA-47CD-8E99-390075C298E0/group-capability-operations/admissions",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/0075B0B5-DCFA-47CD-8E99-390075C298E0/group-capability-operations/submit",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/0075B0B5-DCFA-47CD-8E99-390075C298E0/membership/admissions",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/0075B0B5-DCFA-47CD-8E99-390075C298E0/membership/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/45997EAC-41F1-483B-88E5-784543593E7C/invitation-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/45997EAC-41F1-483B-88E5-784543593E7C/invitation-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/9E3AE2BC-7E2D-486F-B2AC-4290D56046BF/invitation-operations/admissions",
+    "status": 200,
+    "count": 10
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/9E3AE2BC-7E2D-486F-B2AC-4290D56046BF/invitation-operations/submit",
+    "status": 200,
+    "count": 10
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/9E3AE2BC-7E2D-486F-B2AC-4290D56046BF/member-administration/admissions",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/9E3AE2BC-7E2D-486F-B2AC-4290D56046BF/member-administration/submit",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/9E9434E4-4D73-44FD-B25F-93761E8A673C/invitation-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/9E9434E4-4D73-44FD-B25F-93761E8A673C/invitation-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/F2A8DA4E-B300-4032-BA4B-0E8C5D27845B/avatar",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "POST",
+    "path": "/v2/social/operations/submit",
+    "status": 200,
+    "count": 15
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/2B6132B6-ACEE-4E14-AF57-5E3E1CBC7F8C",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/7DB929B5-FE0C-4724-9FBB-15411CB28491",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/8794822B-8058-4588-B47A-008F50BEE147",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/D5CEA29D-CCDF-4A7C-8542-349A53AF070E",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/EB2BE5AB-F8FE-4B4D-94AF-120991F45698",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile-presentations/contact-aliases/1A17D482-4397-458E-B267-3FA2345FDCA5",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile/me",
+    "status": 200,
+    "count": 6
+  }
+]

@@ -1,0 +1,32 @@
+{
+  "oldSymbols": 6023,
+  "newSymbols": 6079,
+  "missingSourceDeclarations": [],
+  "initializerFormChanges": [
+    {
+      "path": [
+        "V2DeviceRegistrationStore",
+        "init(service:)"
+      ],
+      "before": "init(service: String)",
+      "after": "convenience init(service: String)"
+    },
+    {
+      "path": [
+        "V2DeviceRevocationStore",
+        "init(service:)"
+      ],
+      "before": "init(service: String)",
+      "after": "convenience init(service: String)"
+    },
+    {
+      "path": [
+        "V2IssuedCredentialRecoveryStore",
+        "init(service:revocations:)"
+      ],
+      "before": "init(service: String, revocations: V2DeviceRevocationStore)",
+      "after": "convenience init(service: String, revocations: V2DeviceRevocationStore)"
+    }
+  ],
+  "note": "Source declaration comparison ignores module USR relocation and actor delegating initializer convenience spelling; binary ABI is not preserved."
+}

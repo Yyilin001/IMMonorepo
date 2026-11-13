@@ -1,7 +1,13 @@
+#if canImport(Darwin)
 import Darwin
+#elseif canImport(Android)
+import Android
+#else
+import Glibc
+#endif
 import Foundation
-import CryptoKit
-import os
+import Crypto
+import IMV2ClientPlatform
 
 /// Minimal cross-process handoff. This dedicated tree uses UntilFirstAuthentication;
 /// the business database, original sources and credentials keep their original protection.
@@ -9,7 +15,7 @@ public struct V2BackgroundResultInbox: Sendable {
     public let directory: URL
     private let root: URL
     private let protectionWriter:any V2ResourceFileProtectionWriting
-    private static let io = OSAllocatedUnfairLock(initialState: ())
+    private static let io = V2Lock(initialState: ())
     public init(root: URL, sessionID: UUID, protectionWriter:any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) throws {
         self.protectionWriter=protectionWriter
         guard root.isFileURL, root.resolvingSymlinksInPath().path == root.standardizedFileURL.path else { throw V2ResourceStorageError.unsafeFile }

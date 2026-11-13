@@ -1,0 +1,77 @@
+{
+  "phase": 14,
+  "date": "2026-11-13",
+  "branch": "codex/swift-android-feasibility",
+  "implementation": "Shared conversation service with native Swift and Kotlin window bindings; account-owned queries and independent pagination/observation",
+  "ios": {
+    "unitTestsPassed": 192,
+    "realBackendFunctionalTestsPassed": 2,
+    "simulator": "iPhone 16 Pro / iOS 18.5",
+    "physicalDevice": false,
+    "nativeSwift": true
+  },
+  "shared": {
+    "unitTestsPassed": 12,
+    "nativeMacOSBackendTestsPassed": 1,
+    "independentWindowPaging": true,
+    "independentObservation": true,
+    "stalePageBufferRejected": true,
+    "oldAccountWindowRejected": true
+  },
+  "android": {
+    "realBackend": true,
+    "windowCasesPassed": true,
+    "nativeRebuilt": true,
+    "gradlePassed": [
+      "sharedsdk:testDebugUnitTest",
+      "sharedsdk:lintDebug",
+      "swiftplatform:lintDebug",
+      "app:testDebugUnitTest",
+      "app:assembleDebug",
+      "app:assembleDebugAndroidTest",
+      "app:lintDebug",
+      "app:assembleRelease"
+    ],
+    "releaseAPK": {
+      "path": "IMAndroid/app/build/outputs/apk/release/app-release-unsigned.apk",
+      "bytes": 39081174,
+      "MiB": 37.27,
+      "sha256": "3891afb0e24ef9ae03e1101269f81ae45a397c36f3fcc511960eef555655c238",
+      "nativeLibraryCount": 20,
+      "nativeUncompressedBytes": 96770528,
+      "nativeCompressedBytes": 35976592,
+      "verificationCANames": [],
+      "signedForDistribution": false,
+      "deviceAcceptance": false
+    },
+    "cancelledWindowOpens": 140
+  },
+  "api": {
+    "legacySymbols": 6079,
+    "unchanged": true,
+    "sharedNativeSymbols": 94,
+    "addedNativeSymbols": 62,
+    "removedNativeSymbols": 0
+  },
+  "cABI": {
+    "passed": true,
+    "leakedClients": 0,
+    "leakedOperations": 0
+  },
+  "cleanup": {
+    "ownedIOSSimulatorsDeleted": true,
+    "ownedAndroidAVDDeleted": true,
+    "ownedBackendsStopped": true,
+    "systemTrustStoreChanged": false,
+    "scopeCleanupTestsPassed": 2,
+    "preexistingSimulatorsPreserved": true
+  },
+  "limitations": [
+    "Real backend is isolated local PostgreSQL/HTTPS/TLS, not production.",
+    "iOS and Android acceptance used simulators/emulator, not physical devices or signed distribution.",
+    "Existing iOS page presentation and Android default foreground snapshot compatibility remain; independent window handles are available without adding desktop multiwindow UI.",
+    "Domain projection types and low-level composition entry points remain for compatibility; public API narrowing is a subsequent migration.",
+    "Other feature services have not all moved to the new facade. Windows implementation and native validation remain incomplete.",
+    "Broad iOS accessibility audit was not rerun; its earlier Dynamic Type limitation is not declared fixed."
+  ]
+}

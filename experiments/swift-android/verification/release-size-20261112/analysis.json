@@ -1,0 +1,399 @@
+{
+  "apk": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/outputs/apk/release/app-release-unsigned.apk",
+  "bytes": 99691930,
+  "sha256": "340034d8f00e1c514ae0a665cb8c82886cf561b7091aa27655d9595abefed5de",
+  "groups": {
+    "other": 80112,
+    "dex": 2880232,
+    "native": 96437024,
+    "resources": 124832
+  },
+  "zipOverhead": 169730,
+  "libraries": [
+    {
+      "name": "lib_FoundationICU.so",
+      "bytes": 40042536,
+      "apkBytes": 40042536,
+      "deflate6Bytes": 15679887
+    },
+    {
+      "name": "libIMV2SharedSDK.so",
+      "bytes": 27394256,
+      "apkBytes": 27394256,
+      "deflate6Bytes": 10316300
+    },
+    {
+      "name": "libswiftCore.so",
+      "bytes": 6922248,
+      "apkBytes": 6922248,
+      "deflate6Bytes": 2383872
+    },
+    {
+      "name": "libFoundationEssentials.so",
+      "bytes": 6223072,
+      "apkBytes": 6223072,
+      "deflate6Bytes": 2041637
+    },
+    {
+      "name": "libFoundation.so",
+      "bytes": 6121608,
+      "apkBytes": 6121608,
+      "deflate6Bytes": 1870038
+    },
+    {
+      "name": "libFoundationNetworking.so",
+      "bytes": 3471224,
+      "apkBytes": 3471224,
+      "deflate6Bytes": 1486395
+    },
+    {
+      "name": "libFoundationInternationalization.so",
+      "bytes": 1686312,
+      "apkBytes": 1686312,
+      "deflate6Bytes": 530052
+    },
+    {
+      "name": "libc++_shared.so",
+      "bytes": 1423696,
+      "apkBytes": 1423696,
+      "deflate6Bytes": 466338
+    },
+    {
+      "name": "libswift_RegexParser.so",
+      "bytes": 945960,
+      "apkBytes": 945960,
+      "deflate6Bytes": 327824
+    },
+    {
+      "name": "libswift_Concurrency.so",
+      "bytes": 694648,
+      "apkBytes": 694648,
+      "deflate6Bytes": 238368
+    },
+    {
+      "name": "libswift_StringProcessing.so",
+      "bytes": 688456,
+      "apkBytes": 688456,
+      "deflate6Bytes": 261847
+    },
+    {
+      "name": "libdispatch.so",
+      "bytes": 370344,
+      "apkBytes": 370344,
+      "deflate6Bytes": 96018
+    },
+    {
+      "name": "libswiftDispatch.so",
+      "bytes": 183784,
+      "apkBytes": 183784,
+      "deflate6Bytes": 54723
+    },
+    {
+      "name": "libswiftObservation.so",
+      "bytes": 123720,
+      "apkBytes": 123720,
+      "deflate6Bytes": 47196
+    },
+    {
+      "name": "libswiftSynchronization.so",
+      "bytes": 61752,
+      "apkBytes": 61752,
+      "deflate6Bytes": 18813
+    },
+    {
+      "name": "libswiftAndroid.so",
+      "bytes": 47968,
+      "apkBytes": 47968,
+      "deflate6Bytes": 15199
+    },
+    {
+      "name": "libBlocksRuntime.so",
+      "bytes": 10680,
+      "apkBytes": 10680,
+      "deflate6Bytes": 4462
+    },
+    {
+      "name": "libandroidx.graphics.path.so",
+      "bytes": 10096,
+      "apkBytes": 10096,
+      "deflate6Bytes": 4386
+    },
+    {
+      "name": "libswift_Builtin_float.so",
+      "bytes": 7624,
+      "apkBytes": 7624,
+      "deflate6Bytes": 2419
+    },
+    {
+      "name": "libswift_math.so",
+      "bytes": 7040,
+      "apkBytes": 7040,
+      "deflate6Bytes": 2295
+    }
+  ],
+  "sdkExportedSymbols": 39785,
+  "nativeDebugSectionsAbsent": true,
+  "mergedMatchesCurrentNativeManifest": true,
+  "nativeCompressionOnlyEstimateBytes": 39102975,
+  "compressionEstimateIsNotInstallableBuild": true,
+  "dependencies": {
+    "libBlocksRuntime.so": [
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libFoundation.so": [
+      "libFoundationInternationalization.so",
+      "libswiftDispatch.so",
+      "libFoundationEssentials.so",
+      "lib_FoundationICU.so",
+      "libdispatch.so",
+      "libBlocksRuntime.so",
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswift_Builtin_float.so",
+      "libswift_math.so",
+      "libswiftSynchronization.so",
+      "libswiftAndroid.so",
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libFoundationEssentials.so": [
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswift_Builtin_float.so",
+      "libswift_math.so",
+      "libswiftSynchronization.so",
+      "libswiftAndroid.so",
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libFoundationInternationalization.so": [
+      "libFoundationEssentials.so",
+      "lib_FoundationICU.so",
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswift_Builtin_float.so",
+      "libswift_math.so",
+      "libswiftSynchronization.so",
+      "libswiftAndroid.so",
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libFoundationNetworking.so": [
+      "libFoundation.so",
+      "libz.so",
+      "libFoundationInternationalization.so",
+      "libFoundationEssentials.so",
+      "lib_FoundationICU.so",
+      "libswiftDispatch.so",
+      "libdispatch.so",
+      "libBlocksRuntime.so",
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswift_Builtin_float.so",
+      "libswift_math.so",
+      "libswiftSynchronization.so",
+      "libswiftAndroid.so",
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libIMV2SharedSDK.so": [
+      "libswiftCore.so",
+      "libswiftObservation.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswift_Builtin_float.so",
+      "libswift_math.so",
+      "libswiftAndroid.so",
+      "libBlocksRuntime.so",
+      "libdispatch.so",
+      "libswiftDispatch.so",
+      "libFoundation.so",
+      "libFoundationEssentials.so",
+      "libFoundationInternationalization.so",
+      "libFoundationNetworking.so",
+      "libm.so",
+      "libz.so",
+      "libc++_shared.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "lib_FoundationICU.so": [
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libandroidx.graphics.path.so": [
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libc++_shared.so": [
+      "libc.so",
+      "libm.so",
+      "libdl.so"
+    ],
+    "libdispatch.so": [
+      "libBlocksRuntime.so",
+      "libm.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libswiftAndroid.so": [
+      "libm.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libswiftCore.so",
+      "libc.so"
+    ],
+    "libswiftCore.so": [
+      "libm.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libc.so"
+    ],
+    "libswiftDispatch.so": [
+      "libdispatch.so",
+      "libBlocksRuntime.so",
+      "libswiftCore.so",
+      "libswift_Concurrency.so",
+      "libswift_StringProcessing.so",
+      "libswift_RegexParser.so",
+      "libswift_Builtin_float.so",
+      "libdl.so",
+      "libc.so"
+    ],
+    "libswiftObservation.so": [
+      "libm.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libswift_Concurrency.so",
+      "libswiftAndroid.so",
+      "libswiftCore.so",
+      "libc.so"
+    ],
+    "libswiftSynchronization.so": [
+      "libm.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libswiftAndroid.so",
+      "libswiftCore.so",
+      "libc.so"
+    ],
+    "libswift_Builtin_float.so": [
+      "libm.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libswiftCore.so",
+      "libc.so"
+    ],
+    "libswift_Concurrency.so": [
+      "libm.so",
+      "libdispatch.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libswift_Builtin_float.so",
+      "libswiftAndroid.so",
+      "libswiftCore.so",
+      "libc.so"
+    ],
+    "libswift_RegexParser.so": [
+      "libm.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libswiftCore.so",
+      "libc.so"
+    ],
+    "libswift_StringProcessing.so": [
+      "libm.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libswift_RegexParser.so",
+      "libswiftAndroid.so",
+      "libswiftCore.so",
+      "libc.so"
+    ],
+    "libswift_math.so": [
+      "libm.so",
+      "libdl.so",
+      "liblog.so",
+      "libc++_shared.so",
+      "libswift_Builtin_float.so",
+      "libswiftCore.so",
+      "libc.so"
+    ]
+  },
+  "sections": {
+    "libBlocksRuntime.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libBlocksRuntime.so  :\nsection                 size    addr\n.note.android.ident      152     568\n.note.gnu.build-id        36     720\n.dynsym                  744     760\n.gnu.version              62    1504\n.gnu.version_r            32    1568\n.gnu.hash                148    1600\n.dynstr                  565    1748\n.rela.dyn                264    2320\n.rela.plt                240    2584\n.rodata                  192    2832\n.eh_frame_hdr            236    3024\n.eh_frame               1024    3264\n.text                   3136    4288\n.plt                     192    7424\n.data.rel.ro               8   24000\n.fini_array               16   24008\n.init_array               16   24024\n.dynamic                 432   24040\n.got                      24   24472\n.got.plt                 104   24496\n.relro_padding          4072   24600\n.data                     24   40984\n.bss                    1552   41008\n.comment                 519       0\nTotal                  13790\n\n\n",
+    "libFoundation.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libFoundation.so  :\nsection                             size      addr\n.note.android.ident                  152       568\n.note.gnu.build-id                    36       720\n.dynsym                           405096       760\n.gnu.version                       33758    405856\n.gnu.version_r                        96    439616\n.gnu.hash                         108732    439712\n.dynstr                           886158    548444\n.rela.dyn                         509976   1434608\n.rela.plt                          42624   1944584\nswift5_protocols                     120   1987208\nswift5_protocol_conformances        3456   1987328\nswift5_type_metadata                1428   1990784\nswift5_fieldmd                     18704   1992212\nswift5_builtin                       440   2010916\nswift5_assocty                      8912   2011356\nswift5_capture                      2072   2020268\nswift5_reflstr                     18872   2022352\nswift5_typeref                     23236   2041224\nswift5_mpenum                         60   2064460\nswift5_replace                        16   2064520\nswift5_replac2                         0   2064536\nswift5_accessible_functions            0   2064536\nswift5_runtime_attributes              0   2064536\nswift5_tests                           0   2064536\n.swift_modhash                      2096   2064536\nswift5_type_metadata_2                 4   2066632\n.gcc_except_table                    756   2066636\n.eh_frame_hdr                      84900   2067392\n.eh_frame                         361036   2152296\n.text                            2335752   2513344\n.plt                               28448   4849104\n.data.rel.ro                       91840   4893936\n.fini_array                           16   4985776\n.init_array                           32   4985792\n.dynamic                             688   4985824\n.got                                6392   4986512\n.got.plt                           14232   4992904\n.relro_padding                      2272   5007136\n.data                             145792   5023520\n.rodata                           965332   5169312\n.cfstr.data                        15720   6134648\n.bss                               96808   6150368\n.comment                             540         0\nTotal                            6216600\n\n\n",
+    "libFoundationEssentials.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libFoundationEssentials.so  :\nsection                             size      addr\n.note.android.ident                  152       568\n.note.gnu.build-id                    36       720\n.dynsym                           268296       760\n.gnu.version                       22358    269056\n.gnu.version_r                        64    291416\n.gnu.hash                          63164    291480\n.dynstr                           767257    354644\n.rela.dyn                         317496   1121904\n.rela.plt                          21216   1439400\nswift5_protocols                     244   1460616\nswift5_protocol_conformances        6348   1460860\nswift5_type_metadata                2120   1467208\nswift5_fieldmd                     29732   1469328\nswift5_builtin                       580   1499060\nswift5_assocty                     13376   1499640\nswift5_capture                      3684   1513016\nswift5_reflstr                     22270   1516704\nswift5_typeref                     46259   1538976\nswift5_mpenum                        328   1585236\nswift5_replace                         0   1585564\nswift5_replac2                         0   1585564\nswift5_accessible_functions            0   1585564\nswift5_runtime_attributes              0   1585564\nswift5_tests                           0   1585564\n.swift_modhash                      5520   1585564\nswift5_type_metadata_2                16   1591084\n.eh_frame_hdr                     102172   1591100\n.eh_frame                         390872   1693272\n.text                            3307904   2084144\n.plt                               14176   5392048\n.data.rel.ro                      110984   5422608\n.fini_array                           16   5533592\n.init_array                           24   5533608\n.dynamic                             592   5533632\n.got                                5936   5534224\n.got.plt                            7096   5540160\n.relro_padding                      2824   5547256\n.data                              46656   5563640\n.rodata                           641678   5610304\n.bss                              219584   6251984\n.comment                             540         0\nTotal                            6441570\n\n\n",
+    "libFoundationInternationalization.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libFoundationInternationalization.so  :\nsection                            size      addr\n.note.android.ident                 152       568\n.note.gnu.build-id                   36       720\n.dynsym                           84720       760\n.gnu.version                       7060     85480\n.gnu.version_r                       64     92540\n.gnu.hash                         16800     92608\n.dynstr                          295207    109408\n.rela.dyn                        116592    404616\n.rela.plt                         15240    521208\nswift5_protocols                      0    536448\nswift5_protocol_conformances       4308    536448\nswift5_type_metadata               1120    540756\nswift5_fieldmd                    13588    541876\nswift5_builtin                      280    555464\nswift5_assocty                     3096    555744\nswift5_capture                      312    558840\nswift5_reflstr                     8313    559152\nswift5_typeref                    13823    567466\nswift5_mpenum                       188    581292\nswift5_replace                       16    581480\nswift5_replac2                        0    581496\nswift5_accessible_functions           0    581496\nswift5_runtime_attributes             0    581496\nswift5_tests                          0    581496\n.swift_modhash                     1008    581496\n.eh_frame_hdr                     33660    582504\n.eh_frame                        118804    616168\n.text                            790468    734976\n.plt                              10192   1525456\n.data.rel.ro                      40536   1552032\n.fini_array                          16   1592568\n.init_array                          24   1592584\n.dynamic                            624   1592608\n.got                               2328   1593232\n.got.plt                           5104   1595560\n.relro_padding                      872   1600664\n.data                             19024   1617048\n.rodata                           79229   1636080\n.bss                             152880   1715312\n.comment                            540         0\nTotal                           1836224\n\n\n",
+    "libFoundationNetworking.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libFoundationNetworking.so  :\nsection                             size      addr\n.note.android.ident                  152       568\n.note.gnu.build-id                    36       720\n.dynsym                            79344       760\n.gnu.version                        6612     80104\n.gnu.version_r                        64     86716\n.gnu.hash                          17064     86784\n.dynstr                           207925    103848\n.rela.dyn                         231312    311776\n.rela.plt                          14304    543088\nswift5_protocols                      44    557392\nswift5_protocol_conformances         428    557436\nswift5_type_metadata                 368    557864\nswift5_fieldmd                      6740    558232\nswift5_builtin                       200    564972\nswift5_assocty                       648    565172\nswift5_capture                      3136    565820\nswift5_reflstr                      8700    568960\nswift5_typeref                      6472    577660\nswift5_mpenum                        192    584132\nswift5_replace                        16    584328\nswift5_replac2                         0    584344\nswift5_accessible_functions            0    584344\nswift5_runtime_attributes              0    584344\nswift5_tests                           0    584344\n.swift_modhash                       512    584344\n.eh_frame_hdr                      58884    584856\n.eh_frame                         311028    643744\n.text                            1994628    954816\n.plt                                9568   2949456\n.data.rel.ro                       93616   2975408\n.fini_array                           16   3069024\n.init_array                           32   3069040\n.dynamic                             720   3069072\n.got                                2416   3069792\n.got.plt                            4792   3072208\n.relro_padding                      3192   3077000\n.data                              31024   3093384\n.rodata                           374976   3125248\n.bss                               17400   3500224\n.comment                             540         0\nTotal                            3487101\n\n\n",
+    "libIMV2SharedSDK.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libIMV2SharedSDK.so  :\nsection                              size       addr\n.note.android.ident                   152        624\n.note.gnu.build-id                     36        776\n.dynsym                           1002048        816\n.gnu.version                        83504    1002864\n.gnu.version_r                         96    1086368\n.gnu.hash                          264476    1086464\n.dynstr                           2814403    1350940\n.rela.dyn                          312120    4165344\n.relr.dyn                           14040    4477464\n.rela.plt                           61320    4491504\nswift5_protocols                      892    4552824\nswift5_protocol_conformances        37280    4553716\nswift5_type_metadata                12788    4590996\nswift5_fieldmd                     190364    4603784\nswift5_builtin                       3300    4794148\nswift5_assocty                      16888    4797448\nswift5_capture                      30440    4814336\nswift5_reflstr                     121647    4844784\nswift5_typeref                     206001    4966432\nswift5_mpenum                       11428    5172436\nswift5_replace                          0    5183864\nswift5_replac2                          0    5183864\nswift5_accessible_functions             0    5183864\nswift5_runtime_attributes               0    5183864\nswift5_tests                            0    5183864\n.swift_modhash                      12416    5183864\n.gcc_except_table                   12436    5196280\n.eh_frame_hdr                      925172    5208716\n.eh_frame                         3185500    6133888\n.text                            15537616    9335808\n.plt                                40912   24873424\n.data.rel.ro                       650672   24930720\n.fini_array                            16   25581392\n.init_array                            24   25581408\n.dynamic                              752   25581432\n.got                                18360   25582184\n.got.plt                            20464   25600544\n.relro_padding                       3568   25621008\n.data                              241840   25637392\n.rodata                           1556556   25882624\n.bss                              1224336   27439184\n.comment                              844          0\nTotal                            28614707\n\n\n",
+    "lib_FoundationICU.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/lib_FoundationICU.so  :\nsection                     size       addr\n.note.android.ident          152        568\n.note.gnu.build-id            36        720\n.dynsym                   187872        760\n.gnu.version               15656     188632\n.gnu.version_r                96     204288\n.gnu.hash                  54592     204384\n.dynstr                   350384     258976\n.rela.dyn                 386064     609360\n.rela.plt                  58536     995424\n.rodata                 34447812    1053968\n.gcc_except_table         132872   35501780\n.eh_frame_hdr             103748   35634652\n.eh_frame                 621132   35738400\n.text                    3447612   36359536\n__lcxx_override              324   39807148\n.plt                       39056   39807472\n.data.rel.ro              166880   39862912\n.fini_array                   16   40029792\n.init_array                   16   40029808\n.dynamic                     432   40029824\n.got                        3520   40030256\n.got.plt                   19536   40033776\n.relro_padding              1472   40053312\n.data                       3000   40069696\n.bss                       20944   40072704\n.comment                     519          0\nTotal                   40062279\n\n\n",
+    "libandroidx.graphics.path.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libandroidx.graphics.path.so  :\nsection                 size    addr\n.note.android.ident      152     568\n.note.gnu.build-id        36     720\n.dynsym                  216     760\n.gnu.version              18     976\n.gnu.version_d            56     996\n.gnu.version_r            32    1052\n.gnu.hash                 32    1088\n.hash                     80    1120\n.dynstr                  181    1200\n.rela.dyn               1152    1384\n.rela.plt                168    2536\n.rodata                  467    2704\n.eh_frame_hdr             52    3172\n.eh_frame                148    3224\n.text                   3708    3372\n.plt                     144    7088\n.data.rel.ro             368   23616\n.fini_array               16   23984\n.dynamic                 448   24000\n.got.plt                  80   24448\n.bss                      16   40912\n.comment                 178       0\nTotal                   7748\n\n\n",
+    "libc++_shared.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libc++_shared.so  :\nsection                   size      addr\n.note.android.ident        152       680\n.note.gnu.build-id          36       832\n.note.gnu.property          32       872\n.dynsym                  60048       904\n.gnu.version              5004     60952\n.gnu.version_r              64     65956\n.gnu.hash                15796     66024\n.hash                    20024     81820\n.dynstr                 118867    101844\n.rela.dyn                94920    220712\n.rela.plt                10032    315632\n.rodata                 164232    325664\n.gcc_except_table        29436    489896\n.eh_frame_hdr            18308    519332\n.eh_frame               107840    537640\n.text                   723252    645488\n__lcxx_override            380   1368740\n.plt                     10064   1369120\n.data.rel.ro             35808   1395568\n.fini_array                 16   1431376\n.init_array                 24   1431392\n.dynamic                   464   1431416\n.got                      1512   1431880\n.got.plt                  3368   1433392\n.relro_padding            5032   1436760\n.data                      568   1453144\n.bss                     31624   1453760\n.comment                   519         0\nTotal                  1457422\n\n\n",
+    "libdispatch.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libdispatch.so  :\nsection                   size     addr\n.note.android.ident        152      568\n.note.gnu.build-id          36      720\n.dynsym                   7056      760\n.gnu.version               588     7816\n.gnu.version_r              32     8404\n.gnu.hash                 1492     8440\n.dynstr                   6402     9932\n.rela.dyn               106488    16336\n.rela.plt                 3624   122824\n.rodata                   6146   126448\n.eh_frame_hdr             4924   132596\n.eh_frame                29668   137520\n.text                   124288   167200\n.plt                      2448   291488\n.data.rel.ro             69832   310320\n.fini_array                 16   380152\n.init_array                 24   380168\n.dynamic                   448   380192\n.got                       312   380640\n.got.plt                  1232   380952\n.relro_padding            2840   382184\n.data                     2080   398592\n.bss                      8712   400672\n.comment                   519        0\nTotal                   379359\n\n\n",
+    "libswiftAndroid.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswiftAndroid.so  :\nsection                           size    addr\n.note.android.ident                152     568\n.note.gnu.build-id                  36     720\n.dynsym                           8520     760\n.gnu.version                       710    9280\n.gnu.version_r                      64    9992\n.gnu.hash                         1772   10056\n.dynstr                          11624   11828\n.rela.dyn                         1080   23456\n.rela.plt                         1872   24536\nswift5_typeref                      25   26408\nswift5_reflstr                    1286   26436\nswift5_assocty                      24   27724\nswift5_fieldmd                    1588   27748\nswift5_protocol_conformances        12   29336\nswift5_type_metadata                 4   29348\n.swift_modhash                      16   29352\nswift5_protocols                     0   29368\nswift5_builtin                       0   29368\nswift5_capture                       0   29368\nswift5_mpenum                        0   29368\nswift5_replace                       0   29368\nswift5_replac2                       0   29368\nswift5_accessible_functions          0   29368\nswift5_runtime_attributes            0   29368\nswift5_tests                         0   29368\n.eh_frame_hdr                      332   29368\n.eh_frame                         1108   29704\n.text                             8640   30812\n.plt                              1280   39456\n.data.rel.ro                       248   57120\n.fini_array                         16   57368\n.init_array                          8   57384\n.dynamic                           496   57392\n.got                               120   57888\n.got.plt                           648   58008\n.relro_padding                    2784   58656\n.rodata                           2098   75040\n.data                                8   77144\n.bss                               688   77152\n.comment                           356       0\nTotal                            47615\n\n\n",
+    "libswiftCore.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswiftCore.so  :\nsection                             size      addr\n.note.android.ident                  152       568\n.note.gnu.build-id                    36       720\n.dynsym                           355632       760\n.gnu.version                       29636    356392\n.gnu.version_r                        96    386028\n.gnu.hash                         106148    386128\n.dynstr                           580757    492276\n.rela.dyn                         378168   1073040\n.rela.plt                           4152   1451208\nswift5_typeref                     23105   1455360\nswift5_capture                      1016   1478468\nswift5_reflstr                      5585   1479488\nswift5_assocty                     20760   1485076\nswift5_fieldmd                     18084   1505836\nswift5_builtin                      2920   1523920\nswift5_mpenum                         96   1526840\nswift5_protocols                     448   1526936\nswift5_protocol_conformances        5360   1527384\nswift5_type_metadata                1748   1532744\nswift5_type_metadata_2                36   1534492\n.swift_modhash                        16   1534528\nswift5_replace                         0   1534544\nswift5_replac2                         0   1534544\nswift5_accessible_functions            0   1534544\nswift5_runtime_attributes              0   1534544\nswift5_tests                           0   1534544\n.gcc_except_table                   1440   1534544\n.eh_frame_hdr                     130404   1535984\n.eh_frame                         497296   1666392\n.text                            3632396   2163696\n__lcxx_override                      324   5796092\n.plt                                2800   5796416\n.data.rel.ro                       86056   5815600\n.fini_array                           16   5901656\n.init_array                           64   5901672\n.dynamic                             480   5901736\n.got                                 976   5902216\n.got.plt                            1408   5903192\n.relro_padding                      1832   5904600\n.rodata                           899580   5920992\n.data                              63704   6820576\nswift5_backtrace                   65536   6885376\n.bss                              179736   6950912\n.comment                             540         0\nTotal                            7098539\n\n\n",
+    "libswiftDispatch.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswiftDispatch.so  :\nsection                           size     addr\n.note.android.ident                152      568\n.note.gnu.build-id                  36      720\n.dynsym                          21024      760\n.gnu.version                      1752    21784\n.gnu.version_r                      32    23536\n.gnu.hash                         4132    23568\n.dynstr                          36779    27700\n.rela.dyn                        17424    64480\n.rela.plt                         2712    81904\nswift5_protocols                    32    84616\nswift5_protocol_conformances       256    84648\nswift5_type_metadata               120    84904\nswift5_fieldmd                    1292    85024\nswift5_builtin                      40    86316\nswift5_assocty                     864    86356\nswift5_capture                     504    87220\nswift5_reflstr                     950    87728\nswift5_typeref                    1448    88678\nswift5_mpenum                       28    90128\nswift5_replace                       0    90156\nswift5_replac2                       0    90156\nswift5_accessible_functions          0    90156\nswift5_runtime_attributes            0    90156\nswift5_tests                         0    90156\n.swift_modhash                     144    90156\n.eh_frame_hdr                     5268    90300\n.eh_frame                        16268    95568\n.text                            48720   111836\n.plt                              1840   160560\n.data.rel.ro                      6336   178784\n.fini_array                         16   185120\n.init_array                          8   185136\n.dynamic                           544   185144\n.got                               376   185688\n.got.plt                           928   186064\n.relro_padding                    1424   186992\n.data                             1328   203376\n.rodata                           8264   204704\n.bss                              8272   212976\n.comment                           356        0\nTotal                           189669\n\n\n",
+    "libswiftObservation.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswiftObservation.so  :\nsection                           size     addr\n.note.android.ident                152      568\n.note.gnu.build-id                  36      720\n.dynsym                           7176      760\n.gnu.version                       598     7936\n.gnu.version_r                      32     8536\n.gnu.hash                          776     8568\n.dynstr                          11368     9344\n.rela.dyn                        10464    20712\n.rela.plt                         2352    31176\nswift5_typeref                    1314    33528\nswift5_capture                     456    34844\nswift5_reflstr                     583    35312\nswift5_assocty                     240    35896\nswift5_fieldmd                    1324    36136\nswift5_builtin                      60    37460\nswift5_mpenum                       16    37520\nswift5_protocols                     4    37536\nswift5_protocol_conformances        72    37540\nswift5_type_metadata               116    37612\nswift5_type_metadata_2              16    37728\n.swift_modhash                      16    37744\nswift5_replace                       0    37760\nswift5_replac2                       0    37760\nswift5_accessible_functions          0    37760\nswift5_runtime_attributes            0    37760\nswift5_tests                         0    37760\n.eh_frame_hdr                     1596    37760\n.eh_frame                         6680    39360\n.text                            61520    46040\n.plt                              1600   107568\n.data.rel.ro                      4824   125552\n.fini_array                         16   130376\n.init_array                          8   130392\n.dynamic                           528   130400\n.got                               184   130928\n.got.plt                           808   131112\n.relro_padding                    3248   131920\n.rodata                           3714   148304\n.data                              792   152024\n.bss                              4016   152816\n.comment                           356        0\nTotal                           127061\n\n\n",
+    "libswiftSynchronization.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswiftSynchronization.so  :\nsection                           size    addr\n.note.android.ident                152     568\n.note.gnu.build-id                  36     720\n.dynsym                           8040     760\n.gnu.version                       670    8800\n.gnu.version_r                      32    9472\n.gnu.hash                         1712    9504\n.dynstr                          14726   11216\n.rela.dyn                         7032   25944\n.rela.plt                          768   32976\nswift5_typeref                     515   33744\nswift5_reflstr                     153   34272\nswift5_assocty                     912   34428\nswift5_fieldmd                     460   35340\nswift5_builtin                     100   35800\nswift5_protocols                     8   35900\nswift5_protocol_conformances       208   35908\nswift5_type_metadata                36   36116\nswift5_type_metadata_2              20   36152\n.swift_modhash                      16   36172\nswift5_capture                       0   36188\nswift5_mpenum                        0   36188\nswift5_replace                       0   36188\nswift5_replac2                       0   36188\nswift5_accessible_functions          0   36188\nswift5_runtime_attributes            0   36188\nswift5_tests                         0   36188\n.eh_frame_hdr                     1300   36188\n.eh_frame                         3624   37488\n.text                             9552   41120\n.plt                               544   50672\n.data.rel.ro                      1312   67600\n.fini_array                         16   68912\n.init_array                         24   68928\n.dynamic                           512   68952\n.got                                96   69464\n.got.plt                           280   69560\n.relro_padding                    3888   69840\n.data                             1296   86224\n.rodata                           3139   87520\n.bss                              2784   90672\n.comment                           540       0\nTotal                            64503\n\n\n",
+    "libswift_Builtin_float.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswift_Builtin_float.so  :\nsection                          size    addr\n.note.android.ident               152     568\n.note.gnu.build-id                 36     720\n.dynsym                           504     760\n.gnu.version                       42    1264\n.gnu.version_r                     32    1308\n.gnu.hash                         120    1344\n.dynstr                           729    1464\n.rela.dyn                         144    2200\n.rela.plt                          96    2344\n.rodata                             2    2440\n.swift_modhash                     16    2444\nswift5_protocols                    0    2460\nswift5_protocol_conformances        0    2460\nswift5_type_metadata                0    2460\nswift5_fieldmd                      0    2460\nswift5_builtin                      0    2460\nswift5_assocty                      0    2460\nswift5_capture                      0    2460\nswift5_reflstr                      0    2460\nswift5_typeref                      0    2460\nswift5_mpenum                       0    2460\nswift5_replace                      0    2460\nswift5_replac2                      0    2460\nswift5_accessible_functions         0    2460\nswift5_runtime_attributes           0    2460\nswift5_tests                        0    2460\n.eh_frame_hdr                      68    2460\n.eh_frame                         168    2528\n.text                             648    2696\n.plt                               96    3344\n.data.rel.ro                        8   19824\n.fini_array                        16   19832\n.init_array                         8   19848\n.dynamic                          496   19856\n.got                                8   20352\n.got.plt                           56   20360\n.relro_padding                     64   20416\n.data                               8   36800\n.bss                              272   36808\n.comment                          356       0\nTotal                            4145\n\n\n",
+    "libswift_Concurrency.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswift_Concurrency.so  :\nsection                            size     addr\n.note.android.ident                 152      568\n.note.gnu.build-id                   36      720\n.dynsym                           50160      760\n.gnu.version                       4180    50920\n.gnu.version_r                       64    55100\n.gnu.hash                         12300    55168\n.dynstr                           77112    67468\n.rela.dyn                         43560   144584\n.rela.plt                          6744   188144\nswift5_typeref                     3035   194888\nswift5_capture                      576   197924\nswift5_reflstr                      829   198512\nswift5_assocty                     1800   199344\nswift5_fieldmd                     3652   201144\nswift5_builtin                       40   204796\nswift5_mpenum                        16   204836\nswift5_protocols                     48   204852\nswift5_protocol_conformances        540   204900\nswift5_type_metadata                372   205440\nswift5_type_metadata_2               12   205812\n.swift_modhash                       16   205824\nswift5_replace                        0   205840\nswift5_replac2                        0   205840\nswift5_accessible_functions           0   205840\nswift5_runtime_attributes             0   205840\nswift5_tests                          0   205840\n.gcc_except_table                   816   205840\n.eh_frame_hdr                     16676   206656\n.eh_frame                         66240   223336\n.text                            342708   289584\n__lcxx_override                     324   632292\n.plt                               4528   632624\n.data.rel.ro                      14976   653536\n.fini_array                          16   668512\n.init_array                          48   668528\n.dynamic                            544   668576\n.got                                800   669120\n.got.plt                           2272   669920\n.relro_padding                     3648   672192\n.rodata                           29964   688576\n.data                              4848   718544\n.bss                              26752   723392\n.comment                            540        0\nTotal                            720944\n\n\n",
+    "libswift_RegexParser.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswift_RegexParser.so  :\nsection                            size     addr\n.note.android.ident                 152      568\n.note.gnu.build-id                   36      720\n.dynsym                           69912      760\n.gnu.version                       5826    70672\n.gnu.version_r                       32    76500\n.gnu.hash                         16896    76536\n.dynstr                          169184    93432\n.rela.dyn                         41904   262616\n.rela.plt                          4440   304520\nswift5_typeref                     3233   308960\nswift5_capture                      600   312196\nswift5_reflstr                    14780   312800\nswift5_assocty                      712   327580\nswift5_fieldmd                    14112   328292\nswift5_builtin                      220   342404\nswift5_mpenum                       196   342624\nswift5_protocols                     20   342820\nswift5_protocol_conformances       1348   342840\nswift5_type_metadata                388   344188\n.swift_modhash                       16   344576\nswift5_replace                        0   344592\nswift5_replac2                        0   344592\nswift5_accessible_functions           0   344592\nswift5_runtime_attributes             0   344592\nswift5_tests                          0   344592\n.eh_frame_hdr                      9004   344592\n.eh_frame                         33956   353600\n.text                            472896   387556\n.plt                               2992   860464\n.data.rel.ro                      15936   879840\n.fini_array                          16   895776\n.init_array                           8   895792\n.dynamic                            496   895800\n.got                                480   896296\n.got.plt                           1504   896776\n.relro_padding                     2840   898280\n.rodata                           48826   914672\n.data                             11640   963504\n.bss                              46192   975152\n.comment                            356        0\nTotal                            991149\n\n\n",
+    "libswift_StringProcessing.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswift_StringProcessing.so  :\nsection                            size     addr\n.note.android.ident                 152      568\n.note.gnu.build-id                   36      720\n.dynsym                           31680      760\n.gnu.version                       2640    32440\n.gnu.version_r                       32    35080\n.gnu.hash                          2904    35112\n.dynstr                           71032    38016\n.rela.dyn                         38880   109048\n.rela.plt                          9360   147928\nswift5_typeref                     4789   157288\nswift5_capture                     1804   162080\nswift5_reflstr                     3759   163888\nswift5_assocty                     1304   167648\nswift5_fieldmd                     5412   168952\nswift5_builtin                       80   174364\nswift5_mpenum                        44   174444\nswift5_protocols                     44   174488\nswift5_protocol_conformances        440   174532\nswift5_type_metadata                380   174972\n.swift_modhash                       16   175352\nswift5_replace                        0   175368\nswift5_replac2                        0   175368\nswift5_accessible_functions           0   175368\nswift5_runtime_attributes             0   175368\nswift5_tests                          0   175368\n.eh_frame_hdr                      7940   175368\n.eh_frame                         31052   183312\n.text                            410160   214368\n.plt                               6272   624528\n.data.rel.ro                      12120   647184\n.fini_array                          16   659304\n.init_array                          24   659320\n.dynamic                            528   659344\n.got                               3480   659872\n.got.plt                           3144   663352\n.relro_padding                     1152   666496\n.rodata                           30668   682880\n.data                              3904   713552\n.bss                              17904   717456\n.comment                            540        0\nTotal                            703692\n\n\n",
+    "libswift_math.so": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMAndroid/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libswift_math.so  :\nsection                          size    addr\n.note.android.ident               152     568\n.note.gnu.build-id                 36     720\n.dynsym                           288     760\n.gnu.version                       24    1048\n.gnu.version_r                     32    1072\n.gnu.hash                          48    1104\n.dynstr                           338    1152\n.rela.dyn                         144    1496\n.rela.plt                         120    1640\n.rodata                            26    1760\n.swift_modhash                     16    1788\nswift5_protocols                    0    1804\nswift5_protocol_conformances        0    1804\nswift5_type_metadata                0    1804\nswift5_fieldmd                      0    1804\nswift5_builtin                      0    1804\nswift5_assocty                      0    1804\nswift5_capture                      0    1804\nswift5_reflstr                      0    1804\nswift5_typeref                      0    1804\nswift5_mpenum                       0    1804\nswift5_replace                      0    1804\nswift5_replac2                      0    1804\nswift5_accessible_functions         0    1804\nswift5_runtime_attributes           0    1804\nswift5_tests                        0    1804\n.eh_frame_hdr                      68    1804\n.eh_frame                         168    1872\n.text                             680    2040\n.plt                              112    2720\n.data.rel.ro                        8   19216\n.fini_array                        16   19224\n.init_array                         8   19240\n.dynamic                          512   19248\n.got                                8   19760\n.got.plt                           64   19768\n.relro_padding                    648   19832\n.data                               8   36216\n.bss                              304   36224\n.comment                          356       0\nTotal                            4184\n\n\n"
+  },
+  "compressedNativeComparison": {
+    "bytes": 38952438,
+    "sha256": "a07b3c0659556c76028ed376fc536b9cf7e9baede179d76652fd26420eb19e5b",
+    "savedBytes": 60739492,
+    "nativeBytesIdentical": true,
+    "deviceTested": false,
+    "configuration": "temporary init script: packaging.jniLibs.useLegacyPackaging = true",
+    "unsigned": true
+  },
+  "validation": {
+    "nativeReleaseRebuilt": true,
+    "assembleRelease": "passed",
+    "lintRelease": "passed",
+    "lintErrors": 0,
+    "lintWarnings": 12,
+    "defaultPackagingRestored": true,
+    "releaseDeviceAcceptanceRun": false,
+    "unsigned": true
+  },
+  "buildLogs": {
+    "native-build.log": "5bfe61215a603ebf04290852d4e1a3321402d71c55202b1c587263154bccf138",
+    "gradle-build.log": "998c5f53d35cd79e288958b5c82b42c91d8851fb63def7326e7088adc4fbbf58",
+    "compressed-build.log": "65dc4c230c523e712d119d93869aefb44e41cba9e38655401f3df1c9df2823d1",
+    "restored-build.log": "c8fb800a2f61f6f71e107ffcee7cdbf16b7bc2d0f79059b87db1f2cb2a1b6e95"
+  }
+}

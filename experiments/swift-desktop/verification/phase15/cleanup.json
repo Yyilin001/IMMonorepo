@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "ownedIOSSimulatorsDeleted": true,
+  "ownedAndroidAVDDeleted": true,
+  "ownedBackendsStopped": true,
+  "preexistingSimulatorsPreserved": true,
+  "systemTrustStoreChanged": false,
+  "scopeCleanupTestsPassed": 2
+}

@@ -1,0 +1,9 @@
+{
+  "releaseBytes": 39130150,
+  "releaseMiB": 37.31741905212402,
+  "sha256": "3a64ef502b3be06240e826650c1d7a207b55cdbbe769375464c05c335abf58d2",
+  "nativeUncompressedBytes": 96932096,
+  "nativeCompressedBytes": 36025571,
+  "isolatedCAIncluded": false,
+  "debugReleaseLintPassed": true
+}

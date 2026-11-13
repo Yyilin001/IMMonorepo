@@ -1,0 +1,20 @@
+{
+  "platform": "darwin",
+  "hostSmoke": true,
+  "windowsValidated": false,
+  "stages": {
+    "compile-native": {
+      "exitCode": 0
+    },
+    "sqlite": {
+      "exitCode": 0
+    },
+    "lock-contention": {
+      "exitCode": 0
+    },
+    "lock-after-process-death": {
+      "exitCode": 0
+    }
+  },
+  "nativeProbePassed": true
+}

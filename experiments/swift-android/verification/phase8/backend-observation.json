@@ -1,0 +1,50 @@
+{
+  "scope": "final successful phase8 App actor and group only",
+  "roomID": "F2A8DA4E-B300-4032-BA4B-0E8C5D27845B",
+  "actorID": "02a83bd1-1495-4a8c-be28-e0c703afa3e8",
+  "ownAvatar": [
+    {
+      "revision": 3,
+      "removed": true
+    }
+  ],
+  "ownReceipts": [
+    {
+      "outcome_kind": "committed",
+      "count": 2
+    }
+  ],
+  "groupAvatar": [
+    {
+      "revision": 2,
+      "removed": true
+    }
+  ],
+  "groupReceipts": [
+    {
+      "count": 2,
+      "distinct_operations": 2,
+      "min": 1,
+      "max": 2
+    }
+  ],
+  "uploads": [
+    {
+      "home_kind": "account",
+      "state": "completed",
+      "count": 1
+    },
+    {
+      "home_kind": "room",
+      "state": "completed",
+      "count": 1
+    }
+  ],
+  "qrJoin": [
+    {
+      "state": "approved",
+      "count": 1,
+      "membership_confirmed": true
+    }
+  ]
+}

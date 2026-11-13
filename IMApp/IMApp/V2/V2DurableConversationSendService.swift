@@ -25,6 +25,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
     private let store: GRDBV2LocalSyncStore
     private let engine: V2ResourceTransferEngine
     private let resources: V2ResourceCenter
+    private let messages: V2MessageService?
     private let messageOperations: V2MessageSendOperationService
     private let imports: any V2ResourceImportControlling
     private let groupAvatars: V2GroupAvatarIntentEngine
@@ -35,9 +36,10 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
     private let operations = V2ResourceOperationScope()
     private var importOwner = UUID()
 
-    init(store: GRDBV2LocalSyncStore, engine: V2ResourceTransferEngine, resources: V2ResourceCenter, messageOperations: V2MessageSendOperationService,
+    init(store: GRDBV2LocalSyncStore, engine: V2ResourceTransferEngine, resources: V2ResourceCenter, messageOperations: V2MessageSendOperationService, messages: V2MessageService? = nil,
          imports: any V2ResourceImportControlling, groupAvatars: V2GroupAvatarIntentEngine,
          groupAvatarManager: V2GroupAvatarManagementService? = nil) {
+        self.messages = messages
         self.store = store; self.engine = engine; self.resources = resources; self.messageOperations = messageOperations; self.imports = imports
         self.groupAvatars = groupAvatars
         self.groupAvatarManager = groupAvatarManager
@@ -99,7 +101,8 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
         // All uploads and their consumer become recoverable in one transaction.
-        try await engine.prepareSend(intent, resources: resources)
+        if let messages { try await messages.sendPreparedAttachments(intent, resources: resources, using: engine) }
+        else { try await engine.prepareSend(intent, resources: resources) }
     }
 
     func copyAttachments(sources: [V2ResourceImportSource], to room: RoomID) async throws {
@@ -250,7 +253,8 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         guard try await store.preparingSendIntent(id:intentID) != nil else {
             try requireOpen()
             if try await store.sendIntentNeedsAttention(id:intentID) {
-                try await messageOperations.resumeConfirmation(intentID:intentID)
+                if let messages { try await messages.retrySend(intentID) }
+                else { try await messageOperations.resumeConfirmation(intentID:intentID) }
             } else { _ = try await store.replaceProvenUnsentSendIntent(intentID) }
             return
         }

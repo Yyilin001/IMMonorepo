@@ -4,6 +4,9 @@ import Security
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 /// Opt-in only: run with scripts/verify_v2_live_account_authorization.py.
 /// Ordinary package tests remain offline. The harness owns the database,

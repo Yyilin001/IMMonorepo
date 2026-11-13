@@ -113,6 +113,7 @@ receiver_account_handle="twor_${scenario_suffix:0:20}"
 receiver_public_handle="twor${scenario_suffix:0:20}"
 sender_account_handle="twos_${scenario_suffix:0:20}"
 sender_public_handle="twos${scenario_suffix:0:20}"
+export TEST_RUNNER_IMAPP_EXPECTED_GROUP_MEMBER="@${sender_public_handle}"
 message="two-install-${scenario_suffix:0:16}"
 if [[ "${IMAPP_LOCAL_TWO_INSTALL_DIRECT_EDIT_ONLY:-false}" == true ]]; then
   export TEST_RUNNER_IMAPP_DIRECT_EDIT_ONLY=1
@@ -376,7 +377,15 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-public-handle "${receiver_public_handle}" \
   -v2-ui-testing-display-name 'Two install receiver' \
   -v2-ui-testing-group-title "${receiver_self_group_title}"
-run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_SEARCH_RECEIPT_FACADE_ONLY:-false}" == true ]]; then
+  export TEST_RUNNER_IMAPP_SEARCH_RECEIPT_FACADE_ONLY=1
+  run_stage "${receiver_simulator_id}" testSharedSessionRegistersAndStartsRealtime
+elif [[ "${IMAPP_LOCAL_TWO_INSTALL_SHARED_SESSION_ONLY:-false}" == true ]]; then
+  [[ "${IMAPP_LOCAL_TWO_INSTALL_ACCOUNT_SWITCH_ONLY:-false}" == true ]] || { printf '%s\n' 'shared session acceptance requires account-switch mode' >&2; exit 1; }
+  run_stage "${receiver_simulator_id}" testSharedSessionRegistersAndStartsRealtime
+else
+  run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
+fi
 
 if [[ "${IMAPP_LOCAL_TWO_INSTALL_SYSTEM_PUSH_ONLY:-false}" == true ]]; then
   [[ "${external_stack}" == true ]] || exit 1
@@ -705,6 +714,10 @@ if [[ "${IMAPP_LOCAL_TWO_INSTALL_ACCOUNT_SWITCH_ONLY:-false}" == true ]]; then
   export TEST_RUNNER_IMAPP_ACCOUNT_SWITCH_FIRST_GROUP="${receiver_self_group_title}"
   export TEST_RUNNER_IMAPP_ACCOUNT_SWITCH_SECOND_HANDLE="${IMAPP_LOCAL_TWO_INSTALL_SWITCH_SECOND_HANDLE:?registered account B required}"
   launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_MESSAGE_FACADE_ONLY:-false}" == true ]]; then
+    run_stage "${receiver_simulator_id}" testSharedMessageFacadeCommands
+    launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  fi
   run_stage "${receiver_simulator_id}" testAccountSwitchAndColdRestoreKeepProjectionsIsolated
   if [[ "${audit_failure_count}" -gt 0 ]]; then
     printf '%s\n' 'account-switch functional stages complete; retained accessibility failure.' >&2

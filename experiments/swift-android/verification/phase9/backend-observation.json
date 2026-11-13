@@ -1,0 +1,60 @@
+{
+  "scope": "Final successful phase 9 room only; read-only SQL",
+  "roomID": "BA0D45ED-0DF4-4549-98C1-4AF998849F8A",
+  "uploads": [
+    {
+      "media_id": "214c73a6-a13d-42ed-8862-f728126c9a85",
+      "upload_state": "completed",
+      "media_state": "available",
+      "content_type": "text/plain",
+      "byte_count": 9437184,
+      "usage_kind": "message_attachment",
+      "active_message_references": 1
+    },
+    {
+      "media_id": "37b81536-46b1-4ee4-8eb8-8a7abf875322",
+      "upload_state": "completed",
+      "media_state": "available",
+      "content_type": "image/png",
+      "byte_count": 2335,
+      "usage_kind": "message_attachment",
+      "active_message_references": 1
+    },
+    {
+      "media_id": "d29a6a27-4793-49e7-800e-fdf47b72fe09",
+      "upload_state": "completed",
+      "media_state": "available",
+      "content_type": "application/octet-stream",
+      "byte_count": 9437184,
+      "usage_kind": "message_attachment",
+      "active_message_references": 1
+    },
+    {
+      "media_id": "dd9da498-d761-412b-8048-6bcf30ec0380",
+      "upload_state": "completed",
+      "media_state": "available",
+      "content_type": "image/jpeg",
+      "byte_count": 2642,
+      "usage_kind": "message_attachment",
+      "active_message_references": 1
+    }
+  ],
+  "messages": [
+    {
+      "test_message": "incoming file",
+      "accepted": 1
+    },
+    {
+      "test_message": "incoming image",
+      "accepted": 1
+    },
+    {
+      "test_message": "offline file",
+      "accepted": 1
+    },
+    {
+      "test_message": "outgoing image",
+      "accepted": 1
+    }
+  ]
+}

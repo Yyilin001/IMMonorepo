@@ -1,0 +1,34 @@
+{
+  "backends": [
+    {
+      "root": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-6_pw2v8u",
+      "postgresStopped": true,
+      "servicePortsClosed": true,
+      "httpSummaryWritten": true
+    },
+    {
+      "root": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-bzhrqt_6",
+      "postgresStopped": true,
+      "servicePortsClosed": true,
+      "httpSummaryWritten": true
+    },
+    {
+      "root": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-6kzvihkp",
+      "postgresStopped": true,
+      "servicePortsClosed": true,
+      "httpSummaryWritten": true
+    },
+    {
+      "root": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-l7esdlxo",
+      "postgresStopped": true,
+      "servicePortsClosed": true,
+      "httpSummaryWritten": true
+    }
+  ],
+  "testPackagesUninstalled": true,
+  "ownedReversesEmptyBeforeShutdown": true,
+  "ownedEmulatorStopped": true,
+  "ownedAVDDeleted": true,
+  "existingEmulator5554Preserved": true,
+  "existingIOSSimulatorPreserved": true
+}

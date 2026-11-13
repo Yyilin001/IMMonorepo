@@ -1,0 +1,59 @@
+{
+  "phase": 9,
+  "branch": "codex/swift-android-feasibility",
+  "date": "2026-11-12",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "appPassed": true,
+    "avatarRegressionPassed": true,
+    "peopleRegressionPassed": true,
+    "directoryRegressionPassed": true,
+    "messagingRegressionPassed": true,
+    "sameTestedAPK": true,
+    "tests": 5,
+    "testSeconds": [
+      45.127,
+      40.53,
+      47.374,
+      46.34,
+      39.849
+    ],
+    "jvmUnitTasks": "NO-SOURCE",
+    "lint": "passed",
+    "normalDebugBuild": "passed",
+    "normalDebugDeviceAcceptance": false
+  },
+  "swift": {
+    "tests": 332,
+    "suites": 47,
+    "passed": true
+  },
+  "ios": {
+    "tests": 18,
+    "failed": 0,
+    "skipped": 0,
+    "packageBuild": "passed",
+    "publicSymbols": 6079,
+    "apiChanges": 0
+  },
+  "toolTests": 10,
+  "scope": [
+    "imageAndFileMessages",
+    "streamingMultipartUpload",
+    "rangeDownloadAndDocumentExport",
+    "dataSaverPolicy",
+    "offlineSendOwnerReopenExactlyOnce",
+    "importCancellation",
+    "accountIsolation"
+  ],
+  "limits": [
+    "API31Arm64EmulatorOnly",
+    "pickerResultsInjected",
+    "noOSProcessDeathTest",
+    "noSystemBackgroundTransfers",
+    "singleAttachment32MiB",
+    "latest50Transfers",
+    "noCellularSwitchOrProviderFailureInjection"
+  ]
+}

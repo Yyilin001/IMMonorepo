@@ -1,0 +1,17 @@
+{
+  "backendStopped": true,
+  "adbReverseListBeforeEmulatorStop": "",
+  "dedicatedPackages": {
+    "com.xmtx.im.android.sharedverification.test": "Success",
+    "com.xmtx.im.android.sharedverification": "Success"
+  },
+  "emulatorStopRequested": true,
+  "normalAppDataUntouched": true,
+  "userEmulator5554Untouched": true,
+  "iosSimulatorUntouched": true,
+  "dedicatedEmulatorStopped": true,
+  "dedicatedAVDDeleted": true,
+  "remainingAndroidDevices": [
+    "emulator-5554"
+  ]
+}

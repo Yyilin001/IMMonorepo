@@ -1,0 +1,22 @@
+{
+  "attempts": [
+    {
+      "kind": "isolatedBackendStartup",
+      "log": "/tmp/im-phase14-cross-backend.log",
+      "reason": "NIOCore.IOError during account composition; exact cause not established; owned stack cleaned; second isolated startup passed"
+    },
+    {
+      "kind": "initialNativeBackend",
+      "log": "/tmp/im-phase14-native-backend.log",
+      "reason": "directory wait timed out; gateway also logged journal sourceNotReady; final same-backend rerun passed; not classified as a facade regression"
+    },
+    {
+      "kind": "developmentCompile",
+      "logs": [
+        "/tmp/im-phase14-ios-unit.log",
+        "/tmp/im-phase14-ios-unit2.log"
+      ],
+      "reason": "iOS availability and misplaced helper found and fixed before final verification"
+    }
+  ]
+}

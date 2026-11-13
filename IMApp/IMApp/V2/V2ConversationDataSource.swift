@@ -20,13 +20,31 @@ protocol V2ConversationSendTimelineReading: Sendable {
 }
 
 actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDirectoryReading, V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
+    private let searchBusiness: V2SearchService
+    private var business: V2ConversationService?
     private let localStore: GRDBV2LocalSyncStore
     private let requiresLocalReadAuthorization: Bool
     private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
-    init(localStore: GRDBV2LocalSyncStore, requiresLocalReadAuthorization: Bool = false, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
+    init(localStore: GRDBV2LocalSyncStore, requiresLocalReadAuthorization: Bool = false, business: V2ConversationService? = nil, search: V2SearchService? = nil, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
+        self.business = business
+        self.searchBusiness = search ?? V2SearchService(store: localStore)
         self.localStore = localStore
         self.requiresLocalReadAuthorization = requiresLocalReadAuthorization
         self.requestLatestVisible = requestLatestVisible
+    }
+
+    private func service(for userID: String) throws -> V2ConversationService {
+        let id = try UserID(userID)
+        if let business {
+            guard business.accountID == id else { throw V2ConversationServiceError.invalidQuery }
+            return business
+        }
+        // Compatibility construction for offline/performance fixtures. Production receives
+        // the account-owned facade from V2SharedSession.
+        let created = V2ConversationService(accountID: id, store: localStore,
+            requiresAuthorization: requiresLocalReadAuthorization, requestLatestVisible: requestLatestVisible)
+        business = created
+        return created
     }
 
     func refreshDiscoveredConversations(roomIDs: [RoomID]) async throws {
@@ -44,35 +62,12 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
         try await localStore.conversationTitles(for: [roomID])[roomID]
     }
 
-    private func requestMissingSummaries(_ entries: [V2ClientConversationListEntry]) async throws {
-        let rooms = entries.filter { $0.latestVisible == nil }.map(\.roomID)
-        for start in stride(from: 0, to: rooms.count, by: 100) {
-            try Task.checkCancellation()
-            do {
-                try await requestLatestVisible(Array(rooms[start..<min(start + 100, rooms.count)]))
-            } catch V2RoomRecoveryEngineError.notStarted {
-                // Local pages remain available before the connection starts.
-                return
-            } catch V2RoomRecoveryEngineError.coverageLost {
-                // The next connection rebuilds recovery demand.
-                return
-            }
-        }
-    }
-
     /// 该房间是否已被服务端保留裁剪掉一段历史。
     ///
     /// 缺口是永久的：服务端已经删掉那段事件，任何客户端都补不回来。界面必须显式告知，
     /// 而不是把最近窗口当成完整历史展示。
     func roomLogHistoryIsIncomplete(roomID: String) async throws -> Bool {
         try await localStore.roomLogHistoryIsIncomplete(roomID: .init(roomID))
-    }
-
-    /// 按房间标识读取展示未读；目录不可用时返回空映射（界面显示无角标）。
-    private func displayedUnread(roomIDs: [RoomID]) async -> [RoomID: UInt64] {
-        guard !roomIDs.isEmpty else { return [:] }
-        guard let rows = try? await localStore.roomUnreadSnapshot(roomIDs: roomIDs) else { return [:] }
-        return rows.mapValues(\.displayedUnread)
     }
 
     /// 读取进入房间推进已读线所需的本地事实。
@@ -85,6 +80,11 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
     /// - Throws: 本地读取失败。
     func roomReadCheckpoint(roomID: String) async throws -> V2ConversationRoomReadCheckpoint {
         let parsedRoomID = try RoomID(roomID)
+        if let business {
+            let value = try await business.readCheckpoint(in: parsedRoomID)
+            return .init(knownHead: value.knownHead, appliedRoomSequence: value.appliedRoomSequence)
+        }
+        // Compatibility fixtures without an account facade retain their original facts.
         let applied = try await localStore.roomAppliedRoomSequence(roomID: parsedRoomID)
         // 状态未知时房间头未知：界面只按本地已应用序号推进，不会凭空跳到未知的 head。
         let states = try await localStore.roomUnreadSnapshot(roomIDs: [parsedRoomID])
@@ -95,42 +95,14 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
     }
 
     func allConversationSummaries(for userID: String, isArchived: Bool) async throws -> [V2ConversationListItem] {
-        let entries = try await localStore.allConversationListEntries(isArchived: isArchived)
-        var items: [V2ConversationListItem] = []
-        for offset in stride(from: 0, to: entries.count, by: 100) {
-            try Task.checkCancellation()
-            let batch = Array(entries[offset..<min(offset + 100, entries.count)])
-            let unread = await displayedUnread(roomIDs: batch.map(\.roomID))
-            let allowed = try await authorizedPage(.init(entries: batch, nextCursor: nil))
-            try await requestMissingSummaries(allowed.entries)
-            items += Self.listPage(allowed, userID: userID, unread: unread).items
-        }
-        return items
+        let pages = try await service(for: userID).allConversations(isArchived: isArchived)
+        return pages.flatMap { Self.listPage($0.page, userID: userID, unread: $0.unread).items }
     }
 
-    func conversationSummaryPage(
-        for userID: String,
-        isArchived: Bool,
-        before cursor: V2ClientConversationListCursor?,
-        limit: Int
-    ) async throws -> V2ConversationListPage {
-        let page = try await localStore.conversationListPage(
-            isArchived: isArchived,
-            before: cursor,
-            limit: limit
-        )
-        let unread = await displayedUnread(roomIDs: page.entries.map(\.roomID))
-        let allowed = try await authorizedPage(page)
-        try await requestMissingSummaries(allowed.entries)
-        return Self.listPage(allowed, userID: userID, unread: unread)
-    }
-
-
-    private func authorizedPage(_ page: V2ClientConversationListPage) async throws -> V2ClientConversationListPage {
-        guard requiresLocalReadAuthorization else { return page }
-        var entries: [V2ClientConversationListEntry] = []
-        for entry in page.entries where try await localStore.roomAllowsLocalRead(roomID: entry.roomID) { entries.append(entry) }
-        return .init(entries: entries, nextCursor: page.nextCursor)
+    func conversationSummaryPage(for userID: String, isArchived: Bool,
+        before cursor: V2ClientConversationListCursor?, limit: Int) async throws -> V2ConversationListPage {
+        let value = try await service(for: userID).list(isArchived: isArchived, before: cursor, limit: limit)
+        return Self.listPage(value.page, userID: userID, unread: value.unread)
     }
 
     private static func listPage(_ page: V2ClientConversationListPage, userID: String, unread: [RoomID: UInt64]) -> V2ConversationListPage {
@@ -225,27 +197,18 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
         before cursor: V2ConversationTimelineCursor?,
         limit: Int
     ) async throws -> V2ConversationTimelinePage {
-        let parsedRoomID = try RoomID(roomID)
-        if requiresLocalReadAuthorization, try await !localStore.roomAllowsLocalRead(roomID: parsedRoomID) {
-            return .init(items: [], olderCursor: nil)
-        }
-        let page = try await localStore.conversationTimelinePage(
-            in: parsedRoomID,
-            before: cursor.map {
-                .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID, kind: $0.kind)
-            },
-            limit: limit,
-            presentationUserID: try .init(userID)
-        )
-        return Self.timelinePage(page, userID: userID)
+        let value = try await service(for: userID).timeline(in: RoomID(roomID), before: cursor.map {
+            .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID, kind: $0.kind)
+        }, limit: limit)
+        return Self.timelinePage(value.page, userID: userID)
     }
 
     func sendTimeline(in roomID: RoomID, for userID: UserID, before cursor: V2ConversationTimelineCursor?,
                       limit: Int, pendingPage: Int) async throws -> (V2ConversationTimelinePage, V2PendingResourceSendSnapshot) {
-        let snapshot = try await localStore.conversationSendTimeline(in: roomID, for: userID, before: cursor.map {
+        let snapshot = try await service(for: userID.rawValue).timeline(in: roomID, before: cursor.map {
             .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID, kind: $0.kind)
-        }, limit: limit, pendingPage: pendingPage, requiresAuthorization: requiresLocalReadAuthorization)
-        return (Self.timelinePage(snapshot.timeline, userID: userID.rawValue), snapshot.pending)
+        }, limit: limit, pendingPage: pendingPage)
+        return (Self.timelinePage(snapshot.page, userID: userID.rawValue), snapshot.pending)
     }
 
     func sendTimelineChanges(in roomID: RoomID, page: Int) -> AsyncThrowingStream<Void, any Error> {
@@ -253,8 +216,7 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
     }
 
     func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation {
-        if requiresLocalReadAuthorization, try await !localStore.roomAllowsLocalRead(roomID: RoomID(roomID)) { return .unavailable }
-        let location = try await localStore.conversationTimelineWindow(in: RoomID(roomID), for: UserID(userID), around: MessageID(messageID), before: before, after: after, aggregateReactions: true)
+        let location = try await service(for: userID).locate(in: RoomID(roomID), messageID: MessageID(messageID), before: before, after: after)
         switch location {
         case .unavailable: return .unavailable
         case .withdrawn: return .withdrawn
@@ -321,19 +283,19 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
     }
 
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {
-        try await localStore.messageSearch.searchMessages(request)
+        try await searchBusiness.search(request)
     }
 
     func searchConversationContext(roomID: RoomID) async throws -> V2ClientConversationLookupContext? {
-        try await localStore.conversationLookupContexts(for: [roomID])[roomID]
+        try await searchBusiness.conversationContext(in: roomID)
     }
 
     func messageSearchIndexUpdates() async -> AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error> {
-        await localStore.messageSearch.messageSearchIndexUpdates()
+        await searchBusiness.updates()
     }
 
     func messageSearchIndexProgress() async throws -> V2MessageSearchIndexProgress {
-        try await localStore.messageSearch.messageSearchIndexProgress()
+        try await searchBusiness.progress()
     }
 
     func favoriteMessages(

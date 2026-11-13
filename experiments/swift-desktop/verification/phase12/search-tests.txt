@@ -1,0 +1,54 @@
+Building for debugging...
+[Planning 134 / 185]
+[Creating build graph]
+[8 / 22]
+[10 / 20] CSearchFileLock
+[21 / 33]
+[24 / 35]
+[38 / 47] MessageSubstringSearch
+[42 / 53] MessageSubstringSearch
+[47 / 58] MessageSubstringSearchTests-product
+[58 / 69] MessageSubstringSearchTests-product
+[61 / 67] MessageSubstringSearchTests-product
+[63 / 67] MessageSubstringSearchTests-product
+Build complete! (3.13秒)
+􀟈  Test run started.
+􀄵  Testing Library Version: 2084
+􀄵  Target Platform: arm64e-apple-macos14.0
+􀟈  Test diskFullDuringAdmissionDoesNotAcknowledgeOrModifyData() started.
+􀟈  Test pendingQueueRecoversOnReopenAndRejectsDifferentAccount() started.
+􀟈  Test cancelledTransactionRemainsPendingInsteadOfFailed() started.
+􀟈  Test statementReusePreservesBindingsNestedCallsAndErrorRecovery(capacity:) started.
+􀟈  Test rebuildResumesAndPreservesConcurrentChanges() started.
+􀟈  Test checkpointCASAndFailedGapCannotBeSkipped() started.
+􀟈  Test inputLimitsAndBackpressureDoNotPartiallyAccept() started.
+􀟈  Test transactionFailureRollsBackContentsAndProgress(point:) started.
+􀟈  Test invalidConfigurationCannotOverflowQueryBudgetOrTruncatePath() started.
+􀟈  Test expiredSnapshotAndInvalidFiltersFailExplicitly() started.
+􀟈  Test uncertainModeSwitchRecoversActualCommittedMode() started.
+􀟈  Test shadowRebuildChangesRulesAtomically() started.
+􀟈  Test cancellationAndTimeoutAreNotEmptyResults() started.
+􀟈  Test largeTextHasCompleteTailCoverageAndPreviewCanUpgrade() started.
+􀟈  Test case passing 1 argument capacity → 0 to statementReusePreservesBindingsNestedCallsAndErrorRecovery(capacity:) started.
+􀟈  Test case passing 1 argument capacity → 1 to statementReusePreservesBindingsNestedCallsAndErrorRecovery(capacity:) started.
+􀟈  Test case passing 1 argument capacity → 64 to statementReusePreservesBindingsNestedCallsAndErrorRecovery(capacity:) started.
+􀟈  Test corruptPendingPayloadIsVisibleRatherThanSilentlyStalled() started.
+􀟈  Test case passing 1 argument point → .afterOldIndexRemoval to transactionFailureRollsBackContentsAndProgress(point:) started.
+􀟈  Test case passing 1 argument point → .beforeProgress to transactionFailureRollsBackContentsAndProgress(point:) started.
+􀟈  Test case passing 1 argument point → .beforeCommit to transactionFailureRollsBackContentsAndProgress(point:) started.
+􁁛  Test statementReusePreservesBindingsNestedCallsAndErrorRecovery(capacity:) with 3 test cases passed after 0.001 seconds.
+􁁛  Test invalidConfigurationCannotOverflowQueryBudgetOrTruncatePath() passed after 0.001 seconds.
+􁁛  Test inputLimitsAndBackpressureDoNotPartiallyAccept() passed after 0.057 seconds.
+􁁛  Test cancelledTransactionRemainsPendingInsteadOfFailed() passed after 0.057 seconds.
+􁁛  Test expiredSnapshotAndInvalidFiltersFailExplicitly() passed after 0.058 seconds.
+􁁛  Test cancellationAndTimeoutAreNotEmptyResults() passed after 0.058 seconds.
+􁁛  Test diskFullDuringAdmissionDoesNotAcknowledgeOrModifyData() passed after 0.060 seconds.
+􁁛  Test checkpointCASAndFailedGapCannotBeSkipped() passed after 0.060 seconds.
+􁁛  Test uncertainModeSwitchRecoversActualCommittedMode() passed after 0.061 seconds.
+􁁛  Test shadowRebuildChangesRulesAtomically() passed after 0.061 seconds.
+􁁛  Test transactionFailureRollsBackContentsAndProgress(point:) with 3 test cases passed after 0.062 seconds.
+􁁛  Test rebuildResumesAndPreservesConcurrentChanges() passed after 0.064 seconds.
+􁁛  Test pendingQueueRecoversOnReopenAndRejectsDifferentAccount() passed after 0.110 seconds.
+􁁛  Test corruptPendingPayloadIsVisibleRatherThanSilentlyStalled() passed after 0.116 seconds.
+􁁛  Test largeTextHasCompleteTailCoverageAndPreviewCanUpgrade() passed after 0.242 seconds.
+􁁛  Test run with 15 tests in 0 suites passed after 0.243 seconds.

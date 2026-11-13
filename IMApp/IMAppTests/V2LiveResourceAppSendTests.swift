@@ -6,6 +6,9 @@ import os
 import Testing
 import UIKit
 @testable import IMV2ClientKit
+@testable import IMV2ClientApple
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
 @testable import IMApp
 
 /// Opt-in, owned-stack test. No real account, default database or Keychain is used.

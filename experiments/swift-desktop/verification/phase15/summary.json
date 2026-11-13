@@ -1,0 +1,88 @@
+{
+  "phase": 15,
+  "date": "2026-11-13",
+  "branch": "codex/swift-android-feasibility",
+  "implementation": "Account-owned V2MessageService shared by native Swift and Android binding for send/edit/withdraw/reply/forward/reactions, retry and observation; prepared attachment sends enter the same facade",
+  "newKotlinBusinessImplementation": false,
+  "ios": {
+    "unitTestsPassed": 174,
+    "realBackendFunctionalTestsPassed": 3,
+    "scopeCleanupTestsPassed": 2,
+    "nativeSwift": true,
+    "simulator": "iPhone 16 Pro / iOS 18.5",
+    "physicalDevice": false
+  },
+  "sharedUnitTestsPassed": 16,
+  "domainUnitTestsPassed": 34,
+  "macOS": {
+    "nativeBackendPassed": true,
+    "hostStartupReconnectBound": 3,
+    "nativeActionsConfirmedByIndependentPeer": true,
+    "appUIValidated": false
+  },
+  "android": {
+    "realBackendPhasesPassed": [
+      5,
+      9,
+      10,
+      11
+    ],
+    "nativeLibraryRebuilt": true,
+    "leakedClients": 0,
+    "leakedOperations": 0,
+    "gradlePassed": [
+      "sharedsdk:testDebugUnitTest",
+      "sharedsdk:lintDebug",
+      "swiftplatform:lintDebug",
+      "app:testDebugUnitTest",
+      "app:assembleDebug",
+      "app:assembleDebugAndroidTest",
+      "app:lintDebug",
+      "app:assembleRelease"
+    ],
+    "releaseAPK": {
+      "path": "IMAndroid/app/build/outputs/apk/release/app-release-unsigned.apk",
+      "bytes": 39109042,
+      "MiB": 37.3,
+      "sha256": "81061c65ea69608a0d3b7df8469830cfba1c19b6655d983eea76415730fdf4ff",
+      "nativeLibraryCount": 20,
+      "nativeUncompressedBytes": 96857264,
+      "nativeCompressedBytes": 36004461,
+      "verificationCAAbsent": true,
+      "signedForDistribution": false,
+      "deviceAcceptance": false
+    }
+  },
+  "api": {
+    "legacySymbolCount": 6079,
+    "legacyInventorySHA256": "dc3edd55e0af34b8da967acb9381c8394259cc7e6808612a09814cdf115f33ec",
+    "identicalToPhase14": true,
+    "nativeModule": "IMV2SharedRuntime",
+    "nativeSymbolCount": 120,
+    "nativeAdded": 26,
+    "nativeRemoved": [],
+    "nativeChanged": []
+  },
+  "cABI": {
+    "passed": true,
+    "leakedClients": 0,
+    "leakedOperations": 0
+  },
+  "cleanup": {
+    "passed": true,
+    "ownedIOSSimulatorsDeleted": true,
+    "ownedAndroidAVDDeleted": true,
+    "ownedBackendsStopped": true,
+    "preexistingSimulatorsPreserved": true,
+    "systemTrustStoreChanged": false,
+    "scopeCleanupTestsPassed": 2
+  },
+  "limitations": [
+    "Backend is an isolated local PostgreSQL/HTTPS/TLS stack, not production.",
+    "Mobile validation uses simulators/emulator; physical devices and signed distribution were not validated.",
+    "Compatibility constructors and domain status types remain; low-level public API narrowing is not part of this phase.",
+    "Search/read receipts/resource transfer engines are not wholly migrated to the new facade.",
+    "Windows platform adaptation and native validation remain incomplete; no new availability claim.",
+    "Broad iOS accessibility audit was not rerun; earlier Dynamic Type limitation is not declared fixed."
+  ]
+}

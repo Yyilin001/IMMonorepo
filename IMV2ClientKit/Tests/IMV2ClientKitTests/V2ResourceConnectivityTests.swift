@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Foundation connectivity callbacks remain observational", .timeLimit(.minutes(1)))
 struct V2ResourceConnectivityTests {
@@ -48,7 +51,8 @@ struct V2ResourceConnectivityTests {
                         { delegate.urlSession(session, dataTask: task, didReceive: response, completionHandler: { _ in }) },
                         { delegate.cancel() })
             case .request:
-                let delegate = V2HTTPExecutionDelegate()
+                let observation = V2ResourceConnectivityObservation()
+                let delegate = V2HTTPExecutionDelegate(events: .init(waiting: { observation.waiting() }, active: { observation.finish() }))
                 return ({ delegate.urlSession(session, taskIsWaitingForConnectivity: task) },
                         { delegate.record(response: 200, bytes: 0) },
                         { delegate.cancel() })

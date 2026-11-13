@@ -1,12 +1,12 @@
 import Foundation
-import os
+import IMV2ClientPlatform
 
-enum V2BackgroundSessionKind: String, Codable, Sendable { case upload, download }
+package enum V2BackgroundSessionKind: String, Codable, Sendable { case upload, download }
 
 /// Reconnects a system identifier before Complete-protected business SQL can
 /// open. Only opaque ids and a validated relative directory are persisted.
 /// Resolving never creates an account directory or repairs a missing anchor.
-struct V2BackgroundSessionDirectory: Sendable {
+package struct V2BackgroundSessionDirectory: Sendable {
     private struct Route: Codable, Equatable {
         let version: Int
         let session: UUID
@@ -23,15 +23,15 @@ struct V2BackgroundSessionDirectory: Sendable {
     private let directory: URL
     private let allowedRoot: URL
     private let protection: any V2ResourceFileProtectionWriting
-    private static let io = OSAllocatedUnfairLock(initialState: ())
-    init(directory: URL, allowedRoot: URL,
+    private static let io = V2Lock(initialState: ())
+    package init(directory: URL, allowedRoot: URL,
          protection: any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) throws {
         guard directory.isFileURL, allowedRoot.isFileURL else { throw V2ResourceStorageError.unsafeFile }
         self.directory = directory.standardizedFileURL.resolvingSymlinksInPath()
         self.allowedRoot = allowedRoot.standardizedFileURL.resolvingSymlinksInPath()
         self.protection = protection
     }
-    static func production() throws -> Self {
+    package static func production() throws -> Self {
         let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
             .standardizedFileURL.resolvingSymlinksInPath()
         let base = support.appending(path: "IMV2BackgroundTransfers")
@@ -44,7 +44,7 @@ struct V2BackgroundSessionDirectory: Sendable {
         let container = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
         return try .init(directory: base.appending(path: "session-routes"), allowedRoot: container)
     }
-    func register(session: UUID, kind: V2BackgroundSessionKind, root: URL) throws {
+    package func register(session: UUID, kind: V2BackgroundSessionKind, root: URL) throws {
         try Self.io.withLock { _ in
             try prepare()
             let components = try relativeComponents(root)
@@ -79,7 +79,7 @@ struct V2BackgroundSessionDirectory: Sendable {
             try write(route, to: routeURL(session))
         }
     }
-    func resolve(session: UUID, kind: V2BackgroundSessionKind) throws -> URL {
+    package func resolve(session: UUID, kind: V2BackgroundSessionKind) throws -> URL {
         try Self.io.withLock { _ in
             let route = try readRoute(session)
             guard route.kinds.contains(kind) else { throw V2BackgroundTransferError.mappingConflict }
@@ -91,7 +91,7 @@ struct V2BackgroundSessionDirectory: Sendable {
             return root
         }
     }
-    func unregister(session: UUID, kind: V2BackgroundSessionKind, root: URL) throws {
+    package func unregister(session: UUID, kind: V2BackgroundSessionKind, root: URL) throws {
         try Self.io.withLock { _ in
             guard FileManager.default.fileExists(atPath: routeURL(session).path) else { return }
             var route = try readRoute(session)

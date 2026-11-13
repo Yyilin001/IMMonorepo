@@ -5,6 +5,9 @@ import Network
 import Synchronization
 #endif
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Bounded per-attempt resource transfer observations", .timeLimit(.minutes(1)))
 struct V2ResourceTransferProgressTests {

@@ -1,0 +1,131 @@
+{
+  "phase": 13,
+  "date": "2026-11-13",
+  "branch": "codex/swift-android-feasibility",
+  "implementation": "iOS native Swift session ownership, authentication/sign-out, restoration and foreground/maintenance task lifecycle in IMV2SharedRuntime",
+  "ios": {
+    "nativeInterface": true,
+    "usesCABIOrJSON": false,
+    "simulator": "iPhone 16 Pro / iOS 18.5",
+    "physicalDeviceValidated": false,
+    "unitTests": {
+      "passed": 42,
+      "failed": 0,
+      "skipped": 0,
+      "evidence": "ios-unit-summary.json"
+    },
+    "realBackend": {
+      "passed": true,
+      "functionalTests": 2,
+      "evidence": "ios-backend-summary.json",
+      "scenarios": [
+        "password registration and login",
+        "TLS connected and group projection",
+        "server-confirmed text messages",
+        "background/foreground continuation",
+        "ordinary local sign-out without manual retry",
+        "A to B to A account and message isolation",
+        "cold restore of B and A"
+      ]
+    },
+    "preserved": [
+      "Keychain service/account and installation binding",
+      "exit intent format and database paths",
+      "local-first startup",
+      "inactive versus background handling",
+      "APNs and background URLSession integration",
+      "UI routes and native page services"
+    ]
+  },
+  "sharedUnitTests": {
+    "passed": 7,
+    "failed": 0,
+    "evidence": "shared-unit.log",
+    "coverage": [
+      "close failure retains store and exit responsibility",
+      "account activity drains before SQLite closes",
+      "committed sign-out survives caller cancellation and concurrent completion",
+      "maintenance ownership survives cancellation until physical drain",
+      "exit during opening drains late completion"
+    ]
+  },
+  "android": {
+    "realBackend": true,
+    "evidence": "android-backend.json",
+    "nativeLibraryRebuilt": true,
+    "gradle": [
+      "sharedsdk:testDebugUnitTest",
+      "sharedsdk:lintDebug",
+      "swiftplatform:lintDebug",
+      "app:testDebugUnitTest",
+      "app:assembleDebug",
+      "app:assembleDebugAndroidTest",
+      "app:lintDebug",
+      "app:assembleRelease"
+    ],
+    "releaseAPK": {
+      "path": "IMAndroid/app/build/outputs/apk/release/app-release-unsigned.apk",
+      "bytes": 39010414,
+      "sha256": "3e31f232d037c68bcb81d8a834b1306e3c1f1ebd2711513996011dff9b134b23",
+      "signedForDistribution": false
+    }
+  },
+  "macOS": {
+    "realBackend": true,
+    "evidence": "macos-backend.log",
+    "appUIValidated": false,
+    "scenarios": [
+      "HTTPS/TLS login",
+      "two-client text reply reaction",
+      "Unicode search",
+      "physical disconnect",
+      "Keychain/database owner reopen",
+      "no duplicate queued send",
+      "third-account isolation"
+    ]
+  },
+  "cABI": {
+    "passed": true,
+    "evidence": "c-abi.json"
+  },
+  "publicAPI": {
+    "legacySymbols": 6079,
+    "unchanged": true,
+    "newNativeSymbols": 32,
+    "evidence": "api-compatibility.json"
+  },
+  "limitations": [
+    "Existing broad iOS accessibility audit still reports Dynamic Type font sizes are partially unsupported; it is not declared passed.",
+    "iOS page/media composition remains native App code; shared session owns and drains its account runtime.",
+    "iOS acceptance ran on a simulator against a local isolated PostgreSQL/HTTPS/TLS backend, not production or a physical device.",
+    "Windows platform implementation and native validation remain incomplete; no new Windows support claim.",
+    "macOS App UI and signed distribution were not validated."
+  ],
+  "retainedFailures": "retained-failures.json",
+  "cleanup": {
+    "passed": true,
+    "iosScopeCleanupTests": [
+      {
+        "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.RQIixd/7B26409F-8C12-4044-875C-67454C73D4F1-testCleansOnlyRequestedIndependentInstallationScope.xcresult",
+        "passed": 1,
+        "failed": 0
+      },
+      {
+        "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.RQIixd/9A3CEB75-289B-4F3E-B0C7-44C1D7D4AA4E-testCleansOnlyRequestedIndependentInstallationScope.xcresult",
+        "passed": 1,
+        "failed": 0
+      }
+    ],
+    "ownedIOSSimulatorsDeleted": true,
+    "ownedAndroidAVDDeleted": true,
+    "preexistingNavTestPreserved": true,
+    "ownedBackendsStopped": true,
+    "closedBackendPorts": [
+      7443,
+      8443,
+      64547,
+      64546
+    ],
+    "systemTrustStoreChanged": false
+  }
+}

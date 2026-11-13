@@ -1,0 +1,173 @@
+{
+  "scope": "Read-only SQL for final successful phase 11 actor and rooms only",
+  "messages": [
+    {
+      "message_id": "01a1cf4f-1bce-70cc-bf50-9cae2c79965f",
+      "room_id": "52a65694-87f3-46d0-85cb-866ab38b552d",
+      "content_revision": 3,
+      "reply_to_message_id": null,
+      "forwarded_from_message_id": null,
+      "withdrawn": true
+    },
+    {
+      "message_id": "01a1cf4f-26d1-7469-b62b-ef1664d35cbc",
+      "room_id": "52a65694-87f3-46d0-85cb-866ab38b552d",
+      "content_revision": 1,
+      "reply_to_message_id": "01a1cf4f-1bce-70cc-bf50-9cae2c79965f",
+      "forwarded_from_message_id": null,
+      "withdrawn": false
+    },
+    {
+      "message_id": "01a1cf4f-4291-7450-a271-a42165b6e383",
+      "room_id": "01535f3a-49eb-44df-8256-a458f89a015d",
+      "content_revision": 1,
+      "reply_to_message_id": null,
+      "forwarded_from_message_id": "01a1cf4f-1bce-70cc-bf50-9cae2c79965f",
+      "withdrawn": false
+    },
+    {
+      "message_id": "01a1cf4f-73c2-70eb-8d51-5e0515eed4d7",
+      "room_id": "01535f3a-49eb-44df-8256-a458f89a015d",
+      "content_revision": 1,
+      "reply_to_message_id": null,
+      "forwarded_from_message_id": "01a1cf4f-5df6-7fc7-83ad-b1e46731aa11",
+      "withdrawn": false
+    },
+    {
+      "message_id": "01a1cf4f-be5a-7388-9861-2d2a2e28adf6",
+      "room_id": "01535f3a-49eb-44df-8256-a458f89a015d",
+      "content_revision": 1,
+      "reply_to_message_id": null,
+      "forwarded_from_message_id": "01a1cf4f-1bce-70cc-bf50-9cae2c79965f",
+      "withdrawn": false
+    },
+    {
+      "message_id": "01a1cf4f-c0dc-76bd-ad21-627b16730c28",
+      "room_id": "52a65694-87f3-46d0-85cb-866ab38b552d",
+      "content_revision": 1,
+      "reply_to_message_id": "01a1cf4f-1bce-70cc-bf50-9cae2c79965f",
+      "forwarded_from_message_id": null,
+      "withdrawn": false
+    }
+  ],
+  "forwardPlans": [
+    {
+      "operation_id": "1ddd8381-2ec7-4eeb-822d-829470648de9",
+      "sources": [
+        {
+          "roomID": "52A65694-87F3-46D0-85CB-866AB38B552D",
+          "revision": 1,
+          "messageID": "01A1CF4F-5DF6-7FC7-83AD-B1E46731AA11"
+        }
+      ],
+      "resolved": true,
+      "outcome": {
+        "completed": {
+          "_0": {
+            "childCount": 1,
+            "resultDigest": "kSnWLnWDsW5b8f9XpFK4quo3Xke4ajL3+Oq9v1asOGw=",
+            "rejectedItemCount": 0,
+            "cancelledItemCount": 0,
+            "succeededItemCount": 1
+          }
+        }
+      }
+    },
+    {
+      "operation_id": "791f5445-184b-4616-bb86-9994757fc51c",
+      "sources": [
+        {
+          "roomID": "52A65694-87F3-46D0-85CB-866AB38B552D",
+          "revision": 2,
+          "messageID": "01A1CF4F-1BCE-70CC-BF50-9CAE2C79965F"
+        }
+      ],
+      "resolved": true,
+      "outcome": {
+        "completed": {
+          "_0": {
+            "childCount": 1,
+            "resultDigest": "BnnanSUEomA8WLwnLViT0QtmZWVulbFibUoithWnVCI=",
+            "rejectedItemCount": 0,
+            "cancelledItemCount": 0,
+            "succeededItemCount": 1
+          }
+        }
+      }
+    },
+    {
+      "operation_id": "932b1c02-1207-451c-a8c0-52eb876cb0ca",
+      "sources": [
+        {
+          "roomID": "52A65694-87F3-46D0-85CB-866AB38B552D",
+          "revision": 1,
+          "messageID": "01A1CF4F-1BCE-70CC-BF50-9CAE2C79965F"
+        }
+      ],
+      "resolved": true,
+      "outcome": {
+        "completed": {
+          "_0": {
+            "childCount": 1,
+            "resultDigest": "TmaCAeWL4ihVVU33phg2963afnfIgeDWEXAd6F+zHP8=",
+            "rejectedItemCount": 0,
+            "cancelledItemCount": 0,
+            "succeededItemCount": 1
+          }
+        }
+      }
+    }
+  ],
+  "forwardedMessages": [
+    {
+      "message_id": "01a1cf4f-4291-7450-a271-a42165b6e383",
+      "forwarded_from_message_id": "01a1cf4f-1bce-70cc-bf50-9cae2c79965f",
+      "room_id": "01535f3a-49eb-44df-8256-a458f89a015d"
+    },
+    {
+      "message_id": "01a1cf4f-73c2-70eb-8d51-5e0515eed4d7",
+      "forwarded_from_message_id": "01a1cf4f-5df6-7fc7-83ad-b1e46731aa11",
+      "room_id": "01535f3a-49eb-44df-8256-a458f89a015d"
+    },
+    {
+      "message_id": "01a1cf4f-be5a-7388-9861-2d2a2e28adf6",
+      "forwarded_from_message_id": "01a1cf4f-1bce-70cc-bf50-9cae2c79965f",
+      "room_id": "01535f3a-49eb-44df-8256-a458f89a015d"
+    }
+  ],
+  "reactionReceipts": [
+    {
+      "actor_user_id": "bffeee09-8e95-4eb9-b4cd-34d6a2557100",
+      "operation_id": "10a7d942-fa04-44cf-b7b2-c6fcd36f4202",
+      "target_state": "present",
+      "revision": "1"
+    },
+    {
+      "actor_user_id": "83ab7731-a864-4068-bce5-bec56a3b6fe7",
+      "operation_id": "cad7ade6-ac7b-441f-8335-0df34cdb5854",
+      "target_state": "present",
+      "revision": "1"
+    },
+    {
+      "actor_user_id": "bffeee09-8e95-4eb9-b4cd-34d6a2557100",
+      "operation_id": "49685ea5-9d57-4502-a28c-e89d18ab99f4",
+      "target_state": "absent",
+      "revision": "2"
+    },
+    {
+      "actor_user_id": "bffeee09-8e95-4eb9-b4cd-34d6a2557100",
+      "operation_id": "9d520d3b-5ed2-48be-b566-2105c41dae5d",
+      "target_state": "present",
+      "revision": "1"
+    }
+  ],
+  "forwardedMedia": [
+    {
+      "message_id": "01a1cf4f-73c2-70eb-8d51-5e0515eed4d7",
+      "media_id": "21e1bc87-edc1-410e-b1f4-09ee7f562944",
+      "active": true,
+      "state": "available",
+      "byte_count": 16384
+    }
+  ]
+}

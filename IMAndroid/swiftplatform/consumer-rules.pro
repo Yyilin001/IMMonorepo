@@ -1,0 +1,2 @@
+-keep class com.xmtx.im.swiftplatform.AndroidRuntimePlatform { *; }
+-keep class com.xmtx.im.swiftplatform.AndroidRuntimePlatform$Companion { *; }

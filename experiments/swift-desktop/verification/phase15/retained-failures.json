@@ -1,0 +1,35 @@
+{
+  "nativeBackend": [
+    {
+      "log": "/tmp/im-phase15-native-backend.log",
+      "result": "Initial directory wait timed out after runtime became offline."
+    },
+    {
+      "log": "/tmp/im-phase15-native-backend2.log",
+      "result": "Same failure repeated. Native test host now performs at most three foreground reconnects, matching host ownership; final run passed with one reconnect per initial peer. No production reconnect policy was changed."
+    }
+  ],
+  "gatewayStartupObservation": "The isolated gateway logged journal sourceNotReady; the precise cause of each offline transition was not established.",
+  "iosUI": [
+    {
+      "log": "/tmp/im-phase15-ios-backend.log",
+      "reason": "Reply reference is a label, not a button; corrected test query."
+    },
+    {
+      "log": "/tmp/im-phase15-ios-backend2.log",
+      "reason": "Text editor tap placed insertion at start; test replacement helper did not remove original content. Server-projected edit was visible in retained hierarchy."
+    },
+    {
+      "log": "/tmp/im-phase15-ios-backend3.log",
+      "reason": "Existing iOS edit action trims whitespace; expected test value included a leading space. Test now compares normalized submitted content."
+    },
+    {
+      "log": "/tmp/im-phase15-ios-backend4.log",
+      "reason": "Message action UI test passed. Next account-switch test started without the isolated launch arguments after the new test terminated the App. Driver now explicitly relaunches the scoped installation between stages."
+    }
+  ],
+  "sharedUnitDevelopment": {
+    "log": "/tmp/im-phase15-shared-tests.log",
+    "reason": "Close test initially treated in-flight CancellationError as an unexpected failure; it now checks cancellation and verifies physical drain plus durable intent retention."
+  }
+}

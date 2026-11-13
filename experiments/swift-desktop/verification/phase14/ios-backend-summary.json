@@ -1,0 +1,35 @@
+{
+  "realBackend": true,
+  "physicalDevice": false,
+  "simulator": "iPhone 16 Pro / iOS 18.5",
+  "tests": [
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.wOVEDg/1B9FED12-3CEF-418C-B214-F1C6AF675FDB-testAccountSwitchAndColdRestoreKeepProjectionsIsolated.xcresult",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "result": "Passed"
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.wOVEDg/1B9FED12-3CEF-418C-B214-F1C6AF675FDB-testCleansOnlyRequestedIndependentInstallationScope.xcresult",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "result": "Passed"
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.wOVEDg/1B9FED12-3CEF-418C-B214-F1C6AF675FDB-testSharedSessionRegistersAndStartsRealtime.xcresult",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "result": "Passed"
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.wOVEDg/3ABEF6EE-E4F7-410E-9612-9AB48DFD08FA-testCleansOnlyRequestedIndependentInstallationScope.xcresult",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "result": "Passed"
+    }
+  ]
+}

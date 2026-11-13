@@ -47,7 +47,7 @@ public actor V2BackgroundDownloadCoordinator {
     private var initialized = false
     private var closed = false
 
-    init(sessionID: UUID, accountID: UserID, store: GRDBV2LocalSyncStore,
+    package init(sessionID: UUID, accountID: UserID, store: GRDBV2LocalSyncStore,
                 scheduler: V2AccountWorkScheduler, resolver: any V2ClientMediaDownloadTargetResolver,
                 driver: any V2BackgroundDownloadSessionDriving, files: V2ResourceFileStore, root: URL,
                 protectionWriter: any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter(),
@@ -60,19 +60,6 @@ public actor V2BackgroundDownloadCoordinator {
                           sessionID: sessionID, protectionWriter: protectionWriter)
     }
 
-    #if os(iOS)
-    public nonisolated static func native(accountID: UserID, store: GRDBV2LocalSyncStore,
-        scheduler: V2AccountWorkScheduler, resources: V2ResourceCenter,
-        resolver: any V2ClientMediaDownloadTargetResolver) async throws -> V2BackgroundDownloadCoordinator {
-        try await resources.withBackgroundSetup(onCancelledValue: { await $0.close() }) { files, scope in
-            guard accountID == scope.accountID, try await store.resourceFileJournal().accountID() == accountID else { throw V2AccountStorageError.scopeMismatch }
-            let id = try await store.backgroundSessionID(), root = scope.backgroundDirectory
-            try Task.checkCancellation()
-            return try .init(sessionID: id, accountID: accountID, store: store, scheduler: scheduler,
-                resolver: resolver, driver: V2NativeBackgroundSession.sharedDownload(sessionID: id, root: root), files: files, root: root)
-        }
-    }
-    #endif
 
     func requireAttachment(accountID: UserID, files: V2ResourceFileStore) throws {
         guard !closed else { throw V2BackgroundTransferError.closed }
@@ -644,9 +631,7 @@ public actor V2BackgroundDownloadCoordinator {
         for id in Array(permits.keys) { await release(id) }
         awaitingReceipt.removeAll()
         wakes.continuation.finish()
-        #if os(iOS)
-        (driver as? V2NativeBackgroundSession)?.invalidateAfterDrain()
-        #endif
+        driver.invalidateAfterDrain()
     }
 
 }

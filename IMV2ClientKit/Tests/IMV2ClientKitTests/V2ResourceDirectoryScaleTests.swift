@@ -3,6 +3,9 @@ import GRDB
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 /// Opt-in scale verification. Host timings are diagnostics, never proof of the
 /// Release iPhone latency/memory gate. Run on the target device separately.

@@ -1,0 +1,17 @@
+{
+  "projectionCounts": [
+    {
+      "projection_kind": "stranger_message_permission",
+      "count": 2
+    }
+  ],
+  "maxAcknowledgedSequence": 2,
+  "backend": "isolated native account + HTTPS edge + TLS gateway + placement quorum + PostgreSQL 16",
+  "executables": "Existing local builds, not rebuilt during phase4",
+  "binarySHA256": {
+    "IMV2AccountServerApp": "93e4314b00b977b9c5a0badd3e0bf09ad040cb1e252e44d847d01d70553d761a",
+    "IMV2ServerApp": "c650e1afcfc227e8523488ee4458db2b419b8b33e8c4cfd19b9fc0db043cafba",
+    "IMV2LocalGatewayProbe": "5d705cc9abc959853fef3253e12a882e0a254291bee6382b54abfcf7ce36fcda",
+    "IMV2PlacementControlApp": "fcce2e515965fee4a00197d8f001b8faf81db09af9ee9a8c01cd113bf016bd0f"
+  }
+}

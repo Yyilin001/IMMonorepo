@@ -1,6 +1,9 @@
 import XCTest
 import Synchronization
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 final class V2AccountWorkSchedulerTests: XCTestCase, @unchecked Sendable {
     func testActiveDownloadPromotionKeepsPhysicalIdentityAndRejectsForeignAndUploadPermits() async throws {

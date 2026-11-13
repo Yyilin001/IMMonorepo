@@ -1,0 +1,52 @@
+{
+  "devicesAndConfigurations" : [
+    {
+      "device" : {
+        "architecture" : "arm64",
+        "deviceId" : "7BD66C19-1894-4C3B-B394-C779C770002A",
+        "deviceName" : "Phase15 iOS Receiver",
+        "modelName" : "iPhone 16 Pro",
+        "osBuildNumber" : "22F77",
+        "osVersion" : "18.5",
+        "platform" : "iOS Simulator"
+      },
+      "expectedFailures" : 0,
+      "failedTests" : 0,
+      "passedTests" : 200,
+      "skippedTests" : 0,
+      "testPlanConfiguration" : {
+        "configurationId" : "1",
+        "configurationName" : "Test Scheme Action"
+      }
+    }
+  ],
+  "environmentDescription" : "IMApp · Built with macOS 27.0",
+  "expectedFailures" : 0,
+  "failedTests" : 0,
+  "finishTime" : 1794579182.187,
+  "passedTests" : 174,
+  "result" : "Passed",
+  "runtimeWarnings" : [
+
+  ],
+  "skippedTests" : 0,
+  "startTime" : 1794579143.837,
+  "statistics" : [
+    {
+      "subtitle" : "40 test runs",
+      "title" : "14 tests ran with dynamic parameters"
+    }
+  ],
+  "testFailures" : [
+
+  ],
+  "title" : "Test - IMApp",
+  "topInsights" : [
+    {
+      "category" : "Longest Test Runs",
+      "impact" : "0% of duration",
+      "text" : "1 longest test run with outlier durations exceeding 1.88s (three standard deviations)"
+    }
+  ],
+  "totalTestCount" : 174
+}

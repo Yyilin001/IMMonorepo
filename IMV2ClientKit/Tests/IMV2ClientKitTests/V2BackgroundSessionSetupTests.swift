@@ -2,6 +2,9 @@ import Foundation
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Native session setup belongs to account close", .timeLimit(.minutes(1)))
 struct V2BackgroundSessionSetupTests {

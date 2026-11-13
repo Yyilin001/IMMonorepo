@@ -9,6 +9,9 @@ import Security
 import Testing
 import UniformTypeIdentifiers
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 /// Opt in only through verify_v2_live_resource_authors.py --author-capacity.
 /// All peers use the production wire, repositories and page/room coordinators.

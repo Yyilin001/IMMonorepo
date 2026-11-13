@@ -66,10 +66,14 @@ public enum V2HTTPRequestDeadline {
 public final class V2HTTPExecutor: Sendable {
     private let qualityObserver: V2QualityObserver?
     private let scheduler: V2AccountWorkScheduler?
-    private let session: URLSession
+    private let transport: any V2HTTPTransport
     private let metrics: @Sendable (V2NetworkMetric) -> Void
     public init(session: URLSession = V2SecureURLSession.account, scheduler: V2AccountWorkScheduler? = nil, qualityObserver: V2QualityObserver? = nil, metrics: @escaping @Sendable (V2NetworkMetric) -> Void = { _ in }) {
-        self.session = session; self.scheduler = scheduler; self.qualityObserver = qualityObserver; self.metrics = metrics
+        self.transport = V2URLSessionHTTPTransport(session: session); self.scheduler = scheduler; self.qualityObserver = qualityObserver; self.metrics = metrics
+    }
+    public init(transport: any V2HTTPTransport, scheduler: V2AccountWorkScheduler? = nil,
+                qualityObserver: V2QualityObserver? = nil, metrics: @escaping @Sendable (V2NetworkMetric) -> Void = { _ in }) {
+        self.transport = transport; self.scheduler = scheduler; self.qualityObserver = qualityObserver; self.metrics = metrics
     }
     public func execute(_ request: URLRequest, budget: V2HTTPExecutionBudget = .init(), service: String = "account",
                         workContext: V2NetworkWorkContext? = nil) async throws -> (Data, HTTPURLResponse) {
@@ -147,7 +151,8 @@ public final class V2HTTPExecutor: Sendable {
         let start = ContinuousClock.now
         let deadline = min([budget.deadline, V2HTTPRequestDeadline.current, V2HTTPRequestDeadline.deadline(for: request)].compactMap { $0 }.min() ?? start.advanced(by: .seconds(budget.timeout)), start.advanced(by: .seconds(budget.timeout)))
         guard deadline > start else { throw V2HTTPFailure(kind: .deadlineExceeded, service: service, certainty: .notStarted) }
-        let delegate = V2HTTPExecutionDelegate()
+        let connectivity = V2ResourceConnectivityObservation()
+        let delegate = transport.makeExecution(events: .init(waiting: { connectivity.waiting() }, active: { connectivity.finish() }))
         var count = 0
         var status: Int?
         var failure: V2HTTPFailure.Kind?
@@ -170,30 +175,9 @@ public final class V2HTTPExecutor: Sendable {
         do {
             let result = try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: (Data, HTTPURLResponse).self) { group in
-                group.addTask { [session] in
-                    let (bytes, response) = try await session.bytes(for: request, delegate: delegate)
-                    guard let response = response as? HTTPURLResponse else {
-                        throw V2HTTPFailure(kind: .invalidResponse, service: service)
-                    }
-                    delegate.record(response: response.statusCode, bytes: 0)
-                    await onResponse(response)
-                    guard response.expectedContentLength <= Int64(budget.maximumResponseBytes) else {
-                        delegate.cancel()
-                        throw V2HTTPFailure(kind: .responseTooLarge, service: service, statusCode: response.statusCode)
-                    }
-                    var data = Data()
-                    for try await byte in bytes {
-                        try Task.checkCancellation()
-                        guard data.count < budget.maximumResponseBytes else {
-                            delegate.record(response: response.statusCode, bytes: data.count)
-                            delegate.cancel()
-                            throw V2HTTPFailure(kind: .responseTooLarge, service: service, statusCode: response.statusCode)
-                        }
-                        data.append(byte)
-                        if data.count.isMultiple(of: 4096) { delegate.record(response: response.statusCode, bytes: data.count) }
-                    }
-                    delegate.record(response: response.statusCode, bytes: data.count)
-                    return (data, response)
+                group.addTask {
+                    try await delegate.execute(request, maximumResponseBytes: budget.maximumResponseBytes,
+                        service: service, onResponse: onResponse)
                 }
                 group.addTask {
                     try await Task.sleep(until: deadline, clock: .continuous)
@@ -219,58 +203,5 @@ public final class V2HTTPExecutor: Sendable {
             failure = .transport
             throw V2HTTPFailure(kind: .transport, service: service, statusCode: delegate.observation.3)
         }
-    }
-}
-
-final class V2HTTPExecutionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let lock = NSLock()
-    private let connectivity = V2ResourceConnectivityObservation()
-    private var task: URLSessionTask?
-    private var isCancelled = false
-    private var transactions = 0
-    private var reused = false
-    private var phases: V2HTTPPhaseTiming?
-    var phaseTiming: V2HTTPPhaseTiming? { lock.withLock { phases } }
-    private var receivedBytes = 0
-    private var responseStatus: Int?
-    var observation: (Int, Bool, Int, Int?) { lock.withLock { (transactions, reused, receivedBytes, responseStatus) } }
-    func record(response: Int, bytes: Int) { connectivity.finish(); lock.withLock { responseStatus = response; receivedBytes = bytes } }
-    func cancel() {
-        connectivity.finish()
-        let task = lock.withLock { isCancelled = true; return self.task }
-        task?.cancel()
-    }
-    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
-        connectivity.waiting()
-    }
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        v2ForwardAuthenticationChallenge(session: session, task: task, challenge: challenge, completionHandler: completionHandler)
-    }
-    func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
-        let cancel = lock.withLock { self.task = task; return isCancelled }
-        if cancel { task.cancel() }
-    }
-    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
-        lock.withLock {
-            transactions = metrics.transactionMetrics.count
-            reused = metrics.transactionMetrics.contains { $0.isReusedConnection }
-            func sum(_ field: (URLSessionTaskTransactionMetrics) -> TimeInterval?) -> TimeInterval? {
-                let values = metrics.transactionMetrics.compactMap(field)
-                guard !values.isEmpty else { return nil }
-                let total = values.reduce(0, +)
-                return total.isFinite ? total : nil
-            }
-            let rawProtocol = metrics.transactionMetrics.last?.networkProtocolName
-            phases = .init(dns: sum { V2HTTPPhaseTiming.duration($0.domainLookupStartDate, $0.domainLookupEndDate) },
-                connect: sum { V2HTTPPhaseTiming.duration($0.connectStartDate, $0.connectEndDate) },
-                tls: sum { V2HTTPPhaseTiming.duration($0.secureConnectionStartDate, $0.secureConnectionEndDate) },
-                request: sum { V2HTTPPhaseTiming.duration($0.requestStartDate, $0.requestEndDate) },
-                response: sum { V2HTTPPhaseTiming.duration($0.responseStartDate, $0.responseEndDate) },
-                networkProtocol: rawProtocol.map { ["h2", "h3", "http/1.1"].contains($0) ? $0 : "other" })
-        }
-    }
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
     }
 }

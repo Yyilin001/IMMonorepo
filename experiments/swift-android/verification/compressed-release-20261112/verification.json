@@ -1,0 +1,62 @@
+{
+  "releaseBytes": 38952438,
+  "releaseSHA256": "a07b3c0659556c76028ed376fc536b9cf7e9baede179d76652fd26420eb19e5b",
+  "originalBytes": 99691930,
+  "savedBytes": 60739492,
+  "releaseUnsigned": true,
+  "compressedLibraryCount": 20,
+  "nativeContentUnchanged": true,
+  "debugNativeLibrariesRemainUncompressed": true,
+  "builds": [
+    "assembleDebug",
+    "lintDebug",
+    "assembleRelease",
+    "lintRelease",
+    "bundleRelease"
+  ],
+  "device": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "isolatedAVD": "IM_CompressedRelease_API31",
+    "signing": "temporary debug-key-signed copy of the Release APK",
+    "installPassed": true,
+    "coldLaunchPassed": true,
+    "signedOutRestoreScreenNoError": true,
+    "extractedLibrarySHA256": {
+      "libBlocksRuntime.so": "27b0f404a4d806dbbc0b289fd0cccec6027db70f85af2c0ba8380243ef9368b6",
+      "libFoundation.so": "2816f09d50d57a1198a16fd6f4b2b3c8efa4bbcbcdd80a2790df14874dc431f3",
+      "libFoundationEssentials.so": "54def8d25d2da1162e888a17a78a8155ef3581fecadb74f2fb19d3c1a3f6d122",
+      "libFoundationInternationalization.so": "cacaaba471e77bde34eb306cb9c37227a85810518ce11e483b8f43d221db3b11",
+      "libFoundationNetworking.so": "849d235a095262d63d33a8d0574e08733b3a98d7548a845400319906074ade45",
+      "libIMV2SharedSDK.so": "cbeb2264d80ec74e93151417066c7aee5183c7ad75d1f53b9204fdadb1125d16",
+      "lib_FoundationICU.so": "ab4f2ec614829b6e156b0f0f08f7c85c1642b9c03ecb578066d92215f5be550c",
+      "libandroidx.graphics.path.so": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6",
+      "libc++_shared.so": "b5d97c38a728afe28d341cda3369f512d35eaf9c680c1b0563cd6a63e395230f",
+      "libdispatch.so": "d9b310cc8f3d31f6742e55db87f803c5af497d0a09907872a7681c9d51d8feab",
+      "libswiftAndroid.so": "207a98c9b2e2ab168ce5909125d77d7c40a92456bce2577c598edd809837a0c3",
+      "libswiftCore.so": "2f98007dee8671ad7342fdd4f1261d068a185ba5284f1a097f0e5eb79a234e55",
+      "libswiftDispatch.so": "ecf24257be6ec1357d4b12e82d40194589953f59f731bbc3896e85c9524bb79c",
+      "libswiftObservation.so": "83fc495a2983d6d2d78607cda1b14e8fc09e3bb32d951e6130276638c6fdeb8c",
+      "libswiftSynchronization.so": "4c0f2a2fc715825677cd39555ec16f0b5aeb8397f9ebb7dd1cea8caa43568d83",
+      "libswift_Builtin_float.so": "341616031c0b57344267c2aa6ea9f1937ddc7903156a9ae6c2d9b4afc5a8909d",
+      "libswift_Concurrency.so": "017c7f93987d904f33fb15c3f200012255efa8035b18a6fe72481590c88e778b",
+      "libswift_RegexParser.so": "35b72944f54a9b232e8b59cfaa464e8f3362d1231b5c06009dea10c210d03f3f",
+      "libswift_StringProcessing.so": "1987da0d40aff58a2faff3549625e478a4e7828d2a3aecb41badad2a9607c3c2",
+      "libswift_math.so": "50039bc4ecc0d083c3c311c9b91ca6ccdb887eb2e2b9c56a1456a30f79ba3428"
+    },
+    "mappedSharedLibraryCount": 19,
+    "crashLogEmpty": true,
+    "realBackendAcceptance": false
+  },
+  "bundle": {
+    "built": true,
+    "uncompressedNativeLibrariesEnabled": false,
+    "generatedSplitAPKDeviceTest": false
+  },
+  "cleanup": {
+    "testAppUninstalled": true,
+    "ownedEmulatorStopped": true,
+    "ownedAVDDeleted": true,
+    "existingEmulatorPreserved": true
+  }
+}

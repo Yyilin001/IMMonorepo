@@ -1,0 +1,44 @@
+[
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/assertion",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/assertion",
+    "status": 401,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/register",
+    "status": 200,
+    "count": 7
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials",
+    "status": 200,
+    "count": 12
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials/cancel-registration",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials/revoke",
+    "status": 204,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/direct-room-operations/submit",
+    "status": 200,
+    "count": 4
+  }
+]

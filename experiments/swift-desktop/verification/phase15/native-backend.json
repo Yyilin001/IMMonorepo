@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "realBackend": true,
+  "stages": [
+    "Desktop stage: connected",
+    "Desktop stage: room opened",
+    "Desktop stage: received text",
+    "Desktop stage: reply received",
+    "Desktop stage: reaction received",
+    "Desktop stage: native independent window paging, observation and sibling close passed",
+    "Desktop stage: search matched",
+    "Desktop stage: native facade send/edit/reply/forward/reaction/remove/withdraw confirmed by peer",
+    "Desktop stage: cut detected",
+    "Desktop stage: owner closed",
+    "Desktop stage: old native window rejected after owner close"
+  ],
+  "hostReconnects": [
+    "Desktop host reconnect 1, failure=operationFailed",
+    "Desktop host reconnect 1, failure=operationFailed"
+  ],
+  "sourceLog": "/tmp/im-phase15-native-backend3.log",
+  "sha256": "1eda615cd662fe62cc18341ebb1e41cac6cf825a21b82052bd47b3e779807e23"
+}

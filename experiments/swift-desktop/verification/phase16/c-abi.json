@@ -1,0 +1,10 @@
+{
+  "platform": "Darwin",
+  "library": "/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMV2ClientKit/.build/out/Products/Debug/libIMV2SharedSDK.dylib",
+  "cABI": true,
+  "restore": true,
+  "closedAndReleased": true,
+  "leakedClients": 0,
+  "leakedOperations": 0,
+  "backendLogin": false
+}

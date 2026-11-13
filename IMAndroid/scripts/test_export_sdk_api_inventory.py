@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from export_sdk_api_inventory import (SOURCE_ROOT, check_inventory, encode_records,
+from export_sdk_api_inventory import (MODULES, SOURCE_ROOT, check_inventory, encode_records,
                                       export_inventory, normalize_graph)
 
 
@@ -31,8 +31,11 @@ class InventoryTests(unittest.TestCase):
         return result
 
     def export(self):
-        path = self.repo / "graph.json"
-        path.write_text(json.dumps(self.graph))
+        path = self.repo / "graphs"
+        path.mkdir(exist_ok=True)
+        for name in MODULES:
+            graph = self.graph if name == "IMV2ClientKit" else {"module": {"name": name}, "metadata": {}, "symbols": []}
+            (path / (name + ".symbols.json")).write_text(json.dumps(graph))
         output = self.repo / "inventory"
         export_inventory(path, self.repo, output)
         return output

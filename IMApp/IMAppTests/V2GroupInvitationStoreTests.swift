@@ -1,6 +1,7 @@
 import Foundation
 import os
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
 import IMV2Core
 import Testing
 @testable import IMApp

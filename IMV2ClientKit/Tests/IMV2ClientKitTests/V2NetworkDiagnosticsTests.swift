@@ -1,5 +1,8 @@
 import Foundation
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 import Testing
 
 @Suite("Bounded production network diagnostics")

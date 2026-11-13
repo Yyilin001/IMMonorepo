@@ -32,9 +32,9 @@ val generateFixtureTrust = fixtureCa?.let { path ->
 android {
     namespace = "com.xmtx.im"
     compileSdk = 36
-    sourceSets.getByName("androidTest").assets.srcDir("../test-fixtures")
     if (fixtureCa != null) sourceSets.getByName("debug").res.setSrcDirs(listOf(fixtureResources))
     defaultConfig {
+        ndk { abiFilters += "arm64-v8a" }
         applicationId = "com.xmtx.im.android"
         minSdk = 31
         targetSdk = 36
@@ -44,27 +44,28 @@ android {
     }
     buildFeatures { compose = true; buildConfig = true }
     buildTypes {
+        if (providers.gradleProperty("imSharedSDKVerification").orNull == "true") getByName("debug") { applicationIdSuffix = ".sharedverification" }
         getByName("release") {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
-        create("benchmark") {
-            initWith(getByName("release"))
-            signingConfig = signingConfigs.getByName("debug")
-            applicationIdSuffix = ".benchmark"
-            isDebuggable = false
-            matchingFallbacks += "release"
-        }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+}
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        // Smaller distribution packages; Android extracts the native libraries on install.
+        variant.packaging.jniLibs.useLegacyPackaging.set(true)
+        variant.packaging.jniLibs.useLegacyPackagingFromBundle.set(true)
+    }
 }
 if (generateFixtureTrust != null) tasks.configureEach { if (name == "preDebugBuild") dependsOn(generateFixtureTrust) }
 kotlin { jvmToolchain(17) }
 dependencies {
     testImplementation("junit:junit:4.13.2")
-    implementation(project(":platform"))
-    "benchmarkImplementation"("androidx.profileinstaller:profileinstaller:1.4.0")
+    implementation(project(":sharedsdk"))
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     implementation(platform("androidx.compose:compose-bom:2025.12.00"))
     implementation("androidx.activity:activity-compose:1.12.1")
     implementation("androidx.compose.material3:material3")
@@ -73,10 +74,9 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("androidx.navigation3:navigation3-runtime:1.0.0")
     implementation("androidx.navigation3:navigation3-ui:1.0.0")
-    implementation("androidx.media3:media3-exoplayer:1.9.4")
-    implementation("androidx.media3:media3-ui-compose:1.9.4")
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.12.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

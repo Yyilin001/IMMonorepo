@@ -1,0 +1,4 @@
+** TEST SUCCEEDED **
+iOS unit tests executed: passed=7, failed=0, skipped=0
+iOS unit tests result=pass project=/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMApp/IMApp.xcodeproj scheme=IMApp configuration=Debug destination=platform=iOS Simulator,id=E0283730-5ED7-4EB4-ADA9-630F3125AE49 selection=IMAppTests/V2MessageForwardingTests IMAppTests/V2ConversationStoreTests/sendKeepsReplyFrozenDuringMentionResolution IMAppTests/V2ConversationStoreTests/messageReactionTogglesOnlyTheCurrentUsersSetMembership IMAppTests/V2ConversationStoreTests/messageReactionIsNotAvailableAfterWithdrawal IMAppTests/V2ConversationStoreTests/reactionExplicitOfflineTargetSurvivesPageAndUnknownNeedsUserContinuation
+iOS unit tests result_bundle=/tmp/im-phase12-ios.xcresult

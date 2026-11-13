@@ -1,0 +1,172 @@
+Building for debugging...
+[Computing dependencies]
+[Provisioning 31 / 38]
+[1 / 3]
+Build complete! (0.75秒)
+􀟈  Test run started.
+􀄵  Testing Library Version: 2084
+􀄵  Target Platform: arm64e-apple-macos14.0
+􀟈  Suite "Reaction durable admission and recovery" started.
+􀟈  Suite "Forward source intent survives persistence" started.
+􀟈  Suite V2MessageSendWireCodecTests started.
+􀟈  Suite "Durable forward plan authority" started.
+􀟈  Suite "Portable HTTP execution" started.
+􀟈  Suite "Bound forward completion proofs" started.
+􀟈  Suite "Reaction history ownership" started.
+􀟈  Suite "Forward original plan recovery" started.
+􀟈  Suite "Forward child UUID restart preserves authority" started.
+􀟈  Test "expired unfrozen draft never performs baseline or submission I/O" started.
+􀟈  Test everyResultBranchRoundTrips() started.
+􀟈  Test "a full shared reservation transfers into frozen work without a second admission" started.
+􀟈  Suite "Durable own-reaction intent" started.
+􀟈  Suite "Public work forward plan execution" started.
+􀟈  Test "mixed rooms and source revisions stay frozen after reopen" started.
+􀟈  Test commandAndRecoveryPreserveDomainIdentityAndFingerprints() started.
+􀟈  Suite "Forward history retention" started.
+􀟈  Test "admission reserves full progress and terminal proof before capacity fills" started.
+􀟈  Test "new finished history never hides an old unknown plan from its source page" started.
+􀟈  Test "fresh schema persists original manifest and child identities across reopen" started.
+􀟈  Test "terminal result replays once and rejects a different permanent result" started.
+􀟈  Suite "Message send public work" started.
+􀟈  Test "frozen manifest rejects mismatched identity without creating additional work" started.
+􀟈  Test "public completion and full domain result roll back together on storage failure" started.
+􀟈  Test "proof corruption fails before completing public work" started.
+􀟈  Test "processing proof and server floor survive user continuation and cancellation" started.
+􀟈  Test sharedSessionRoutesConcurrentResponsesToTheirOwners() started.
+􀟈  Test "cancelling a page before saving never enters the durable journal" started.
+􀟈  Test "a processing child cannot regress or become a cancellation-before-start" started.
+􀟈  Test "only proven completed history is removed; a queued successor survives" started.
+􀟈  Test "lost acceptance reopens SQLite and queries original manifest without another parent submission" started.
+􀟈  Test "partial acceptance keeps its proof while explicit cancellation resolves only pending children" started.
+􀟈  Test "completed child proof and pending identities survive reopen" started.
+􀟈  Test "100 by 10 manifests retain 50 stable children and exact terminal totals" started.
+􀟈  Test "offline target saves first and coalesces without renewing identity or deadline" started.
+􀟈  Test "local cancellation stops work before any submission claim" started.
+􀟈  Test unknownAndPartiallyCompletedPlansAreNeverAgedOut() started.
+􀟈  Test case passing 1 argument field → "fingerprint" to "proof corruption fails before completing public work" started.
+􀟈  Test case passing 1 argument field → "source" to "proof corruption fails before completing public work" started.
+􀟈  Test incomingDependencyPinsCompletedForwardHistory() started.
+􀟈  Test completedProofAndDomainPayloadArePrunedAtomicallyAfterSevenDays() started.
+􀟈  Test case passing 1 argument field → "target" to "proof corruption fails before completing public work" started.
+􀟈  Test case passing 1 argument field → "revision" to "proof corruption fails before completing public work" started.
+􀟈  Test case passing 1 argument field → "empty" to "proof corruption fails before completing public work" started.
+􀟈  Test "server-confirmed close of an expired unknown send releases its room quota" started.
+􁁛  Test everyResultBranchRoundTrips() passed after 0.219 seconds.
+􁁛  Test commandAndRecoveryPreserveDomainIdentityAndFingerprints() passed after 0.225 seconds.
+􁁛  Test "a full shared reservation transfers into frozen work without a second admission" passed after 0.278 seconds.
+􁁛  Test "frozen manifest rejects mismatched identity without creating additional work" passed after 0.278 seconds.
+􁁛  Test "expired unfrozen draft never performs baseline or submission I/O" passed after 0.279 seconds.
+􁁛  Test "processing proof and server floor survive user continuation and cancellation" passed after 0.278 seconds.
+􁁛  Test "mixed rooms and source revisions stay frozen after reopen" passed after 0.279 seconds.
+􁁛  Test "fresh schema persists original manifest and child identities across reopen" passed after 0.279 seconds.
+􁁛  Test "terminal result replays once and rejects a different permanent result" passed after 0.280 seconds.
+􁁛  Test "public completion and full domain result roll back together on storage failure" passed after 0.299 seconds.
+􁁛  Test "a processing child cannot regress or become a cancellation-before-start" passed after 0.299 seconds.
+􁁛  Suite V2MessageSendWireCodecTests passed after 0.300 seconds.
+􁁛  Test "offline target saves first and coalesces without renewing identity or deadline" passed after 0.299 seconds.
+􁁛  Test "partial acceptance keeps its proof while explicit cancellation resolves only pending children" passed after 0.299 seconds.
+􁁛  Test "local cancellation stops work before any submission claim" passed after 0.299 seconds.
+􁁛  Test unknownAndPartiallyCompletedPlansAreNeverAgedOut() passed after 0.299 seconds.
+􁁛  Suite "Forward source intent survives persistence" passed after 0.300 seconds.
+􀟈  Test "unknown frozen head keeps its version and blocks later target until original receipt" started.
+􁁛  Test "proof corruption fails before completing public work" with 5 test cases passed after 0.301 seconds.
+􁁛  Suite "Bound forward completion proofs" passed after 0.301 seconds.
+􁁛  Test "completed child proof and pending identities survive reopen" passed after 0.301 seconds.
+􁁛  Suite "Forward child UUID restart preserves authority" passed after 0.301 seconds.
+􁁛  Test "only proven completed history is removed; a queued successor survives" passed after 0.303 seconds.
+􁁛  Suite "Reaction history ownership" passed after 0.303 seconds.
+􁁛  Test sharedSessionRoutesConcurrentResponsesToTheirOwners() passed after 0.305 seconds.
+􀟈  Test headerCooldownPrecedesBodyLimitFailure() started.
+􁁛  Test "cancelling a page before saving never enters the durable journal" passed after 0.307 seconds.
+􁁛  Suite "Reaction durable admission and recovery" passed after 0.307 seconds.
+􁁛  Test "admission reserves full progress and terminal proof before capacity fills" passed after 0.307 seconds.
+􁁛  Test "lost acceptance reopens SQLite and queries original manifest without another parent submission" passed after 0.321 seconds.
+􁁛  Suite "Forward original plan recovery" passed after 0.321 seconds.
+􁁛  Test incomingDependencyPinsCompletedForwardHistory() passed after 0.326 seconds.
+􁁛  Test headerCooldownPrecedesBodyLimitFailure() passed after 0.030 seconds.
+􀟈  Test delegateSupportsSuccessExactLimitAndRepeatedPreCancellation() started.
+􁁛  Test delegateSupportsSuccessExactLimitAndRepeatedPreCancellation() passed after 0.001 seconds.
+􁁛  Suite "Portable HTTP execution" passed after 0.337 seconds.
+􁁛  Test completedProofAndDomainPayloadArePrunedAtomicallyAfterSevenDays() passed after 0.340 seconds.
+􁁛  Suite "Forward history retention" passed after 0.354 seconds.
+􁁛  Test "unknown frozen head keeps its version and blocks later target until original receipt" passed after 0.068 seconds.
+􀟈  Test "snapshot identity must bind actor and key before freezing" started.
+􁁛  Test "snapshot identity must bind actor and key before freezing" passed after 0.030 seconds.
+􁁛  Suite "Durable own-reaction intent" passed after 0.400 seconds.
+􁁛  Test "100 by 10 manifests retain 50 stable children and exact terminal totals" passed after 0.408 seconds.
+􁁛  Suite "Public work forward plan execution" passed after 0.409 seconds.
+􁁛  Test "server-confirmed close of an expired unknown send releases its room quota" passed after 0.361 seconds.
+􀟈  Test "sending restores an archived conversation and preserves pin and mute settings" started.
+􁁛  Test "sending restores an archived conversation and preserves pin and mute settings" passed after 0.056 seconds.
+􀟈  Test "a send supersedes an unfrozen archive without resetting other pending settings" started.
+􁁛  Test "a send supersedes an unfrozen archive without resetting other pending settings" passed after 0.028 seconds.
+􀟈  Test "failure to save a send rolls back its automatic unarchive" started.
+􁁛  Test "failure to save a send rolls back its automatic unarchive" passed after 0.037 seconds.
+􀟈  Test "explicit resend of a proven-unsent message also restores its archived conversation" started.
+􁁛  Test "explicit resend of a proven-unsent message also restores its archived conversation" passed after 0.040 seconds.
+􀟈  Test "pending rows keep the original creation time through handoff and retries" started.
+􁁛  Test "pending rows keep the original creation time through handoff and retries" passed after 0.036 seconds.
+􀟈  Test "a send paused for manual confirmation does not block later messages" started.
+􀟈  Test case passing 1 argument paused → true to "a send paused for manual confirmation does not block later messages" started.
+􀟈  Test case passing 1 argument paused → false to "a send paused for manual confirmation does not block later messages" started.
+􁁛  Test "a send paused for manual confirmation does not block later messages" with 2 test cases passed after 0.073 seconds.
+􀟈  Test "pending presentation distinguishes network and authentication waits" started.
+􀟈  Test case passing 1 argument network → true to "pending presentation distinguishes network and authentication waits" started.
+􀟈  Test case passing 1 argument network → false to "pending presentation distinguishes network and authentication waits" started.
+􁁛  Test "pending presentation distinguishes network and authentication waits" with 2 test cases passed after 0.062 seconds.
+􀟈  Test "offline work survives reopening and resumes the frozen command without a manual retry" started.
+􁁛  Test "offline work survives reopening and resumes the frozen command without a manual retry" passed after 0.050 seconds.
+􀟈  Test "connection recovery observes both preexisting and late parked commands" started.
+􀟈  Test case passing 1 argument parkFirst → false to "connection recovery observes both preexisting and late parked commands" started.
+􀟈  Test case passing 1 argument parkFirst → true to "connection recovery observes both preexisting and late parked commands" started.
+􁁛  Test "new finished history never hides an old unknown plan from its source page" passed after 1.016 seconds.
+􁁛  Suite "Durable forward plan authority" passed after 1.016 seconds.
+􁁛  Test "connection recovery observes both preexisting and late parked commands" with 2 test cases passed after 0.087 seconds.
+􀟈  Test "fresh authentication wakes legacy transport-paused work but keeps its recovery action" started.
+􁁛  Test "fresh authentication wakes legacy transport-paused work but keeps its recovery action" passed after 0.030 seconds.
+􀟈  Test "connection wakeup excludes unknown outcomes and capacity failures" started.
+􀟈  Test case passing 1 argument capacity → false to "connection wakeup excludes unknown outcomes and capacity failures" started.
+􀟈  Test case passing 1 argument capacity → true to "connection wakeup excludes unknown outcomes and capacity failures" started.
+􁁛  Test "connection wakeup excludes unknown outcomes and capacity failures" with 2 test cases passed after 0.062 seconds.
+􀟈  Test "an unknown last submission starts the independent reconciliation round" started.
+􀟈  Test case passing 1 argument typedTransportFailure → false to "an unknown last submission starts the independent reconciliation round" started.
+􀟈  Test case passing 1 argument typedTransportFailure → true to "an unknown last submission starts the independent reconciliation round" started.
+􁁛  Test "an unknown last submission starts the independent reconciliation round" with 2 test cases passed after 0.074 seconds.
+􀟈  Test transportCertaintyPersistsNextAction(_:) started.
+􀟈  Test case passing 1 argument failure → .unavailableBeforeSubmission to transportCertaintyPersistsNextAction(_:) started.
+􀟈  Test case passing 1 argument failure → .outcomeUnknown to transportCertaintyPersistsNextAction(_:) started.
+􁁛  Test transportCertaintyPersistsNextAction(_:) with 2 test cases passed after 0.064 seconds.
+􀟈  Test "correlated TCP busy preserves the claim action; ambiguous unavailable reconciles" started.
+􀟈  Test case passing 2 arguments code → "SERVER_BUSY", action → .submit to "correlated TCP busy preserves the claim action; ambiguous unavailable reconciles" started.
+􀟈  Test case passing 2 arguments code → "SERVER_BUSY", action → .reconcile to "correlated TCP busy preserves the claim action; ambiguous unavailable reconciles" started.
+􀟈  Test case passing 2 arguments code → "UNAVAILABLE", action → .submit to "correlated TCP busy preserves the claim action; ambiguous unavailable reconciles" started.
+􀟈  Test case passing 2 arguments code → "UNAVAILABLE", action → .reconcile to "correlated TCP busy preserves the claim action; ambiguous unavailable reconciles" started.
+􁁛  Test "correlated TCP busy preserves the claim action; ambiguous unavailable reconciles" with 4 test cases passed after 0.117 seconds.
+􀟈  Test provenUnsentDispositionPreservesUnknownIdentity(_:) started.
+􀟈  Test case passing 1 argument scenario → "negative" to provenUnsentDispositionPreservesUnknownIdentity(_:) started.
+􀟈  Test case passing 1 argument scenario → "expired" to provenUnsentDispositionPreservesUnknownIdentity(_:) started.
+􀟈  Test case passing 1 argument scenario → "unknown" to provenUnsentDispositionPreservesUnknownIdentity(_:) started.
+􁁛  Test provenUnsentDispositionPreservesUnknownIdentity(_:) with 3 test cases passed after 0.107 seconds.
+􀟈  Test acceptedPresentationConvergesWithoutResurrection(_:) started.
+􀟈  Test case passing 1 argument order → "receiptFirst" to acceptedPresentationConvergesWithoutResurrection(_:) started.
+􀟈  Test case passing 1 argument order → "projectionFirst" to acceptedPresentationConvergesWithoutResurrection(_:) started.
+􀟈  Test case passing 1 argument order → "preparedSnapshot" to acceptedPresentationConvergesWithoutResurrection(_:) started.
+􀟈  Test case passing 1 argument order → "projectionBeforeSnapshot" to acceptedPresentationConvergesWithoutResurrection(_:) started.
+􁁛  Test acceptedPresentationConvergesWithoutResurrection(_:) with 4 test cases passed after 1.010 seconds.
+􀟈  Test "200 terminal sends remain pageable without hiding a later active send" started.
+􁁛  Test "200 terminal sends remain pageable without hiding a later active send" passed after 0.920 seconds.
+􀟈  Test "a lost acceptance survives restart and resolves the original client message ID" started.
+􁁛  Test "a lost acceptance survives restart and resolves the original client message ID" passed after 0.072 seconds.
+􀟈  Test "a full shared reservation transfers to executable work without double admission" started.
+􁁛  Test "a full shared reservation transfers to executable work without double admission" passed after 0.039 seconds.
+􀟈  Test "preparation does not renew the original bounded first submission deadline" started.
+􁁛  Test "preparation does not renew the original bounded first submission deadline" passed after 0.044 seconds.
+􀟈  Test "200 pending messages per room are bounded independently of other rooms" started.
+􁁛  Test "200 pending messages per room are bounded independently of other rooms" passed after 0.267 seconds.
+􀟈  Test handoffFreezesServerDeadlineDespiteDeviceSkew(skew:) started.
+􀟈  Test case passing 1 argument skew → -120.0 to handoffFreezesServerDeadlineDespiteDeviceSkew(skew:) started.
+􀟈  Test case passing 1 argument skew → 30.0 to handoffFreezesServerDeadlineDespiteDeviceSkew(skew:) started.
+􀟈  Test case passing 1 argument skew → 120.0 to handoffFreezesServerDeadlineDespiteDeviceSkew(skew:) started.
+􁁛  Test handoffFreezesServerDeadlineDespiteDeviceSkew(skew:) with 3 test cases passed after 0.102 seconds.
+􁁛  Suite "Message send public work" passed after 3.951 seconds.
+􁁛  Test run with 53 tests in 13 suites passed after 3.952 seconds.

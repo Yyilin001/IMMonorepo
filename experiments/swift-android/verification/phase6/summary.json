@@ -1,0 +1,56 @@
+{
+  "phase": 6,
+  "date": "2026-11-12",
+  "branch": "codex/swift-android-feasibility",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "realBackendAppTests": 2,
+    "passed": 2,
+    "failed": 0,
+    "skipped": 0,
+    "directoryTestSeconds": 48.36,
+    "messagingRegressionSeconds": 39.888,
+    "debugBuild": true,
+    "lint": true,
+    "jvmTestTasks": "NO-SOURCE; no JVM test case count claimed"
+  },
+  "swift": {
+    "testsPassed": 112,
+    "suites": 14
+  },
+  "ios": {
+    "testsPassed": 27,
+    "failed": 0,
+    "skipped": 0,
+    "arm64SimulatorBuild": true,
+    "publicSymbols": 6079,
+    "apiAdded": 0,
+    "apiRemoved": 0,
+    "apiChanged": 0
+  },
+  "pythonTestsPassed": 10,
+  "packages": {
+    "testedIsolatedDebug": {
+      "sha256": "25162b420e87133ed98bf6f1c28ceda57148dcd20ba6fc2da60f4c721e7738fc",
+      "testCAIncluded": true
+    },
+    "normalDebug": {
+      "sha256": "94dbac51e7a314e5aa469d77462a58130b359a286771c949beeb1817ec546a03",
+      "bytes": 159559050,
+      "abis": [
+        "arm64-v8a"
+      ],
+      "testCAIncluded": false,
+      "deviceRuntimeTest": false
+    }
+  },
+  "limitations": [
+    "Contact/member names use user ID fallback; contextual profile presentation, aliases and avatars are not integrated",
+    "Group invitation links/QR, group metadata editing and member mute UI are not integrated",
+    "API31 arm64 emulator; no physical device or Release runtime validation in this phase",
+    "Owner reopen is tested, not OS process kill/power loss; no large-directory performance acceptance",
+    "Old Kotlin credentials/database/outbox migration remains outside this phase",
+    "Permission and stale revision failures pause admission; they are not fabricated terminal rejection receipts"
+  ]
+}

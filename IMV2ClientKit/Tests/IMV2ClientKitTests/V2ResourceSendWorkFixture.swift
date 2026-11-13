@@ -2,6 +2,9 @@ import Foundation
 import GRDB
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 /// Resource tests inspect the production typed send payload and finish with a
 /// matching owner receipt, rather than synthesizing legacy outbox acceptance.

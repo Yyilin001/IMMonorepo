@@ -1,0 +1,56 @@
+{
+  "phase": 8,
+  "branch": "codex/swift-android-feasibility",
+  "date": "2026-11-12",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "appPassed": true,
+    "peopleRegressionPassed": true,
+    "directoryRegressionPassed": true,
+    "messagingRegressionPassed": true,
+    "sameTestedAPK": true,
+    "tests": 4,
+    "testSeconds": [
+      40.308,
+      45.596,
+      47.282,
+      41.824
+    ],
+    "jvmUnitTasks": "NO-SOURCE",
+    "lint": "passed",
+    "normalDebugBuild": "passed",
+    "normalDebugDeviceAcceptance": false
+  },
+  "swift": {
+    "tests": 104,
+    "suites": 12,
+    "passed": true
+  },
+  "ios": {
+    "tests": 49,
+    "failed": 0,
+    "skipped": 0,
+    "packageBuild": "passed",
+    "publicSymbols": 6079,
+    "apiChanges": 0
+  },
+  "toolTests": 10,
+  "scope": [
+    "ownAvatarCropUploadRemove",
+    "groupAvatarUploadRemove",
+    "qrImageInvitationJoin",
+    "cameraScannerOpenCancel",
+    "androidResourceStorage"
+  ],
+  "limits": [
+    "physicalCameraOpticalScan",
+    "cameraPermissionDenialUI",
+    "avatarCapture",
+    "maximumImageStress",
+    "osProcessDeathDuringUpload",
+    "generalFilePresentationExport",
+    "oldKotlinDataMigration",
+    "systemBackgroundTasks"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "backendStopped": true,
+  "postgresPIDFileAbsent": true,
+  "backendPortsClosed": true,
+  "ownedAndroidPackagesRemoved": true,
+  "ownedEmulatorStopped": true,
+  "ownedAVDRemoved": true,
+  "ownedAdbReversesRemoved": true,
+  "existingIOSSimulatorPreserved": "E0283730-5ED7-4EB4-ADA9-630F3125AE49"
+}

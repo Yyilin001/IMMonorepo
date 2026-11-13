@@ -316,13 +316,22 @@ protocol V2ModeratedGroupMemberRemoving: Sendable {
 /// 它在尝试传输之前先持久化命令，因此前台连接失败会转化为持久化重试，
 /// 而不是丢失界面意图。
 actor V2OperationConversationSender: V2ConversationSending, V2ConversationSendTracking {
-    private let service: V2MessageSendOperationService
-    init(service:V2MessageSendOperationService) { self.service=service }
+    private let enqueue: @Sendable (RoomID, String, [V2MentionTarget], [V2MessageEntity], V2MessageReplyReference?) async throws -> UUID
+    private let confirmations: @Sendable (UUID) async -> AsyncThrowingStream<V2OperationExecutionState?, any Error>
+    // Compatibility construction for existing tests/hosts; production injects the shared facade.
+    init(service: V2MessageSendOperationService) {
+        enqueue = { try await service.enqueueMessage(roomID: $0, text: $1, mentions: $2, entities: $3, replyTo: $4) }
+        confirmations = { await service.confirmationUpdates(intentID: $0) }
+    }
+    init(service: V2MessageService) {
+        enqueue = { try await service.send(in: $0, text: $1, mentions: $2, entities: $3, replyTo: $4) }
+        confirmations = { await service.sendConfirmations($0) }
+    }
     func enqueueTracked(text: String, mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, roomID: String) async throws -> UUID {
-        try await service.enqueueMessage(roomID: .init(roomID), text: text, mentions: mentions, entities: entities, replyTo: replyTo)
+        try await enqueue(.init(roomID), text, mentions, entities, replyTo)
     }
     func sendConfirmations(intentID: UUID) async -> AsyncThrowingStream<V2OperationExecutionState?, any Error> {
-        await service.confirmationUpdates(intentID: intentID)
+        await confirmations(intentID)
     }
     func send(text:String,media:[V2MediaReference],in roomID:String) async throws -> V2ConversationSendOutcome {
         try await send(text:text,media:media,mentions:[],entities:[],replyTo:nil,in:roomID)
@@ -334,7 +343,7 @@ actor V2OperationConversationSender: V2ConversationSending, V2ConversationSendTr
         try Task.checkCancellation()
         // Attachment sends enter via durable consumer intents with explicit Ready dependencies.
         guard media.isEmpty else { throw V2OperationWorkError.dependencyUnavailable }
-        _ = try await service.enqueueMessage(roomID:.init(roomID),text:text,mentions:mentions,entities:entities,replyTo:replyTo)
+        _ = try await enqueue(.init(roomID), text, mentions, entities, replyTo)
         return .queuedForRetry
     }
 }
@@ -343,36 +352,57 @@ actor V2OperationConversationSender: V2ConversationSending, V2ConversationSendTr
 ///
 /// 界面最终展示的墓碑状态以已同步的消息投影为权威，而不是以本次确认为准。
 actor V2OperationMessageWithdrawer: V2MessageWithdrawing {
-    private let service: V2MessageMutationOperationService
-    init(service: V2MessageMutationOperationService) { self.service=service }
+    private let enqueue: @Sendable (RoomID, MessageID, UInt64) async throws -> UUID
+    init(service: V2MessageMutationOperationService) {
+        enqueue = { try await service.enqueueWithdrawal(roomID: $0, messageID: $1, expectedRevision: $2) }
+    }
+    init(service: V2MessageService) {
+        enqueue = { try await service.withdraw(in: $0, messageID: $1, expectedRevision: $2) }
+    }
     func withdraw(messageID:String,in roomID:String,expectedMessageRevision:UInt64) async throws -> V2MessageWithdrawalOutcome {
         try Task.checkCancellation()
-        _ = try await service.enqueueWithdrawal(roomID:.init(roomID),messageID:.init(messageID),expectedRevision:expectedMessageRevision)
+        _ = try await enqueue(.init(roomID), .init(messageID), expectedMessageRevision)
         return .queuedForRetry
     }
 }
 
 actor V2OperationMessageReactionChanger: V2MessageReactionChanging,V2MessageReactionManaging {
-    private let service:V2MessageReactionOperationService
-    init(service:V2MessageReactionOperationService) { self.service=service }
-    func reactionUpdates(roomID:String) async throws -> AsyncThrowingStream<[V2MessageReactionPending],any Error> { await service.updates(roomID:try .init(roomID)) }
-    func resumeReactionConfirmation(intentID:UUID) async throws { try await service.resumeConfirmation(intentID:intentID) }
-    func changeReaction(messageID:String,in roomID:String,reaction:String,action:V2MessageReactionAction) async throws -> V2MessageReactionOutcome {
-        _ = try await service.enqueue(roomID:.init(roomID),messageID:.init(messageID),reaction:reaction,targetState:action == .add ? .present : .absent)
+    private let enqueue: @Sendable (RoomID, MessageID, String, V2MessageReactionTargetState) async throws -> UUID
+    private let updates: @Sendable (RoomID) async -> AsyncThrowingStream<[V2MessageReactionPending], any Error>
+    private let retry: @Sendable (UUID) async throws -> Void
+    init(service: V2MessageReactionOperationService) {
+        enqueue = { try await service.enqueue(roomID: $0, messageID: $1, reaction: $2, targetState: $3) }
+        updates = { await service.updates(roomID: $0) }; retry = { try await service.resumeConfirmation(intentID: $0) }
+    }
+    init(service: V2MessageService) {
+        enqueue = { try await service.react(in: $0, messageID: $1, reaction: $2, targetState: $3) }
+        updates = { await service.reactionUpdates(in: $0) }; retry = { try await service.retryReaction($0) }
+    }
+    func reactionUpdates(roomID: String) async throws -> AsyncThrowingStream<[V2MessageReactionPending], any Error> { await updates(try .init(roomID)) }
+    func resumeReactionConfirmation(intentID: UUID) async throws { try await retry(intentID) }
+    func changeReaction(messageID: String, in roomID: String, reaction: String, action: V2MessageReactionAction) async throws -> V2MessageReactionOutcome {
+        _ = try await enqueue(.init(roomID), .init(messageID), reaction, action == .add ? .present : .absent)
         return .queuedForRetry
     }
 }
 
 actor V2OperationMessageEditor: V2MessageEditing, V2MessageMutationManaging {
-    private let service: V2MessageMutationOperationService
-    init(service: V2MessageMutationOperationService) { self.service=service }
-    func mutationUpdates(roomID:String) async throws -> AsyncThrowingStream<[V2MessageMutationSnapshot],any Error> {
-        await service.updates(roomID:try .init(roomID))
+    private let enqueue: @Sendable (RoomID, MessageID, UInt64, String) async throws -> UUID
+    private let updates: @Sendable (RoomID) async -> AsyncThrowingStream<[V2MessageMutationSnapshot], any Error>
+    private let retry: @Sendable (UUID) async throws -> Void
+    init(service: V2MessageMutationOperationService) {
+        enqueue = { try await service.enqueueEdit(roomID: $0, messageID: $1, expectedRevision: $2, text: $3) }
+        updates = { await service.updates(roomID: $0) }; retry = { try await service.resumeConfirmation(workID: $0) }
     }
-    func resumeMutationConfirmation(workID:UUID) async throws { try await service.resumeConfirmation(workID:workID) }
-    func edit(messageID:String,in roomID:String,expectedMessageRevision:UInt64,text:String) async throws -> V2MessageEditOutcome {
+    init(service: V2MessageService) {
+        enqueue = { try await service.edit(in: $0, messageID: $1, expectedRevision: $2, text: $3) }
+        updates = { await service.mutationUpdates(in: $0) }; retry = { try await service.retryMutation($0) }
+    }
+    func mutationUpdates(roomID: String) async throws -> AsyncThrowingStream<[V2MessageMutationSnapshot], any Error> { await updates(try .init(roomID)) }
+    func resumeMutationConfirmation(workID: UUID) async throws { try await retry(workID) }
+    func edit(messageID: String, in roomID: String, expectedMessageRevision: UInt64, text: String) async throws -> V2MessageEditOutcome {
         try Task.checkCancellation()
-        _ = try await service.enqueueEdit(roomID:.init(roomID),messageID:.init(messageID),expectedRevision:expectedMessageRevision,text:text)
+        _ = try await enqueue(.init(roomID), .init(messageID), expectedMessageRevision, text)
         return .queuedForRetry
     }
 }
@@ -382,23 +412,28 @@ actor V2OperationMessageEditor: V2MessageEditing, V2MessageMutationManaging {
 /// 底层存储会原子地抑制相等或更旧的水位，因此每当本地会话变为可见时都可以调用该 actor，
 /// 包括离线重启之后，也不会产生重复记录。
 actor V2OperationConversationReadReporter: V2ConversationReadSyncManaging {
-    private let service: V2ReadReceiptOperationService
-    init(service: V2ReadReceiptOperationService) { self.service = service }
-    func readSyncUpdates(roomID: String) async throws -> AsyncThrowingStream<V2ReadReceiptTrackingSnapshot, any Error> {
-        await service.statusUpdates(roomID:try .init(roomID))
+    private let updates: @Sendable (RoomID) async -> AsyncThrowingStream<V2ReadReceiptTrackingSnapshot, any Error>
+    private let resume: @Sendable (RoomID) async throws -> Void
+    private let archive: @Sendable (UUID) async throws -> Void
+    private let restore: @Sendable (UUID) async throws -> Void
+    private let record: @Sendable (RoomID, UInt64) async throws -> Bool
+    init(service: V2ReadReceiptService) {
+        updates = { await service.updates(in: $0) }; resume = { try await service.resumeConfirmation(in: $0) }
+        archive = { try await service.archiveUnavailable($0) }; restore = { try await service.restoreArchive($0) }
+        record = { try await service.recordReadThrough(in: $0, roomSequence: $1) }
     }
-    func resumeReadConfirmation(roomID: String) async throws {
-        try await service.resumeConfirmation(roomID:.init(roomID))
+    init(service: V2ReadReceiptOperationService) {
+        updates = { await service.statusUpdates(roomID: $0) }; resume = { try await service.resumeConfirmation(roomID: $0) }
+        archive = { try await service.archiveUnavailable(workID: $0) }; restore = { try await service.restoreArchive(workID: $0) }
+        record = { try await service.enqueue(roomID: $0, readThrough: $1) }
     }
-    func archiveUnavailableRead(workID: UUID) async throws {
-        try await service.archiveUnavailable(workID: workID)
-    }
-    func restoreReadArchive(workID: UUID) async throws {
-        try await service.restoreArchive(workID: workID)
-    }
+    func readSyncUpdates(roomID: String) async throws -> AsyncThrowingStream<V2ReadReceiptTrackingSnapshot, any Error> { await updates(try .init(roomID)) }
+    func resumeReadConfirmation(roomID: String) async throws { try await resume(.init(roomID)) }
+    func archiveUnavailableRead(workID: UUID) async throws { try await archive(workID) }
+    func restoreReadArchive(workID: UUID) async throws { try await restore(workID) }
     func recordReadThrough(roomID: String, roomSequence: UInt64) async throws -> V2ReadReceiptReportOutcome {
         try Task.checkCancellation()
-        return try await service.enqueue(roomID:.init(roomID),readThrough:roomSequence) ? .queuedForRetry : .alreadyRecorded
+        return try await record(.init(roomID), roomSequence) ? .queuedForRetry : .alreadyRecorded
     }
 }
 
@@ -454,15 +489,24 @@ protocol V2ForwardPlanManaging: V2MessageForwarding {
     func cancelRemaining(workID:UUID) async throws
 }
 actor V2OperationMessageForwarder: V2ForwardPlanManaging {
-    private let service:V2ForwardPlanOperationService
-    init(service:V2ForwardPlanOperationService) { self.service=service }
-    func forward(sources:[V2ForwardMessageReference],targetRoomIDs:[String]) async throws -> V2MessageForwardingOutcome {
-        _ = try await service.enqueue(sources:sources,targetRoomIDs:targetRoomIDs.map(RoomID.init))
-        return .queued
+    private let enqueue: @Sendable ([V2ForwardMessageReference], [RoomID]) async throws -> UUID
+    private let observe: @Sendable (RoomID) async -> AsyncThrowingStream<[V2ForwardPlanSnapshot], any Error>
+    private let retry: @Sendable (UUID) async throws -> Void
+    private let cancel: @Sendable (UUID) async throws -> Void
+    init(service: V2ForwardPlanOperationService) {
+        enqueue = { try await service.enqueue(sources: $0, targetRoomIDs: $1) }; observe = { await service.updates(sourceRoomID: $0) }
+        retry = { try await service.resumeConfirmation(workID: $0) }; cancel = { try await service.cancelRemaining(workID: $0) }
     }
-    func updates(sourceRoomID:RoomID) async -> AsyncThrowingStream<[V2ForwardPlanSnapshot],any Error> { await service.updates(sourceRoomID:sourceRoomID) }
-    func resumeConfirmation(workID:UUID) async throws { try await service.resumeConfirmation(workID:workID) }
-    func cancelRemaining(workID:UUID) async throws { try await service.cancelRemaining(workID:workID) }
+    init(service: V2MessageService) {
+        enqueue = { try await service.forward(sources: $0, to: $1) }; observe = { await service.forwardUpdates(in: $0) }
+        retry = { try await service.retryForward($0) }; cancel = { try await service.cancelForward($0) }
+    }
+    func forward(sources: [V2ForwardMessageReference], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome {
+        _ = try await enqueue(sources, targetRoomIDs.map(RoomID.init)); return .queued
+    }
+    func updates(sourceRoomID: RoomID) async -> AsyncThrowingStream<[V2ForwardPlanSnapshot], any Error> { await observe(sourceRoomID) }
+    func resumeConfirmation(workID: UUID) async throws { try await retry(workID) }
+    func cancelRemaining(workID: UUID) async throws { try await cancel(workID) }
 }
 
 struct V2OperationGroupAnnouncementManager: V2GroupAnnouncementManaging {
@@ -617,17 +661,13 @@ actor V2RealtimeGroupMemberDirectory: V2GroupMemberDirectoryReading {
 }
 
 actor V2RealtimeGroupReadReceiptReader: V2GroupReadReceiptReading {
-    private let transport: any V2ClientReadReceiptTransport
-
-    init(transport: any V2ClientReadReceiptTransport) { self.transport = transport }
-
+    private let query: @Sendable (RoomID, MessageID, String?) async throws -> V2ReadReceiptReadersPage
+    init(service: V2ReadReceiptService) { query = { try await service.readers(in: $0, messageID: $1, cursor: $2) } }
+    init(transport: any V2ClientReadReceiptTransport) {
+        query = { try await transport.listReadReceiptReaders(roomID: $0, messageID: $1, cursor: $2, pageSize: 50) }
+    }
     func readers(roomID: String, messageID: String, cursor: String?) async throws -> V2ReadReceiptReadersPage {
-        try await transport.listReadReceiptReaders(
-            roomID: .init(roomID),
-            messageID: .init(messageID),
-            cursor: cursor,
-            pageSize: 50
-        )
+        try await query(.init(roomID), .init(messageID), cursor)
     }
 }
 
@@ -980,6 +1020,8 @@ struct V2AppRealtimeRuntime {
     let messageReactionOperations:V2MessageReactionOperationService
     let messageReactionChanger: any V2MessageReactionChanging
     let messageSendOperations: V2MessageSendOperationService
+    let messages: V2MessageService
+    let readReceipts: V2ReadReceiptService
     let messageMutationOperations: V2MessageMutationOperationService
     let messageEditor: any V2MessageEditing
     let readReceiptOperations: V2ReadReceiptOperationService
@@ -1023,6 +1065,7 @@ struct V2AppRealtimeRuntime {
         authEpoch: V2AuthSessionEpoch,
         localStore: GRDBV2LocalSyncStore,
         resourceCenter: V2ResourceCenter,
+        sharedSession: V2SharedSession? = nil,
         testRoomNotificationInterceptor: (@Sendable (String, UInt64, Int) -> Bool)? = nil,
         testRoomProgressObserver: (@Sendable (RoomID, UInt64) async throws -> Void)? = nil,
         testRoomRecoveryObserver: (@Sendable (V2RoomRecoveryObservation) -> Void)? = nil,
@@ -1085,6 +1128,14 @@ struct V2AppRealtimeRuntime {
         let readReceiptOperations = V2ReadReceiptOperationService(accountID:actorUserID,store:localStore,
             client:try V2ReadReceiptOperationAdapter(realtime:transport,baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
         self.readReceiptOperations = readReceiptOperations
+        let readReceipts: V2ReadReceiptService
+        if let sharedSession {
+            readReceipts = try await sharedSession.readReceipts(for: localStore, accountID: actorUserID,
+                receipts: readReceiptOperations, transport: transport)
+        } else {
+            readReceipts = .init(accountID: actorUserID, store: localStore, receipts: readReceiptOperations, transport: transport)
+        }
+        self.readReceipts = readReceipts
         let personalPreferences = V2PersonalPreferenceService(accountID: actorUserID, store: localStore, transport: transport,
             recovery: try V2HTTPPersonalPreferenceRecoveryClient(roomsEndpoint: configuration.endpoint("v2/rooms"), credentials: accountHTTP, transport: accountHTTP))
         self.personalPreferences = personalPreferences
@@ -1094,6 +1145,16 @@ struct V2AppRealtimeRuntime {
         let forwardPlanOperations=V2ForwardPlanOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPForwardPlanOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
         self.forwardPlanOperations=forwardPlanOperations
+        let messages: V2MessageService
+        if let sharedSession {
+            messages = try await sharedSession.messages(for: localStore, accountID: actorUserID,
+                sends: messageSendOperations, mutations: messageMutationOperations,
+                reactions: messageReactionOperations, forwards: forwardPlanOperations)
+        } else {
+            messages = V2MessageService(accountID: actorUserID, store: localStore, sends: messageSendOperations,
+                mutations: messageMutationOperations, reactions: messageReactionOperations, forwards: forwardPlanOperations)
+        }
+        self.messages = messages
         let mediaDownloadResolver = try V2HTTPMediaDownloadTargetResolver(
             endpoint: configuration.mediaEdgeEndpoint,
             credentials: accountHTTP, transport: accountHTTP
@@ -1253,19 +1314,19 @@ struct V2AppRealtimeRuntime {
         runtime = .init(connection: coordinator, activity: activity)
         self.projectionChangeNotifier = projectionChangeNotifier
         self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
-        sender = V2OperationConversationSender(service:messageSendOperations)
-        messageWithdrawer = V2OperationMessageWithdrawer(service:messageMutationOperations)
-        messageReactionChanger = V2OperationMessageReactionChanger(service: messageReactionOperations)
-        messageEditor = V2OperationMessageEditor(service:messageMutationOperations)
-        readReceiptReporter = V2OperationConversationReadReporter(service: readReceiptOperations)
+        sender = V2OperationConversationSender(service: messages)
+        messageWithdrawer = V2OperationMessageWithdrawer(service: messages)
+        messageReactionChanger = V2OperationMessageReactionChanger(service: messages)
+        messageEditor = V2OperationMessageEditor(service: messages)
+        readReceiptReporter = V2OperationConversationReadReporter(service: readReceipts)
         conversationStateChanger = V2OutboxConversationStateChanger(service: personalPreferences)
         messageFavoriter = V2OutboxMessageFavoriter(service: personalPreferences)
         groupMessagePinner = V2OperationGroupMessagePinner(service:groupCapabilityOperations)
-        messageForwarder = V2OperationMessageForwarder(service:forwardPlanOperations)
+        messageForwarder = V2OperationMessageForwarder(service: messages)
         groupAnnouncementManager = V2OperationGroupAnnouncementManager(service:groupCapabilityOperations)
         groupMemberRoleChanger = V2OperationGroupMemberRoleChanger(service:groupCapabilityOperations)
         groupRolePolicyChanger = V2OperationGroupRolePolicyChanger(service:groupCapabilityOperations)
-        groupReadReceiptReader = V2RealtimeGroupReadReceiptReader(transport: transport)
+        groupReadReceiptReader = V2RealtimeGroupReadReceiptReader(service: readReceipts)
         conversationLiveActivity = V2RealtimeConversationLiveActivity(transport: transport, events: connection,localStore:localStore)
         let resourceControl = try V2HTTPResourceUploadClient(endpoint: configuration.endpoint("v2/resource-uploads"), credentials: accountHTTP, transport: accountHTTP)
         let resourceEngine = V2ResourceTransferEngine(store: localStore, control: resourceControl, executor: V2URLSessionResourcePlanExecutor(scheduler: accountRuntime.scheduler, diagnostics: accountRuntime.networkDiagnostics), resources: resourceCenter,
@@ -1284,7 +1345,7 @@ struct V2AppRealtimeRuntime {
             store: localStore, intents: groupAvatarIntents, reader: groupReader,
             capabilities: resourceControl, resources: resourceCenter)
         self.groupAvatarManager = groupAvatarManager
-        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, resources: resourceCenter, messageOperations:messageSendOperations,
+        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, resources: resourceCenter, messageOperations:messageSendOperations, messages: messages,
             imports: resourceImports, groupAvatars: groupAvatarIntents, groupAvatarManager: groupAvatarManager)
         attachmentUploader = V2ForegroundConversationAttachmentUploader(durable: durableSender)
         let foregroundMediaDownloader = V2ForegroundConversationMediaDownloader(

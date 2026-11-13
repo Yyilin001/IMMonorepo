@@ -1,0 +1,61 @@
+{
+  "realBackend": true,
+  "platform": "iOS 18.5 simulator",
+  "backendRoot": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-lhdkwms9",
+  "functionalPassed": 6,
+  "cleanupPassed": 2,
+  "nativeSwiftFacade": true,
+  "groupReaders": true,
+  "searchAndTimelineLocate": true,
+  "stages": [
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.0YrcpE/25D3941E-6008-43CA-A903-CA73376CABC2-testCleansOnlyRequestedIndependentInstallationScope.xcresult",
+      "passed": 1,
+      "result": "Passed",
+      "cleanup": true
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.0YrcpE/25D3941E-6008-43CA-A903-CA73376CABC2-testSenderOpensDirectConversationAndSendsFromIndependentInstallation.xcresult",
+      "passed": 1,
+      "result": "Passed",
+      "cleanup": false
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.0YrcpE/25D3941E-6008-43CA-A903-CA73376CABC2-testSenderRestoresIndependentGroupAndProjectsMessage.xcresult",
+      "passed": 1,
+      "result": "Passed",
+      "cleanup": false
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.0YrcpE/CB0BDCA6-FA38-4149-ACE1-EE68539FC967-testCleansOnlyRequestedIndependentInstallationScope.xcresult",
+      "passed": 1,
+      "result": "Passed",
+      "cleanup": true
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.0YrcpE/CB0BDCA6-FA38-4149-ACE1-EE68539FC967-testGroupOwnerProjectsActualMemberReadReceipts.xcresult",
+      "passed": 1,
+      "result": "Passed",
+      "cleanup": false
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.0YrcpE/CB0BDCA6-FA38-4149-ACE1-EE68539FC967-testReceiverCreatesIndependentGroupAndSendsMessage.xcresult",
+      "passed": 1,
+      "result": "Passed",
+      "cleanup": false
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.0YrcpE/CB0BDCA6-FA38-4149-ACE1-EE68539FC967-testReceiverProjectsDirectMessageAndReportsRead.xcresult",
+      "passed": 1,
+      "result": "Passed",
+      "cleanup": false
+    },
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.0YrcpE/CB0BDCA6-FA38-4149-ACE1-EE68539FC967-testSharedSessionRegistersAndStartsRealtime.xcresult",
+      "passed": 1,
+      "result": "Passed",
+      "cleanup": false
+    }
+  ],
+  "logSHA256": "05e95960095954bda54b1bbebaab25d69a7a1a827e9ccb99d9befaa3f5c6dfe3"
+}

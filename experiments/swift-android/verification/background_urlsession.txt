@@ -1,0 +1,13 @@
+$REPO/experiments/swift-android/build/background_urlsession.swift:3:44: error: 'background(withIdentifier:)' is unavailable: Not available on non-Darwin platforms
+1 | import Foundation
+2 | import FoundationNetworking
+3 | func probe() { _ = URLSessionConfiguration.background(withIdentifier: "probe") }
+  |                                            `- error: 'background(withIdentifier:)' is unavailable: Not available on non-Darwin platforms
+4 | 
+
+FoundationNetworking.URLSessionConfiguration.background:3:19: note: 'background(withIdentifier:)' has been explicitly marked unavailable here
+1 | class URLSessionConfiguration {
+2 | @available(*, unavailable, message: "Not available on non-Darwin platforms")
+3 |   open class func background(withIdentifier identifier: String) -> URLSessionConfiguration}
+  |                   `- note: 'background(withIdentifier:)' has been explicitly marked unavailable here
+4 | 

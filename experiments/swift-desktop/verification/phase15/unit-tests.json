@@ -1,0 +1,12 @@
+{
+  "shared": {
+    "passed": 16,
+    "log": "/tmp/im-phase15-shared-tests2.log",
+    "sha256": "1fd7770fc7d0c84cda9152872df737a661d02b8b9013475478c70159789ad0e4"
+  },
+  "domain": {
+    "passed": 34,
+    "log": "/tmp/im-phase15-domain-tests.log",
+    "sha256": "b91b05f8672cdef751a4464bf2133fb77739b96d83b283fa232590a2d767b785"
+  }
+}

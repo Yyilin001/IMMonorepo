@@ -2,6 +2,9 @@ import Foundation
 import Testing
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Member administration reservation")
 struct V2MemberAdministrationReservationTests {

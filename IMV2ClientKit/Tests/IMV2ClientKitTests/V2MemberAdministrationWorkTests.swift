@@ -3,6 +3,9 @@ import Synchronization
 import Testing
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Member administration confirmation and recovery",.serialized)
 struct V2MemberAdministrationWorkTests {

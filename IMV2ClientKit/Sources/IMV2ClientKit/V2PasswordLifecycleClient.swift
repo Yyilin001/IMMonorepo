@@ -3,9 +3,6 @@ import Foundation
 import FoundationNetworking
 #endif
 import IMV2Core
-#if canImport(Security)
-import Security
-#endif
 
 public enum V2PasswordLifecycleAction: String, Sendable {
     case change, recoveryCode = "recovery-code", recover
@@ -66,15 +63,8 @@ public struct V2PasswordLifecycleClient: Sendable {
 
     /// 256-bit random secret. Show only in the explicit recovery-code setup UI.
     public static func generateRecoveryCode() throws -> String {
-        #if canImport(Security)
-        var bytes = [UInt8](repeating: 0, count: 32)
-        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-            throw V2AccountAuthenticationError.invalidResponse
-        }
-        return bytes.map { String(format: "%02x", $0) }.joined()
-        #else
-        throw V2AccountAuthenticationError.invalidResponse
-        #endif
+        do { return try V2SecureRandom.recoveryCodeBytes().map { String(format: "%02x", $0) }.joined() }
+        catch { throw V2AccountAuthenticationError.invalidResponse }
     }
 
     private struct Input: Encodable {

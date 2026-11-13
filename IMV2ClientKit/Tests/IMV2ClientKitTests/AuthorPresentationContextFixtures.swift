@@ -28,6 +28,9 @@ extension V2AuthorPresentationDelta {
 }
 
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 extension V2AuthorPresentationView {
     var roomID: RoomID { messageRoomIDs[0] }
 }

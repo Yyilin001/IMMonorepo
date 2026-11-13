@@ -1,0 +1,22 @@
+{
+  "passed": 13,
+  "sharedUnitTests": 12,
+  "realBackendTests": 1,
+  "finalLine": [
+    "􁁛  Test run with 13 tests in 4 suites passed after 9.639 seconds."
+  ],
+  "backendStages": [
+    "Desktop stage: connected",
+    "Desktop stage: room opened",
+    "Desktop stage: received text",
+    "Desktop stage: reply received",
+    "Desktop stage: reaction received",
+    "Desktop stage: native independent window paging, observation and sibling close passed",
+    "Desktop stage: search matched",
+    "Desktop stage: cut detected",
+    "Desktop stage: owner closed",
+    "Desktop stage: old native window rejected after owner close"
+  ],
+  "sourceLog": "/tmp/im-phase14-native-final.log",
+  "sha256": "f631c15fd43a854dff50859a13963a021868725d38be7344737206cec16abec4"
+}

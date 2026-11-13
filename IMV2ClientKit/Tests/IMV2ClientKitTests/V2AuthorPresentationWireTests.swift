@@ -3,6 +3,9 @@ import Foundation
 import IMV2Core
 import Synchronization
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 import Testing
 
 @Suite("Author supplements on the authenticated connection", .timeLimit(.minutes(1)))

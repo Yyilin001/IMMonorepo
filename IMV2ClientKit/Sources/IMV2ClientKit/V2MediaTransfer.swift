@@ -246,7 +246,9 @@ public actor V2URLSessionMediaByteTransfer: V2ClientMediaByteTransfer {
                 let priorETag = file.etag
                 let end = start == target.expectedByteCount ? start + chunkBytes - 1 : min(target.expectedByteCount - 1,start + chunkBytes - 1)
                 var request = URLRequest(url: target.url,cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,timeoutInterval: min(60,remainingLease))
-                target.networkConstraints.apply(to: &request)
+                #if !os(Android)
+                try target.networkConstraints.apply(to: &request)
+                #endif
                 request.httpMethod = "GET"
                 for (name,value) in target.headers { request.setValue(value,forHTTPHeaderField: name) }
                 request.setValue("bytes=\(start)-\(end)",forHTTPHeaderField:"Range")
@@ -255,7 +257,8 @@ public actor V2URLSessionMediaByteTransfer: V2ClientMediaByteTransfer {
                 let progress = V2ResourceDownloadProgressRequest(context: V2ResourceDownloadProgressScope.context)
                 let transfer: V2RangeDownloadResponse
                 do {
-                    transfer = try await transport.stream(request,maximumBytes: max(64 * 1024,target.expectedByteCount),
+                    transfer = try await V2ResourceDownloadNetworkConstraints.$transferConstraints.withValue(target.networkConstraints) {
+                    try await transport.stream(request,maximumBytes: max(64 * 1024,target.expectedByteCount),
                         receiveResponse: {
                             try file.accept($0,requestedStart: start,requestedEnd: end)
                             try progress.begin(expectedBytes: file.acceptedResponseBytes)
@@ -263,6 +266,7 @@ public actor V2URLSessionMediaByteTransfer: V2ClientMediaByteTransfer {
                             try file.append($0)
                             try progress.consume(byteCount: $0.count)
                         })
+                    }
                     progress.end()
                 } catch { progress.end(); throw error }
                 let response = transfer.response

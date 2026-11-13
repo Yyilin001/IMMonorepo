@@ -1,0 +1,23 @@
+{
+  "removedPackagesAbsent": [
+    "com.xmtx.im.client",
+    "com.xmtx.im.platform",
+    "com.xmtx.im.imclientkit"
+  ],
+  "dexReportSHA256": "43814d3212941641861033cb7cfefb547f37571b234c1f1ff57794b6e8d82340",
+  "testedNativeSHA256": "3f4bb9ed9d3858c487b97a19ebd85921cad70473cfd13dd15c715d610e441b47",
+  "mergedNativeSHA256": "4fc30d6a1d7620816b65c1fbe529fa6959449126c68c2054f5a41c4ac5d150cc",
+  "mergedNativeMatchesManifest": true,
+  "packagedNativeMatchesStripped": true,
+  "runtimeProjects": [
+    "app",
+    "sharedsdk",
+    "swiftplatform"
+  ],
+  "dependencyReportSHA256": "2da501d98231615826fcf8b12ccdf036883469e6e1062b7b7308938dc0356f59",
+  "normalDebugAPK": {
+    "sha256": "267a7e53988320f56dafc3073bea71fc663eafefcf2e45138f5a027bffcb25bd",
+    "bundledCertificates": [],
+    "deviceAcceptance": false
+  }
+}

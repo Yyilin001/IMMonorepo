@@ -1,0 +1,963 @@
+[
+  {
+    "id": "s:17IMV2SharedRuntime02V2B12SessionErrorO",
+    "path": [
+      "V2SharedSessionError"
+    ],
+    "declaration": "enum V2SharedSessionError"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B12SessionErrorO25accountResourcesStillOpenyA2CmF",
+    "path": [
+      "V2SharedSessionError",
+      "accountResourcesStillOpen"
+    ],
+    "declaration": "case accountResourcesStillOpen"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B12SessionErrorO4busyyA2CmF",
+    "path": [
+      "V2SharedSessionError",
+      "busy"
+    ],
+    "declaration": "case busy"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B17ExitIntentStoringP",
+    "path": [
+      "V2SharedExitIntentStoring"
+    ],
+    "declaration": "protocol V2SharedExitIntentStoring : Sendable"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B17ExitIntentStoringP11markPendingyyYaKF",
+    "path": [
+      "V2SharedExitIntentStoring",
+      "markPending()"
+    ],
+    "declaration": "func markPending() async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B17ExitIntentStoringP12clearPendingyyYaKF",
+    "path": [
+      "V2SharedExitIntentStoring",
+      "clearPending()"
+    ],
+    "declaration": "func clearPending() async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B17ExitIntentStoringP9isPendingSbyYaKF",
+    "path": [
+      "V2SharedExitIntentStoring",
+      "isPending()"
+    ],
+    "declaration": "func isPending() async throws -> Bool"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B18SessionRestorationC",
+    "path": [
+      "V2SharedSessionRestoration"
+    ],
+    "declaration": "@MainActor final class V2SharedSessionRestoration"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B18SessionRestorationC11isRestoringSbvp",
+    "path": [
+      "V2SharedSessionRestoration",
+      "isRestoring"
+    ],
+    "declaration": "@MainActor var isRestoring: Bool { get }"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B18SessionRestorationC12workDurationACs0H0V_tcfc",
+    "path": [
+      "V2SharedSessionRestoration",
+      "init(workDuration:)"
+    ],
+    "declaration": "@MainActor init(workDuration: Duration = .seconds(25))"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B18SessionRestorationC3run5until9operationy12_Concurrency15ContinuousClockV7InstantVSg_yyYaYbScMYcctYaKF",
+    "path": [
+      "V2SharedSessionRestoration",
+      "run(until:operation:)"
+    ],
+    "declaration": "@MainActor func run(until deadline: ContinuousClock.Instant? = nil, operation: @escaping @MainActor @Sendable () async -> Void) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B18SessionRestorationC7FailureO",
+    "path": [
+      "V2SharedSessionRestoration",
+      "Failure"
+    ],
+    "declaration": "enum Failure"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B18SessionRestorationC7FailureO15deadlineReachedyA2EmF",
+    "path": [
+      "V2SharedSessionRestoration",
+      "Failure",
+      "deadlineReached"
+    ],
+    "declaration": "case deadlineReached"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC",
+    "path": [
+      "V2SharedSession"
+    ],
+    "declaration": "actor V2SharedSession"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC015openEstablishedE00a6ClientC020GRDBV2LocalSyncStoreCyYaKF",
+    "path": [
+      "V2SharedSession",
+      "openEstablishedSession()"
+    ],
+    "declaration": "func openEstablishedSession() async throws -> GRDBV2LocalSyncStore"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC022openLocallyEstablishedE00a6ClientC020GRDBV2LocalSyncStoreC5store_AE0dK15AccountIdentityV8identitytyYaKF",
+    "path": [
+      "V2SharedSession",
+      "openLocallyEstablishedSession()"
+    ],
+    "declaration": "func openLocallyEstablishedSession() async throws -> (store: GRDBV2LocalSyncStore, identity: V2LocalAccountIdentity)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC04authE012bootstrapper10exitIntent13registrationsAC0a6ClientC00d4AuthE0C_AH0dkE12BootstrapperCAA0db4ExitI7Storing_pAH0D23DeviceRegistrationStoreCSgtcfc",
+    "path": [
+      "V2SharedSession",
+      "init(authSession:bootstrapper:exitIntent:registrations:)"
+    ],
+    "declaration": "init(authSession: V2AuthSession, bootstrapper: V2ClientSessionBootstrapper, exitIntent: any V2SharedExitIntentStoring, registrations: V2DeviceRegistrationStore? = nil)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC11MaintenanceO",
+    "path": [
+      "V2SharedSession",
+      "Maintenance"
+    ],
+    "declaration": "enum Maintenance"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC11MaintenanceO16deviceRevocationyA2EmF",
+    "path": [
+      "V2SharedSession",
+      "Maintenance",
+      "deviceRevocation"
+    ],
+    "declaration": "case deviceRevocation"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC11MaintenanceO24registrationCancellationyA2EmF",
+    "path": [
+      "V2SharedSession",
+      "Maintenance",
+      "registrationCancellation"
+    ],
+    "declaration": "case registrationCancellation"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC11runRealtime_7account11onConnectedy0a6ClientC00dkC0C_AG0d7AccountC0CyyYaYbctYaKF",
+    "path": [
+      "V2SharedSession",
+      "runRealtime(_:account:onConnected:)"
+    ],
+    "declaration": "func runRealtime(_ runtime: V2ClientRuntime, account: V2AccountRuntime, onConnected: @escaping @Sendable () async -> Void = {}) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC12adoptAccount_5storey0a6ClientC00dgC0C_AF20GRDBV2LocalSyncStoreCtKF",
+    "path": [
+      "V2SharedSession",
+      "adoptAccount(_:store:)"
+    ],
+    "declaration": "func adoptAccount(_ account: V2AccountRuntime, store: GRDBV2LocalSyncStore) throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC12beginSignOutyyYaKF",
+    "path": [
+      "V2SharedSession",
+      "beginSignOut()"
+    ],
+    "declaration": "func beginSignOut() async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC12closeAccountyy0a6ClientC00dgC0CYaF",
+    "path": [
+      "V2SharedSession",
+      "closeAccount(_:)"
+    ],
+    "declaration": "func closeAccount(_ account: V2AccountRuntime) async"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC13conversations3for9accountID21requiresAuthorization20requestLatestVisibleAA0D19ConversationServiceC0a6ClientC020GRDBV2LocalSyncStoreC_0A4Core0D10IdentifierVyAN9UserIDTagOGSbySayAPyAN04RoomY0OGGYaYbKctKF",
+    "path": [
+      "V2SharedSession",
+      "conversations(for:accountID:requiresAuthorization:requestLatestVisible:)"
+    ],
+    "declaration": "func conversations(for store: GRDBV2LocalSyncStore, accountID: UserID, requiresAuthorization: Bool = true, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void = { _ in }) throws -> V2ConversationService"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC14runMaintenance_9operationyAC0G0O_yyYaYbKctYaKF",
+    "path": [
+      "V2SharedSession",
+      "runMaintenance(_:operation:)"
+    ],
+    "declaration": "func runMaintenance(_ kind: V2SharedSession.Maintenance, operation: @escaping @Sendable () async throws -> Void) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC15activeTaskCountSiyF",
+    "path": [
+      "V2SharedSession",
+      "activeTaskCount()"
+    ],
+    "declaration": "func activeTaskCount() -> Int"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC15closeLocalStoreyy0a6ClientC006GRDBV2g4SyncH0CYaKF",
+    "path": [
+      "V2SharedSession",
+      "closeLocalStore(_:)"
+    ],
+    "declaration": "func closeLocalStore(_ store: GRDBV2LocalSyncStore) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC15completeSignOutyyYaKF",
+    "path": [
+      "V2SharedSession",
+      "completeSignOut()"
+    ],
+    "declaration": "func completeSignOut() async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC15ownedStoreCountSiyF",
+    "path": [
+      "V2SharedSession",
+      "ownedStoreCount()"
+    ],
+    "declaration": "func ownedStoreCount() -> Int"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC15suspendRealtimeyyYaF",
+    "path": [
+      "V2SharedSession",
+      "suspendRealtime()"
+    ],
+    "declaration": "func suspendRealtime() async"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC18suspendMaintenanceyyYaF",
+    "path": [
+      "V2SharedSession",
+      "suspendMaintenance()"
+    ],
+    "declaration": "func suspendMaintenance() async"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC20authenticatePassword13accountHandle8password4mode06publicI011displayName7baseURL8metadata8recovery9transport9ifCurrent0a6ClientC020GRDBV2LocalSyncStoreCSS_SSAO0d7OneTimeG24AccountAssertionProviderC4ModeOSSSgAV10Foundation0P0VAO0dV26DeviceRegistrationMetadataVAO0d24IssuedCredentialRecoveryZ0CAO0D17AuthHTTPTransport_pAO0d4AuthE5EpochVSgtYaKF",
+    "path": [
+      "V2SharedSession",
+      "authenticatePassword(accountHandle:password:mode:publicHandle:displayName:baseURL:metadata:recovery:transport:ifCurrent:)"
+    ],
+    "declaration": "func authenticatePassword(accountHandle: String, password: String, mode: V2OneTimePasswordAccountAssertionProvider.Mode = .authenticate, publicHandle: String? = nil, displayName: String? = nil, baseURL: URL, metadata: V2ClientDeviceRegistrationMetadata, recovery: V2IssuedCredentialRecoveryStore, transport: any V2AuthHTTPTransport = V2URLSessionAuthHTTPTransport(), ifCurrent epoch: V2AuthSessionEpoch? = nil) async throws -> GRDBV2LocalSyncStore"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime02V2B7SessionC8messages3for9accountID5sends9mutations9reactions8forwardsAA0D14MessageServiceC0a6ClientC020GRDBV2LocalSyncStoreC_0A4Core0D10IdentifierVyAP9UserIDTagOGAM0dn13SendOperationO0CAM0dn8MutationzO0CAM0dn8ReactionzO0CAM0d11ForwardPlanzO0CtKF",
+    "path": [
+      "V2SharedSession",
+      "messages(for:accountID:sends:mutations:reactions:forwards:)"
+    ],
+    "declaration": "func messages(for store: GRDBV2LocalSyncStore, accountID: UserID, sends: V2MessageSendOperationService, mutations: V2MessageMutationOperationService, reactions: V2MessageReactionOperationService, forwards: V2ForwardPlanOperationService) throws -> V2MessageService"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC",
+    "path": [
+      "V2MessageService"
+    ],
+    "declaration": "actor V2MessageService"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC12retryForwardyy10Foundation4UUIDVYaKF",
+    "path": [
+      "V2MessageService",
+      "retryForward(_:)"
+    ],
+    "declaration": "func retryForward(_ id: UUID) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC13cancelForwardyy10Foundation4UUIDVYaKF",
+    "path": [
+      "V2MessageService",
+      "cancelForward(_:)"
+    ],
+    "declaration": "func cancelForward(_ id: UUID) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC13retryMutationyy10Foundation4UUIDVYaKF",
+    "path": [
+      "V2MessageService",
+      "retryMutation(_:)"
+    ],
+    "declaration": "func retryMutation(_ id: UUID) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC13retryReactionyy10Foundation4UUIDVYaKF",
+    "path": [
+      "V2MessageService",
+      "retryReaction(_:)"
+    ],
+    "declaration": "func retryReaction(_ id: UUID) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC14forwardUpdates2inScsySay0a6ClientC00D19ForwardPlanSnapshotVGs5Error_pG0A4Core0D10IdentifierVyAL9RoomIDTagOG_tF",
+    "path": [
+      "V2MessageService",
+      "forwardUpdates(in:)"
+    ],
+    "declaration": "func forwardUpdates(in room: RoomID) -> AsyncThrowingStream<[V2ForwardPlanSnapshot], any Error>"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC15mutationUpdates2inScsySay0a6ClientC00dE16MutationSnapshotVGs5Error_pG0A4Core0D10IdentifierVyAL9RoomIDTagOG_tF",
+    "path": [
+      "V2MessageService",
+      "mutationUpdates(in:)"
+    ],
+    "declaration": "func mutationUpdates(in room: RoomID) -> AsyncThrowingStream<[V2MessageMutationSnapshot], any Error>"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC15reactionUpdates2inScsySay0a6ClientC00dE15ReactionPendingVGs5Error_pG0A4Core0D10IdentifierVyAL9RoomIDTagOG_tF",
+    "path": [
+      "V2MessageService",
+      "reactionUpdates(in:)"
+    ],
+    "declaration": "func reactionUpdates(in room: RoomID) -> AsyncThrowingStream<[V2MessageReactionPending], any Error>"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC17sendConfirmationsyScsy0A4Core0D23OperationExecutionStateOSgs5Error_pG10Foundation4UUIDVF",
+    "path": [
+      "V2MessageService",
+      "sendConfirmations(_:)"
+    ],
+    "declaration": "func sendConfirmations(_ id: UUID) -> AsyncThrowingStream<V2OperationExecutionState?, any Error>"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC22runReactionPreparationyyYaKF",
+    "path": [
+      "V2MessageService",
+      "runReactionPreparation()"
+    ],
+    "declaration": "func runReactionPreparation() async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC23sendPreparedAttachments_9resources5usingy0a6ClientC00D10SendIntentV_SayAG0d8ResourceH6UploadVGAG0dO14TransferEngineCtYaKF",
+    "path": [
+      "V2MessageService",
+      "sendPreparedAttachments(_:resources:using:)"
+    ],
+    "declaration": "func sendPreparedAttachments(_ intent: V2SendIntent, resources: [V2ResourcePreparedUpload], using transfers: V2ResourceTransferEngine) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC4edit2in9messageID16expectedRevision4text10Foundation4UUIDV0A4Core0D10IdentifierVyAL9RoomIDTagOG_ANyAL0eS0OGs6UInt64VSStYaKF",
+    "path": [
+      "V2MessageService",
+      "edit(in:messageID:expectedRevision:text:)"
+    ],
+    "declaration": "@discardableResult func edit(in room: RoomID, messageID: MessageID, expectedRevision: UInt64, text: String) async throws -> UUID"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC4send2in4text8mentions8entities7replyTo10Foundation4UUIDV0A4Core0D10IdentifierVyAM9RoomIDTagOG_SSSayAM0D13MentionTargetOGSayAM0dE6EntityVGAM0dE14ReplyReferenceVSgtYaKF",
+    "path": [
+      "V2MessageService",
+      "send(in:text:mentions:entities:replyTo:)"
+    ],
+    "declaration": "@discardableResult func send(in room: RoomID, text: String, mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil) async throws -> UUID"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC5closeyyYaF",
+    "path": [
+      "V2MessageService",
+      "close()"
+    ],
+    "declaration": "func close() async"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC5react2in9messageID8reaction11targetState10Foundation4UUIDV0A4Core0D10IdentifierVyAL9RoomIDTagOG_ANyAL0eS0OGSSAL0de14ReactionTargetM0OtYaKF",
+    "path": [
+      "V2MessageService",
+      "react(in:messageID:reaction:targetState:)"
+    ],
+    "declaration": "@discardableResult func react(in room: RoomID, messageID: MessageID, reaction: String, targetState: V2MessageReactionTargetState) async throws -> UUID"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC7forward7sources2to10Foundation4UUIDVSay0A4Core0d7ForwardE9ReferenceVG_SayAJ0D10IdentifierVyAJ9RoomIDTagOGGtYaKF",
+    "path": [
+      "V2MessageService",
+      "forward(sources:to:)"
+    ],
+    "declaration": "@discardableResult func forward(sources: [V2ForwardMessageReference], to targets: [RoomID]) async throws -> UUID"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC7message2in2id0a6ClientC00djE10ProjectionV0A4Core0D10IdentifierVyAJ9RoomIDTagOG_ALyAJ0eO0OGtYaKF",
+    "path": [
+      "V2MessageService",
+      "message(in:id:)"
+    ],
+    "declaration": "func message(in room: RoomID, id: MessageID) async throws -> V2ClientMessageProjection"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC8handlersSay0a6ClientC00D23OperationWorkDispatcherC7HandlerVGyF",
+    "path": [
+      "V2MessageService",
+      "handlers()"
+    ],
+    "declaration": "func handlers() -> [V2OperationWorkDispatcher.Handler]"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC8withdraw2in9messageID16expectedRevision10Foundation4UUIDV0A4Core0D10IdentifierVyAK9RoomIDTagOG_AMyAK0eR0OGs6UInt64VtYaKF",
+    "path": [
+      "V2MessageService",
+      "withdraw(in:messageID:expectedRevision:)"
+    ],
+    "declaration": "@discardableResult func withdraw(in room: RoomID, messageID: MessageID, expectedRevision: UInt64) async throws -> UUID"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC9accountID0A4Core0D10IdentifierVyAE9UserIDTagOGvp",
+    "path": [
+      "V2MessageService",
+      "accountID"
+    ],
+    "declaration": "nonisolated let accountID: UserID"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC9accountID5store5sends9mutations9reactions8forwardsAC0A4Core0D10IdentifierVyAJ9UserIDTagOG_0a6ClientC020GRDBV2LocalSyncStoreCAP0de13SendOperationF0CAP0de8MutationxF0CAP0de8ReactionxF0CAP0d11ForwardPlanxF0Ctcfc",
+    "path": [
+      "V2MessageService",
+      "init(accountID:store:sends:mutations:reactions:forwards:)"
+    ],
+    "declaration": "init(accountID: UserID, store: GRDBV2LocalSyncStore, sends: V2MessageSendOperationService, mutations: V2MessageMutationOperationService, reactions: V2MessageReactionOperationService, forwards: V2ForwardPlanOperationService)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime16V2MessageServiceC9retrySendyy10Foundation4UUIDVYaKF",
+    "path": [
+      "V2MessageService",
+      "retrySend(_:)"
+    ],
+    "declaration": "func retrySend(_ id: UUID) async throws"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime19V2ConversationQueryO",
+    "path": [
+      "V2ConversationQuery"
+    ],
+    "declaration": "enum V2ConversationQuery"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime19V2ConversationQueryO13conversationsyACSb_0a6ClientC00dhE10ListCursorVSgSitcACmF",
+    "path": [
+      "V2ConversationQuery",
+      "conversations(isArchived:before:limit:)"
+    ],
+    "declaration": "case conversations(isArchived: Bool, before: V2ClientConversationListCursor?, limit: Int)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime19V2ConversationQueryO8timelineyAC0A4Core0D10IdentifierVyAE9RoomIDTagOG_0a6ClientC00dL14TimelineCursorVSgS2itcACmF",
+    "path": [
+      "V2ConversationQuery",
+      "timeline(roomID:before:limit:pendingPage:)"
+    ],
+    "declaration": "case timeline(roomID: RoomID, before: V2ClientTimelineCursor?, limit: Int, pendingPage: Int)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime20V2ConversationWindowC",
+    "path": [
+      "V2ConversationWindow"
+    ],
+    "declaration": "actor V2ConversationWindow"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime20V2ConversationWindowC11isFirstPageSbyF",
+    "path": [
+      "V2ConversationWindow",
+      "isFirstPage()"
+    ],
+    "declaration": "func isFirstPage() -> Bool"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime20V2ConversationWindowC2id10Foundation4UUIDVvp",
+    "path": [
+      "V2ConversationWindow",
+      "id"
+    ],
+    "declaration": "nonisolated let id: UUID"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime20V2ConversationWindowC4readAA0deF7ContentOyYaKF",
+    "path": [
+      "V2ConversationWindow",
+      "read()"
+    ],
+    "declaration": "func read() async throws -> V2ConversationWindowContent"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime20V2ConversationWindowC5closeyyYaF",
+    "path": [
+      "V2ConversationWindow",
+      "close()"
+    ],
+    "declaration": "func close() async"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime20V2ConversationWindowC5resetAA0deF7ContentOyYaKF",
+    "path": [
+      "V2ConversationWindow",
+      "reset()"
+    ],
+    "declaration": "func reset() async throws -> V2ConversationWindowContent"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime20V2ConversationWindowC7updatesAA0deF7UpdatesVyYaF",
+    "path": [
+      "V2ConversationWindow",
+      "updates()"
+    ],
+    "declaration": "func updates() async -> V2ConversationWindowUpdates"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime20V2ConversationWindowC8nextPageAA0deF7ContentOyYaKF",
+    "path": [
+      "V2ConversationWindow",
+      "nextPage()"
+    ],
+    "declaration": "func nextPage() async throws -> V2ConversationWindowContent"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC",
+    "path": [
+      "V2ConversationService"
+    ],
+    "declaration": "actor V2ConversationService"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC12openTimeline2in5limitAA0dE6WindowC0A4Core0D10IdentifierVyAI9RoomIDTagOG_SitKF",
+    "path": [
+      "V2ConversationService",
+      "openTimeline(in:limit:)"
+    ],
+    "declaration": "func openTimeline(in roomID: RoomID, limit: Int = 50) throws -> V2ConversationWindow"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC16allConversations10isArchivedSayAA0dE12ListSnapshotVGSb_tYaKF",
+    "path": [
+      "V2ConversationService",
+      "allConversations(isArchived:)"
+    ],
+    "declaration": "func allConversations(isArchived: Bool) async throws -> [V2ConversationListSnapshot]"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC4list10isArchived6before5limitAA0dE12ListSnapshotVSb_0a6ClientC00dneL6CursorVSgSitYaKF",
+    "path": [
+      "V2ConversationService",
+      "list(isArchived:before:limit:)"
+    ],
+    "declaration": "func list(isArchived: Bool, before: V2ClientConversationListCursor? = nil, limit: Int = 50) async throws -> V2ConversationListSnapshot"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC5closeyyYaF",
+    "path": [
+      "V2ConversationService",
+      "close()"
+    ],
+    "declaration": "func close() async"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC6locate2in9messageID6before5after0a6ClientC00dM16TimelineLocationO0A4Core0D10IdentifierVyAL9RoomIDTagOG_ANyAL07MessageS0OGS2itYaKF",
+    "path": [
+      "V2ConversationService",
+      "locate(in:messageID:before:after:)"
+    ],
+    "declaration": "func locate(in roomID: RoomID, messageID: MessageID, before: Int = 40, after: Int = 39) async throws -> V2ClientTimelineLocation"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC7changesAA0dE14ChangeNotifierCvp",
+    "path": [
+      "V2ConversationService",
+      "changes"
+    ],
+    "declaration": "nonisolated let changes: V2ConversationChangeNotifier"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC8openList10isArchived5limitAA0dE6WindowCSb_SitKF",
+    "path": [
+      "V2ConversationService",
+      "openList(isArchived:limit:)"
+    ],
+    "declaration": "func openList(isArchived: Bool = false, limit: Int = 50) throws -> V2ConversationWindow"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC8timeline2in6before5limit11pendingPageAA0D23MessageTimelineSnapshotV0A4Core0D10IdentifierVyAK9RoomIDTagOG_0a6ClientC00dtN6CursorVSgS2itYaKF",
+    "path": [
+      "V2ConversationService",
+      "timeline(in:before:limit:pendingPage:)"
+    ],
+    "declaration": "func timeline(in roomID: RoomID, before: V2ClientTimelineCursor? = nil, limit: Int = 50, pendingPage: Int = 0) async throws -> V2MessageTimelineSnapshot"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC9accountID0A4Core0D10IdentifierVyAE9UserIDTagOGvp",
+    "path": [
+      "V2ConversationService",
+      "accountID"
+    ],
+    "declaration": "nonisolated let accountID: UserID"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2ConversationServiceC9accountID5store21requiresAuthorization20requestLatestVisibleAC0A4Core0D10IdentifierVyAH9UserIDTagOG_0a6ClientC020GRDBV2LocalSyncStoreCSbySayAJyAH04RoomR0OGGYaYbKctcfc",
+    "path": [
+      "V2ConversationService",
+      "init(accountID:store:requiresAuthorization:requestLatestVisible:)"
+    ],
+    "declaration": "init(accountID: UserID, store: GRDBV2LocalSyncStore, requiresAuthorization: Bool = true, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void = { _ in })"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2MessageServiceErrorO",
+    "path": [
+      "V2MessageServiceError"
+    ],
+    "declaration": "enum V2MessageServiceError"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2MessageServiceErrorO12invalidInputyA2CmF",
+    "path": [
+      "V2MessageServiceError",
+      "invalidInput"
+    ],
+    "declaration": "case invalidInput"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime21V2MessageServiceErrorO6closedyA2CmF",
+    "path": [
+      "V2MessageServiceError",
+      "closed"
+    ],
+    "declaration": "case closed"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime25V2MessageTimelineSnapshotV",
+    "path": [
+      "V2MessageTimelineSnapshot"
+    ],
+    "declaration": "struct V2MessageTimelineSnapshot"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime25V2MessageTimelineSnapshotV4page0a6ClientC00di12ConversationF4PageVvp",
+    "path": [
+      "V2MessageTimelineSnapshot",
+      "page"
+    ],
+    "declaration": "let page: V2ClientConversationTimelinePage"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime25V2MessageTimelineSnapshotV7pending0a6ClientC00d19PendingResourceSendG0Vvp",
+    "path": [
+      "V2MessageTimelineSnapshot",
+      "pending"
+    ],
+    "declaration": "let pending: V2PendingResourceSendSnapshot"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationListSnapshotV",
+    "path": [
+      "V2ConversationListSnapshot"
+    ],
+    "declaration": "struct V2ConversationListSnapshot"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationListSnapshotV4page0a6ClientC00dieF4PageVvp",
+    "path": [
+      "V2ConversationListSnapshot",
+      "page"
+    ],
+    "declaration": "let page: V2ClientConversationListPage"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationListSnapshotV6titlesSDy0A4Core0D10IdentifierVyAE9RoomIDTagOGSSGvp",
+    "path": [
+      "V2ConversationListSnapshot",
+      "titles"
+    ],
+    "declaration": "let titles: [RoomID : String]"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationListSnapshotV6unreadSDy0A4Core0D10IdentifierVyAE9RoomIDTagOGs6UInt64VGvp",
+    "path": [
+      "V2ConversationListSnapshot",
+      "unread"
+    ],
+    "declaration": "let unread: [RoomID : UInt64]"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationServiceErrorO",
+    "path": [
+      "V2ConversationServiceError"
+    ],
+    "declaration": "enum V2ConversationServiceError"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationServiceErrorO11windowLimityA2CmF",
+    "path": [
+      "V2ConversationServiceError",
+      "windowLimit"
+    ],
+    "declaration": "case windowLimit"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationServiceErrorO12invalidQueryyA2CmF",
+    "path": [
+      "V2ConversationServiceError",
+      "invalidQuery"
+    ],
+    "declaration": "case invalidQuery"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationServiceErrorO4busyyA2CmF",
+    "path": [
+      "V2ConversationServiceError",
+      "busy"
+    ],
+    "declaration": "case busy"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime26V2ConversationServiceErrorO6closedyA2CmF",
+    "path": [
+      "V2ConversationServiceError",
+      "closed"
+    ],
+    "declaration": "case closed"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime27V2ConversationWindowContentO",
+    "path": [
+      "V2ConversationWindowContent"
+    ],
+    "declaration": "enum V2ConversationWindowContent"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime27V2ConversationWindowContentO13conversationsyAcA0dE12ListSnapshotVcACmF",
+    "path": [
+      "V2ConversationWindowContent",
+      "conversations(_:)"
+    ],
+    "declaration": "case conversations(V2ConversationListSnapshot)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime27V2ConversationWindowContentO8timelineyAcA0D23MessageTimelineSnapshotVcACmF",
+    "path": [
+      "V2ConversationWindowContent",
+      "timeline(_:)"
+    ],
+    "declaration": "case timeline(V2MessageTimelineSnapshot)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime27V2ConversationWindowUpdatesV",
+    "path": [
+      "V2ConversationWindowUpdates"
+    ],
+    "declaration": "struct V2ConversationWindowUpdates"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime27V2ConversationWindowUpdatesV13AsyncIteratorV",
+    "path": [
+      "V2ConversationWindowUpdates",
+      "AsyncIterator"
+    ],
+    "declaration": "struct AsyncIterator"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime27V2ConversationWindowUpdatesV13AsyncIteratorV4nextAA0deF7ContentOSgyYaKF",
+    "path": [
+      "V2ConversationWindowUpdates",
+      "AsyncIterator",
+      "next()"
+    ],
+    "declaration": "@concurrent mutating func next() async throws -> V2ConversationWindowUpdates.Element?"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime27V2ConversationWindowUpdatesV17makeAsyncIteratorAC0iJ0VyF",
+    "path": [
+      "V2ConversationWindowUpdates",
+      "makeAsyncIterator()"
+    ],
+    "declaration": "func makeAsyncIterator() -> V2ConversationWindowUpdates.AsyncIterator"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime27V2ConversationWindowUpdatesV7Elementa",
+    "path": [
+      "V2ConversationWindowUpdates",
+      "Element"
+    ],
+    "declaration": "typealias Element = V2ConversationWindowContent"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC",
+    "path": [
+      "V2ConversationChangeNotifier"
+    ],
+    "declaration": "actor V2ConversationChangeNotifier"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC10localStore5sleepAC0a6ClientC0015GRDBV2LocalSyncI0CSg_ys8DurationVYaYbKctcfc",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "init(localStore:sleep:)"
+    ],
+    "declaration": "init(localStore: GRDBV2LocalSyncStore? = nil, sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) })"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC12SubscriptionV",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Subscription"
+    ],
+    "declaration": "struct Subscription"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC12SubscriptionV13AsyncIteratorV",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Subscription",
+      "AsyncIterator"
+    ],
+    "declaration": "nonisolated struct AsyncIterator"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC12SubscriptionV13AsyncIteratorV4nextAC7RequestVSgyYaF",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Subscription",
+      "AsyncIterator",
+      "next()"
+    ],
+    "declaration": "@concurrent mutating func next() async -> V2ConversationChangeNotifier.Request?"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC12SubscriptionV17makeAsyncIteratorAE0jK0VyF",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Subscription",
+      "makeAsyncIterator()"
+    ],
+    "declaration": "func makeAsyncIterator() -> V2ConversationChangeNotifier.Subscription.AsyncIterator"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC12SubscriptionV7Elementa",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Subscription",
+      "Element"
+    ],
+    "declaration": "typealias Element = V2ConversationChangeNotifier.Request"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC13closeAndDrainyyYaF",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "closeAndDrain()"
+    ],
+    "declaration": "func closeAndDrain() async"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC6finishyyF",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "finish()"
+    ],
+    "declaration": "func finish()"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7RequestV",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Request"
+    ],
+    "declaration": "struct Request"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7RequestV10generation24requiresImmediateRefresh18conversationCommit6scopes7roomIDsAEs6UInt64V_Sb0a6ClientC00deN11MeasurementCSgAM0D16ProjectionScopesVShySSGSgtcfc",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Request",
+      "init(generation:requiresImmediateRefresh:conversationCommit:scopes:roomIDs:)"
+    ],
+    "declaration": "init(generation: UInt64, requiresImmediateRefresh: Bool, conversationCommit: V2ConversationCommitMeasurement? = nil, scopes: V2ProjectionScopes = .all, roomIDs: Set<String>? = nil)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7RequestV10generations6UInt64Vvp",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Request",
+      "generation"
+    ],
+    "declaration": "let generation: UInt64"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7RequestV18conversationCommit0a6ClientC00deJ11MeasurementCSgvp",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Request",
+      "conversationCommit"
+    ],
+    "declaration": "let conversationCommit: V2ConversationCommitMeasurement?"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7RequestV24requiresImmediateRefreshSbvp",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Request",
+      "requiresImmediateRefresh"
+    ],
+    "declaration": "let requiresImmediateRefresh: Bool"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7RequestV2eeoiySbAE_AEtFZ",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Request",
+      "==(_:_:)"
+    ],
+    "declaration": "static func == (lhs: V2ConversationChangeNotifier.Request, rhs: V2ConversationChangeNotifier.Request) -> Bool"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7RequestV6scopes0a6ClientC00D16ProjectionScopesVvp",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Request",
+      "scopes"
+    ],
+    "declaration": "let scopes: V2ProjectionScopes"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7RequestV7roomIDsShySSGSgvp",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "Request",
+      "roomIDs"
+    ],
+    "declaration": "let roomIDs: Set<String>?"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7publishyy0a6ClientC00d10ProjectionF0VF",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "publish(_:)"
+    ],
+    "declaration": "func publish(_ change: V2ProjectionChange = .all)"
+  },
+  {
+    "id": "s:17IMV2SharedRuntime28V2ConversationChangeNotifierC7updates6scopes6roomIDAC12SubscriptionV0a6ClientC00D16ProjectionScopesV_SSSgtF",
+    "path": [
+      "V2ConversationChangeNotifier",
+      "updates(scopes:roomID:)"
+    ],
+    "declaration": "func updates(scopes: V2ProjectionScopes = .all, roomID: String? = nil) -> V2ConversationChangeNotifier.Subscription"
+  }
+]

@@ -2,6 +2,8 @@ import Foundation
 import IMV2Core
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Android)
+import Android
 #elseif canImport(Glibc)
 import Glibc
 #endif
@@ -78,8 +80,8 @@ public actor V2ResourceFileStore {
     init(root: URL, cacheRoot: URL? = nil, backgroundRoot: URL? = nil, journal: V2ResourceFileJournal, policy: V2ResourceStoragePolicy = .standard,
                 protection: any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) throws {
         guard root.isFileURL, cacheRoot?.isFileURL ?? true else { throw V2ResourceStorageError.invalidRecord }
-        self.root = root.standardizedFileURL.resolvingSymlinksInPath()
-        self.cacheRoot = (cacheRoot ?? root.appending(path: "cache")).standardizedFileURL.resolvingSymlinksInPath()
+        self.root = canonicalResourceRoot(root)
+        self.cacheRoot = canonicalResourceRoot(cacheRoot ?? root.appending(path: "cache"))
         backgroundDirectory = (backgroundRoot ?? root.appendingPathExtension("background")).standardizedFileURL
         guard self.cacheRoot != self.root else { throw V2ResourceStorageError.invalidRecord }
         self.journal = journal; self.policy = try journal.storagePolicy(defaults: policy); self.protection = protection
@@ -99,8 +101,8 @@ public actor V2ResourceFileStore {
          placementCheckpoint: @escaping @Sendable (PlacementCheckpoint) throws -> Void = { _ in },
          backgroundSourceCheckpoint: @escaping @Sendable (BackgroundSourceCheckpoint) throws -> Void = { _ in },
          checkpoint: @escaping @Sendable (PublicationCheckpoint) throws -> Void) throws {
-        self.root = root.standardizedFileURL.resolvingSymlinksInPath()
-        self.cacheRoot = (cacheRoot ?? root.appending(path: "cache")).standardizedFileURL.resolvingSymlinksInPath()
+        self.root = canonicalResourceRoot(root)
+        self.cacheRoot = canonicalResourceRoot(cacheRoot ?? root.appending(path: "cache"))
         backgroundDirectory = (backgroundRoot ?? root.appendingPathExtension("background")).standardizedFileURL
         self.journal = journal; self.policy = try journal.storagePolicy(defaults: policy)
         protection = V2SystemResourceFileProtectionWriter(); self.checkpoint = checkpoint
@@ -728,12 +730,7 @@ public actor V2ResourceFileStore {
         if addition > 0, let maximum = policy.maximumManagedBytes {
             guard addition <= maximum, usage.managedBytes <= maximum - addition else { throw V2ResourceStorageError.capacityExceeded }
         }
-        let capacity = try root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
-        // Small mounted volumes can report zero (or nil) for the purge-aware
-        // estimate despite having ordinary free blocks. Without a useful
-        // estimate, fall back to those actual blocks; unknown remains zero.
-        let estimate = capacity.volumeAvailableCapacityForImportantUsage ?? 0
-        let free = estimate > 0 ? estimate : capacity.volumeAvailableCapacity.map(Int64.init) ?? 0
+        let free = try V2AvailableDiskCapacity.bytes(at: root)
         guard free >= usage.temporaryReservedBytes + addition + policy.minimumFreeBytes else { throw V2ResourceStorageError.capacityExceeded }
     }
 
@@ -859,7 +856,18 @@ public actor V2ResourceFileStore {
         }
     }
 
-    private func storageRoot(_ storage: V2ResourceFileStorage) -> URL { storage == .persistent ? root : cacheRoot }
+    private func storageRoot(_ storage: V2ResourceFileStorage) -> URL {
+        #if os(Android)
+        // Android SELinux forbids hard links in app data. Keep one stable,
+        // account-private payload path: retention and eviction remain journal
+        // decisions, and changing retention cannot invalidate a live lease.
+        // Android resources first ship with this layout; no legacy payloads
+        // exist in cacheRoot. Transfer staging still uses the cache directory.
+        return root
+        #else
+        return storage == .persistent ? root : cacheRoot
+        #endif
+    }
     private func fileURL(_ id: V2LocalResourceFileID, storage: V2ResourceFileStorage) -> URL { storageRoot(storage).appendingPathComponent("files").appendingPathComponent(id.value.uuidString) }
     private func partialURL(_ id: V2LocalResourceFileID, storage: V2ResourceFileStorage) -> URL { storageRoot(storage).appendingPathComponent("partials").appendingPathComponent(id.value.uuidString) }
     private func transferURL(_ id: UUID) -> URL { cacheRoot.appendingPathComponent("transfers").appendingPathComponent(id.uuidString) }
@@ -946,7 +954,7 @@ public actor V2ResourceFileStore {
         try journal.commitRelocation(operation)
         try placementCheckpoint(.catalogCommitted)
         guard !leases.values.contains(record.id) else { return }
-        try removeManaged(source)
+        if source != target { try removeManaged(source) }
         try placementCheckpoint(.sourceRemoved)
         try journal.finishRelocation(operation)
     }
@@ -1264,7 +1272,26 @@ extension V2ResourceFileStore {
 private func closeResourceDirectoryDescriptor(_ descriptor: Int32) -> Int32 {
     #if canImport(Darwin)
     Darwin.close(descriptor)
+    #elseif canImport(Android)
+    Android.close(descriptor)
     #else
     Glibc.close(descriptor)
+    #endif
+}
+
+/// Android's Foundation resolves /data/user/0 only when the entire path exists.
+/// Resolve the existing ancestor before appending not-yet-created resource directories;
+/// otherwise prepare() would mistake their later canonical paths for symlink substitution.
+private func canonicalResourceRoot(_ url: URL) -> URL {
+    #if os(Android)
+    var ancestor = url.standardizedFileURL
+    var missing: [String] = []
+    while !FileManager.default.fileExists(atPath: ancestor.path), ancestor.path != "/" {
+        missing.append(ancestor.lastPathComponent)
+        ancestor.deleteLastPathComponent()
+    }
+    return missing.reversed().reduce(ancestor.resolvingSymlinksInPath()) { $0.appendingPathComponent($1) }
+    #else
+    return url.standardizedFileURL.resolvingSymlinksInPath()
     #endif
 }

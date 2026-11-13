@@ -1,0 +1,20 @@
+{
+  "realBackend": true,
+  "appEntry": "MainActivity",
+  "initialSequence": 1,
+  "passwordLogin": true,
+  "reconnectedSequence": 2,
+  "connections": 2,
+  "projectionVerified": true,
+  "loginCancellationMilliseconds": 18,
+  "credentialAndDatabaseReopen": true,
+  "leakedClients": 0,
+  "leakedOperations": 0,
+  "passed": true,
+  "api": 31,
+  "serial": "emulator-5558",
+  "apkSHA256": "a27b2188c26c88c50032c9d41a61baa4cd2fbe18dc9e314a428f7dd081a858dc",
+  "installedApkSHA256": "a27b2188c26c88c50032c9d41a61baa4cd2fbe18dc9e314a428f7dd081a858dc",
+  "relayCuts": 1,
+  "relayConnections": 3
+}

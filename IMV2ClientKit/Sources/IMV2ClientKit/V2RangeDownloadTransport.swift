@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Headers are validated before any body bytes are accepted. Implementations
 /// drain cancellation before returning so the physical byte permit stays held.
@@ -30,6 +33,10 @@ public struct V2URLSessionRangeDownloadTransport: V2RangeDownloadTransport, Send
     public func stream(_ request: URLRequest, maximumBytes: Int64,
                        receiveResponse: @escaping @Sendable (HTTPURLResponse) throws -> Void,
                        consume: @escaping @Sendable (Data) throws -> Void) async throws -> V2RangeDownloadResponse {
+        #if os(Android)
+        // Restricted Android requests must use the platform network adapter.
+        if let constraints = V2ResourceDownloadNetworkConstraints.transferConstraints, constraints != .unrestricted { throw V2NetworkPolicyError.unsupportedConstraints }
+        #endif
         guard request.timeoutInterval.isFinite,request.timeoutInterval > 0 else { throw V2ClientMediaTransferError.invalidTarget }
         let transportDeadline = ContinuousClock.now.advanced(by: .seconds(min(60, request.timeoutInterval)))
         let deadline = min(transportDeadline, V2HTTPRequestDeadline.deadline(for: request) ?? transportDeadline, V2HTTPRequestDeadline.current ?? transportDeadline)
@@ -112,7 +119,7 @@ final class V2RangeTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked Se
         connectivity.waiting()
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         v2ForwardAuthenticationChallenge(session: session, task: task, challenge: challenge, completionHandler: completionHandler)
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {

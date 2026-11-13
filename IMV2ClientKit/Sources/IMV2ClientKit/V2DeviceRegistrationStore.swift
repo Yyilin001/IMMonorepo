@@ -1,9 +1,6 @@
 import Foundation
 import Crypto
 import IMV2Core
-#if canImport(Security)
-import Security
-#endif
 
 /// 待执行注册取消的不可变快照，保留完整证明、失败次数、重试时间及暂停原因。
 public struct V2DeviceRegistrationCancellationJob: Codable, Equatable, Sendable {
@@ -35,15 +32,9 @@ public actor V2DeviceRegistrationStore {
     /// 只接收取消队列聚合状态的展示订阅。
     private var statusObservers: [UUID: AsyncThrowingStream<V2DeviceRevocationQueueStatus, any Error>.Continuation] = [:]
 
-    /// 创建指定 Keychain 命名空间的注册所有者，默认使用系统 UUID 与当前日期，不立即读取账本。
-    public init(service: String) {
-        persistence = V2KeychainDeviceRegistrationPersistence(service: service)
-        makeUUID = UUID.init
-        now = Date.init
-    }
 
     /// 注入同步存储、UUID 工厂与时钟，便于隔离验证注册及恢复流程。
-    init(persistence: any V2DeviceRegistrationPersisting, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(persistence: any V2DeviceRegistrationPersisting, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init) {
         self.persistence = persistence
         self.makeUUID = makeUUID
         self.now = now
@@ -332,74 +323,11 @@ public struct V2PreparedDeviceRegistration: V2DeviceIdentityProvider, V2DeviceCr
 }
 
 /// 同步完整账本存储边界，使 actor 能在无 await 的执行段内完成读取、比较和写入。
-protocol V2DeviceRegistrationPersisting: Sendable {
+public protocol V2DeviceRegistrationPersisting: Sendable {
     /// 读取完整账本字节，不存在返回 nil，失败抛出错误。
     func load() throws -> Data?
     /// 同步保存完整账本，返回成功后才可发布状态变更。
     func save(_ data: Data) throws
     /// 删除整个账本存储项，缺失项应视为成功。
     func delete() throws
-}
-
-/// 单个 Keychain 通用密码项的账本适配器；新项目设备限定且首次解锁后可访问，更新仅替换数据。
-private struct V2KeychainDeviceRegistrationPersistence: V2DeviceRegistrationPersisting {
-    /// 账本 Keychain 服务命名空间。
-    let service: String
-
-    #if canImport(Security)
-    /// 以通用密码类别、服务名与固定账户 device-registration-ledger-v1 定位项目。
-    private var query: [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: "device-registration-ledger-v1"]
-    }
-
-    /// 读取唯一匹配项并要求 Data 类型，不存在返回 nil，系统或类型错误明确报告。
-    func load() throws -> Data? {
-        var query = query
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var value: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &value)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else { throw error(status) }
-        guard let data = value as? Data else { throw V2DeviceCredentialRegistrationOperationStoreError.malformedRecord }
-        return data
-    }
-
-    /// 先更新项目数据，仅在不存在时插入；插入设置首次解锁后且仅限本设备保护级别。
-    func save(_ data: Data) throws {
-        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if status == errSecSuccess { return }
-        guard status == errSecItemNotFound else { throw error(status) }
-        var insert = query
-        insert[kSecValueData as String] = data
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let added = SecItemAdd(insert as CFDictionary, nil)
-        guard added == errSecSuccess else { throw error(added) }
-    }
-
-    /// 删除匹配项目，不存在视为成功。
-    func delete() throws {
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw error(status) }
-    }
-
-    /// 将不可访问、解码及认证失败分别映射为 unavailable、malformedRecord、permanentlyInvalidated，其余保留状态码。
-    private func error(_ status: OSStatus) -> V2DeviceCredentialRegistrationOperationStoreError {
-        switch status {
-        case errSecInteractionNotAllowed, errSecNotAvailable: .unavailable
-        case errSecDecode: .malformedRecord
-        case errSecAuthFailed: .permanentlyInvalidated
-        default: .unexpectedStatus(status)
-        }
-    }
-    #else
-    /// 当前平台不支持 Security，始终抛出 unavailable。
-    func load() throws -> Data? { throw V2DeviceCredentialRegistrationOperationStoreError.unavailable }
-    /// 当前平台不支持 Security，不保存输入并抛出 unavailable。
-    func save(_: Data) throws { throw V2DeviceCredentialRegistrationOperationStoreError.unavailable }
-    /// 当前平台不支持 Security，始终抛出 unavailable。
-    func delete() throws { throw V2DeviceCredentialRegistrationOperationStoreError.unavailable }
-    #endif
 }

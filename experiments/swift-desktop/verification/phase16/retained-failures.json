@@ -1,0 +1,40 @@
+[
+  {
+    "kind": "compile",
+    "cause": "Initial facade page limit used UInt32; existing transport uses Int. Corrected and rebuilt both platforms."
+  },
+  {
+    "kind": "unit-test",
+    "cause": "Subscriber test initially expected an unfrozen draft to publish prepared-work state. Corrected fixture by preparing durable work; original observation behavior unchanged."
+  },
+  {
+    "kind": "ios-ui",
+    "bundle": "im-v2-local-two-install-e2e.bls4La",
+    "cause": "Immediate send-enabled assertion failed; first correction waited for admission."
+  },
+  {
+    "kind": "ios-ui",
+    "bundle": "im-v2-local-two-install-e2e.jFI6oi",
+    "cause": "Screenshot confirmed an empty composer. Old fixture treated placeholder as text. Test now enters actual text and verifies it is not the placeholder."
+  },
+  {
+    "kind": "ios-ui",
+    "bundle": "im-v2-local-two-install-e2e.1pjpIr",
+    "cause": "Old test referenced removed conversation refresh menu. Relevant receipt tests now wait for the existing conversation controls and verify synchronized projections."
+  },
+  {
+    "kind": "ios-ui",
+    "bundle": "im-v2-local-two-install-e2e.WH6nlF",
+    "cause": "Old group fixture required isHittable for the SwiftUI Menu wrapper. Uses established tapConversationTool helper, which validates the navigation-frame coordinate and resulting menu action."
+  },
+  {
+    "kind": "ios-ui",
+    "bundle": "im-v2-local-two-install-e2e.2U5a0S",
+    "cause": "Group creation now renders preselected handles as rows; old test required the removed multiline editor. Test now asserts the exact expected handle in the current selection list and still verifies actual member directory after server creation."
+  },
+  {
+    "kind": "ios-ui",
+    "bundle": "im-v2-local-two-install-e2e.whqK61",
+    "cause": "Current member sheet dismisses into group settings, not directly into chat. Test now uses the observed group settings back navigation before accessing the composer."
+  }
+]

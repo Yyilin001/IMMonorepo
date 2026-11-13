@@ -1,0 +1,33 @@
+Final validation logs (local path, SHA-256, selected terminal evidence):
+
+/tmp/im-phase3-native.log
+65b60e7840376b7d7c50f2fd35c4239ce90cee6ad97ff04eabf82644976df111
+Build complete! (62.23秒)
+
+/tmp/im-phase3-gradle.log
+9228074a4d06264b01769c84d6a4b29cdef1e8cd0f4b5dc5df7f5295cc76b3b6
+BUILD SUCCESSFUL in 1s
+
+/tmp/im-phase3-r8-build.log
+68755b09311997bcbe05e84084b492298274217452163f1dd562795d035ea1d7
+BUILD SUCCESSFUL in 5s
+
+/tmp/im-phase3-regression.log
+18fad7d74b558a37c9cce39270426d9915eb6a6627b5be429b80a607011a512a
+Build complete! (2.10秒)
+􁁛  Test run with 233 tests in 9 suites passed after 122.881 seconds.
+
+/tmp/im-phase3-ios.log
+f78cb7702f14d9a3055e97964663c4a9e7c92fef12bb427decefb6f16dda8f60
+Build complete! (5.60秒)
+
+/tmp/im-phase3-app-tests.log
+a968bbb181b0a7010ca595126c66d33edd19b812cfe48b69282222810b9a9898
+✔ Test run with 15 tests in 3 suites passed after 1.022 seconds.
+** TEST SUCCEEDED **
+iOS unit tests executed: passed=15, failed=0, skipped=0
+iOS unit tests result=pass project=/Users/yyl/Desktop/Code/IMProject/IMMonorepo/IMApp/IMApp.xcodeproj scheme=IMApp configuration=Debug destination=platform=iOS Simulator,id=ABF1052A-8626-4BD5-AE7D-9E6B7DA574E3 selection=IMAppTests/V2BackgroundTransferBridgeTests IMAppTests/V2BackgroundUploadSourceTests IMAppTests/V2OfflineStartupTests
+
+API inventory: 6079 declarations; phase2 comparison: added=0 removed=0 changed=0.
+Android testDebugUnitTest tasks: NO-SOURCE; platform behavior tested through instrumentation.
+iOS xcresult: /tmp/im-phase3-ios-compatibility.xcresult

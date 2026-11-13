@@ -1,5 +1,5 @@
 import Foundation
-import os
+import IMV2ClientPlatform
 
 /// Callback interval includes other transaction observers; it is not a pure
 /// SQLite fsync measurement. Snapshot publication is not a rendered GPU frame.
@@ -14,7 +14,7 @@ public struct V2ProjectionMetric: Sendable {
 public final class V2ConversationCommitMeasurement: Sendable {
     let committedAt: ContinuousClock.Instant
     private let diagnostics: V2NetworkDiagnostics
-    private let consumed = OSAllocatedUnfairLock(initialState: false)
+    private let consumed = V2Lock(initialState: false)
     init(committedAt: ContinuousClock.Instant, diagnostics: V2NetworkDiagnostics) {
         self.committedAt = committedAt; self.diagnostics = diagnostics
     }

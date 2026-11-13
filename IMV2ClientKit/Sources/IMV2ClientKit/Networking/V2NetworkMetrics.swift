@@ -29,21 +29,6 @@ public struct V2NetworkMetric: Sendable {
 
 }
 
-/// Missing URLSession phases remain nil (for example, a reused connection).
-public struct V2HTTPPhaseTiming: Sendable {
-    public let dns: TimeInterval?
-    public let connect: TimeInterval?
-    public let tls: TimeInterval?
-    public let request: TimeInterval?
-    public let response: TimeInterval?
-    public let networkProtocol: String?
-    static func duration(_ start: Date?, _ end: Date?) -> TimeInterval? {
-        guard let start, let end else { return nil }
-        let value = end.timeIntervalSince(start)
-        return value.isFinite && value >= 0 ? value : nil
-    }
-}
-
 /// Handler timing is separate from network admission, decoding and SQLite
 /// commit timing. Journal states are observations, never proof manufactured
 /// from a successful handler return.

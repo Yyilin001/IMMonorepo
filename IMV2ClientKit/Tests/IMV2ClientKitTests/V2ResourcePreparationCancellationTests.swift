@@ -4,6 +4,9 @@ import IMV2Core
 import Synchronization
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Dependency-aware preparation cancellation", .timeLimit(.minutes(1)))
 struct V2ResourcePreparationCancellationTests {

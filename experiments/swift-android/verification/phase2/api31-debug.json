@@ -1,0 +1,187 @@
+{
+  "api": 31,
+  "abi": "arm64-v8a",
+  "fingerprint": "google/sdk_gphone64_arm64/emulator64_arm64:12/SE1A.220630.001.A1/9056438:userdebug/dev-keys",
+  "tests": {
+    "defaultTrustAcceptsPublicHTTPS": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "redirectRejected": "false",
+          "bytes": "34404",
+          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>\n       Swift Programming Language \n    </titl",
+          "status": "200"
+        },
+        "outcome": "ok"
+      }
+    },
+    "absoluteDeadlineCancelsRequest": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "error": "deadline"
+        },
+        "outcome": "error",
+        "elapsedMs": 156
+      }
+    },
+    "productionHTTPUsesDefaultTLS": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "permitDrained": "true",
+          "bytes": "34404",
+          "runtime": "IMV2ClientRuntime",
+          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>\n       Swift Programming Language \n    </titl",
+          "status": "200"
+        },
+        "outcome": "ok",
+        "selfSignedRejected": {
+          "outcome": "error",
+          "values": {
+            "error": "V2HTTPFailure(kind: IMV2ClientNetwork.V2HTTPFailure.Kind.transport, service: \"phaseTwo\", statusCode: nil, urlErrorCode: Optional(-1), retryAfter: nil, certainty: IMV2ClientNetwork.V2HTTPFailure.Certainty.outcomeUnknown)"
+          }
+        }
+      }
+    },
+    "kotlinCancellationDrainsSwiftSleep": {
+      "status": "passed",
+      "evidence": {
+        "iterations": 30,
+        "elapsedMs": 561
+      }
+    },
+    "cancellationClosesPhysicalHTTPStream": {
+      "status": "passed",
+      "evidence": {
+        "cancelAndDrainMs": 11,
+        "serverObservedDisconnect": true
+      }
+    },
+    "productionHTTPBoundsAndRedirects": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "error": "oversized"
+        },
+        "outcome": "error",
+        "body": true,
+        "redirectRejected": true,
+        "declaredAndChunkedCap": true
+      }
+    },
+    "nativeCancelIsIdempotentAndReleaseRequiresCompletion": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "cancelled",
+        "values": {}
+      }
+    },
+    "productionHTTPDeadlineAndCancellationDrain": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "error": "deadline"
+        },
+        "outcome": "error",
+        "cancelAndDrainMs": 12,
+        "serverObservedDisconnect": true
+      }
+    },
+    "redirectsAreNotFollowed": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "redirectRejected": "true",
+          "body": "",
+          "bytes": "0",
+          "status": "302"
+        },
+        "outcome": "ok"
+      }
+    },
+    "declaredOversizeRejected": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "oversized"
+        }
+      }
+    },
+    "defaultTrustRejectsSelfSignedTLS": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "error": "Error Domain=NSURLErrorDomain Code=-1 \"(null)\"UserInfo={NSUnderlyingError=Error Domain=NSURLErrorDomain Code=-1 \"(null)\"UserInfo={NSLocalizedDescription=SSL certificate problem: self signed certificate}, NSLocalizedDescription=SSL certificate problem: self signed certificate, NSErrorFailingURLStringKey=https://127.0.0.1:55443/, NSErrorFailingURLKey=https://127.0.0.1:55443/}"
+        },
+        "outcome": "error"
+      }
+    },
+    "chunkedOversizeRejected": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "oversized"
+        }
+      }
+    },
+    "productionRuntimeAndUnicodeSearch": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "search": "MessageSubstringSearch",
+          "runtime": "IMV2ClientRuntime",
+          "schedulerDrained": "true",
+          "unicode": "true",
+          "productionStoreAndSearchActors": "true",
+          "exclusiveWriter": "true",
+          "reopen": "true"
+        }
+      }
+    },
+    "dependenciesDatabaseAndFTS5": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "sqlite": "3.51.2",
+          "protobuf": "repository-generated",
+          "fts5Phrase": "true",
+          "atomicRollback": "true",
+          "crypto": "SHA256,AES-GCM",
+          "reopen": "true",
+          "wal": "wal",
+          "compression": "zlib",
+          "core": "IMV2Core"
+        }
+      }
+    },
+    "kotlinCancellationDrainsSwiftStream": {
+      "status": "passed",
+      "evidence": {
+        "iterations": 20,
+        "producerDrainedBeforeReturn": true
+      }
+    },
+    "httpBodyAndStatus": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "bytes": "20",
+          "status": "200",
+          "body": "中文 HTTP response",
+          "redirectRejected": "false"
+        }
+      }
+    }
+  },
+  "apkSHA256": "6210c76829eadf5f3f814228efad150b840c2218233e14a26862f53211b724c5",
+  "variant": "debug",
+  "serial": "emulator-5558",
+  "installedApkSHA256": "6210c76829eadf5f3f814228efad150b840c2218233e14a26862f53211b724c5",
+  "verified": true
+}
