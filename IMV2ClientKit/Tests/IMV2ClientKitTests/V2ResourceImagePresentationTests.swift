@@ -3,6 +3,9 @@ import GRDB
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 struct V2ResourceImagePresentationTests {
     @Test(arguments: [(0, 1), (1, 0), (-1, 1), (16385, 1), (10000, 10000)])

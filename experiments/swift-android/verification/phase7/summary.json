@@ -1,0 +1,56 @@
+{
+  "phase": 7,
+  "branch": "codex/swift-android-feasibility",
+  "date": "2026-11-12",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "appPassed": true,
+    "directoryRegressionPassed": true,
+    "messagingRegressionPassed": true,
+    "sameTestedAPK": true,
+    "tests": 3,
+    "testSeconds": [
+      50.342,
+      37.359,
+      40.959
+    ],
+    "jvmUnitTasks": "NO-SOURCE",
+    "lint": "passed",
+    "normalDebugBuild": "passed",
+    "normalDebugDeviceAcceptance": false
+  },
+  "swift": {
+    "tests": 92,
+    "suites": 11,
+    "passed": true
+  },
+  "ios": {
+    "tests": 37,
+    "failed": 0,
+    "skipped": 0,
+    "packageBuild": "passed",
+    "publicSymbols": 6079,
+    "apiChanges": 0
+  },
+  "toolTests": 10,
+  "scope": [
+    "authorizedContactProfile",
+    "privateContactAlias",
+    "contactAvatarRead",
+    "groupInvitation",
+    "memberMuteOneHour"
+  ],
+  "limits": [
+    "ownAvatarUploadUI",
+    "groupAvatarEditing",
+    "qrScan",
+    "deepLinkNavigation",
+    "earlyUnmute",
+    "largeDirectoryPerformance",
+    "maximumAvatarStress",
+    "osProcessDeath",
+    "oldKotlinDataMigration",
+    "systemBackgroundTasks"
+  ]
+}

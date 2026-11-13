@@ -1,0 +1,89 @@
+INSTRUMENTATION_STATUS: class=com.xmtx.im.SharedSDKInteractionsBackendTests
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=1
+INSTRUMENTATION_STATUS: stream=
+com.xmtx.im.SharedSDKInteractionsBackendTests:
+INSTRUMENTATION_STATUS: test=repliesForwardingAndReactionsUseSharedRuntime
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=com.xmtx.im.SharedSDKInteractionsBackendTests
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=1
+INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: expected null, but was:<内容或权限已变化，请刷新后重试>
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.failNotNull(Assert.java:756)
+	at org.junit.Assert.assertNull(Assert.java:738)
+	at org.junit.Assert.assertNull(Assert.java:748)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend$openChat(SharedSDKInteractionsBackendTests.kt:44)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend$openChat$default(SharedSDKInteractionsBackendTests.kt:44)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend(SharedSDKInteractionsBackendTests.kt:67)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+	at kotlinx.coroutines.internal.ScopeCoroutine.afterResume(Scopes.kt:35)
+	at kotlinx.coroutines.AbstractCoroutine.resumeWith(AbstractCoroutine.kt:101)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:47)
+	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:100)
+	at kotlinx.coroutines.EventLoopImplBase.processNextEvent(EventLoop.common.kt:263)
+	at kotlinx.coroutines.BlockingCoroutine.joinBlocking(Builders.kt:94)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking(Builders.kt:70)
+	at kotlinx.coroutines.BuildersKt.runBlocking(Unknown Source:1)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking$default(Builders.kt:48)
+	at kotlinx.coroutines.BuildersKt.runBlocking$default(Unknown Source:1)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests.repliesForwardingAndReactionsUseSharedRuntime(SharedSDKInteractionsBackendTests.kt:29)
+
+INSTRUMENTATION_STATUS: stream=
+Error in repliesForwardingAndReactionsUseSharedRuntime(com.xmtx.im.SharedSDKInteractionsBackendTests):
+java.lang.AssertionError: expected null, but was:<内容或权限已变化，请刷新后重试>
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.failNotNull(Assert.java:756)
+	at org.junit.Assert.assertNull(Assert.java:738)
+	at org.junit.Assert.assertNull(Assert.java:748)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend$openChat(SharedSDKInteractionsBackendTests.kt:44)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend$openChat$default(SharedSDKInteractionsBackendTests.kt:44)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend(SharedSDKInteractionsBackendTests.kt:67)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+	at kotlinx.coroutines.internal.ScopeCoroutine.afterResume(Scopes.kt:35)
+	at kotlinx.coroutines.AbstractCoroutine.resumeWith(AbstractCoroutine.kt:101)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:47)
+	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:100)
+	at kotlinx.coroutines.EventLoopImplBase.processNextEvent(EventLoop.common.kt:263)
+	at kotlinx.coroutines.BlockingCoroutine.joinBlocking(Builders.kt:94)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking(Builders.kt:70)
+	at kotlinx.coroutines.BuildersKt.runBlocking(Unknown Source:1)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking$default(Builders.kt:48)
+	at kotlinx.coroutines.BuildersKt.runBlocking$default(Unknown Source:1)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests.repliesForwardingAndReactionsUseSharedRuntime(SharedSDKInteractionsBackendTests.kt:29)
+
+INSTRUMENTATION_STATUS: test=repliesForwardingAndReactionsUseSharedRuntime
+INSTRUMENTATION_STATUS_CODE: -2
+INSTRUMENTATION_RESULT: stream=
+
+Time: 7.341
+There was 1 failure:
+1) repliesForwardingAndReactionsUseSharedRuntime(com.xmtx.im.SharedSDKInteractionsBackendTests)
+java.lang.AssertionError: expected null, but was:<内容或权限已变化，请刷新后重试>
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.failNotNull(Assert.java:756)
+	at org.junit.Assert.assertNull(Assert.java:738)
+	at org.junit.Assert.assertNull(Assert.java:748)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend$openChat(SharedSDKInteractionsBackendTests.kt:44)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend$openChat$default(SharedSDKInteractionsBackendTests.kt:44)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests$repliesForwardingAndReactionsUseSharedRuntime$1.invokeSuspend(SharedSDKInteractionsBackendTests.kt:67)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+	at kotlinx.coroutines.internal.ScopeCoroutine.afterResume(Scopes.kt:35)
+	at kotlinx.coroutines.AbstractCoroutine.resumeWith(AbstractCoroutine.kt:101)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:47)
+	at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:100)
+	at kotlinx.coroutines.EventLoopImplBase.processNextEvent(EventLoop.common.kt:263)
+	at kotlinx.coroutines.BlockingCoroutine.joinBlocking(Builders.kt:94)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking(Builders.kt:70)
+	at kotlinx.coroutines.BuildersKt.runBlocking(Unknown Source:1)
+	at kotlinx.coroutines.BuildersKt__BuildersKt.runBlocking$default(Builders.kt:48)
+	at kotlinx.coroutines.BuildersKt.runBlocking$default(Unknown Source:1)
+	at com.xmtx.im.SharedSDKInteractionsBackendTests.repliesForwardingAndReactionsUseSharedRuntime(SharedSDKInteractionsBackendTests.kt:29)
+
+FAILURES!!!
+Tests run: 1,  Failures: 1
+
+
+INSTRUMENTATION_CODE: -1

@@ -4,6 +4,7 @@ import os
 import Testing
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
 @testable import IMApp
 
 @Suite("Real App decoded room notification loss", .enabled(if: ProcessInfo.processInfo.environment["IMV2_LOCAL_ACCOUNT_E2E"] == "1" && ProcessInfo.processInfo.environment["IMV2_APP_ROOM_PROGRESS_E2E"] == "1"))

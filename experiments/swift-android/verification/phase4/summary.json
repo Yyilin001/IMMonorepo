@@ -1,0 +1,63 @@
+{
+  "phase": 4,
+  "date": "2026-11-12",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "realBackendAppTests": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "unitTestTasks": "NO-SOURCE; no JVM case count claimed",
+    "debugBuild": true,
+    "lint": true,
+    "releaseUnsignedBuild": true,
+    "releaseDeviceTest": false
+  },
+  "swift": {
+    "testsPassed": 76,
+    "suites": 8
+  },
+  "ios": {
+    "appTestsPassed": 15,
+    "failed": 0,
+    "skipped": 0,
+    "simulatorSDK": "18.5",
+    "minimumBuildTarget": "17.0",
+    "arm64SimulatorBuild": true,
+    "publicSymbols": 6079,
+    "publicAPIDiff": {
+      "baseline": "phase3 iOS symbol graphs",
+      "previousCount": 6079,
+      "currentCount": 6079,
+      "removed": [],
+      "added": [],
+      "changed": []
+    }
+  },
+  "packages": {
+    "debug": {
+      "sizeBytes": 190788390,
+      "sha256": "a27b2188c26c88c50032c9d41a61baa4cd2fbe18dc9e314a428f7dd081a858dc",
+      "abis": [
+        "arm64-v8a"
+      ],
+      "testCAIncluded": true
+    },
+    "release": {
+      "sizeBytes": 99349862,
+      "sha256": "7815d70a0466dab798c006767ddb7b7f333a16319b5bdc26865cb13f2ed9bcc5",
+      "abis": [
+        "arm64-v8a"
+      ],
+      "testCAIncluded": false
+    }
+  },
+  "limitations": [
+    "Opt-in App entry; existing Kotlin App remains the default",
+    "No full feature/UI migration, sign-out/account switching, Passkey, background system jobs or old database migration",
+    "Owner reopen verified; process kill/power-loss recovery not verified",
+    "Release built with R8; this phase did not run Release instrumentation",
+    "Native shared SDK currently arm64 only"
+  ]
+}

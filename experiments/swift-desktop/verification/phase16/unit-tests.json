@@ -1,0 +1,8 @@
+{
+  "sharedPassed": 18,
+  "domainPassed": 36,
+  "failed": 0,
+  "filter": "FacadeTests|SharedSessionOwnershipTests|V2ReadReceipt|V2MessageSearchTests",
+  "log": "/tmp/im-phase16-unit-verified.log",
+  "sha256": "07b02c8e717f3e163107265ff8c158d6bbdd7e8cd323108a1176a5a0772ab9a5"
+}

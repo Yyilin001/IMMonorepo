@@ -1,0 +1,77 @@
+{
+  "scope": "Read-only SQL for final successful phase 10 rooms only",
+  "messages": [
+    {
+      "message_id": "01a1cf13-c639-7a71-a8af-f212f2a517fc",
+      "room_id": "32e37a10-b950-476a-9a48-ec1f82043963",
+      "room_sequence": 62,
+      "content_revision": 3,
+      "withdrawn": true
+    },
+    {
+      "message_id": "01a1cf13-f9e8-76e7-9625-a4b1efd0491b",
+      "room_id": "32e37a10-b950-476a-9a48-ec1f82043963",
+      "room_sequence": 65,
+      "content_revision": 2,
+      "withdrawn": false
+    },
+    {
+      "message_id": "01a1cf14-566f-7f25-a5b9-58416634b10c",
+      "room_id": "64c00a92-c174-48b1-b24c-96a5eb3e4434",
+      "room_sequence": 2,
+      "content_revision": 1,
+      "withdrawn": false
+    }
+  ],
+  "mutations": [
+    {
+      "message_id": "01a1cf13-c639-7a71-a8af-f212f2a517fc",
+      "kind": "editMessage",
+      "receipts": 1
+    },
+    {
+      "message_id": "01a1cf13-c639-7a71-a8af-f212f2a517fc",
+      "kind": "withdrawMessage",
+      "receipts": 1
+    },
+    {
+      "message_id": "01a1cf13-f9e8-76e7-9625-a4b1efd0491b",
+      "kind": "editMessage",
+      "receipts": 1
+    }
+  ],
+  "readWatermarks": [
+    {
+      "room_id": "32e37a10-b950-476a-9a48-ec1f82043963",
+      "user_id": "49ebba07-c88c-4776-b399-3ccac27cd07b",
+      "read_through_room_sequence": 62
+    },
+    {
+      "room_id": "32e37a10-b950-476a-9a48-ec1f82043963",
+      "user_id": "ba33e10c-865e-4634-8237-b76604822733",
+      "read_through_room_sequence": 65
+    },
+    {
+      "room_id": "64c00a92-c174-48b1-b24c-96a5eb3e4434",
+      "user_id": "49ebba07-c88c-4776-b399-3ccac27cd07b",
+      "read_through_room_sequence": 2
+    },
+    {
+      "room_id": "64c00a92-c174-48b1-b24c-96a5eb3e4434",
+      "user_id": "ba33e10c-865e-4634-8237-b76604822733",
+      "read_through_room_sequence": 2
+    }
+  ],
+  "readOperations": [
+    {
+      "room_id": "32e37a10-b950-476a-9a48-ec1f82043963",
+      "receipts": 25,
+      "maximum_resulting_room_sequence": 65
+    },
+    {
+      "room_id": "64c00a92-c174-48b1-b24c-96a5eb3e4434",
+      "receipts": 2,
+      "maximum_resulting_room_sequence": 2
+    }
+  ]
+}

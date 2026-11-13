@@ -9,6 +9,9 @@ import Security
 import Testing
 import UniformTypeIdentifiers
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 /// Run only through scripts/verify_v2_live_resource_authors.py. Both services,
 /// their Actor transport, database, bytes and CA belong to that invocation.

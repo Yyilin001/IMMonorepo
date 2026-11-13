@@ -3,6 +3,9 @@ import Testing
 import GRDB
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Durable forward plan authority")
 struct V2ForwardPlanWorkTests {

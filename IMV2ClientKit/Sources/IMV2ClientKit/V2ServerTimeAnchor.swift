@@ -1,5 +1,5 @@
 import Foundation
-import os
+import IMV2ClientPlatform
 
 /// A session-owned server time estimate. Device wall-clock changes cannot extend
 /// command windows after the authenticated connection establishes this anchor.
@@ -9,7 +9,7 @@ public final class V2ServerTimeAnchor: Sendable {
         let milliseconds: Int64
         let receivedAt: ContinuousClock.Instant
     }
-    private let sample = OSAllocatedUnfairLock<Sample?>(initialState: nil)
+    private let sample = V2Lock<Sample?>(initialState: nil)
     public init() {}
 
     public func observe(milliseconds: Int64, receivedAt: ContinuousClock.Instant = .now) throws {

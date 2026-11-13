@@ -2,6 +2,9 @@ import Foundation
 import GRDB
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Committed projection invalidations", .timeLimit(.minutes(1)))
 struct V2ProjectionChangeTests {

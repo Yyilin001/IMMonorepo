@@ -1,0 +1,15 @@
+{
+  "IMApp/IMApp/V2/V2ConversationDataSource.swift": "5418196aee347b46d8957e252412bb50bb46d6562f4286a14d58d29038c5521b",
+  "IMApp/IMApp/V2/V2ProjectionChangeNotifier.swift": "7eb42fb440387c085a1c240846ce029849a9958de8d868f9f25dc494c6c3e98d",
+  "IMApp/IMApp/V2/V2AppStore.swift": "fd13861d1fb846be360e1d25899e4522b7deacbceb6d109d006817ad58704e02",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2ConversationService.swift": "f09403f6677ae4e7ca005ff9dca15b19e4bf786c4860f652de2663d27869a11b",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2ConversationChangeNotifier.swift": "47353c48b91a69ae2a2d0990779f6c14f6e23b79751de7820312f1c49fbbb190",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/SharedConversationWindowReader.swift": "28c4efe4aee90e8411a4101c498eebcea7de65f4ff2348bb59d6d8d675133398",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/SharedRuntime.swift": "c21d2607cac3ea612726617f9aacf2be0da33e13844104ce10c02e16056b70e8",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2SharedSession.swift": "47e6c950517569a56ccb01a7d69c12cc4fa3914f6d19edc1c05831f184b97a54",
+  "IMAndroid/sharedsdk/src/main/kotlin/com/xmtx/im/sharedsdk/SharedConversationWindow.kt": "a29c91a87ac9021690122417763b995851b31d96efb65ccc252e1edccb7a14c3",
+  "IMAndroid/sharedsdk/src/main/kotlin/com/xmtx/im/sharedsdk/SharedClient.kt": "97cfee172693a3331c06fc45c5277f9b602a0fee8ac29468645ddedb29084e85",
+  "IMV2ClientKit/Tests/IMV2SharedRuntimeTests/ConversationFacadeTests.swift": "88f6d5440afb0a9ce6a02a7c1adf75557c08752ba52e48fc96ea69352aafc83f",
+  "IMV2ClientKit/Tests/IMV2SharedRuntimeTests/SharedDesktopBackendTests.swift": "ab5e4d8e2dfb16387dd1ad40410080c06f0bd396d9e2fe0efbcce50b6a0aaf5c",
+  "IMAndroid/app/src/androidTest/kotlin/com/xmtx/im/SharedSDKMessagingBackendTests.kt": "0ebcadda3a99e863bdb35d87f6ab6499420ff3b9f4b87ecff4c4d3dbce982cc6"
+}

@@ -39,7 +39,7 @@ final class V2SearchCommitObserver: TransactionObserver {
 
 /// 每个可写账号实例的唯一写入者。整批读取、发布与确认在该执行器上连续执行。
 actor V2MessageSearchWriter {
-    private let queue = DispatchSerialQueue(label: "IMV2.messageSearch.writer", qos: .utility)
+    private let queue = V2SerialQueue(label: "IMV2.messageSearch.writer", qos: .utility)
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     private let databasePool: DatabasePool
     private let messageSearchDatabasePool: DatabasePool

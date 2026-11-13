@@ -1,0 +1,34 @@
+Building for debugging...
+[Computing dependencies]
+[Using on-disk description]
+[2 / 5] IMV2SharedRuntimeTests-product
+[4 / 7] IMV2SharedRuntimeTests-product
+[9 / 11] IMV2SharedRuntimeTests-product
+[11 / 11] IMV2SharedRuntimeTests-product
+Build complete! (2.30秒)
+􀟈  Test run started.
+􀄵  Testing Library Version: 2084
+􀄵  Target Platform: arm64e-apple-macos14.0
+􀟈  Suite SharedPlatformTests started.
+􀟈  Suite SharedDesktopBackendTests started.
+􀟈  Test appleSecureItemsAndBindingRoundTrip() started.
+􀟈  Test appleLoginMessagesSearchDisconnectRestoreAndAccountExit() started.
+􁁛  Test appleSecureItemsAndBindingRoundTrip() passed after 0.058 seconds.
+􀟈  Test cABIHandlesCloseAndCallerOwnedReplies() started.
+􁁛  Test cABIHandlesCloseAndCallerOwnedReplies() passed after 0.031 seconds.
+􁁛  Suite SharedPlatformTests passed after 0.090 seconds.
+Desktop stage: connected
+Desktop directory state=connected seq=0 rows=0 failure=none
+Desktop directory state=connected seq=0 rows=1 failure=none
+Desktop stage: room opened
+Desktop stage: received text
+Desktop stage: reply received
+Desktop stage: reaction received
+Desktop stage: search matched
+Desktop stage: cut detected
+Desktop stage: owner closed
+Desktop directory state=connected seq=6 rows=1 failure=none
+Desktop shared SDK: real HTTPS/TLS login, two-peer text/reply/reaction, Unicode search, physical disconnect, Keychain/database owner reopen, no duplicate send and third-account isolation passed.
+􁁛  Test appleLoginMessagesSearchDisconnectRestoreAndAccountExit() passed after 7.610 seconds.
+􁁛  Suite SharedDesktopBackendTests passed after 7.611 seconds.
+􁁛  Test run with 3 tests in 2 suites passed after 7.611 seconds.

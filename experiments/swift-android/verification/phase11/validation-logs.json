@@ -1,0 +1,62 @@
+{
+  "/tmp/im-phase11-native.log": {
+    "bytes": 6301,
+    "sha256": "794d7d627c267f74bed78d8cec0ddc9069ebe0f14b2eabc703d51d355beeecf3"
+  },
+  "/tmp/im-phase11-swift-tests.log": {
+    "bytes": 17246,
+    "sha256": "43b74f140c4699b8e7b9757489736b42fd62e920fba07249a3ca4204e7e6d53f"
+  },
+  "/tmp/im-phase11-ios-tests.log": {
+    "bytes": 111237,
+    "sha256": "52b4468103e58f4d3863642caa07ca7641b618778a06a9caf499cd8668026743"
+  },
+  "/tmp/im-phase11-ios-build.log": {
+    "bytes": 1211,
+    "sha256": "077f1d66b66b3a29401941aaacc536595448fe938c1a7f728b94abfb94194f91"
+  },
+  "/tmp/im-phase11-tool-tests.log": {
+    "bytes": 109,
+    "sha256": "d5c42298542e8087193ca809f6dfcba308030c868c5e717efbc32ab0ad47b9de"
+  },
+  "/tmp/im-phase11-normal-debug.log": {
+    "bytes": 9091,
+    "sha256": "597aefc4957114f2cfd52464277aa9e1d65570e2e77783bddc923928b4efe30e"
+  },
+  "/tmp/im-phase11-verified-dex.txt": {
+    "bytes": 29096959,
+    "sha256": "edf48604ec4b78877e59f23f8a766c5fc67c8201d63938bee74fb66ee24787c6"
+  },
+  "/tmp/im-phase11-dependencies.txt": {
+    "bytes": 70264,
+    "sha256": "645120905d48c909db6415cff24c0304207e49b61751f4af1b4aa223872dcba9"
+  },
+  "/tmp/im-phase11-release11/gradle.log": {
+    "bytes": 11646,
+    "sha256": "39ff01d9805f4b89e21d621f1d9914c73e7004581842f943ebbf1f2a43567367"
+  },
+  "/tmp/im-phase11-release10/gradle.log": {
+    "bytes": 11249,
+    "sha256": "c4a30d3484a47cc8debf765bdf79e4f76312dd9848ca32d8957d5089752c3ab4"
+  },
+  "/tmp/im-phase11-release9/gradle.log": {
+    "bytes": 11249,
+    "sha256": "fe507026ff01289bc036747c7d7315ff2027b86ece9cc8edfd5e4fdb174e808c"
+  },
+  "/tmp/im-phase11-release8/gradle.log": {
+    "bytes": 11249,
+    "sha256": "93443f181d74a6bbd790830175903fb5b32c6469225d526c71ec5b21276a5072"
+  },
+  "/tmp/im-phase11-release7/gradle.log": {
+    "bytes": 11249,
+    "sha256": "941f94498eb1f22525046525590711e85b619dcf3e3ae3dfb0ff31c338d7a742"
+  },
+  "/tmp/im-phase11-release6/gradle.log": {
+    "bytes": 11249,
+    "sha256": "e61bd81504c06df4dba7e90b8278fec12f0206ee83d5064faaef901a298729f1"
+  },
+  "/tmp/im-phase11-release5/gradle.log": {
+    "bytes": 11170,
+    "sha256": "d79a9b750ff5f766b4029f795d3328c699ccd3ad56e15cf05558768294a5b816"
+  }
+}

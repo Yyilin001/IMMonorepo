@@ -9,7 +9,7 @@ struct V2DamagedSearchIndex: Error {
 }
 
 actor V2MessageSearchReader {
-    private let queue = DispatchSerialQueue(label: "IMV2.messageSearch.reader", qos: .userInitiated)
+    private let queue = V2SerialQueue(label: "IMV2.messageSearch.reader", qos: .userInitiated)
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     private let primaryStatePool: DatabasePool
     private let searchPool: DatabasePool?

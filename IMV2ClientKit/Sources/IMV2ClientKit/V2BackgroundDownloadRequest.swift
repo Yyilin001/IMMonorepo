@@ -5,8 +5,8 @@ import FoundationNetworking
 
 /// The request exists only in memory until transferred to the OS. Business journals
 /// retain the grant ID and immutable byte facts, never this URL or its headers.
-enum V2BackgroundDownloadRequest {
-    static func make(target: V2ClientMediaTransferTarget, now: Date = Date()) throws -> URLRequest {
+package enum V2BackgroundDownloadRequest {
+    package static func make(target: V2ClientMediaTransferTarget, now: Date = Date()) throws -> URLRequest {
         guard let grant = target.backgroundDownloadAuthorization,
               grant.expectedByteCount == target.expectedByteCount, grant.checksum == target.checksum,
               target.expiresAt > now,
@@ -17,7 +17,7 @@ enum V2BackgroundDownloadRequest {
         else { throw V2BackgroundTransferError.invalidAuthorization }
         var request = URLRequest(url: target.url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
                                  timeoutInterval: min(30, target.expiresAt.timeIntervalSince(now)))
-        target.networkConstraints.apply(to: &request)
+        try target.networkConstraints.apply(to: &request)
         request.httpMethod = "GET"
         for (name, value) in target.headers { request.setValue(value, forHTTPHeaderField: name) }
         return request

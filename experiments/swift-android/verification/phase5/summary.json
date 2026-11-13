@@ -1,0 +1,60 @@
+{
+  "phase": 5,
+  "date": "2026-11-12",
+  "branch": "codex/swift-android-feasibility",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "realBackendAppTests": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "durationSeconds": 45.851,
+    "debugBuild": true,
+    "lint": true,
+    "releaseR8Build": true,
+    "releaseDeviceTest": false,
+    "jvmTestTasks": "NO-SOURCE; no JVM case count claimed"
+  },
+  "swift": {
+    "testsPassed": 197,
+    "suites": 18,
+    "finalSendSubsetRerun": 23
+  },
+  "ios": {
+    "testsPassed": 170,
+    "failed": 0,
+    "skipped": 0,
+    "simulatorSDK": "18.5",
+    "arm64SimulatorBuild": true,
+    "deploymentTarget": "17.0",
+    "publicSymbols": 6079
+  },
+  "pythonTestsPassed": 10,
+  "packages": {
+    "debug": {
+      "sizeBytes": 185816601,
+      "sha256": "7eb089c966d5628a80efbd7b5633f0b0906ba681bbe105fe9b3e331a5640ca32",
+      "abis": [
+        "arm64-v8a"
+      ],
+      "testCAIncluded": true
+    },
+    "release": {
+      "sizeBytes": 98384110,
+      "sha256": "b1ea9e99e3bf1542ba9e7e97037eddf570098d5827871becde750acb0fd3330a",
+      "abis": [
+        "arm64-v8a"
+      ],
+      "testCAIncluded": false
+    }
+  },
+  "limitations": [
+    "Text messaging UI only; contacts, media/resources, search, group administration, Passkey and system background work not integrated",
+    "Old Kotlin credentials/database/outbox are not migrated or deleted by the new App",
+    "API31 arm64 emulator validated; no physical-device or Release runtime test",
+    "Owner reopen is verified, not OS process kill or power-loss",
+    "Pagination implemented; this real-backend case uses two rooms and four messages, not a large-history or performance load",
+    "Updated Linux GitHub Actions workflow has not run remotely"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "removedPackagesAbsent": [
+    "com.xmtx.im.client",
+    "com.xmtx.im.platform",
+    "com.xmtx.im.imclientkit"
+  ],
+  "dexReportSHA256": "edf48604ec4b78877e59f23f8a766c5fc67c8201d63938bee74fb66ee24787c6",
+  "testedNativeSHA256": "cbeb2264d80ec74e93151417066c7aee5183c7ad75d1f53b9204fdadb1125d16",
+  "mergedNativeSHA256": "f849368fb46d73c3d21c0ab019a2c23dd4404ac08ca9e38ba6fd72621c07e502",
+  "mergedNativeMatchesManifest": true,
+  "packagedNativeMatchesStripped": true,
+  "verifiedNativeLibraryCount": 19,
+  "runtimeProjects": [
+    "app",
+    "sharedsdk",
+    "swiftplatform"
+  ],
+  "dependencyReportSHA256": "645120905d48c909db6415cff24c0304207e49b61751f4af1b4aa223872dcba9",
+  "testedAPK": "267b361bc0342b2dff192889ca9543aba5e191d09ea57dbe372c52865e6d2fa4",
+  "normalDebugAPK": {
+    "sha256": "c8110ff243eb6c5060daea361a1c180321463a9cf5dc10b77c50a11e323e8c68",
+    "isolatedTestCertificatesAbsent": true,
+    "nativeMatchesStripped": true,
+    "manifestLibraryCount": 19,
+    "additionalComposeLibrary": "libandroidx.graphics.path.so",
+    "deviceAcceptance": false
+  }
+}

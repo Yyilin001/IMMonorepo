@@ -1,0 +1,11 @@
+{
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2SharedSession.swift": "3d2726d682d0bddd54c22fc3386cd4d55af6919307fbf9a2377fa103cf2a2ff7",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2SharedSessionRestoration.swift": "854c41fa1b0a6ace82b9a7342ee82d187865292fb3b2cf9f3f7e84856e857dcc",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/SharedRuntime.swift": "2542718d2355b70ade3eebb56923a143655bb87577e8fc677f679abcdd01881c",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/SharedPlatform.swift": "c4ad8985b97156757700e1bdb0085d2b447f084bb6c741d4a3ec1ee63c537e23",
+  "IMApp/IMApp/V2/V2AppStore.swift": "b97d55cdb358def65092a24dd1c1b6bba4729e79d788cd649a9f66eb48fb359f",
+  "IMApp/IMApp/V2/V2SessionRestoration.swift": "33b7c5e8c355d3dac97eb5f428e3325218b3f2df24c0f5990e1554e1aaff7a9d",
+  "IMApp/IMApp/V2/V2PendingCredentialDeletion.swift": "b4b6a1fa9fa2278b9da9e1924420d7d7ba5e8d215e44cc2f22f910fa9a9fd10b",
+  "IMV2ClientKit/Package.swift": "d8bc61a33c4524e6bfca615976c02c07fba85670b618cb12c012c0948b1a1ab6",
+  "IMV2ClientKit/Sources/IMV2ClientFacade/Exports.swift": "bc6912698a75d05076b3416178500fa11971c85fe2517f64149121207682e164"
+}

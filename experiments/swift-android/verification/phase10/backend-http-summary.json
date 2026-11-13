@@ -1,0 +1,506 @@
+[
+  {
+    "method": "GET",
+    "path": "/v2/group-invites",
+    "status": 200,
+    "count": 13
+  },
+  {
+    "method": "GET",
+    "path": "/v2/group-join-requests",
+    "status": 200,
+    "count": 13
+  },
+  {
+    "method": "GET",
+    "path": "/v2/media/1E3A8543-A433-4E5B-B5FD-8C9F0BDC40E4",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/media/9F170F52-049E-4980-8EDB-8E202FF272B9",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/media/EACDD44A-12BC-448F-8702-02C3B8F8FF67",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/media/EDE96744-9D70-4584-A58E-B71B4E9071EC",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/0AEE889B-1C05-4CCA-872B-F9A5754999D7",
+    "status": 403,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/26E7316B-3949-4693-81D5-992B371F8068",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/9517465E-62CF-42BD-AE08-01BC85B5355A",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/AAD5334E-081F-4980-B8A3-BFD282E38C59",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile/me",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "GET",
+    "path": "/v2/public-identities/resolve",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/09406103-1efb-4b8b-ab7a-ccb63eaf3c95",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/6bbe891f-36a8-4b6b-ae50-d4b2470cc62c",
+    "status": 206,
+    "count": 9
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/6e9eb004-9cef-4e2e-bc6f-6f1e12ea369e",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/8cb5fbff-5372-46b1-96fc-d68b12d8b990",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/a69a3a8a-45c2-4c64-8041-7048ce746f89",
+    "status": 206,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/d8894a0a-532d-4751-b106-8f22686b428e",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/df5a4686-8e50-436e-a9b9-9d50757cb9a9",
+    "status": 206,
+    "count": 9
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/e5a9d72d-41d0-4261-a60e-1e523c34b9f0",
+    "status": 206,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/rooms/EDD6F6EF-9EFF-416A-9046-D3D954A01127/avatar",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/22FB09E8-7672-4182-A7C1-E9CC05708D67/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/26E7316B-3949-4693-81D5-992B371F8068/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/49EBBA07-C88C-4776-B399-3CCAC27CD07B/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/6383F900-5A98-4895-B5D8-1B150AA039FA/baseline",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/93C03AC9-C4CF-404A-8BC6-2BFF16460A23/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/9517465E-62CF-42BD-AE08-01BC85B5355A/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/AAD5334E-081F-4980-B8A3-BFD282E38C59/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/B290C530-C8EA-46B0-9E98-A9D3BF8FA32D/baseline",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/BA33E10C-865E-4634-8237-B76604822733/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/BF01D304-869F-4D57-BE65-F1AEBB8374CA/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/C555AF3D-E0A8-4F8A-AEA1-219C3C03A8BD/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/E57CFD5D-7CD6-4E45-AA10-893D2F986070/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/assertion",
+    "status": 200,
+    "count": 24
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/assertion",
+    "status": 401,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/register",
+    "status": 200,
+    "count": 25
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials",
+    "status": 200,
+    "count": 49
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials/cancel-registration",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials/revoke",
+    "status": 204,
+    "count": 18
+  },
+  {
+    "method": "POST",
+    "path": "/v2/direct-room-operations/submit",
+    "status": 200,
+    "count": 7
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/append",
+    "status": 200,
+    "count": 8
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/begin",
+    "status": 200,
+    "count": 8
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/finalize",
+    "status": 200,
+    "count": 8
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-invites/preview",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-invites/preview",
+    "status": 404,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/profile-presentations/batch",
+    "status": 200,
+    "count": 37
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads",
+    "status": 200,
+    "count": 8
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/finalize",
+    "status": 200,
+    "count": 8
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/status",
+    "status": 200,
+    "count": 15
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/targets",
+    "status": 200,
+    "count": 15
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/3002E546-6A45-49E2-93CC-3942741D8762/invitation-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/3002E546-6A45-49E2-93CC-3942741D8762/invitation-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/32E37A10-B950-476A-9A48-EC1F82043963/message-mutations/edit",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/32E37A10-B950-476A-9A48-EC1F82043963/message-mutations/withdraw",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/32E37A10-B950-476A-9A48-EC1F82043963/read-receipts/operations/recover",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/45D30DD2-21E7-487D-9B8E-492B65E0FAD7/group-capability-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/45D30DD2-21E7-487D-9B8E-492B65E0FAD7/group-capability-operations/submit",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/B72068AD-865E-45B8-8E55-DCF334133344/message-mutations/edit",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/B72068AD-865E-45B8-8E55-DCF334133344/message-mutations/withdraw",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/B72068AD-865E-45B8-8E55-DCF334133344/read-receipts/operations/recover",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/BFFDA2E6-7917-4D32-B824-D03203CD2684/invitation-operations/admissions",
+    "status": 200,
+    "count": 10
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/BFFDA2E6-7917-4D32-B824-D03203CD2684/invitation-operations/submit",
+    "status": 200,
+    "count": 10
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/BFFDA2E6-7917-4D32-B824-D03203CD2684/member-administration/admissions",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/BFFDA2E6-7917-4D32-B824-D03203CD2684/member-administration/submit",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/E560DC97-7822-4156-B1E5-B6978D84BD39/invitation-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/E560DC97-7822-4156-B1E5-B6978D84BD39/invitation-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/EDD6F6EF-9EFF-416A-9046-D3D954A01127/avatar",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/F29E62EA-4E5E-4AA9-A6DB-BAF93B71CD29/group-capability-operations/admissions",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/F29E62EA-4E5E-4AA9-A6DB-BAF93B71CD29/group-capability-operations/submit",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/F29E62EA-4E5E-4AA9-A6DB-BAF93B71CD29/membership/admissions",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/F29E62EA-4E5E-4AA9-A6DB-BAF93B71CD29/membership/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/social/operations/submit",
+    "status": 200,
+    "count": 19
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/13DC2F3D-326F-EC39-A724-D846D11647D9",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/386CDB68-C593-4E22-BDEE-1191B9ADBDA2",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/651213A7-B87A-47BD-F42A-E22FFDE394CA",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/6EDDB721-E92A-8B97-77B7-C9B068D98C96",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/7BF35EDB-223F-45AD-A475-EAC2C9752709",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/7C17ECDC-D82E-4C75-98A7-B187C0CCD208",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/DABD450F-4671-B60A-20AE-E2B296D5F867",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/F6D64FFE-ACAD-6E3C-EF3B-080EBF5025FF",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/F7FB3ABD-51FE-438B-A336-450B71902214",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/FD387382-83D0-47A6-0C99-05294A1D5C80",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile-presentations/contact-aliases/9517465E-62CF-42BD-AE08-01BC85B5355A",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile/me",
+    "status": 200,
+    "count": 4
+  }
+]

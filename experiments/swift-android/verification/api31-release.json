@@ -1,0 +1,130 @@
+{
+  "api": 31,
+  "abi": "arm64-v8a",
+  "fingerprint": "google/sdk_gphone64_arm64/emulator64_arm64:12/SE1A.220630.001.A1/9056438:userdebug/dev-keys",
+  "tests": {
+    "defaultTrustAcceptsPublicHTTPS": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "redirectRejected": "false",
+          "status": "200",
+          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>\n       Swift Programming Language \n    </titl",
+          "bytes": "34404"
+        },
+        "outcome": "ok"
+      }
+    },
+    "absoluteDeadlineCancelsRequest": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "deadline"
+        },
+        "elapsedMs": 156
+      }
+    },
+    "kotlinCancellationDrainsSwiftSleep": {
+      "status": "passed",
+      "evidence": {
+        "iterations": 30,
+        "elapsedMs": 580
+      }
+    },
+    "cancellationClosesPhysicalHTTPStream": {
+      "status": "passed",
+      "evidence": {
+        "cancelAndDrainMs": 13,
+        "serverObservedDisconnect": true
+      }
+    },
+    "nativeCancelIsIdempotentAndReleaseRequiresCompletion": {
+      "status": "passed",
+      "evidence": {
+        "values": {},
+        "outcome": "cancelled"
+      }
+    },
+    "redirectsAreNotFollowed": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "bytes": "0",
+          "status": "302",
+          "redirectRejected": "true",
+          "body": ""
+        },
+        "outcome": "ok"
+      }
+    },
+    "declaredOversizeRejected": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "error": "oversized"
+        },
+        "outcome": "error"
+      }
+    },
+    "defaultTrustRejectsSelfSignedTLS": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "Error Domain=NSURLErrorDomain Code=-1 \"(null)\"UserInfo={NSUnderlyingError=Error Domain=NSURLErrorDomain Code=-1 \"(null)\"UserInfo={NSLocalizedDescription=SSL certificate problem: self signed certificate}, NSLocalizedDescription=SSL certificate problem: self signed certificate, NSErrorFailingURLStringKey=https://127.0.0.1:48173/, NSErrorFailingURLKey=https://127.0.0.1:48173/}"
+        }
+      }
+    },
+    "chunkedOversizeRejected": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "oversized"
+        }
+      }
+    },
+    "dependenciesDatabaseAndFTS5": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "fts5Phrase": "true",
+          "crypto": "SHA256,AES-GCM",
+          "sqlite": "3.51.2",
+          "wal": "wal",
+          "compression": "zlib",
+          "protobuf": "repository-generated",
+          "atomicRollback": "true",
+          "reopen": "true",
+          "core": "IMV2Core"
+        }
+      }
+    },
+    "kotlinCancellationDrainsSwiftStream": {
+      "status": "passed",
+      "evidence": {
+        "iterations": 20,
+        "producerDrainedBeforeReturn": true
+      }
+    },
+    "httpBodyAndStatus": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "bytes": "20",
+          "status": "200",
+          "redirectRejected": "false",
+          "body": "中文 HTTP response"
+        },
+        "outcome": "ok"
+      }
+    }
+  },
+  "apkSHA256": "73567694983f9b2b1974d943acf5ffc0fe3f91a89dec01bc1b74ee4f0f5f269c",
+  "variant": "release",
+  "serial": "emulator-5556",
+  "installedApkSHA256": "73567694983f9b2b1974d943acf5ffc0fe3f91a89dec01bc1b74ee4f0f5f269c",
+  "verified": true
+}

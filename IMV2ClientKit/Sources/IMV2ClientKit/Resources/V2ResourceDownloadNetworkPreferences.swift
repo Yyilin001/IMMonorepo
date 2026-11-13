@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import GRDB
 import IMV2Core
 
@@ -35,25 +38,6 @@ public struct V2ResourceDownloadNetworkPreferences: Equatable, Sendable {
     }
 }
 
-public struct V2ResourceDownloadNetworkConstraints: Equatable, Sendable {
-    public let allowsCellular: Bool
-    public let allowsExpensive: Bool
-    public let allowsConstrained: Bool
-    public static let unrestricted = Self(allowsCellular: true, allowsExpensive: true, allowsConstrained: true)
-    public init(allowsCellular: Bool, allowsExpensive: Bool, allowsConstrained: Bool) {
-        self.allowsCellular = allowsCellular; self.allowsExpensive = allowsExpensive; self.allowsConstrained = allowsConstrained
-    }
-    func intersecting(_ other: Self) -> Self {
-        .init(allowsCellular: allowsCellular && other.allowsCellular,
-              allowsExpensive: allowsExpensive && other.allowsExpensive,
-              allowsConstrained: allowsConstrained && other.allowsConstrained)
-    }
-    func apply(to request: inout URLRequest) {
-        request.allowsCellularAccess = allowsCellular
-        request.allowsExpensiveNetworkAccess = allowsExpensive
-        request.allowsConstrainedNetworkAccess = allowsConstrained
-    }
-}
 
 extension GRDBV2LocalSyncStore {
     static let resourceDownloadNetworkSchemaSQL = """

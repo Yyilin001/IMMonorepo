@@ -1,0 +1,22 @@
+{
+  "backends": [
+    {
+      "root": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-lnn92_5o",
+      "postgresStopped": true,
+      "servicePortsClosed": true,
+      "httpSummaryWritten": true
+    },
+    {
+      "root": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-68v2ws0q",
+      "postgresStopped": true,
+      "servicePortsClosed": true,
+      "httpSummaryWritten": true
+    }
+  ],
+  "testPackagesUninstalled": true,
+  "ownedReversesEmptyBeforeShutdown": true,
+  "ownedEmulatorStopped": true,
+  "ownedAVDDeleted": true,
+  "existingEmulator5554Preserved": true,
+  "existingIOSSimulatorPreserved": true
+}

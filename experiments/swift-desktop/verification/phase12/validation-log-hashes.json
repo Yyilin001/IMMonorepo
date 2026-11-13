@@ -1,0 +1,54 @@
+{
+  "/tmp/im-phase12-android-native-final.log": {
+    "bytes": 5439,
+    "sha256": "840ed800e246598fdda856de5d7c6e259a1e4311391bf9d8cfbd2f0c403d758c"
+  },
+  "/tmp/im-phase12-mac-backend.log": {
+    "bytes": 1722,
+    "sha256": "d3fde867d0a2b8595b6c4e72583ea43e88afe5f6e250564f153ce80378e32ce2"
+  },
+  "/tmp/im-phase12-core-tests.log": {
+    "bytes": 16860,
+    "sha256": "6ed98886f00cacd94efc99c1f99e7ebbaeb97888617535f88bcb955a604e1930"
+  },
+  "/tmp/im-phase12-search-tests.log": {
+    "bytes": 3890,
+    "sha256": "8adcdfa06007fd4ce3ba49e064f79b67523afd712a9edc3003a28c58bb7a1e55"
+  },
+  "/tmp/im-phase12-ios-tests.log": {
+    "bytes": 781765,
+    "sha256": "db815c3e7170d102bf0984422bdcdc686189bf0de28106c53c86361cbb1bab6e"
+  },
+  "/tmp/im-phase12-final-android-build.log": {
+    "bytes": 16696,
+    "sha256": "babfe5114c41e327ce5fee22d8e1691a8aa45d60044917db1e48e7dfbf4d5589"
+  },
+  "/tmp/im-phase12-final11/gradle.log": {
+    "bytes": 11170,
+    "sha256": "1ec3e76abd95d26dc168e3aa9efa2a876a6bda2eb43574ed224b698584b6a5e2"
+  },
+  "/tmp/im-phase12-final10/gradle.log": {
+    "bytes": 11249,
+    "sha256": "61249e484cfa4fd5054b40b4a65eeb4d69bf2f43bf0c13de811086b91bd4cd26"
+  },
+  "/tmp/im-phase12-final9/gradle.log": {
+    "bytes": 11249,
+    "sha256": "adcf41676d2f29f1fbea32746b6eb7ee35d754df57d2fdbf97193e29c468b68d"
+  },
+  "/tmp/im-phase12-final8/gradle.log": {
+    "bytes": 11249,
+    "sha256": "7337a172d9aa50d78806fea73fe1a8416049afdc028352f79d4148cadcb49a8a"
+  },
+  "/tmp/im-phase12-final7/gradle.log": {
+    "bytes": 11249,
+    "sha256": "3681ef41ffd81bec89623385176db2a733ba7224a51ce5679b32d609f8677063"
+  },
+  "/tmp/im-phase12-final6/gradle.log": {
+    "bytes": 11249,
+    "sha256": "15686c50f843001852acfb009a689438ceae627abe239348284030dd04982137"
+  },
+  "/tmp/im-phase12-final5/gradle.log": {
+    "bytes": 11249,
+    "sha256": "2434ec79a8fd334f349ffcf5eedfe02e371901099631a54ce0c7722c5f57bb7f"
+  }
+}

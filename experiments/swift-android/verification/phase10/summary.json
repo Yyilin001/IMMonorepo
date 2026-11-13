@@ -1,0 +1,64 @@
+{
+  "phase": 10,
+  "branch": "codex/swift-android-feasibility",
+  "date": "2026-11-12",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "appPassed": true,
+    "regressionPhases": [
+      9,
+      8,
+      7,
+      6,
+      5
+    ],
+    "sameTestedAPK": true,
+    "tests": 6,
+    "testSeconds": [
+      57.625,
+      46.604,
+      40.322,
+      48.492,
+      46.534,
+      41.96
+    ],
+    "jvmUnitTasks": "NO-SOURCE",
+    "lint": "passed",
+    "normalDebugBuild": "passed",
+    "normalDebugDeviceAcceptance": false,
+    "directoryFirstAttempt": "UI confirmation click missed; unchanged APK rerun passed; see directory-first-attempt.txt"
+  },
+  "swift": {
+    "tests": 47,
+    "suites": 8,
+    "passed": true
+  },
+  "ios": {
+    "tests": 17,
+    "failed": 0,
+    "skipped": 0,
+    "packageBuild": "passed",
+    "publicSymbols": 6079,
+    "apiChanges": 0
+  },
+  "toolTests": 10,
+  "scope": [
+    "localSearchPaginationAndAnchor",
+    "editAndWithdrawalPeerSync",
+    "viewportReadReceipt",
+    "withdrawnViewportTolerance",
+    "offlineEditOwnerReopenSingleRevision",
+    "groupReadDetail",
+    "accountIsolation"
+  ],
+  "limits": [
+    "API31Arm64EmulatorOnly",
+    "noOSProcessDeathTest",
+    "localSyncedTextSearchOnly",
+    "groupReadersAreIDs",
+    "noPrivacyToggleE2E",
+    "noGroupReadersOver50E2E",
+    "noNonMessageHeadReadAdvancement"
+  ]
+}

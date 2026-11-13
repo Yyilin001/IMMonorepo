@@ -1,27 +1,12 @@
 import Foundation
+import IMV2ClientKit
 import CryptoKit
 
 /// 待删除凭据标记的存储能力。
 ///
 /// 这里只持久化非敏感意图，绝不保存令牌或账号身份；
 /// 读取或提交标记失败都不能被当作「已登出」处理。
-protocol V2PendingCredentialDeletionStoring: Sendable {
-    /// 查询是否存在待完成的凭据删除。
-    ///
-    /// - Returns: 存在待删除标记时为 `true`。
-    /// - Throws: 标记文件损坏或不可读写时抛出。
-    func isPending() async throws -> Bool
-
-    /// 标记存在待完成的凭据删除。
-    ///
-    /// - Throws: 写入失败时抛出。
-    func markPending() async throws
-
-    /// 清除待删除标记。
-    ///
-    /// - Throws: 写入失败时抛出。
-    func clearPending() async throws
-}
+typealias V2PendingCredentialDeletionStoring = V2SharedExitIntentStoring
 
 /// 凭据删除标记错误。
 enum V2PendingCredentialDeletionError: Error { case invalidRecord }

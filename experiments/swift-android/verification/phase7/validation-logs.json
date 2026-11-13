@@ -1,0 +1,38 @@
+{
+  "/tmp/im-phase7-native.log": {
+    "bytes": 5433,
+    "sha256": "0ff2f9ea47ae4c0e8c44c73f26f8baeabc29acd285db4027e24c24a483c366c2"
+  },
+  "/tmp/im-phase7-swift-tests.log": {
+    "bytes": 30629,
+    "sha256": "09fffc370b18ff036f3456e6d0d7971bf3c8ef1e77cba3c19a2efaf2e71859ac"
+  },
+  "/tmp/im-phase7-ios-tests.log": {
+    "bytes": 117948,
+    "sha256": "faee52006623af8c5b9e46f9f42e0cacec5756ab32bc889eff26c6a683524b2d"
+  },
+  "/tmp/im-phase7-ios-build.log": {
+    "bytes": 343,
+    "sha256": "894d9cfb0cadd350061fd34696e80bfddb0f4ede200b45f0d062cc955fce1938"
+  },
+  "/tmp/im-phase7-tool-tests.log": {
+    "bytes": 109,
+    "sha256": "58a520a024f15707222afe6575db8a3a9dbe7469c2c156ae0f9979903d48645a"
+  },
+  "/tmp/im-phase7-normal-debug.log": {
+    "bytes": 8466,
+    "sha256": "0b46c674f4b70f1d290942fd55f98d356337b2f4e2a36c3a2cdcedaccb3615f9"
+  },
+  "/tmp/im-phase7-sixth/gradle.log": {
+    "bytes": 11170,
+    "sha256": "fca4da79ee84c90bef8014bca86af96d79bc33161ea31a0205ff34f03142ad77"
+  },
+  "/tmp/im-phase7-directory-regression/gradle.log": {
+    "bytes": 11249,
+    "sha256": "a00f27c7a7618cf03663f4b521c44027dc30af794e3a98e69c14cc632d7d615a"
+  },
+  "/tmp/im-phase7-messaging-regression/gradle.log": {
+    "bytes": 11249,
+    "sha256": "0e12089dd87469aa659397a1fc4472964c44cc2500b18651b99b435ea7840b03"
+  }
+}

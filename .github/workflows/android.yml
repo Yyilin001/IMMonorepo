@@ -1,15 +1,16 @@
-name: Android 验证
+name: Android 共享 SDK 验证
 on:
   pull_request:
-    paths: ['IMAndroid/**', 'Protocol/im_realtime/**', '.github/workflows/android.yml']
+    paths: ['IMAndroid/**', 'IMV2ClientKit/**', 'IMV2Core/**', 'IMV2Compression/**', 'MessageSubstringSearch/**', 'Protocol/im_realtime/**', 'experiments/swift-android/**', '.github/workflows/android.yml']
   push:
-    paths: ['IMAndroid/**', 'Protocol/im_realtime/**', '.github/workflows/android.yml']
+    paths: ['IMAndroid/**', 'IMV2ClientKit/**', 'IMV2Core/**', 'IMV2Compression/**', 'MessageSubstringSearch/**', 'Protocol/im_realtime/**', 'experiments/swift-android/**', '.github/workflows/android.yml']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -18,25 +19,37 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
-      - name: 安装 Android SDK
-        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
-      - name: 验证协议、SDK、APK 与 Lint
-        working-directory: IMAndroid
-        run: ./gradlew :clientkit:test :app:assembleDebug :app:lintDebug :platform:lintDebug --console=plain
-      - name: 构建列表性能测试与校验报告工具
+      - name: 安装 Android 与 Swift 工具链
+        shell: bash
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;35.0.0' 'ndk;30.0.16248370'
+          sudo apt-get update
+          sudo apt-get install -y binutils git gnupg2 libcurl4-openssl-dev libedit2 libgcc-13-dev libpython3-dev libsqlite3-0 libstdc++-13-dev libxml2-dev libz3-dev pkg-config tzdata unzip zlib1g-dev
+          curl -fL https://download.swift.org/swiftly/linux/swiftly-x86_64.tar.gz -o "$RUNNER_TEMP/swiftly.tar.gz"
+          tar -xzf "$RUNNER_TEMP/swiftly.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/swiftly" init --assume-yes --skip-install --no-modify-profile
+          source "$HOME/.local/share/swiftly/env.sh"
+          swiftly install 6.4.1 --assume-yes
+          swiftly run swift sdk install https://download.swift.org/swift-6.4.1-release/android-sdk/swift-6.4.1-RELEASE/swift-6.4.1-RELEASE_android.artifactbundle.tar.gz --checksum a356b79f8f1daa6ae3a66f4c556966ca20c0208b3659805cf30a83a0a31d6772 +6.4.1
+      - name: 编译唯一共享 SDK
+        shell: bash
+        run: |
+          source "$HOME/.local/share/swiftly/env.sh"
+          python3 experiments/swift-android/build_probe.py --shared-sdk
+      - name: 验证 Android 构建与 Lint
         working-directory: IMAndroid
         run: |
-          ./gradlew :app:testBenchmarkUnitTest :app:assembleBenchmark :benchmark:assembleBenchmark --console=plain
-          python3 -m unittest discover -s scripts -p test_benchmark_lists.py
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :sharedsdk:lintDebug :swiftplatform:lintDebug :app:assembleRelease --console=plain
+          python3 -m unittest discover -s scripts -p 'test_*.py'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-verification
+          name: android-shared-sdk-verification
           path: |
             IMAndroid/app/build/outputs/apk/debug/*.apk
-            IMAndroid/app/build/outputs/apk/benchmark/*.apk
-            IMAndroid/app/build/outputs/mapping/benchmark/
-            IMAndroid/benchmark/build/outputs/apk/benchmark/*.apk
-            IMAndroid/clientkit/build/reports/tests/
+            IMAndroid/app/build/outputs/apk/release/*.apk
+            IMAndroid/app/build/outputs/mapping/release/
             IMAndroid/app/build/reports/lint-results-debug.*
-            IMAndroid/platform/build/reports/lint-results-debug.*
+            IMAndroid/sharedsdk/build/reports/lint-results-debug.*
+            IMAndroid/swiftplatform/build/reports/lint-results-debug.*
+            experiments/swift-android/build/shared-sdk-manifest.json

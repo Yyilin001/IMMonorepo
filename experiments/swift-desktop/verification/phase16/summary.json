@@ -1,0 +1,39 @@
+{
+  "phase": 16,
+  "date": "2026-11-13",
+  "branch": "codex/swift-android-feasibility",
+  "implementation": "Account-owned Swift search and read receipt business facades shared by native iOS and Android bindings",
+  "newKotlinBusinessImplementation": false,
+  "sharedTestsPassed": 18,
+  "domainTestsPassed": 36,
+  "ios": {
+    "backendFunctionalPassed": 6,
+    "scopeCleanupPassed": 2,
+    "unitTestsPassed": 178,
+    "nativeSwift": true,
+    "simulator": "iPhone 16 Pro / iOS 18.5",
+    "physicalDevice": false
+  },
+  "macOS": {
+    "nativeBackendPassed": true,
+    "appUIValidated": false
+  },
+  "android": {
+    "realBackendPhase10Passed": true,
+    "api": 31,
+    "leakedClients": 0,
+    "leakedOperations": 0,
+    "normalDebugReleaseLintPassed": true
+  },
+  "api": {
+    "legacySymbolCount": 6079,
+    "identicalToPhase15": true,
+    "legacyInventorySHA256": "dc3edd55e0af34b8da967acb9381c8394259cc7e6808612a09814cdf115f33ec",
+    "nativeSymbolCount": 157,
+    "nativeAdded": 37,
+    "nativeRemoved": [],
+    "nativeChanged": []
+  },
+  "windowsValidated": false,
+  "backend": "Isolated local PostgreSQL + HTTPS edge + TLS gateway; no production account"
+}

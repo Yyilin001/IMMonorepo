@@ -1,0 +1,14 @@
+{
+  "removedPackagesAbsent": [
+    "com.xmtx.im.client",
+    "com.xmtx.im.platform",
+    "com.xmtx.im.imclientkit"
+  ],
+  "runtimeProjects": [
+    "app",
+    "sharedsdk",
+    "swiftplatform"
+  ],
+  "dexReportSHA256": "fdba86c5d00a1e75eab5e1e7c56fbda9a3073b2239f74d0a792b730147083221",
+  "dependencyReportSHA256": "e4564e963bce952428ed1a462d171ac6055b2f1123a59cfc8f34bf257e2a0c07"
+}

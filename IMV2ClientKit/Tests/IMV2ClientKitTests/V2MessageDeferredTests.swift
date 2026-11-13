@@ -5,6 +5,9 @@ import FoundationNetworking
 import Testing
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Bound message mutation HTTP backpressure")
 struct V2MessageDeferredTests {

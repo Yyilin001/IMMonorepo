@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Crypto
 
 public enum V2RangeDownloadError: Error, Equatable, Sendable {
@@ -75,8 +78,14 @@ final class V2RangeDownloadFile: @unchecked Sendable {
     deinit { try? handle.close() }
     private func digest(_ value: SHA256) -> String { value.finalize().map { String(format:"%02x",$0) }.joined() }
     private func protect(_ url: URL) throws {
+        #if os(Android)
+        // Android callers place transfer journals in the account's noBackup/cache
+        // scope. Foundation does not implement Apple's backup resource key.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        #else
         var values = URLResourceValues(); values.isExcludedFromBackup = true
         var url = url; try url.setResourceValues(values)
+        #endif
         #if os(iOS)
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete],ofItemAtPath: url.path)
         #endif

@@ -1,0 +1,12 @@
+{
+  "backendStopped": true,
+  "adbReverseListBeforeStop": "",
+  "dedicatedPackagesUninstalled": true,
+  "dedicatedEmulatorStopped": true,
+  "dedicatedAVDDeleted": true,
+  "remainingAndroidDevices": [
+    "emulator-5554"
+  ],
+  "normalUserAppAndEmulatorUntouched": true,
+  "iosSimulatorPreserved": true
+}

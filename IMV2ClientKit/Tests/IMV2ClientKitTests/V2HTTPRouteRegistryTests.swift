@@ -33,7 +33,7 @@ struct V2HTTPRouteRegistryTests {
     }
 
     @Test func newlyAddedRequestBuildersAndWireAdaptersRequireBoundaryRegistration() throws {
-        let root = try repositoryRoot().appending(path: "IMV2ClientKit/Sources/IMV2ClientKit")
+        let root = try repositoryRoot().appending(path: "IMV2ClientKit/Sources")
         let enumerator = try #require(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
         var discovered = Set<String>()
         for case let file as URL in enumerator where file.pathExtension == "swift" {

@@ -1,13 +1,13 @@
 import Foundation
 import IMV2Core
-import os
+import IMV2ClientPlatform
 
 /// Synchronous OS-callback boundary of FileStore. Its small AFU permit is
 /// written only after durable capacity admission, before the task can resume.
 /// Receiving bytes never opens business SQLite or confers read permission.
-struct V2ResourceBackgroundDownloadInbox: Sendable {
-    struct Permit: Codable, Equatable, Sendable {
-        enum State: Codable, Equatable, Sendable {
+package struct V2ResourceBackgroundDownloadInbox: Sendable {
+    package struct Permit: Codable, Equatable, Sendable {
+        package enum State: Codable, Equatable, Sendable {
             case prepared
             case installed(Int)
             case received(Int)
@@ -15,9 +15,9 @@ struct V2ResourceBackgroundDownloadInbox: Sendable {
         }
         let version: Int
         let reservationID: UUID, mappingID: UUID, sessionID: UUID
-        let grant: V2ResourceBackgroundDownloadAuthorization
-        let originDigest: String
-        var state: State
+        package let grant: V2ResourceBackgroundDownloadAuthorization
+        package let originDigest: String
+        package var state: State
         var expectedBytes: Int64 { grant.expectedByteCount }
         var checksum: V2ResourceChecksum { grant.checksum }
         var expiresAtMilliseconds: Int64 { grant.expiresAtMilliseconds }
@@ -26,8 +26,8 @@ struct V2ResourceBackgroundDownloadInbox: Sendable {
     private let root: URL
     private let sessionID: UUID
     private let protection: any V2ResourceFileProtectionWriting
-    private static let io = OSAllocatedUnfairLock(initialState: ())
-    init(root: URL, sessionID: UUID, protection: any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) {
+    private static let io = V2Lock(initialState: ())
+    package init(root: URL, sessionID: UUID, protection: any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()) {
         self.root = root.standardizedFileURL; self.sessionID = sessionID; self.protection = protection
         directory = root.appending(path: "downloads").appending(path: sessionID.uuidString)
     }
@@ -51,7 +51,7 @@ struct V2ResourceBackgroundDownloadInbox: Sendable {
             try write(permit)
         }
     }
-    func permit(_ mapping: UUID) throws -> Permit { try Self.io.withLock { _ in try read(mapping) } }
+    package func permit(_ mapping: UUID) throws -> Permit { try Self.io.withLock { _ in try read(mapping) } }
     func permits() throws -> [Permit] {
         try Self.io.withLock { _ in
             guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
@@ -63,7 +63,7 @@ struct V2ResourceBackgroundDownloadInbox: Sendable {
     /// Called synchronously before URLSession releases its temporary URL.
     /// No hashing or authorization occurs while locked; full verification and
     /// a fresh access grant remain prerequisites for account publication.
-    func receive(_ location: URL, mapping: UUID, identifier: Int, origin: String?) throws {
+    package func receive(_ location: URL, mapping: UUID, identifier: Int, origin: String?) throws {
         try Self.io.withLock { _ in
             var permit = try read(mapping)
             guard permit.state == .installed(identifier), origin == permit.originDigest else { throw V2BackgroundTransferError.mappingConflict }

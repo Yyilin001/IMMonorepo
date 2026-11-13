@@ -1,0 +1,58 @@
+{
+  "phase": 12,
+  "date": "2026-11-13",
+  "sharedRuntimePlatformDependenciesRemoved": true,
+  "android": {
+    "phases": [
+      11,
+      10,
+      9,
+      8,
+      7,
+      6,
+      5
+    ],
+    "tests": 7,
+    "sameAPK": true,
+    "apkSHA256": "9849cec48fe2a773198a1592be227d2e048fc440fb9da80844bebdf1db65113d",
+    "passed": true,
+    "releasePackaging": {
+      "path": "IMAndroid/app/build/outputs/apk/release/app-release-unsigned.apk",
+      "bytes": 38974154,
+      "MiB": 37.17,
+      "sha256": "7453c06aec14075dc5092194725f8eb9e91799c3e18af5ac370771d65644af34",
+      "nativeLibraryCount": 20,
+      "nativeUncompressedBytes": 96495600,
+      "nativeCompressedBytes": 35869787,
+      "manifestLibrariesVerified": 19,
+      "packagedBytesMatchStripped": true,
+      "testCAAbsent": true,
+      "deviceAcceptance": false
+    },
+    "initialFailure": "phase 11 UI fixture opened a summary before local read authorization projection; bounded transient retry added, full final suite rerun"
+  },
+  "macOS": {
+    "realBackend": true,
+    "tests": 3,
+    "cABIHost": "Python ctypes",
+    "uiApp": false,
+    "distribution": false
+  },
+  "swiftCoreTests": 53,
+  "searchTests": 15,
+  "iosTests": 7,
+  "iosPublicSymbolsUnchanged": 6079,
+  "windows": {
+    "nativeExecution": false,
+    "platformAdaptersComplete": false,
+    "searchLockWin32Branch": true,
+    "readinessScript": true,
+    "hostProbeOnly": "darwin",
+    "remaining": [
+      "native Windows toolchain and dependency verification",
+      "secure persistence and HTTP/TLS/cancellation",
+      "resource filesystem durability",
+      "DLL host and real backend acceptance"
+    ]
+  }
+}

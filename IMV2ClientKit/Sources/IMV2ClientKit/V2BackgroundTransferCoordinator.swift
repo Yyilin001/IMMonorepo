@@ -30,7 +30,7 @@ public actor V2BackgroundTransferCoordinator {
     private var reconciliationDirty=false
     private var closing:Task<Void,Never>?
     private var expiryWake:Task<Void,Never>?
-    init(sessionID:UUID,activationID:UUID,store:GRDBV2LocalSyncStore,scheduler:V2AccountWorkScheduler,
+    package init(sessionID:UUID,activationID:UUID,store:GRDBV2LocalSyncStore,scheduler:V2AccountWorkScheduler,
                 driver:any V2BackgroundSessionDriving,files:V2ResourceFileStore,root:URL,protectionWriter:any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter(),diagnostics:V2NetworkDiagnostics? = nil) throws {
         self.diagnostics=diagnostics;self.sessionID=sessionID;self.activationID=activationID;self.store=store;self.scheduler=scheduler
         guard root.isFileURL, root.standardizedFileURL.path == files.backgroundDirectory.path else { throw V2AccountStorageError.scopeMismatch }
@@ -42,18 +42,7 @@ public actor V2BackgroundTransferCoordinator {
             .appendingPathComponent("IMV2BackgroundTransfers",isDirectory:true)
             .standardizedFileURL.resolvingSymlinksInPath()
     }
-    #if os(iOS)
-    public nonisolated static func native(store:GRDBV2LocalSyncStore,scheduler:V2AccountWorkScheduler,
-                                         resources:V2ResourceCenter,activationID:UUID,diagnostics:V2NetworkDiagnostics? = nil) async throws -> V2BackgroundTransferCoordinator {
-        try await resources.withBackgroundSetup(onCancelledValue: { await $0.close() }) { files, scope in
-            guard try await store.resourceFileJournal().accountID() == scope.accountID else { throw V2AccountStorageError.scopeMismatch }
-            let id=try await store.backgroundSessionID(),root=scope.backgroundDirectory
-            try Task.checkCancellation()
-            let driver=try V2NativeBackgroundSession.shared(sessionID:id,root:root)
-            return try .init(sessionID:id,activationID:activationID,store:store,scheduler:scheduler,driver:driver,files:files,root:root,diagnostics:diagnostics)
-        }
-    }
-    #endif
+
     public func initialize() async throws {
         guard !closed else { throw V2BackgroundTransferError.closed }
         if initialized { return }
@@ -370,8 +359,6 @@ public actor V2BackgroundTransferCoordinator {
         _ = try? await files.reconcileBackgroundUploadSources(sessionID:sessionID,retained:[])
         for id in Array(permits.keys) { await releasePermit(id) }
         permits.removeAll();unmappedTaskIdentities.removeAll();cancellationStarted.removeAll();wakes.continuation.finish()
-        #if os(iOS)
-        (driver as? V2NativeBackgroundSession)?.invalidateAfterDrain()
-        #endif
+        driver.invalidateAfterDrain()
     }
 }

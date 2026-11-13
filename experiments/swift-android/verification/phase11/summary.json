@@ -1,0 +1,67 @@
+{
+  "phase": 11,
+  "branch": "codex/swift-android-feasibility",
+  "date": "2026-11-12",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "appPassed": true,
+    "regressionPhases": [
+      10,
+      9,
+      8,
+      7,
+      6,
+      5
+    ],
+    "sameTestedAPK": true,
+    "tests": 7,
+    "testSeconds": [
+      55.145,
+      63.704,
+      53.134,
+      44.834,
+      49.472,
+      43.067,
+      42.83
+    ],
+    "jvmUnitTasks": "NO-SOURCE",
+    "lint": "passed",
+    "normalDebugBuild": "passed",
+    "normalDebugDeviceAcceptance": false
+  },
+  "swift": {
+    "tests": 50,
+    "suites": 12,
+    "passed": true
+  },
+  "ios": {
+    "tests": 7,
+    "failed": 0,
+    "skipped": 0,
+    "packageBuild": "passed",
+    "publicSymbols": 6079,
+    "apiChanges": 0
+  },
+  "toolTests": 10,
+  "scope": [
+    "replyReferenceAndNavigation",
+    "reactionTwoUsersAddRemove",
+    "textAndFileForward",
+    "staleSourceRevisionRejected",
+    "receiverDownloadAndDocumentExport",
+    "disconnectOwnerReopenNoDuplicates",
+    "withdrawnReferenceRedaction",
+    "accountIsolation",
+    "passiveReadReportDoesNotDisableActions"
+  ],
+  "limits": [
+    "API31Arm64EmulatorOnly",
+    "singleSourceSingleTargetForward",
+    "textOnlyReplyComposer",
+    "noOSProcessDeathTest",
+    "documentPickerResultInjected",
+    "TLSDisconnectedButHTTPAvailable",
+    "noForwardCancelOrPartialFailureE2E"
+  ]
+}

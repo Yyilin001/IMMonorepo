@@ -1,0 +1,26 @@
+{
+  "debug": {
+    "path": "IMAndroid/app/build/outputs/apk/debug/app-debug.apk",
+    "bytes": 161912246,
+    "MiB": 154.41,
+    "sha256": "fa0c5b2d62776628662de5ab9c22e23d1ebc4d6e283a97a960ef5e6c186fb397",
+    "nativeLibraryCount": 20,
+    "nativeUncompressedBytes": 96857264,
+    "nativeCompressedBytes": 96857264,
+    "verificationCAAbsent": true,
+    "signedForDistribution": false,
+    "deviceAcceptance": false
+  },
+  "release": {
+    "path": "IMAndroid/app/build/outputs/apk/release/app-release-unsigned.apk",
+    "bytes": 39109042,
+    "MiB": 37.3,
+    "sha256": "81061c65ea69608a0d3b7df8469830cfba1c19b6655d983eea76415730fdf4ff",
+    "nativeLibraryCount": 20,
+    "nativeUncompressedBytes": 96857264,
+    "nativeCompressedBytes": 36004461,
+    "verificationCAAbsent": true,
+    "signedForDistribution": false,
+    "deviceAcceptance": false
+  }
+}

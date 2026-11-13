@@ -1,6 +1,9 @@
 import Foundation
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 import Testing
 
 @Suite("Resource directory page persistence", .timeLimit(.minutes(1)))

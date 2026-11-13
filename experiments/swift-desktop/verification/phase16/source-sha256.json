@@ -1,0 +1,15 @@
+{
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2SearchService.swift": "82459ac1eecae6b6447167dd0073e1e003f311269863ad5c3970639ea0e9108c",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2ReadReceiptService.swift": "f15a6d83c54db824cc9899262a964b1d2a0344bba82f6ff08f7e4e996b008b92",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2SharedSession.swift": "3b29c8b7b01b02cf59f73e675d69b8a883e0a383965a8a2ca80ef84f7d727635",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/V2ConversationService.swift": "432f6ac5e5afeb4a6ffb30b0d7b6ba6017f456e2b0ea10ac89f1da4bbb72ce8f",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/SharedRuntime.swift": "c58ec631e078004eb6780dce32a203d76d5de5f2ce29bb40fbeccfd3aeb764c3",
+  "IMV2ClientKit/Sources/IMV2SharedRuntime/SharedMessaging.swift": "6ab0ae04db99ee9c0a8b97db79c86efff13d96e792e4072562dd5475031a2766",
+  "IMApp/IMApp/V2/V2AppStore.swift": "f6976988504706d00dfeb515bb5543d249961bf26be606740b701e84445d1a67",
+  "IMApp/IMApp/V2/V2AppRealtimeRuntime.swift": "f4b1aab81328b2d6dc340d7e4351436efb90997d584cf4c535beddbc244f9e17",
+  "IMApp/IMApp/V2/V2ConversationDataSource.swift": "2b1d8b113ce4942c441039c0234a8814f50bbbcb1adb934707c329c273e79564",
+  "IMV2ClientKit/Tests/IMV2SharedRuntimeTests/SearchReceiptFacadeTests.swift": "f77afe2d5de18ba5c7f88514682167bd69ea7bc576bc908818591de626988a0b",
+  "IMV2ClientKit/Tests/IMV2SharedRuntimeTests/SharedDesktopBackendTests.swift": "ad032f21da86d359030a46a3f1c8eb6dafe5152dd271542f6ed4f374d4f976f2",
+  "IMApp/IMAppLocalTwoInstallE2ETests/IMAppLocalTwoInstallE2ETests.swift": "e9772307a444c373d3b2b9cb2948f754b879a977eccb6989f3d5ba632f45c7cd",
+  "IMApp/scripts/verify_local_account_two_install_e2e.sh": "cd421895e28e0166be9efc963ce005e6835a25b9b26a67d2bf05a04dc577eb3d"
+}

@@ -1,0 +1,252 @@
+{
+  "api": 31,
+  "abi": "arm64-v8a",
+  "fingerprint": "google/sdk_gphone64_arm64/emulator64_arm64:12/SE1A.220630.001.A1/9056438:userdebug/dev-keys",
+  "tests": {
+    "androidTLS13TrustedRoundTrip": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "tls": "1.3",
+          "bytes": "6"
+        }
+      }
+    },
+    "defaultTrustAcceptsPublicHTTPS": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "redirectRejected": "false",
+          "bytes": "34404",
+          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>\n       Swift Programming Language \n    </titl",
+          "status": "200"
+        },
+        "outcome": "ok"
+      }
+    },
+    "absoluteDeadlineCancelsRequest": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "deadline"
+        },
+        "elapsedMs": 157
+      }
+    },
+    "productionHTTPUsesDefaultTLS": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "permitDrained": "true",
+          "runtime": "IMV2ClientRuntime",
+          "body": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>\n       Swift Programming Language \n    </titl",
+          "bytes": "34404",
+          "status": "200"
+        },
+        "outcome": "ok",
+        "selfSignedRejected": {
+          "values": {
+            "error": "V2HTTPFailure(kind: IMV2ClientNetwork.V2HTTPFailure.Kind.transport, service: \"phaseTwo\", statusCode: nil, urlErrorCode: Optional(-1), retryAfter: nil, certainty: IMV2ClientNetwork.V2HTTPFailure.Certainty.outcomeUnknown)"
+          },
+          "outcome": "error"
+        }
+      }
+    },
+    "androidSharedRuntimeAuthenticationSyncAndReconnect": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "credentialRestore": "true",
+          "durableSequence": "2",
+          "authenticatedConnections": "2",
+          "runtime": "IMV2ClientRuntime"
+        }
+      }
+    },
+    "androidTLSRejectsUnknownCAHostnameAndTLS12": {
+      "status": "passed",
+      "evidence": {
+        "ca": "rejected",
+        "hostname": "rejected",
+        "tls12": "rejected"
+      }
+    },
+    "kotlinCancellationDrainsSwiftSleep": {
+      "status": "passed",
+      "evidence": {
+        "iterations": 30,
+        "elapsedMs": 652
+      }
+    },
+    "cancellationClosesPhysicalHTTPStream": {
+      "status": "passed",
+      "evidence": {
+        "cancelAndDrainMs": 13,
+        "serverObservedDisconnect": true
+      }
+    },
+    "productionHTTPBoundsAndRedirects": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "error": "oversized"
+        },
+        "outcome": "error",
+        "body": true,
+        "redirectRejected": true,
+        "declaredAndChunkedCap": true
+      }
+    },
+    "nativeCancelIsIdempotentAndReleaseRequiresCompletion": {
+      "status": "passed",
+      "evidence": {
+        "values": {},
+        "outcome": "cancelled"
+      }
+    },
+    "androidTLSCancellationDrainsStalledHandshake": {
+      "status": "passed",
+      "evidence": {
+        "cancelMilliseconds": 12,
+        "physicalDisconnect": true
+      }
+    },
+    "androidTLSCancellationDrainsBlockedRead": {
+      "status": "passed",
+      "evidence": {
+        "cancelMilliseconds": 14,
+        "physicalDisconnect": true
+      }
+    },
+    "productionHTTPDeadlineAndCancellationDrain": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "deadline"
+        },
+        "cancelAndDrainMs": 13,
+        "serverObservedDisconnect": true
+      }
+    },
+    "redirectsAreNotFollowed": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "body": "",
+          "redirectRejected": "true",
+          "bytes": "0",
+          "status": "302"
+        },
+        "outcome": "ok"
+      }
+    },
+    "declaredOversizeRejected": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "error": "oversized"
+        },
+        "outcome": "error"
+      }
+    },
+    "defaultTrustRejectsSelfSignedTLS": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "Error Domain=NSURLErrorDomain Code=-1 \"(null)\"UserInfo={NSErrorFailingURLKey=https://127.0.0.1:37931/, NSUnderlyingError=Error Domain=NSURLErrorDomain Code=-1 \"(null)\"UserInfo={NSLocalizedDescription=SSL certificate problem: self signed certificate}, NSLocalizedDescription=SSL certificate problem: self signed certificate, NSErrorFailingURLStringKey=https://127.0.0.1:37931/}"
+        }
+      }
+    },
+    "chunkedOversizeRejected": {
+      "status": "passed",
+      "evidence": {
+        "values": {
+          "error": "oversized"
+        },
+        "outcome": "error"
+      }
+    },
+    "productionRuntimeAndUnicodeSearch": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "exclusiveWriter": "true",
+          "search": "MessageSubstringSearch",
+          "reopen": "true",
+          "unicode": "true",
+          "runtime": "IMV2ClientRuntime",
+          "schedulerDrained": "true",
+          "productionStoreAndSearchActors": "true"
+        }
+      }
+    },
+    "androidKeystoreMissingKeyIsNotAbsence": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "error",
+        "values": {
+          "error": "permanentlyInvalidated"
+        }
+      }
+    },
+    "dependenciesDatabaseAndFTS5": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "fts5Phrase": "true",
+          "atomicRollback": "true",
+          "reopen": "true",
+          "wal": "wal",
+          "core": "IMV2Core",
+          "sqlite": "3.51.2",
+          "compression": "zlib",
+          "protobuf": "repository-generated",
+          "crypto": "SHA256,AES-GCM"
+        }
+      }
+    },
+    "kotlinCancellationDrainsSwiftStream": {
+      "status": "passed",
+      "evidence": {
+        "iterations": 20,
+        "producerDrainedBeforeReturn": true
+      }
+    },
+    "androidKeystoreAtomicRecordAndTamper": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "reopened": "true",
+          "pendingOperations": "true"
+        },
+        "tamperRejected": true,
+        "noPlaintext": true
+      }
+    },
+    "httpBodyAndStatus": {
+      "status": "passed",
+      "evidence": {
+        "outcome": "ok",
+        "values": {
+          "bytes": "20",
+          "body": "中文 HTTP response",
+          "redirectRejected": "false",
+          "status": "200"
+        }
+      }
+    }
+  },
+  "apkSHA256": "4094067e734ee27d30060824a2e9e3d27fc243f30b17dafbdb572c4f13f6511e",
+  "variant": "release",
+  "serial": "emulator-5558",
+  "installedApkSHA256": "4094067e734ee27d30060824a2e9e3d27fc243f30b17dafbdb572c4f13f6511e",
+  "verified": true
+}

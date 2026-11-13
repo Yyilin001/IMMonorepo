@@ -1,0 +1,42 @@
+{
+  "phase": 3,
+  "branch": "codex/swift-android-feasibility",
+  "android": {
+    "debug": {
+      "api": 31,
+      "abi": "arm64-v8a",
+      "passed": 23,
+      "failed": 0,
+      "verifiedInstalledAPK": true,
+      "apkSHA256": "fbcba03337359a66b89a7b40ba32d03124b696c8af8d6c6e8a5f0bde812e53b0",
+      "handshakeCancelMilliseconds": 14,
+      "readCancelMilliseconds": 1
+    },
+    "release": {
+      "api": 31,
+      "abi": "arm64-v8a",
+      "passed": 23,
+      "failed": 0,
+      "verifiedInstalledAPK": true,
+      "apkSHA256": "4094067e734ee27d30060824a2e9e3d27fc243f30b17dafbdb572c4f13f6511e",
+      "handshakeCancelMilliseconds": 12,
+      "readCancelMilliseconds": 14
+    }
+  },
+  "sharedRuntimeRegression": {
+    "platform": "macOS",
+    "swiftTestingPassed": 233,
+    "suites": 9
+  },
+  "ios": {
+    "arm64SimulatorMinimumTarget": 17,
+    "buildPassed": true,
+    "appSimulatorOS": "18.5",
+    "testsPassed": 15,
+    "testsFailed": 0,
+    "testsSkipped": 0,
+    "publicDeclarations": 6079,
+    "declarationChangesFromPhase2": 0
+  },
+  "serverScope": "Real TLS contract fixture using canonical generated Protobuf; credentials are fixture-issued. No production account HTTP issuance or real backend deployment tested."
+}

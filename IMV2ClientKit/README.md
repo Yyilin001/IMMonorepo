@@ -1,5 +1,24 @@
 # IM V2 客户端 SDK
 
+## 四端共享目标与当前边界
+
+长期目标为 iOS、Android、macOS、Windows 共用一套 Swift 业务实现。共享认证、同步、SQLite、搜索、消息、联系人/群组和资源状态机；各端分别提供系统适配、薄语言绑定和界面。桌面 UI 技术栈不在本次约束中预先确定，不为接入新 UI 重写业务。
+
+| 平台 | 当前基础 | 尚需验证或实现 |
+| --- | --- | --- |
+| iOS | 保留 `IMV2ClientKit` 门面及 Apple 适配；会话建立、退出和任务所有权通过原生 `V2SharedSession` 接入共享模块 | 页面与完整功能依赖组合仍在 App，后续按功能收敛；不是改用 JSON 快照 UI |
+| Android | Swift 共享运行时、Keystore / HTTP / TLS 适配、Kotlin 绑定与 App，第 5–11 阶段已有真实后端验收；第十二阶段拆分后重新回归 | 覆盖范围以各阶段验收报告为准；Release 原生库压缩是 Android 独立打包策略 |
+| macOS | Package 已声明 macOS 15；共享动态库、C ABI、Keychain 与双客户端真实后端链路已验证 | 桌面 App/UI、沙盒文件授权、系统生命周期及签名分发；SDK 验收不等于桌面产品已交付 |
+| Windows | 搜索锁已增加 Win32 分支，提供原生检查脚本；尚无原生 Windows 验收 | 工具链和依赖、安全存储、HTTP / TLS / 取消、资源文件持久化、DLL 宿主接入及分发 |
+
+应用级组合已移入 `IMV2SharedRuntime`，通过 `SharedPlatform` 注入凭据/安装绑定、退出标记和恢复账本、邀请秘密、认证与头像 HTTP、资源上传/下载、TLS、注册设备信息及暂存文件创建。该模块不导入 Android / Apple 具体实现。`IMV2SharedAndroid` 保留原有 Android 存储命名空间、请求和 JNI 语义；`IMV2SharedApple` 接入 Keychain、URLSession 与 Network.framework，使用新的共享入口命名空间，不迁移或修改原 iOS 凭据。
+
+`IMV2SharedSDK` 仅保留 C ABI 句柄注册表和平台入口选择，按目标平台链接对应适配；非 Apple / Android 入口尚未实现时明确失败。Apple App 原有 Swift 产品接口保持不变。C ABI 的 UTF-8 JSON、内存所有权、取消及关闭合同见 [桌面接入与验证](../experiments/swift-desktop/README.md)。
+
+搜索写入锁已隔离到 `CSearchFileLock`：Apple / Android 继续使用 `flock`；Windows 分支使用 UTF-16 路径、`CreateFileW` / `LockFileEx`，尚未在原生 Windows 编译运行。共享 C ABI 已移除 `strdup/free` 平台导入，暂存文件创建由适配器提供。尚未完成的 Windows 源码边界包括 `V2ResourceDirectoryIO`、`V2ResourceFileStore`、`V2BackgroundResultInbox` 等 POSIX 文件操作。zlib 链接与 SQLite、GRDB、Crypto、Protobuf、Foundation 的具体版本组合仍需 Windows 实测，保留现有数据、Unicode 搜索和幂等合同。[Swift 已提供 Windows 工具链](https://www.swift.org/install/windows/)，这不代表本 SDK 已支持 Windows；WSL / Linux 或 macOS 探针不能代替原生 Windows 验收。
+
+下一步优先取得原生 Windows 环境，执行最小探针并补齐上述适配，再扩展桌面 UI 与安装包验收。macOS 已通过共享 SDK 登录、双端文本/回复/回应、中文搜索、物理 TLS 断线、客户端关闭重开后的凭据/数据库恢复、发送不重复与第三账号隔离；测试信任仅限定隔离后端 CA 和 localhost，未修改系统信任库。平台专属的导出、链接和体积优化不得改变其他端的默认行为。
+
 `IMV2ClientKit` 拥有独立的本地缓存与协议边界。当前已实现以下持久化边界：
 
 - `V2AuthSession`：统一管理设备凭据与刷新轮换。
@@ -10,6 +29,90 @@
 - `V2LocalStoreBootstrapper`：本地存储的唯一生产入口，将 SQLite 数据库绑定到设备专属 Keychain 标记。标记缺失或不匹配时，将数据库视为导入数据，丢弃后通过认证同步重建；Keychain 暂时不可用时暂停启动，不修改数据库。
 
 尚未发布的本地投影数据库在初始化时一次安装完整的当前结构，历史结构升级和投影回填已移除。重新打开当前数据库会保留排队命令、完成回执、成员围栏和快照导入进度。独立搜索数据库同样只初始化当前结构。
+
+## 共享运行时与平台适配（第二阶段）
+
+| 模块 | 职责 |
+| --- | --- |
+| `IMV2ClientRuntime` | 认证、同步、发件箱、GRDB、搜索、资源调度及 TLS 帧协议；源码保留在原 `Sources/IMV2ClientKit` 路径，避免影响协议生成脚本。 |
+| `IMV2ClientNetwork` | HTTP 物理执行接口、URLSession 适配、TLS 字节接口与 Apple Network 实现、网络条件及请求约束。 |
+| `IMV2ClientPlatform` | 锁、SQLite 串行执行器、安全随机数、文件保护、备份排除和磁盘容量查询。 |
+| `IMV2ClientApple` | Keychain、Passkey、原生后台 URLSession，以及原有 Keychain 构造器和 `native(...)` 工厂。 |
+| `IMV2ClientKit` | 保留原产品与 import 入口，重导出共享运行时和 Apple 适配。 |
+
+现有 iOS App 继续 `import IMV2ClientKit`，原有 Keychain service/account、可访问级别、后台 session 标识和文件布局不变。iOS HTTP 保留 `URLSession.bytes(for:)`、连接池、自定义认证代理、响应上限、拒绝重定向及现有指标。模块归属已改变，消费者需要重新编译；不承诺旧二进制 ABI 或反射得到的模块名不变。访问内部实现的测试需显式 `@testable import` 对应模块。
+
+其他 Swift 平台依赖 `IMV2ClientRuntime` 产品，注入凭据/安装绑定存储、注册/撤销账本持久化接口、`V2TLSByteConnection` 和网络条件来源。HTTP 可以注入 `V2HTTPTransport`；默认在非 Apple 平台使用 FoundationNetworking 数据代理，响应缓存有上限，取消等待完成回调，仍由同一运行时负责准入、绝对截止时间和冷却。资源上传及 Range 下载的现有 Foundation 代理保持在运行时内，已补齐跨平台导入，不新增第二份业务调度逻辑。
+
+Android 当前通过 API 31 / arm64 编译及设备验证，第三阶段的 `IMV2ClientAndroid` 产品提供 Keystore 与 TLS 字节连接适配；ConnectivityManager 和系统后台任务仍未接入。通用非 Apple 默认 TLS 连接仍明确失败，Android 调用方须显式选择 Android 初始化入口。自动下载的默认网络条件为不可用；无法执行的蜂窝/昂贵/受限网络约束明确抛错。数据库和资源仍应使用 Android 私有、不备份目录，Apple 文件属性不视为 Android 安全实现。
+
+搜索改用 `Crypto` 的 SHA-256，并按 Darwin / Android / Glibc 选择 POSIX 文件锁；索引格式、分词、摘要及 Unicode 匹配合同不变。Android 链接的 SQLite 必须提供 FTS5，验证程序继续显式构建并隐藏自带 SQLite 符号。
+
+复现和结果见 [`experiments/swift-android`](../experiments/swift-android/README.md)。本阶段只建立共享模块与平台替换边界，不表示 Android App 已切换到完整 Swift SDK。
+
+第四阶段新增独立动态产品 `IMV2SharedSDK`，通过有界 C/JNI 操作句柄向 Kotlin 暴露登录、恢复、连接、同步和关闭；认证 HTTP 使用 Android 原生信任与取消适配。Android App 可选择接入，已在真实后端验证密码登录、两条非空偏好同步、断线重连和凭据/数据库重新打开。该产品不改变现有 iOS 门面或 Apple 默认实现；完整 Kotlin 业务接口及 App 功能迁移仍未完成。参见 [Kotlin 接入说明](../IMAndroid/sharedsdk/README.md) 与 [第四阶段证据](../experiments/swift-android/verification/phase4/RESULTS.md)。
+
+第五阶段将 Android App 默认且唯一切换到 `IMV2SharedSDK`，删除原 Kotlin 业务 SDK 与平台存储模块。会话/消息读取、文本持久发送与确认、房间恢复、退出和账号切换均接到共享运行时；Android 页面只持有不可变快照和调用生命周期。iOS 默认实现及公开门面保持不变。范围与真实后端证据见 [第五阶段结果](../experiments/swift-android/verification/phase5/RESULTS.md)。
+
+## iOS 原生共享会话（第十三阶段）
+
+`IMV2ClientKit` 新增重导出 `IMV2SharedRuntime`。iOS 直接调用公开的 `V2SharedSession`，不经过 C ABI、JNI 或 JSON。Android/macOS 的原有 `SharedRuntime` 也复用同一会话组件完成密码登录、数据库打开关闭、退出尾部和维护任务。旧五模块 API 清单继续单独对照；新原生 API 是独立模块的增量接口。
+
+- `V2SharedSession` 持有凭据/安装绑定 bootstrap、正在打开的任务和已打开的 store。iOS 将既有 `V2AccountRuntime` 注册到它；账户任务排空以前禁止关闭其数据库。退出会取消并等待未完成的打开操作，迟到结果不得交给页面。
+- `authenticatePassword` 支持原有注册/登录模式及公开 ID、显示名，沿用原认证、注册和签发恢复服务。`openLocallyEstablishedSession` 保留本地优先启动，不要求在线刷新后才显示已有内容。
+- `beginSignOut` 先保存退出意图，再使认证代次失效、排空打开和实时任务。宿主撤下 UI、关闭页面/媒体资源及账户工作后，`completeSignOut` 才执行撤销交接、凭据删除、注册清理和标记清除。关闭失败保留退出责任；已经开始的持久尾部不随页面取消中断。
+- `runRealtime` / `suspendRealtime` 持有并排空真实前台连接任务；撤销和注册取消通过 `runMaintenance` 由共享所有者持有。`V2SharedSessionRestoration` 统一恢复任务、独立等待者取消和截止时间，旧 App 名称保留为类型别名。
+- iOS 的 `scenePhase`、APNs 回调、受保护数据提示、页面观察和资源系统后台适配仍在 App/Apple 层。`inactive` 仍不等于后台；关闭保留登录，退出才删除凭据。Keychain service/account、安装绑定、退出文件格式、数据库目录及后台 URLSession 标识不变。
+
+本阶段统一的是会话和任务所有权，尚未把 iOS 的全部页面服务组合替换为 `SharedSnapshot`，也未要求 iOS 使用跨语言轮询。实际验证与限制见 [第十三阶段记录](../experiments/swift-desktop/verification/phase13/summary.json)。
+
+验证：iOS 相关单元测试 42 项、共享所有权及平台测试 7 项通过。iPhone 16 Pro / iOS 18.5 模拟器使用隔离 PostgreSQL + HTTPS/TLS 后端，通过注册登录、同步消息、前后台恢复、退出、A→B→A 隔离和双账号冷启动恢复；Android 真实后端回归及 Debug/Release/lint、macOS 共享 SDK 真实后端回归也通过。旧综合 UI 用例的 Dynamic Type 审计失败单独保留；本阶段不声明全套 UI、iOS 真机或分发验收通过。
+
+## 统一会话业务门面（第十四阶段）
+
+账号所有者 `V2SharedSession` 为本地存储注册唯一的 `V2ConversationService`。iOS 的 `V2ConversationDataSource` 和 Android 的 `SharedRuntime` 都通过它读取会话列表、消息时间线和定位窗口；共享层负责读取权限、未读数、缺失摘要恢复以及待发送消息的原子快照。iOS 保留原生 Swift 值、完整列表 diff、页面路由和已有 150ms 普通变更合并策略。
+
+```swift
+// 由账号组合层取得 service 后，注入页面；页面不打开数据库。
+let window = try await service.openTimeline(in: roomID, limit: 50)
+let initial = try await window.read()
+let older = try await window.nextPage()
+for try await snapshot in await window.updates() {
+    // 在 UI 自己的隔离域渲染。
+}
+await window.close()
+```
+
+每个 `V2ConversationWindow` 独立持有查询、游标和观察者，支持多个窗口打开同一会话。取消订阅或关闭窗口不关闭账号连接；切页时过滤已缓冲的旧游标结果。退出账号先关闭门面、终止订阅并排空读取，再关闭数据库，旧窗口不能继续返回缓存。每账号最多 128 个窗口，页面退出后应显式关闭；事件缓冲只保留最新状态。
+
+这是统一业务接口的首批迁移。旧投影值类型及组合层初始化接口暂时保留以兼容现有 iOS；其他功能尚未全部迁移，底层公开符号尚未收窄。Android 原来的默认页面快照和游标仍兼容，新增独立窗口绑定供多窗口宿主使用；原生 Swift 无需经过 JSON。验证范围与限制见 [第十四阶段记录](../experiments/swift-desktop/verification/phase14/RESULTS.md)。Windows 平台实现及分发状态没有变化。
+
+## 统一消息业务门面（第十五阶段）
+
+`V2SharedSession.messages` 注册账号级 `V2MessageService`。iOS 的发送、编辑、撤回、转发和回应适配器，以及 Android 的 `SharedRuntime` / `SharedMessaging` / `SharedInteractions`，均调用该服务。Kotlin API 与页面交互不变，没有新增 Kotlin 业务实现。
+
+```swift
+let intentID = try await messages.send(in: roomID, text: "hello", replyTo: replyReference)
+let workID = try await messages.edit(in: roomID, messageID: messageID,
+                                    expectedRevision: revision, text: "edited")
+for try await state in await messages.sendConfirmations(intentID) {
+    // 持久化提交与服务端确认分开；最终正文以同步投影为准。
+}
+```
+
+门面保留原操作服务的幂等身份、修订号、未知结果确认、转发计划和回应目标状态合并。文本发送冻结后交给原持久化执行器；取消不会删除已冻结的意图，离线恢复继续使用同一身份。附件由原资源引擎准备，消息消费者与上传依赖通过门面原子冻结。`retrySend`、`retryMutation`、`retryReaction`、`retryForward` 和 `cancelForward` 复用原持久化重试与取消语义。
+
+消息状态流按订阅者独立观察；关闭门面会拒绝新命令，取消订阅和执行中的工作，并等待物理完成后允许关闭数据库。账号运行时仍负责调度器与连接，门面的 `handlers()` 只将既有执行器接入账号 dispatcher。页面不创建第二套 HTTP 客户端或执行器。
+
+兼容边界仍保留：iOS 内部适配器的旧构造入口供既有测试/宿主使用，生产组合注入统一门面；状态值仍沿用原领域类型。资源上传下载、搜索、已读回执等其他领域没有在本阶段整体迁移。验收记录见 [第十五阶段](../experiments/swift-desktop/verification/phase15/RESULTS.md)。
+
+## 统一搜索和已读业务门面（第十六阶段）
+
+`V2SharedSession.search(for:)` 提供账号数据库级 `V2SearchService`，统一搜索、会话上下文、索引进度与索引启停。每次请求携带自身查询和游标，多窗口互不覆盖；原索引仍负责精确子串、筛选、发布水位、账号/代次游标隔离及编辑撤回失效。
+
+`V2SharedSession.readReceipts(for:accountID:receipts:transport:)` 提供账号级 `V2ReadReceiptService`，统一回执状态、可见消息上报、重试、归档恢复、群读者查询与持久化执行器。iOS 的本地 checkpoint 序号和 Android 的可见消息 ID 都进入原有单调合并队列；隐私暂停不会改写已冻结操作身份。群读者请求前后都核对本地授权，退出时取消并排空查询，再关闭数据库。`V2ConversationService.readCheckpoint(in:)` 提供原生页面使用的本地已应用序号与已知房间头。
+
+生产 iOS 通过原生 Swift 门面调用；Android 保留现有 Kotlin/C ABI 方法和页面状态转换，没有新增 Kotlin 业务实现。iOS 内部旧初始化入口继续兼容。搜索和回执详情的页面游标、展示期限与 UI 防过期结果逻辑保持原样。完整证据和真实后端验收边界见 [第十六阶段](../experiments/swift-desktop/verification/phase16/RESULTS.md)；Windows 的平台与运行验证缺口没有变化。
 
 ## 认证与设备凭据
 
@@ -56,3 +159,10 @@ swift test --package-path IMV2ClientKit
 仓库的原生测试使用可丢弃临时构建目录，可运行 `scripts/run_v2_clientkit_native_tests.sh`。默认使用四个编译任务，显式采用 Xcode 默认 Swift 工具链，以匹配 macOS 测试辅助程序；需要调整本机资源限制时，设置 `IMV2_CLIENTKIT_TEST_JOBS`。
 
 单元测试使用 Actor 隔离的模拟存储与传输。设备锁定、重启后首次解锁之前、签名权限或访问组变更时的 Keychain 行为，以及真实服务端终态错误，仍需模拟器/真机与后端集成验证。
+
+
+## Android 平台接入（第三阶段）
+
+新增独立产品 `IMV2ClientAndroid`，提供 Keystore 凭据/安装绑定/恢复账本存储，以及 `V2TLSFrameConnection(androidEndpoint:frameLimits:...)` 的 Android TLS 1.3 接线。它只依赖共享 Runtime 和 JNI 平台边界；原 `IMV2ClientKit` 门面继续导出 Apple 实现，现有 iOS 调用和默认行为不变。
+
+Android 宿主先加载包含本产品的 native library，再安装 `AndroidRuntimePlatform`。JNI 及 Kotlin 模块的安全条件、生命周期和接入示例见 [`IMAndroid/swiftplatform/README.md`](../IMAndroid/swiftplatform/README.md)；设备和 iOS 回归证据见 [`第三阶段结果`](../experiments/swift-android/verification/phase3/RESULTS.md)。本阶段不包含完整 Kotlin 业务 facade 或正式 App 迁移。

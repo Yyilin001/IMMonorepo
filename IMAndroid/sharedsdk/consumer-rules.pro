@@ -1,0 +1,1 @@
+-keep class com.xmtx.im.sharedsdk.NativeSharedSDK { *; }

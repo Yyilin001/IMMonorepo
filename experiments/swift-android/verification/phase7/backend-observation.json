@@ -1,0 +1,77 @@
+{
+  "scope": "final successful phase7 app room only",
+  "roomID": "A98D1C61-7F22-47E4-86EF-22B51B8578BA",
+  "invites": [
+    {
+      "state": "active",
+      "count": 2,
+      "approved_uses": 0
+    },
+    {
+      "state": "revoked",
+      "count": 1,
+      "approved_uses": 1
+    }
+  ],
+  "requests": [
+    {
+      "state": "approved",
+      "count": 1
+    },
+    {
+      "state": "cancelled",
+      "count": 1
+    },
+    {
+      "state": "rejected",
+      "count": 1
+    }
+  ],
+  "receipts": [
+    {
+      "kind": "groupInvite",
+      "count": 4
+    },
+    {
+      "kind": "groupJoinDecision",
+      "count": 2
+    },
+    {
+      "kind": "groupJoinRequest",
+      "count": 4
+    }
+  ],
+  "mutes": [
+    {
+      "count": 1,
+      "valid_deadline": true
+    }
+  ],
+  "sendResults": [
+    {
+      "rejection_code": "permissionDenied",
+      "count": 1
+    }
+  ],
+  "privateAlias": [
+    {
+      "count": 1,
+      "revision": 1
+    }
+  ],
+  "operationIdentityDuplicates": [
+    {
+      "count": 0
+    }
+  ],
+  "memberAdministrationReceipts": [
+    {
+      "count": 1
+    }
+  ],
+  "aliasReceipt": [
+    {
+      "count": 1
+    }
+  ]
+}

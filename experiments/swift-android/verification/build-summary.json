@@ -1,0 +1,195 @@
+{
+  "date": "2026-11-12",
+  "baseCommit": "3a7ca17f392992e0ac8a3a270cc07a918c2633e6",
+  "branch": "codex/swift-android-feasibility",
+  "apk": {
+    "debug": {
+      "bytes": 88536255,
+      "sha256": "b71549969ae05753e67a074ffe670bbeeec3a61646a37b9566df39e8dcebec55",
+      "nativeBytes": 84638528,
+      "libraries": {
+        "lib/arm64-v8a/libBlocksRuntime.so": {
+          "bytes": 10680,
+          "zipBytes": 10680
+        },
+        "lib/arm64-v8a/libFoundation.so": {
+          "bytes": 6121608,
+          "zipBytes": 6121608
+        },
+        "lib/arm64-v8a/libFoundationEssentials.so": {
+          "bytes": 6223072,
+          "zipBytes": 6223072
+        },
+        "lib/arm64-v8a/libFoundationInternationalization.so": {
+          "bytes": 1686312,
+          "zipBytes": 1686312
+        },
+        "lib/arm64-v8a/libFoundationNetworking.so": {
+          "bytes": 3471224,
+          "zipBytes": 3471224
+        },
+        "lib/arm64-v8a/libIMSwiftProbe.so": {
+          "bytes": 15605856,
+          "zipBytes": 15605856
+        },
+        "lib/arm64-v8a/lib_FoundationICU.so": {
+          "bytes": 40042536,
+          "zipBytes": 40042536
+        },
+        "lib/arm64-v8a/libc++_shared.so": {
+          "bytes": 1423696,
+          "zipBytes": 1423696
+        },
+        "lib/arm64-v8a/libdispatch.so": {
+          "bytes": 370344,
+          "zipBytes": 370344
+        },
+        "lib/arm64-v8a/libswiftAndroid.so": {
+          "bytes": 47968,
+          "zipBytes": 47968
+        },
+        "lib/arm64-v8a/libswiftCore.so": {
+          "bytes": 6922248,
+          "zipBytes": 6922248
+        },
+        "lib/arm64-v8a/libswiftDispatch.so": {
+          "bytes": 183784,
+          "zipBytes": 183784
+        },
+        "lib/arm64-v8a/libswiftObservation.so": {
+          "bytes": 123720,
+          "zipBytes": 123720
+        },
+        "lib/arm64-v8a/libswiftSynchronization.so": {
+          "bytes": 61752,
+          "zipBytes": 61752
+        },
+        "lib/arm64-v8a/libswift_Builtin_float.so": {
+          "bytes": 7624,
+          "zipBytes": 7624
+        },
+        "lib/arm64-v8a/libswift_Concurrency.so": {
+          "bytes": 694648,
+          "zipBytes": 694648
+        },
+        "lib/arm64-v8a/libswift_RegexParser.so": {
+          "bytes": 945960,
+          "zipBytes": 945960
+        },
+        "lib/arm64-v8a/libswift_StringProcessing.so": {
+          "bytes": 688456,
+          "zipBytes": 688456
+        },
+        "lib/arm64-v8a/libswift_math.so": {
+          "bytes": 7040,
+          "zipBytes": 7040
+        }
+      }
+    },
+    "release": {
+      "bytes": 88625401,
+      "sha256": "73567694983f9b2b1974d943acf5ffc0fe3f91a89dec01bc1b74ee4f0f5f269c",
+      "nativeBytes": 84638528,
+      "libraries": {
+        "lib/arm64-v8a/libBlocksRuntime.so": {
+          "bytes": 10680,
+          "zipBytes": 10680
+        },
+        "lib/arm64-v8a/libFoundation.so": {
+          "bytes": 6121608,
+          "zipBytes": 6121608
+        },
+        "lib/arm64-v8a/libFoundationEssentials.so": {
+          "bytes": 6223072,
+          "zipBytes": 6223072
+        },
+        "lib/arm64-v8a/libFoundationInternationalization.so": {
+          "bytes": 1686312,
+          "zipBytes": 1686312
+        },
+        "lib/arm64-v8a/libFoundationNetworking.so": {
+          "bytes": 3471224,
+          "zipBytes": 3471224
+        },
+        "lib/arm64-v8a/libIMSwiftProbe.so": {
+          "bytes": 15605856,
+          "zipBytes": 15605856
+        },
+        "lib/arm64-v8a/lib_FoundationICU.so": {
+          "bytes": 40042536,
+          "zipBytes": 40042536
+        },
+        "lib/arm64-v8a/libc++_shared.so": {
+          "bytes": 1423696,
+          "zipBytes": 1423696
+        },
+        "lib/arm64-v8a/libdispatch.so": {
+          "bytes": 370344,
+          "zipBytes": 370344
+        },
+        "lib/arm64-v8a/libswiftAndroid.so": {
+          "bytes": 47968,
+          "zipBytes": 47968
+        },
+        "lib/arm64-v8a/libswiftCore.so": {
+          "bytes": 6922248,
+          "zipBytes": 6922248
+        },
+        "lib/arm64-v8a/libswiftDispatch.so": {
+          "bytes": 183784,
+          "zipBytes": 183784
+        },
+        "lib/arm64-v8a/libswiftObservation.so": {
+          "bytes": 123720,
+          "zipBytes": 123720
+        },
+        "lib/arm64-v8a/libswiftSynchronization.so": {
+          "bytes": 61752,
+          "zipBytes": 61752
+        },
+        "lib/arm64-v8a/libswift_Builtin_float.so": {
+          "bytes": 7624,
+          "zipBytes": 7624
+        },
+        "lib/arm64-v8a/libswift_Concurrency.so": {
+          "bytes": 694648,
+          "zipBytes": 694648
+        },
+        "lib/arm64-v8a/libswift_RegexParser.so": {
+          "bytes": 945960,
+          "zipBytes": 945960
+        },
+        "lib/arm64-v8a/libswift_StringProcessing.so": {
+          "bytes": 688456,
+          "zipBytes": 688456
+        },
+        "lib/arm64-v8a/libswift_math.so": {
+          "bytes": 7040,
+          "zipBytes": 7040
+        }
+      }
+    }
+  },
+  "lint": {
+    "debug": {
+      "errors": 0,
+      "warnings": 4,
+      "ids": [
+        "NewerVersionAvailable",
+        "ChromeOsAbiSupport",
+        "DataExtractionRules",
+        "MissingApplicationIcon"
+      ]
+    },
+    "release": {
+      "errors": 0,
+      "warnings": 4,
+      "ids": [
+        "NewerVersionAvailable",
+        "ChromeOsAbiSupport",
+        "DataExtractionRules",
+        "MissingApplicationIcon"
+      ]
+    }
+  }
+}

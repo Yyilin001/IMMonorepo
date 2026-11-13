@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ClientKit
 import UIKit
 import Testing
 @testable import IMApp

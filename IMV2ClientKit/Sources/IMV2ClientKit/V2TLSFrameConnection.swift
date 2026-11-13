@@ -1,38 +1,10 @@
 import Foundation
 import IMV2Compression
 import IMV2Core
-#if canImport(Network) && canImport(Security)
-import Network
-import Security
-import os
-#endif
+import IMV2ClientNetwork
 
 enum V2MessageSendConnectionScope {
     @TaskLocal static var generation: UUID?
-}
-
-/// 实时连接的主机与端口配置；不包含凭证或自定义信任策略。
-public struct V2RealtimeEndpoint: Equatable, Sendable {
-    /// 原样保存的主机字符串，初始化只检查去除首尾空白后非空。
-    public let host: String
-    /// 非零目标端口。
-    public let port: UInt16
-
-    /// 创建实时连接端点。
-    ///
-    /// - Parameters:
-    ///   - host: 非空主机，检查时去除首尾空白但保存原值。
-    ///   - port: 非零端口。
-    /// - Throws: 空主机或零端口时抛出 invalidEndpoint。
-    ///
-    /// 不在此解析 DNS、验证地址语法或建立网络连接。
-    public init(host: String, port: UInt16) throws {
-        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, port > 0 else {
-            throw V2TLSFrameConnectionError.invalidEndpoint
-        }
-        self.host = host
-        self.port = port
-    }
 }
 
 /// 连接握手后返回的身份与协商结果快照；初始化仅保存字段，不执行认证或版本校验。
@@ -78,36 +50,6 @@ public struct V2AuthenticatedClientSession: Equatable, Sendable {
         self.connectionID = connectionID
         self.authorPresentationStreamID = authorPresentationStreamID
     }
-}
-
-/// 连接配置、握手、请求关联和提示消费的错误分类。
-public enum V2TLSFrameConnectionError: Error, Equatable, Sendable {
-    /// 主机为空或端口为零。
-    case invalidEndpoint
-    /// 未建立可用于当前操作的已认证连接。
-    case notConnected
-    /// 底层连接启动失败。
-    case connectionFailed
-    /// 连接关闭或操作所属连接代际已失效。
-    case connectionClosed
-    /// 关联请求在期限内未收到响应。
-    case requestTimedOut
-    /// 握手版本不在允许范围。
-    case unsupportedVersion
-    /// 认证未成功。
-    case authenticationFailed
-    /// 握手响应或协商字段不满足要求。
-    case invalidHandshake
-    /// 压缩协商不受支持。
-    case unsupportedCompression
-    /// 帧标志与连接合同不符。
-    case unsupportedFrameFlags
-    /// 响应类型、关联或内容不符合预期。
-    case unexpectedResponse
-    /// 同类提示已有等待者，不允许另一个并发消费者。
-    case concurrentAvailabilityConsumer
-    /// 在途请求达到连接预算。
-    case tooManyPendingRequests
 }
 
 /// 用户同步可用性提示，只用于唤醒正常拉取，不证明对应水位已投递或落盘。
@@ -245,105 +187,7 @@ public protocol V2RealtimeSessionConnecting: Sendable {
     func disconnect() async
 }
 
-#if canImport(Network) && canImport(Security)
-/// 可注入的异步字节连接边界。
-///
-/// 生产实现使用 TLS 1.3 与平台信任校验，测试实现可控制旧连接回调时机。此接口不解析 IM 帧或认证载荷。
-protocol V2TLSByteConnection: Sendable {
-    /// 启动连接并等待可发送字节；连接失败通过错误报告。
-    func start() async throws
-    /// 发送字节并等待底层完成回调，不代表服务端业务已确认。
-    func send(_ data: Data) async throws
-    /// 读取不超过请求上限的一段字节，不保证包含完整协议帧。
-    func receive(maximumLength: Int) async throws -> Data
-    /// 请求终止底层连接，不要求同步等待所有回调结束。
-    func cancel()
-}
-
-/// 把 Network.framework 回调桥接为异步字节读写。
-///
-/// 端点构造路径限定 TLS 1.3，沿用平台信任校验；内部连接注入路径由调用者提供正确配置。
-/// 异步方法不自行安装 Task 取消处理器，连接所有者通过 cancel 终止底层连接。
-struct V2NetworkTLSByteConnection: V2TLSByteConnection {
-    /// 底层网络连接，生产端点路径配置了 TLS 1.3。
-    let connection: NWConnection
-    /// 用于启动连接及接收网络回调的队列。
-    private let queue: DispatchQueue
-    /// 按端点创建仅允许 TLS 1.3 的 TCP 连接，使用平台默认信任验证与 utility 队列；不立即启动连接。
-    init(endpoint: V2RealtimeEndpoint) {
-        let tls = NWProtocolTLS.Options()
-        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
-        sec_protocol_options_set_max_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
-        let parameters = NWParameters(tls: tls, tcp: .init())
-        connection = NWConnection(host: .init(endpoint.host), port: .init(rawValue: endpoint.port)!, using: parameters)
-        queue = .global(qos: .utility)
-    }
-    // Internal byte-boundary injection for Network.framework callback tests.
-    // The public endpoint initializer above always configures validated TLS.
-    /// 注入已配置的连接与队列以支持回调测试；此初始化方法不重新配置 TLS 或验证其参数。
-    init(connection: NWConnection, queue: DispatchQueue) {
-        self.connection = connection
-        self.queue = queue
-    }
-    /// 启动连接并等待 ready，failed 或 cancelled 映射为 connectionFailed。
-    ///
-    /// 使用互斥保护的可选 continuation 保证完成一次；已排队的后续状态回调不能重复恢复等待者。
-    /// waiting 等中间状态继续等待，本层不设置启动超时。
-    func start() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let pending = OSAllocatedUnfairLock<CheckedContinuation<Void, Error>?>(initialState: continuation)
-            connection.stateUpdateHandler = { state in
-                let result: Result<Void, Error>
-                switch state {
-                case .ready: result = .success(())
-                case .failed, .cancelled: result = .failure(V2TLSFrameConnectionError.connectionFailed)
-                default: return
-                }
-                // Framework state callbacks can already be queued when the
-                // handler is cleared. Complete this readiness bridge once.
-                let waiter = pending.withLock { value in
-                    let waiter = value
-                    value = nil
-                    return waiter
-                }
-                connection.stateUpdateHandler = nil
-                waiter?.resume(with: result)
-            }
-            connection.start(queue: queue)
-        }
-    }
-    /// 等待 contentProcessed 回调，非空错误映射为 connectionFailed。
-    ///
-    /// 成功仅表示底层发送处理完成，不表示对端应用收到或事务提交。Task 取消本身不会在本方法中主动取消网络连接。
-    func send(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            connection.send(content: data, completion: .contentProcessed { error in
-                if error == nil { continuation.resume() }
-                else { continuation.resume(throwing: V2TLSFrameConnectionError.connectionFailed) }
-            })
-        }
-    }
-    /// 请求至少一个、不超过上限的字节片段。
-    ///
-    /// - Parameter maximumLength: 交给 Network.framework 的读取上限，此处不另行验证。
-    /// - Returns: 非空字节片段；分帧与跨读取缓冲由上层处理。
-    /// - Throws: 回调错误映射为 connectionFailed，无错误但没有非空字节时映射为 connectionClosed。
-    ///
-    /// 若回调同时标记流结束并带有字节，此方法仍先返回字节，不独立报告结束标志。
-    func receive(maximumLength: Int) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: maximumLength) { bytes, _, _, error in
-                if error != nil { continuation.resume(throwing: V2TLSFrameConnectionError.connectionFailed) }
-                else if let bytes, !bytes.isEmpty { continuation.resume(returning: bytes) }
-                else { continuation.resume(throwing: V2TLSFrameConnectionError.connectionClosed) }
-            }
-        }
-    }
-    /// 调用底层连接取消，不等待取消回调，也不直接处理上层请求关联状态。
-    func cancel() { connection.cancel() }
-}
-
-/// Apple 平台的已认证 TLS 帧连接，拥有请求关联、读取任务与提示缓冲。
+/// 平台无关的已认证 TLS 帧连接，拥有请求关联、读取任务与提示缓冲。
 ///
 /// 连接工厂的生产实现使用 TLS 1.3 和平台信任校验，网络进入 `.ready` 后才发送握手。
 /// 每轮连接持有独立代际与接收缓冲，异步操作恢复时核对代际，防止旧回调影响替换连接。
@@ -475,7 +319,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         testRoomNotificationInterceptor: (@Sendable (String, UInt64, Int) -> Bool)? = nil
     ) {
         precondition(maximumProtobufMessageDepth > 0)
-        self.connectionFactory = { V2NetworkTLSByteConnection(endpoint: endpoint) }
+        self.connectionFactory = { V2SystemTLSByteConnection.make(endpoint: endpoint) }
         precondition(maximumPendingRequests > 0 && requestTimeout > .zero)
         self.maximumPendingRequests = maximumPendingRequests
         self.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
@@ -487,8 +331,8 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         self.requestTimeout = requestTimeout
     }
 
-    /// 注入可控字节连接以测试网络生命周期；使用默认 protobuf 深度，超时与在途上限必须为正。
-    init(
+    /// 注入平台字节连接或测试连接；使用默认 protobuf 深度，超时与在途上限必须为正。
+    public init(
         connectionFactory: @escaping @Sendable () -> any V2TLSByteConnection,
         frameLimits: V2FrameLimits,
         requestTimeout: Duration = .seconds(20),
@@ -1468,64 +1312,3 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     }
 
 }
-#else
-/// 缺少 Apple Network 或 Security 框架时的占位连接实现。
-///
-/// 保留纯协议与持久化测试所需的接口，所有网络操作明确报告未连接，不降级到非 TLS 传输。
-public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2AccountRoomChangeSource, V2AuthorPresentationSource, V2RealtimeConnection, V2RealtimeCoverageSource, V2RoomProgressConnection {
-    /// 创建占位实现，只检查 protobuf 深度为正，不创建 socket 或保存端点配置。
-    public init(
-        endpoint _: V2RealtimeEndpoint,
-        frameLimits _: V2FrameLimits,
-        maximumProtobufMessageDepth: Int = V2ProtobufFrameCodec.defaultMaximumMessageDepth,
-        supportsAuthorPresentationDelta _: Bool = false
-    ) {
-        precondition(maximumProtobufMessageDepth > 0)
-    }
-
-    /// 此平台不提供生产 TLS 连接，始终抛出 notConnected。
-    public func connectAndAuthenticate(accessToken _: String, deviceID _: DeviceID, supportedCapabilityProfiles _: Set<String>) async throws -> V2AuthenticatedClientSession {
-        throw V2TLSFrameConnectionError.notConnected
-    }
-
-    /// 占位实现不发送帧，始终抛出 notConnected。
-    public func request(_: V2Frame) async throws -> V2Frame {
-        throw V2TLSFrameConnectionError.notConnected
-    }
-
-    public func realtimeCoverageChanges() -> AsyncStream<V2RealtimeCoverageState> {
-        AsyncStream { $0.finish() }
-    }
-
-    public func roomProgressScope() -> V2RealtimeCoverageState? { nil }
-    public func acceptRoomProgressHead(roomID _: String, scopeGeneration _: UInt64, highWatermark _: UInt64,
-                                       connectionID _: UUID) throws { throw V2TLSFrameConnectionError.notConnected }
-
-    public func negotiatedProtocolVersion() async -> UInt8? { nil }
-    public func messageSendSession() -> V2MessageSendRealtimeReadiness? { nil }
-    public func requireMessageSendSession(_: V2MessageSendRealtimeReadiness) throws {
-        throw V2MessageSendTransportError.unavailableBeforeSubmission
-    }
-
-    /// 占位实现没有用户同步提示来源，始终抛出 notConnected。
-    public func nextAvailabilityHint() async throws -> V2SyncAvailabilityHint {
-        throw V2TLSFrameConnectionError.notConnected
-    }
-
-    /// 占位实现没有房间事件提示来源，始终抛出 notConnected。
-    public func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint {
-        throw V2TLSFrameConnectionError.notConnected
-    }
-
-    public func nextAccountRoomChange() async throws -> V2AccountRoomChange {
-        throw V2TLSFrameConnectionError.notConnected
-    }
-
-    public func beginAuthorPresentationView(messageRoomIDs: [RoomID]) throws -> V2AuthorPresentationView { throw V2TLSFrameConnectionError.notConnected }
-    public func endAuthorPresentationView(_ view: V2AuthorPresentationView) {}
-    public func nextAuthorPresentationDelta(for view: V2AuthorPresentationView) throws -> V2ReceivedAuthorPresentationDelta { throw V2TLSFrameConnectionError.notConnected }
-
-    /// 占位实现没有连接资源，断开为空操作。
-    public func disconnect() {}
-}
-#endif

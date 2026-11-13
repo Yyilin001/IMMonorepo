@@ -2,6 +2,9 @@ import Foundation
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Group avatar imports retain their exact business owner")
 struct V2GroupAvatarImportTests {

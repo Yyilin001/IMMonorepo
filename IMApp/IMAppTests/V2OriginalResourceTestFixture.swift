@@ -1,6 +1,7 @@
 import Foundation
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
 @testable import IMApp
 
 // Test doubles that exercise presentation or command behavior do not acquire

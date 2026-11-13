@@ -2,6 +2,7 @@ import Foundation
 import GRDB
 import IMV2Core
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
 @testable import IMApp
 import Testing
 

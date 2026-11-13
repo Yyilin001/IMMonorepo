@@ -1,0 +1,14 @@
+{
+  "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.8Z101u/7BD66C19-1894-4C3B-B394-C779C770002A-testSharedMessageFacadeCommands.xcresult",
+  "passed": 1,
+  "failed": 0,
+  "actions": [
+    "send",
+    "reply",
+    "edit",
+    "reaction",
+    "forward to another group",
+    "withdraw"
+  ],
+  "note": "Message action stage passed; subsequent test-driver relaunch was corrected before final full acceptance."
+}

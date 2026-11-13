@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Opaque background results stay inside their owned directory", .timeLimit(.minutes(1)))
 struct V2BackgroundResultInboxTests {

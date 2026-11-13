@@ -1,0 +1,16 @@
+{
+  "IMAndroid/app/src/androidTest/kotlin/com/xmtx/im/SharedBackendFixture.kt": "32358a8a10703219e06fe8de09aadd453a904a62dd64d8e01d16a3fdd8ad50c2",
+  "IMAndroid/app/src/androidTest/kotlin/com/xmtx/im/SharedSDKDirectoryBackendTests.kt": "dc7b3a6a13c0b4e4a72cd1b5807c84eca3dd8f93042abc2e8012605dd6d9717c",
+  "IMAndroid/app/src/androidTest/kotlin/com/xmtx/im/SharedSDKMessagingBackendTests.kt": "b1907babd08b00e9778b2e76273eab5d309e6ebf1aee9e930310911229930e7f",
+  "IMAndroid/app/src/main/kotlin/com/xmtx/im/MainActivity.kt": "6fe52834f979083fc870a2f60d2aecb13980b9f15c16fff06cd12522ce3eba8d",
+  "IMAndroid/app/src/main/kotlin/com/xmtx/im/SharedAppViewModel.kt": "391ab99ccbdb8bf159fdb6916aec8f7aa2f0a521bd73f6322cbf6dfd1b9fd02f",
+  "IMAndroid/app/src/main/kotlin/com/xmtx/im/SharedApplicationContent.kt": "0405f6e9f1eda34c2779f981b275b6c6988a0978d2c8c1f2ae4026186f6068e6",
+  "IMAndroid/app/src/main/kotlin/com/xmtx/im/SharedDirectoryContent.kt": "c43b065362880350fbcfe888a6b5c416a838bc5bef5d541db44b63f2d00792be",
+  "IMAndroid/scripts/verify_shared_sdk.py": "bc9badb012ec69abcd7a660001d225f52fa288931e241bea07e82f9bd317926b",
+  "IMAndroid/sharedsdk/src/main/AndroidManifest.xml": "571f2735faf5e857752ee057ac8ef63425576a721616c60b86ee5d4c0a2d682f",
+  "IMAndroid/sharedsdk/src/main/kotlin/com/xmtx/im/sharedsdk/SharedClient.kt": "c562d7be7a206bca2dc3286a2d8ee105b934fb9dc92b1841a7bc0066b91ba1ef",
+  "IMAndroid/sharedsdk/src/main/kotlin/com/xmtx/im/sharedsdk/SharedDirectory.kt": "e730282578b459adc23688ec668192e835d0dc1a4a6f0d5c42335d2abb372ec2",
+  "IMV2ClientKit/Sources/IMV2SharedSDK/Bridge.swift": "310c62cb7dd986991a48c806e7ac6f0b2df4a2221316fbfd028d7845efd8e88a",
+  "IMV2ClientKit/Sources/IMV2SharedSDK/SharedRuntime.swift": "1494aa94e9f90fb2033ed36a48d16be2babf63f3969310fd8bc184cce406e74e",
+  "IMV2ClientKit/Sources/IMV2SharedSDK/SharedSocialGroups.swift": "da5fbbc253a43fa561c1150142bfddda02f5ad3ff3946098e8784d8fd168bd7a"
+}

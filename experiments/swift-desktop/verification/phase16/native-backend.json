@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "nativeSearch": true,
+  "nativeVisibleReceiptConfirmedByPeer": true,
+  "physicalDisconnect": true,
+  "ownerReopen": true,
+  "accountIsolation": true,
+  "platform": "macOS",
+  "log": "/tmp/im-phase16-native-backend-final.log",
+  "sha256": "be2ebb3ece8967c086db15c2cbff4e8ff94ada24bfba929061d2ded74a939aed"
+}

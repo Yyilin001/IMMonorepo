@@ -1,0 +1,17 @@
+{
+  "dissolved": true,
+  "groupRoom": "17ab0507-f4b7-4845-b359-61299d8d26fe",
+  "capabilityReceipts": {
+    "groupRole": 1,
+    "groupOwnership": 1,
+    "groupPermission": 1,
+    "groupDissolution": 1,
+    "groupAnnouncement": 1
+  },
+  "groupCreationCount": 1,
+  "membershipRevision": 7,
+  "socialReceiptsForActors": 9,
+  "appliedCapabilityReceipts": 5,
+  "changedMembershipReceipts": 3,
+  "duplicateCapabilityIdentities": 0
+}

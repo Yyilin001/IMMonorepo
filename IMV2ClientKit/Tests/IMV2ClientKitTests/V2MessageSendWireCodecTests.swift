@@ -3,6 +3,9 @@ import IMV2Core
 import Testing
 import SwiftProtobuf
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 struct V2MessageSendWireCodecTests {
     private func command() throws -> V2MessageSendOperationCommand {

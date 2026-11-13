@@ -4,6 +4,9 @@ import Darwin
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 /// Opt-in destructive writes are confined to a tiny, separately mounted test
 /// volume. Never run the filler against the host data volume or an arbitrary path.

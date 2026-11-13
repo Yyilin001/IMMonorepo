@@ -1,0 +1,30 @@
+{
+  "nativeBuild": {
+    "localPath": "/tmp/im-phase4-native.log",
+    "sha256": "9bfc318c5d8edf43498c7056845ccd8b15c7fc487b16708f42ca4aa0437334b5"
+  },
+  "androidDebugAndLint": {
+    "localPath": "/tmp/im-phase4-final-verification/gradle.log",
+    "sha256": "af63a3ae695949c34827958ca83b83ef00adc58920f320802819a67f62460dce"
+  },
+  "androidInstrumentation": {
+    "localPath": "/tmp/im-phase4-final-verification/instrumentation.log",
+    "sha256": "0ffe6ef2fca6fef7dbc50a4d21bae7a9fdff4b54a8ccc2f955f4b502e1e51b10"
+  },
+  "androidRelease": {
+    "localPath": "/tmp/im-phase4-release.log",
+    "sha256": "8dc90bc842ff09d518eb8563a64dcd66e60ab8e541f426632ab33ce125f16fbd"
+  },
+  "swiftTests": {
+    "localPath": "/tmp/im-phase4-swift-tests.log",
+    "sha256": "e870d564ebc81ab3ef2d2426d72051e8d81220dece6e3bdaae608d958f1d1739"
+  },
+  "iosAppTests": {
+    "localPath": "/tmp/im-phase4-ios-app.log",
+    "sha256": "df302b3a9ee738a2777204d966f10a8d9bcd70d78d50f502701075b9efe419a4"
+  },
+  "iosBuild": {
+    "localPath": "/tmp/im-phase4-ios-build.log",
+    "sha256": "c9dea34288201d3e9cbf5c51addc65aa1049aa3c489db53783ee6011ec63d4ef"
+  }
+}

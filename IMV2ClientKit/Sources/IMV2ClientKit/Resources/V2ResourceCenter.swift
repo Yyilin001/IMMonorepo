@@ -439,7 +439,7 @@ public actor V2ResourceCenter {
 
     /// Creating/reconnecting a native session is account work too. Close drains
     /// setup and its cancelled result before retiring the scoped directories.
-    func withBackgroundSetup<Result: Sendable>(
+    package func withBackgroundSetup<Result: Sendable>(
         onCancelledValue: @escaping @Sendable (Result) async -> Void,
         _ operation: @escaping @Sendable (V2ResourceFileStore, V2AccountStorageScope) async throws -> Result
     ) async throws -> Result {

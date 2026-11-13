@@ -1,0 +1,35 @@
+{
+  "date": "2026-11-12",
+  "branch": "codex/swift-android-feasibility",
+  "baseCommit": "3a7ca17f392992e0ac8a3a270cc07a918c2633e6",
+  "android": {
+    "api": 31,
+    "abi": "arm64-v8a",
+    "tests": 16,
+    "verified": true
+  },
+  "apple": {
+    "sdkXCTest": 53,
+    "sdkSwiftTesting": 1528,
+    "finalNetworkXCTest": 13,
+    "finalNetworkSwiftTesting": 7,
+    "iOSCompatibility": 15,
+    "search": 52
+  },
+  "inventory": {
+    "symbols": 6079,
+    "oldSourceDeclarationsMissing": 0,
+    "actorDelegatingInitializerChanges": 3
+  },
+  "limitations": [
+    "Phase 2 did not rerun API 36 or R8; phase 1 results describe the earlier binary.",
+    "No production Android TLS byte adapter, Keystore, ConnectivityManager or system background task integration.",
+    "Source facade compatibility is verified; module identity and binary ABI change."
+  ],
+  "reproduction": {
+    "sdk": "xcrun --toolchain XcodeDefault swift test --package-path IMV2ClientKit --jobs 4 --no-parallel",
+    "androidBuild": "python3 experiments/swift-android/build_probe.py",
+    "androidTests": "python3 experiments/swift-android/run_probe.py --serial <device> --api 31",
+    "inventory": "python3 IMAndroid/scripts/export_sdk_api_inventory.py --check"
+  }
+}

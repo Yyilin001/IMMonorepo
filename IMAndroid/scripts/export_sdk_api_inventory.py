@@ -15,7 +15,8 @@ from urllib.parse import unquote, urlparse
 
 
 MODULE = "IMV2ClientKit"
-SOURCE_ROOT = Path("IMV2ClientKit/Sources/IMV2ClientKit")
+MODULES = {MODULE, "IMV2ClientRuntime", "IMV2ClientNetwork", "IMV2ClientPlatform", "IMV2ClientApple"}
+SOURCE_ROOT = Path("IMV2ClientKit/Sources")
 CONTRACT_FILES = ("IMV2ClientKit/Package.swift", "IMV2ClientKit/Package.resolved",
                   "Protocol/im_realtime/v2/im_v2.proto")
 
@@ -33,7 +34,7 @@ def source_hashes(repo):
 
 
 def normalize_graph(graph, repo):
-    if graph["module"]["name"] != MODULE:
+    if graph["module"]["name"] not in MODULES:
         raise ValueError("Unexpected Swift module")
     records, seen = [], set()
     for symbol in graph["symbols"]:
@@ -45,6 +46,7 @@ def normalize_graph(graph, repo):
             raise ValueError(f"Non-public symbol: {identity}")
         record = {
             "id": identity,
+            "module": graph["module"]["name"],
             "kind": symbol["kind"]["identifier"],
             "path": symbol["pathComponents"],
             "declaration": "".join(f["spelling"] for f in symbol["declarationFragments"]),
@@ -66,8 +68,6 @@ def normalize_graph(graph, repo):
                 raise ValueError(f"Invalid source position: {identity}")
             record["category"] = "generated" if "Generated" in relative.parts else "handwritten"
         records.append(record)
-    if not records:
-        raise ValueError("Empty public API graph")
     return sorted(records, key=lambda r: (r.get("source", ""), r["path"], r["id"]))
 
 
@@ -77,17 +77,35 @@ def encode_records(records):
 
 
 def export_inventory(graph_path, repo, output):
-    raw = graph_path.read_bytes()
-    graph = json.loads(raw)
-    records = normalize_graph(graph, repo)
+    paths = sorted(graph_path.glob("*.symbols.json")) if graph_path.is_dir() else [graph_path]
+    graphs = [(path, path.read_bytes()) for path in paths]
+    names = {json.loads(raw)["module"]["name"] for _, raw in graphs}
+    if names != MODULES:
+        raise ValueError("Export all package modules together: " + ", ".join(sorted(MODULES)))
+    records, identities = [], set()
+    platform = None
+    for path, raw in graphs:
+        graph = json.loads(raw)
+        if platform is not None and platform != graph["module"].get("platform"):
+            raise ValueError("Mixed symbol graph targets")
+        platform = graph["module"].get("platform")
+        for record in normalize_graph(graph, repo):
+            if record["id"] in identities:
+                raise ValueError("Duplicate symbol across graphs: " + record["id"])
+            identities.add(record["id"])
+            records.append(record)
+    records.sort(key=lambda r: (r.get("source", ""), r["path"], r["id"]))
+    if not records:
+        raise ValueError("Empty public API inventory")
     data = encode_records(records)
     manifest = {
-        "format": 1,
+        "format": 2,
         "module": MODULE,
-        "scope": "Public symbols exported for this module and target only; not Android behavior coverage",
+        "modules": sorted(MODULES),
+        "scope": "Public symbols of the facade and its owned package modules for this target; not Android behavior coverage",
         "target": graph["module"].get("platform"),
         "generator": graph["metadata"].get("generator"),
-        "symbol_graph_sha256": digest(raw),
+        "symbol_graph_sha256": {path.name: digest(raw) for path, raw in graphs},
         "inventory_sha256": digest(data),
         "symbol_count": len(records),
         "categories": dict(sorted(Counter(r["category"] for r in records).items())),
@@ -103,7 +121,7 @@ def export_inventory(graph_path, repo, output):
 
 def check_inventory(repo, output):
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
-    if manifest["format"] != 1 or manifest["module"] != MODULE:
+    if manifest["format"] != 2 or manifest["module"] != MODULE or set(manifest["modules"]) != MODULES:
         raise ValueError("Unexpected inventory format/module")
     data = (output / "swift-public-api.jsonl").read_bytes()
     if digest(data) != manifest["inventory_sha256"]:
@@ -123,7 +141,7 @@ def main():
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parents[1] / "sdk-parity")
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--graph", type=Path, help="Fresh swift-symbolgraph-extract JSON")
+    mode.add_argument("--graph", type=Path, help="Directory of fresh symbol graphs for all package modules (including extension graphs)")
     mode.add_argument("--check", action="store_true", help="Check current source hashes and inventory integrity")
     args = parser.parse_args()
     try:

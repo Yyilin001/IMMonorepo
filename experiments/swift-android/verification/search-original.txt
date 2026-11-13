@@ -1,0 +1,8 @@
+error: SwiftCompile normal aarch64 failed with a nonzero exit code. Command line:     cd $REPO
+    
+$REPO/MessageSubstringSearch/Sources/MessageSubstringSearch/Indexing/IndexWriter.swift:2:8: error: no such module 'CryptoKit'
+  1 | import Foundation
+  2 | import CryptoKit
+    |        `- error: no such module 'CryptoKit'
+  3 | 
+  4 | struct StoredEvent {

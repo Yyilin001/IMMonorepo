@@ -5,6 +5,8 @@ import Testing
 import os
 @testable import IMApp
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientApple
 
 @MainActor
 @Suite("Background opaque completion bridge", .timeLimit(.minutes(1)))
@@ -105,7 +107,7 @@ struct V2BackgroundTransferBridgeTests {
         try inbox.install(mapping: mapping, identifier: 1)
         let original = root.appending(path: "original"), provider = root.appending(path: "provider")
         try body.write(to: original); try body.write(to: provider)
-        writer.apply(.complete, to: original)
+        try writer.apply(.complete, to: original)
         try inbox.receive(provider, mapping: mapping, identifier: 1, origin: origin)
         let received = inbox.fileURL(mapping)
         #expect(writer.policy(at: original) == .complete)
@@ -137,7 +139,19 @@ struct V2BackgroundTransferBridgeTests {
     #endif
 }
 private final class RecordingResourceProtectionWriter:V2ResourceFileProtectionWriting {
-    private let values=OSAllocatedUnfairLock<[String:V2ResourceFileProtection]>(initialState: [:])
-    func apply(_ protection:V2ResourceFileProtection,to file:URL) { values.withLock { $0[file.path]=protection } }
-    func policy(at file:URL) -> V2ResourceFileProtection? { values.withLock { $0[file.path] } }
+    // Protection belongs to the file, including an inbox's atomic .tmp -> .result rename.
+    private let values = OSAllocatedUnfairLock<[UInt64: V2ResourceFileProtection]>(initialState: [:])
+    private func identity(_ file: URL) throws -> UInt64 {
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard let inode = attributes[.systemFileNumber] as? NSNumber else { throw CocoaError(.fileReadUnknown) }
+        return inode.uint64Value
+    }
+    func apply(_ protection: V2ResourceFileProtection, to file: URL) throws {
+        let id = try identity(file)
+        values.withLock { $0[id] = protection }
+    }
+    func policy(at file: URL) -> V2ResourceFileProtection? {
+        guard let id = try? identity(file) else { return nil }
+        return values.withLock { $0[id] }
+    }
 }

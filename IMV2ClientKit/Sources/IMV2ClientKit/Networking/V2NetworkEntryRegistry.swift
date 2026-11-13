@@ -49,6 +49,7 @@ public enum V2NetworkEntryRegistry {
         "V2NativeBackgroundSession.swift": [.objectBytes],
         "V2RangeDownloadTransport.swift": [.objectBytes],
         "V2BoundedFileUpload.swift": [.objectBytes],
+        "V2FoundationHTTPSession.swift": [.accountHTTP],
         "V2SecureURLSession.swift": [.configuration]
     ]
     /// A new Core kind makes this switch non-exhaustive. HTTP recovery does not

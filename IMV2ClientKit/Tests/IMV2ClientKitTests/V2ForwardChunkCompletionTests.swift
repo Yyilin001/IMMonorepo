@@ -3,6 +3,9 @@ import GRDB
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 @Suite("Bound forward completion proofs")
 struct V2ForwardChunkCompletionTests {

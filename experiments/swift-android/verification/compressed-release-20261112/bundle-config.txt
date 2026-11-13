@@ -1,0 +1,50 @@
+bundletool {
+  version: "1.18.1"
+}
+optimizations {
+  splits_config {
+  }
+  uncompress_native_libraries {
+    alignment: PAGE_ALIGNMENT_16K
+  }
+  store_archive {
+    enabled: true
+  }
+}
+compression {
+  uncompressed_glob: "**.3[gG]2"
+  uncompressed_glob: "**.3[gG][pP]"
+  uncompressed_glob: "**.3[gG][pP][pP]"
+  uncompressed_glob: "**.3[gG][pP][pP]2"
+  uncompressed_glob: "**.[aA][aA][cC]"
+  uncompressed_glob: "**.[aA][mM][rR]"
+  uncompressed_glob: "**.[aA][wW][bB]"
+  uncompressed_glob: "**.[gG][iI][fF]"
+  uncompressed_glob: "**.[iI][mM][yY]"
+  uncompressed_glob: "**.[jJ][eE][tT]"
+  uncompressed_glob: "**.[jJ][pP][eE][gG]"
+  uncompressed_glob: "**.[jJ][pP][gG]"
+  uncompressed_glob: "**.[mM]4[aA]"
+  uncompressed_glob: "**.[mM]4[vV]"
+  uncompressed_glob: "**.[mM][iI][dD]"
+  uncompressed_glob: "**.[mM][iI][dD][iI]"
+  uncompressed_glob: "**.[mM][kK][vV]"
+  uncompressed_glob: "**.[mM][pP]2"
+  uncompressed_glob: "**.[mM][pP]3"
+  uncompressed_glob: "**.[mM][pP]4"
+  uncompressed_glob: "**.[mM][pP][eE][gG]"
+  uncompressed_glob: "**.[mM][pP][gG]"
+  uncompressed_glob: "**.[oO][gG][gG]"
+  uncompressed_glob: "**.[oO][pP][uU][sS]"
+  uncompressed_glob: "**.[pP][nN][gG]"
+  uncompressed_glob: "**.[rR][tT][tT][tT][lL]"
+  uncompressed_glob: "**.[sS][mM][fF]"
+  uncompressed_glob: "**.[tT][fF][lL][iI][tT][eE]"
+  uncompressed_glob: "**.[wW][aA][vV]"
+  uncompressed_glob: "**.[wW][eE][bB][mM]"
+  uncompressed_glob: "**.[wW][eE][bB][pP]"
+  uncompressed_glob: "**.[wW][mM][aA]"
+  uncompressed_glob: "**.[wW][mM][vV]"
+  uncompressed_glob: "**.[xX][mM][fF]"
+}
+

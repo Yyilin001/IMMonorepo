@@ -323,7 +323,7 @@ public struct V2ResourceFileJournal: Sendable {
         }
     }
 
-    func accountID() throws -> UserID {
+    package func accountID() throws -> UserID {
         try databasePool.read { db in
             guard let value = try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") else {
                 throw V2ResourceStorageError.invalidRecord

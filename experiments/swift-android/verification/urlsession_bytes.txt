@@ -1,0 +1,6 @@
+$REPO/experiments/swift-android/build/urlsession_bytes.swift:3:77: error: value of type 'URLSession' has no member 'bytes'
+1 | import Foundation
+2 | import FoundationNetworking
+3 | func probe(_ s: URLSession, _ r: URLRequest) async throws { _ = try await s.bytes(for: r) }
+  |                                                                             `- error: value of type 'URLSession' has no member 'bytes'
+4 | 

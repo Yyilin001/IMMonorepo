@@ -2,6 +2,9 @@ import Foundation
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
+@testable import IMV2ClientRuntime
+@testable import IMV2ClientNetwork
+@testable import IMV2ClientApple
 
 struct V2ResourceUploadCancellationTests {
     @Test("resource upload cancellation stops each business stage and retains the recoverable journal", arguments: [-1, 0, 1, 2, 3, 4])

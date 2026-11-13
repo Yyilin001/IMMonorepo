@@ -35,6 +35,7 @@ public struct V2BackgroundTransferResult: Codable, Sendable, Equatable {
     }
 }
 public protocol V2BackgroundTaskSessionDriving: Sendable {
+    func invalidateAfterDrain()
     func tasks() async -> [V2BackgroundSystemTask]
     func resume(_ identifier: Int) async throws
     /// Returns only after the real system task completion callback.
@@ -59,4 +60,8 @@ public struct V2BackgroundTaskMapping: Sendable, Equatable {
 
 public protocol V2BackgroundProtectedDataChecking:Sendable {
     func protectedDataAvailable() async -> Bool
+}
+
+public extension V2BackgroundTaskSessionDriving {
+    func invalidateAfterDrain() {}
 }

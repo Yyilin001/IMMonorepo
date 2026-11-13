@@ -45,7 +45,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True)
     parser.add_argument("--api", type=int, default=31)
-    parser.add_argument("--suite", choices=("platform", "app"), required=True)
+    parser.add_argument("--suite", choices=("app",), required=True)
     parser.add_argument("--classes", help="Optional comma-separated fully qualified test classes")
     parser.add_argument("--adb", default=shutil.which("adb") or str(
         Path(os.environ.get("ANDROID_HOME", Path.home() / "Library/Android/sdk")) / "platform-tools/adb"))
@@ -59,7 +59,7 @@ def main():
     if api != args.api or shell("getprop", "sys.boot_completed") != "1":
         parser.error(f"Device must be booted API {args.api}; observed API {api}")
     fingerprint = shell("getprop", "ro.build.fingerprint")
-    package = "com.xmtx.im.platform.test" if args.suite == "platform" else "com.xmtx.im.android.test"
+    package = "com.xmtx.im.android.test"
     command = adb + ["shell", "am", "instrument", "-w", "-r"]
     if args.classes:
         command += ["-e", "class", args.classes]

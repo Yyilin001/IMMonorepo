@@ -1,0 +1,542 @@
+[
+  {
+    "method": "GET",
+    "path": "/v2/group-invites",
+    "status": 200,
+    "count": 23
+  },
+  {
+    "method": "GET",
+    "path": "/v2/group-join-requests",
+    "status": 200,
+    "count": 23
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/3D3E7290-DD4E-4CD0-87ED-274AC08C8E19",
+    "status": 403,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/4074BAA9-6BCE-491F-BB8D-109C3DEA6A73",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/7D553B78-5846-43F8-9737-2F46D69E1391",
+    "status": 403,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/88EEB150-4B6C-427A-92CA-AC02B65420F5",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/98EE0A1A-B925-4A57-9830-3EFB6769D164",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/9DDC88DC-D858-4A19-8883-5CD42E591BF3",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/A447C7E7-43D5-4824-A12F-C8C8543D7997",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/B13D0400-C5F7-4A6A-8234-DA9F59B49EBB",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/C0665BDB-3175-4E01-9065-7F9C09B4FB85",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/C896C3C7-C018-4555-9DCA-DDA5A2611FAD",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/CC2C55C7-E58D-4CB0-A2DD-45EFF6E157AA",
+    "status": 403,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/D46C226C-7414-43ED-B9AB-A34BD4B6E18A",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile-presentations/contact-aliases/FCA8A21F-B10B-45C1-A167-8CD9CA6CA618",
+    "status": 403,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/profile/me",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "GET",
+    "path": "/v2/public-identities/resolve",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/1e125cb4-396c-4c09-880f-fe5f733ec6f3",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/24802bfb-2c28-40ae-a433-76c06a523def",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/3895544e-da6c-45f3-b4bd-40580d4eda54",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/50c4a26b-e395-4a29-bc53-ede0a167cd73",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/cb688e4c-0b98-403a-bb88-9b69864154a8",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/e0390e19-f5c9-4259-b37c-55d8c3a8998b",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/e4f4ca6d-d6e6-4649-9a90-6ed025227637",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/f16642f4-7f60-44df-aa13-26ce15a69b84",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "GET",
+    "path": "/v2/resource-bytes/f6109903-8fae-40bf-913a-5d3f57faf9db",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/155F347D-FE3D-4929-AB9C-A8D25CC37C71/baseline",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/4074BAA9-6BCE-491F-BB8D-109C3DEA6A73/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/88EEB150-4B6C-427A-92CA-AC02B65420F5/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/98EE0A1A-B925-4A57-9830-3EFB6769D164/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/9DDC88DC-D858-4A19-8883-5CD42E591BF3/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/A447C7E7-43D5-4824-A12F-C8C8543D7997/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/AA3C3F87-4F89-4C68-99F0-5A0900419465/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/B13D0400-C5F7-4A6A-8234-DA9F59B49EBB/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/C0665BDB-3175-4E01-9065-7F9C09B4FB85/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/C24500E7-FA0C-4710-86E1-3B17664AE61A/baseline",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/C896C3C7-C018-4555-9DCA-DDA5A2611FAD/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "GET",
+    "path": "/v2/social/targets/D46C226C-7414-43ED-B9AB-A34BD4B6E18A/baseline",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/assertion",
+    "status": 200,
+    "count": 18
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/assertion",
+    "status": 401,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/account-auth/password/register",
+    "status": 200,
+    "count": 25
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials",
+    "status": 200,
+    "count": 43
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials/cancel-registration",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/device-credentials/revoke",
+    "status": 204,
+    "count": 9
+  },
+  {
+    "method": "POST",
+    "path": "/v2/direct-room-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/append",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/begin",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-creation-operations/finalize",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-invites/preview",
+    "status": 200,
+    "count": 12
+  },
+  {
+    "method": "POST",
+    "path": "/v2/group-invites/preview",
+    "status": 404,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/profile-presentations/batch",
+    "status": 200,
+    "count": 63
+  },
+  {
+    "method": "POST",
+    "path": "/v2/profile-presentations/contact-aliases/D46C226C-7414-43ED-B9AB-A34BD4B6E18A/operations/recover",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads",
+    "status": 200,
+    "count": 10
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/finalize",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/status",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/targets",
+    "status": 200,
+    "count": 9
+  },
+  {
+    "method": "POST",
+    "path": "/v2/resource-uploads/targets",
+    "status": 400,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/569913B9-5B4C-4073-8474-BC557E6A121F/group-capability-operations/admissions",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/569913B9-5B4C-4073-8474-BC557E6A121F/group-capability-operations/submit",
+    "status": 200,
+    "count": 5
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/569913B9-5B4C-4073-8474-BC557E6A121F/membership/admissions",
+    "status": 200,
+    "count": 4
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/569913B9-5B4C-4073-8474-BC557E6A121F/membership/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/7E4921F8-52EE-40CC-A37C-83FF9234A6A5/invitation-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/7E4921F8-52EE-40CC-A37C-83FF9234A6A5/invitation-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/969CCA88-8252-433B-A6FD-4AAA293AED1E/invitation-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/969CCA88-8252-433B-A6FD-4AAA293AED1E/invitation-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/A4294D03-11F4-43E9-A134-DE57260E43D4/invitation-operations/admissions",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/A4294D03-11F4-43E9-A134-DE57260E43D4/invitation-operations/submit",
+    "status": 200,
+    "count": 6
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/A867A4E1-0E0B-4A96-B580-8C29C550E8D2/invitation-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/A867A4E1-0E0B-4A96-B580-8C29C550E8D2/invitation-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/A98D1C61-7F22-47E4-86EF-22B51B8578BA/invitation-operations/admissions",
+    "status": 200,
+    "count": 10
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/A98D1C61-7F22-47E4-86EF-22B51B8578BA/invitation-operations/submit",
+    "status": 200,
+    "count": 10
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/A98D1C61-7F22-47E4-86EF-22B51B8578BA/member-administration/admissions",
+    "status": 200,
+    "count": 2
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/A98D1C61-7F22-47E4-86EF-22B51B8578BA/member-administration/submit",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/AA84A3D5-D545-4956-8AE2-00AB0B5A3490/invitation-operations/admissions",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/rooms/AA84A3D5-D545-4956-8AE2-00AB0B5A3490/invitation-operations/submit",
+    "status": 200,
+    "count": 3
+  },
+  {
+    "method": "POST",
+    "path": "/v2/social/operations/submit",
+    "status": 200,
+    "count": 19
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/02C8775A-D6B1-465F-AA1E-CAE06D3C1B65",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/0393A9D9-0F13-4742-9CC2-9C46621EEDA7",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/08579294-4EEE-465D-9D9F-0EA6754B7AED",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/1613B7C4-3D1D-4D8D-B32C-A351BB43D541",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/459FB213-D247-47C2-B71D-470CCDA4E54D",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/5C472CD8-373D-4B72-A75A-D06C15C46F62",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/740983D5-FEEE-4257-A18A-FD43E8CBA2D3",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/DD2BF64E-4456-401D-82DD-98C33718315B",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/local-media/upload/F62BBC16-C457-44B1-AEE1-B9B3E9BF8A07",
+    "status": 204,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile-presentations/contact-aliases/88EEB150-4B6C-427A-92CA-AC02B65420F5",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile-presentations/contact-aliases/A447C7E7-43D5-4824-A12F-C8C8543D7997",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile-presentations/contact-aliases/B13D0400-C5F7-4A6A-8234-DA9F59B49EBB",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile-presentations/contact-aliases/C0665BDB-3175-4E01-9065-7F9C09B4FB85",
+    "status": 200,
+    "count": 1
+  },
+  {
+    "method": "PUT",
+    "path": "/v2/profile/me",
+    "status": 200,
+    "count": 9
+  }
+]

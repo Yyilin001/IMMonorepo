@@ -1,0 +1,19 @@
+{
+  "productionProjectDependencies": [
+    ":sharedsdk",
+    ":swiftplatform"
+  ],
+  "absentDexPackages": [
+    "com.xmtx.im.client",
+    "com.xmtx.im.platform",
+    "com.xmtx.imclientkit"
+  ],
+  "legacySourceModulesRemoved": [
+    "clientkit",
+    "platform"
+  ],
+  "legacyBenchmarkRemoved": true,
+  "defaultSharedSDK": true,
+  "legacyBuildSwitch": false,
+  "protocolModule": "Only included with enableSwiftProbe; not in App runtime"
+}

@@ -1,6 +1,11 @@
 import Foundation
 import Dispatch
-import Darwin
+import CSearchFileLock
+#if canImport(Android)
+import Android
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// SQLite 是同步 C API。专用串行 executor 避免长 SQL 占用主线程或 cooperative pool。
 final class DatabaseExecutor: SerialExecutor {
@@ -62,19 +67,22 @@ final class AdmissionGate: @unchecked Sendable {
 }
 
 /// 一个进程/实例独占本索引。锁文件保留，避免 unlink 后其他实例锁到不同 inode。
-public final class SearchIndexWriteLease: Sendable {
-    private let descriptor: Int32
+public final class SearchIndexWriteLease: @unchecked Sendable {
+    // Immutable opaque handle; the C adapter alone releases it at deinit.
+    private let lease: UnsafeMutableRawPointer
     public init(path: String) throws {
         guard !path.isEmpty, !path.utf8.contains(0) else { throw SearchIndexError.invalidArgument("invalid index path") }
-        let descriptor = Darwin.open(path + ".lock", O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
-        guard descriptor >= 0 else { throw SearchIndexError.invalidArgument("cannot create store lock") }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            let code = errno
-            Darwin.close(descriptor)
-            if code == EWOULDBLOCK { throw SearchIndexError.alreadyOpen }
-            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        var status: Int32 = 0, nativeError: Int32 = 0
+        guard let lease = (path + ".lock").withCString({ im_search_lock_open($0, &status, &nativeError) }) else {
+            if status == 1 { throw SearchIndexError.alreadyOpen }
+            if status == 2 { throw SearchIndexError.invalidArgument("cannot create store lock") }
+            #if os(Windows)
+            throw SearchIndexError.invalidArgument("cannot acquire store lock")
+            #else
+            throw POSIXError(POSIXErrorCode(rawValue: nativeError) ?? .EIO)
+            #endif
         }
-        self.descriptor = descriptor
+        self.lease = lease
     }
-    deinit { flock(descriptor, LOCK_UN); Darwin.close(descriptor) }
+    deinit { im_search_lock_close(lease) }
 }

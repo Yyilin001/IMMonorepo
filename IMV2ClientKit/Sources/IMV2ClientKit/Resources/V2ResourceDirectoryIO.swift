@@ -1,6 +1,8 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
+#elseif canImport(Android)
+import Android
 #else
 import Glibc
 #endif
@@ -12,6 +14,8 @@ enum V2ResourceDirectoryIO {
         defer {
             #if canImport(Darwin)
             _ = Darwin.close(descriptor)
+            #elseif canImport(Android)
+            _ = Android.close(descriptor)
             #else
             _ = Glibc.close(descriptor)
             #endif

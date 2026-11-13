@@ -1,0 +1,6 @@
+$REPO/experiments/swift-android/build/waits_for_connectivity.swift:3:46: error: cannot assign to property: 'waitsForConnectivity' is a get-only property
+1 | import Foundation
+2 | import FoundationNetworking
+3 | func probe(_ c: URLSessionConfiguration) { c.waitsForConnectivity = true }
+  |                                              `- error: cannot assign to property: 'waitsForConnectivity' is a get-only property
+4 | 

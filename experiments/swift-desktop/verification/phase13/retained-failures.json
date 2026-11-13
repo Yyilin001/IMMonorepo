@@ -1,0 +1,23 @@
+{
+  "broadIOSAccessibilityAudit": [
+    {
+      "bundle": "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.QxNS8l/7B26409F-8C12-4044-875C-67454C73D4F1-testReceiverRegistersIndependentInstallation.xcresult",
+      "result": "Failed",
+      "failures": [
+        "Dynamic Type font sizes are partially unsupported"
+      ]
+    }
+  ],
+  "earlierFunctionalHarnessAttempts": [
+    "iOS 27.1 Duo sidebar did not satisfy the old bottom-tab selector",
+    "iOS 18 SwiftUI Menu wrapper reports non-hittable; actual visible control opened by its observed navigation-bar frame",
+    "Old group-creation feedback assertion replaced by current automatic chat navigation; current composer selected by its identifier",
+    "Removed refresh menu assertion replaced with current conversation readiness"
+  ],
+  "macOSInitialAttempt": {
+    "result": "timeout",
+    "observed": "offline / operationFailed before room projection; backend startup log included sourceNotReady",
+    "rerun": "Same production code and backend, new isolated accounts: passed all scenarios; no production change made for this retry"
+  },
+  "earlierBackendLifecycleAttempt": "A concurrent macOS/Android attempt lost its backend when the failed iOS harness stopped its owned stack; final regressions used an independent backend."
+}

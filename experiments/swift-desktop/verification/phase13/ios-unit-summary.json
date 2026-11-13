@@ -1,0 +1,48 @@
+{
+  "devicesAndConfigurations": [
+    {
+      "device": {
+        "architecture": "arm64",
+        "deviceId": "E0283730-5ED7-4EB4-ADA9-630F3125AE49",
+        "deviceName": "NavTest iPhone",
+        "modelName": "iPhone",
+        "osBuildNumber": "24A94425",
+        "osVersion": "27.1",
+        "platform": "iOS Simulator"
+      },
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "passedTests": 49,
+      "skippedTests": 0,
+      "testPlanConfiguration": {
+        "configurationId": "1",
+        "configurationName": "Test Scheme Action"
+      }
+    }
+  ],
+  "environmentDescription": "IMApp · Built with macOS 27.0",
+  "expectedFailures": 0,
+  "failedTests": 0,
+  "finishTime": 1794573464.464,
+  "passedTests": 42,
+  "result": "Passed",
+  "runtimeWarnings": [],
+  "skippedTests": 0,
+  "startTime": 1794573447.976,
+  "statistics": [
+    {
+      "subtitle": "11 test runs",
+      "title": "4 tests ran with dynamic parameters"
+    }
+  ],
+  "testFailures": [],
+  "title": "Test - IMApp",
+  "topInsights": [
+    {
+      "category": "Longest Test Runs",
+      "impact": "44% of duration",
+      "text": "2 longest test runs with outlier durations exceeding 0.77s (three standard deviations)"
+    }
+  ],
+  "totalTestCount": 42
+}

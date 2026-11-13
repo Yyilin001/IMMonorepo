@@ -1,0 +1,27 @@
+{
+  "ownedSimulatorsDeleted": [
+    "25D3941E-6008-43CA-A903-CA73376CABC2",
+    "CB0BDCA6-FA38-4149-ACE1-EE68539FC967"
+  ],
+  "preexistingSimulatorsPreserved": [
+    "E0283730-5ED7-4EB4-ADA9-630F3125AE49",
+    "CDC0C2CF-21C3-48B2-9E23-A7CE4729D192"
+  ],
+  "ownedAVDDeleted": "IM_SharedPhase16_API31",
+  "verificationPackagesUninstalled": true,
+  "ownedBackendsStopped": [
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-m_93441v",
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-rhb9amcr",
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-8monxkm_",
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-mkqvpl55",
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-q_1bn4_5",
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-zg26nr5n",
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-i8jouwsv",
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-lhdkwms9"
+  ],
+  "localPortsClosed": {
+    "7443": true,
+    "8443": true
+  },
+  "systemTrustModified": false
+}
