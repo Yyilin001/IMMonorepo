@@ -15,7 +15,7 @@ struct V2RoomRequestTests {
         }
         let valid = envelope(viewers)
         #expect(valid.actorUserID == nil && valid.roomID == room && valid.replayPolicy == .readOnly)
-        #expect(valid.profileVisibilityTargetCount == 100 && !valid.hasStableOperationID && !valid.canShareSendTurn)
+        #expect(valid.profileVisibilityTargetCount == 100 && !valid.hasStableOperationID)
         let retainedBytes = V2ActorPayloadBudget.retainedBytes(of: valid)
         let encoded = try V2ActorProtobuf.encode(valid)
         #expect(retainedBytes <= 64 * 1_024 && retainedBytes >= encoded.count)
@@ -44,7 +44,7 @@ struct V2RoomRequestTests {
         }
         let valid = request([target], actor: actor)
         #expect(valid.profileVisibilityTargetCount == 1)
-        #expect(valid.actorUserID == actor && valid.replayPolicy == .readOnly && !valid.canShareSendTurn)
+        #expect(valid.actorUserID == actor && valid.replayPolicy == .readOnly)
         #expect(try JSONDecoder().decode(V2RoomRequest.self, from: JSONEncoder().encode(valid)) == valid)
         #expect(request([], actor: actor).profileVisibilityTargetCount == nil)
         #expect(request([target, target], actor: actor).profileVisibilityTargetCount == nil)
@@ -69,13 +69,11 @@ struct V2RoomRequestTests {
         #expect(decoded.actorUserID == user)
         #expect(decoded.replayPolicy == .durableIdempotent)
         #expect(decoded.hasStableOperationID)
-        #expect(!decoded.canShareSendTurn)
 
         let query = V2RoomRequest.recovery(.init(roomID: room, actorUserID: user, kind: .state))
         #expect(query.roomID == room)
         #expect(query.replayPolicy == .readOnly)
         #expect(!query.hasStableOperationID)
-        #expect(!query.canShareSendTurn)
         #expect(try JSONDecoder().decode(V2RoomRequest.self, from: JSONEncoder().encode(query)) == query)
     }
 
@@ -90,7 +88,6 @@ struct V2RoomRequestTests {
         #expect(request.actorUserID == nil)
         #expect(request.roomID == room)
         #expect(request.hasStableOperationID)
-        #expect(!request.canShareSendTurn)
     }
 
     @Test("unknown capabilities and collection queries cannot masquerade as one room turn")

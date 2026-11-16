@@ -29,7 +29,7 @@
 - [当前消息发送与结果恢复合同](reviews/message-send-contract.md)：房间顺序、内存权限、原子提交、单份成功记录和只读恢复。
 - [消息发送性能记录](reviews/send-throughput-5000-20261008.zh-CN.md)：当前 Actor 链路各轮运行条件、结果及失败边界。
 
-- [服务端解耦优化方案](proposals/server-decoupling-plan.md)：资源、HTTP/Gateway、房间执行器、消息写入及 SwiftPM 模块边界的分阶段方案；当前进度见[实施状态](proposals/server-decoupling-progress.md)。
+- [服务端解耦验收记录](proposals/server-decoupling-validation.md)：模块边界改造的编译、应用栈与故障验证范围。
 - [应用级弱网架构提案](proposals/application-weak-network-design.md)与[实施任务计划](proposals/application-weak-network-implementation-plan.md)：结合当前源码的目标设计；基础组件与个人资料链路已接入，完整差距见[实施状态](proposals/application-weak-network-progress.md)，全量能力尚未验收。
 - [会话偏好与收藏的恢复合同](proposals/personal-preference-operation-contract.md)：RoomRef 权威回执、公共任务 journal、队首冻结与投影版本保护。
 - [作者资料分发实施计划](proposals/author-presentation-implementation.md)：消息资料补充、共享读取、批量授权和可见订阅的完整完成条件；当前仍在实施。

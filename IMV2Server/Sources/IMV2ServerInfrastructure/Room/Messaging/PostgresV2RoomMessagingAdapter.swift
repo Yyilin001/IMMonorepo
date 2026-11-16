@@ -42,7 +42,8 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     func execute(_ command: V2RoomMessagingCommand) async throws -> V2RoomMessagingResult {
         switch command {
         case .sendOperation(let value):
-            let results = try await executeSendOperationBatch([value])
+            let prepared = try await prepareSendOperationBatch([value], deadline: nil)
+            let results = try await prepared.execute()
             guard results.count == 1, let result = results.first else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -64,20 +65,14 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
         }
     }
 
-    func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult] {
-        let prepared = try await prepareSendOperationBatch(commands,
-            deadline: V2RoomSQLDeadline.boundedTransactionDeadline())
-        return try await prepared.execute()
-    }
-
     func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
-                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch {
+                                   deadline: ContinuousClock.Instant?) async throws -> V2PreparedRoomSendOperationBatch {
         V2SendPathTrace.current?.mark("persistence_prepare_enter")
         guard let batcher = sendOperationOwnerBatcher, let prepare = directSendPreparation else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
         let startedAt = ContinuousClock.now
-        let prepared = try await prepare(commands, token, deadline)
+        let prepared = try await prepare(commands, token, deadline ?? V2RoomSQLDeadline.boundedTransactionDeadline())
         V2SendPathTrace.current?.record("permission_preparation", from: startedAt)
         let trace = V2SendPathTrace.current
         return .init {

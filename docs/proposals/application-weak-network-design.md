@@ -38,7 +38,7 @@ App 基线为 iOS 26；ClientKit 当前为 Swift tools 6.2、iOS 26/macOS 15，C
 
 | 领域 | 已有实现 | 本方案处理 |
 | --- | --- | --- |
-| HTTP 会话 | [V2SecureURLSession](../../IMV2ClientKit/Sources/IMV2ClientKit/V2SecureURLSession.swift) 共享 account/media 池，禁 Cookie、凭据存储、URLCache 与自动重定向 | 保留安全默认值，在其上加执行预算、结构化错误、metrics；不全局开启 URLCache |
+| HTTP 会话 | [V2SecureURLSession](../../IMV2ClientKit/Sources/IMV2ClientNetwork/V2SecureURLSession.swift) 共享 account/media 池，禁 Cookie、凭据存储、URLCache 与自动重定向 | 保留安全默认值，在其上加执行预算、结构化错误、metrics；不全局开启 URLCache |
 | HTTP 鉴权 | [V2SessionHTTPAuthorization](../../IMV2ClientKit/Sources/IMV2ClientKit/V2SessionHTTPAuthorization.swift) 绑定 epoch；401 可共享刷新，但返回原 401，不自动重放业务请求 | 保留 epoch/token 栅栏，让上层按语义重建请求；刷新本身不进入递归鉴权路径 |
 | 认证恢复 | [V2AuthSession](../../IMV2ClientKit/Sources/IMV2ClientKit/V2AuthSession.swift) 已持久化 refresh operation、单飞、串行凭据 I/O；另有签发/撤销恢复 store | 复用当前设备凭据协议，不另建通用 OAuth 体系，不把凭据写入业务 operation 表 |
 | 账户存储 | [V2AccountLocalStoreOwner](../../IMV2ClientKit/Sources/IMV2ClientKit/V2AccountLocalStoreOwner.swift) 按账号散列和 incarnation 定位目录；普通 close 保留数据库与 outbox | 复用同账号恢复和具体 store 对象关闭；显式擦除与普通退出分开 |

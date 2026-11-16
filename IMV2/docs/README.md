@@ -13,6 +13,7 @@ V2 是一条没有历史兼容层的 从零构建的运行路径。本文档只�
 | 查看仍需部署、设备、容量或审批闭环的风险 | [开放风险登记表](10-operations/residual-risk-register.md) |
 | 查找已接受或待批准的设计决定 | [设计决定登记册](ADR-REGISTER.md) |
 | 使用 100k 成员配置或准备压测 | [十万成员容量合同](09-capacity/standard-100k.md) |
+| 发布服务、回退配置或镜像、分流 Host 和数据库故障 | [部署与回滚手册](10-operations/single-node-performance-rollout-runbook.md) |
 | 处理已暂停的持久任务 | [运维重放手册](10-operations/durable-work-operator-replay.md) |
 | 执行已批准的单账号禁用 | [账户禁用手册](10-operations/account-disable-runbook.md) |
 | 查看指标、告警与尚缺运行证据 | [可观测性说明](10-operations/observability.md) |
@@ -20,11 +21,19 @@ V2 是一条没有历史兼容层的 从零构建的运行路径。本文档只�
 | 个人快照构建与恢复 | [个人快照运维](10-operations/personal-snapshot-runbook.md) |
 | 当前会话同步与恢复 | [客户端排序与房间恢复](../../docs/reviews/client-owned-conversation-sync-plan.md) |
 | 公共消息房间日志恢复决策 | [ADR-017](00-foundation/ADR-017-direct-room-event-log.md) |
-| 灰度发布私聊发送策略缓存 | [私聊发送策略缓存运维手册](10-operations/direct-send-policy-cache-runbook.md) |
+| 核对发送权限服务的启动与恢复 | [私聊发送策略缓存运维手册](10-operations/direct-send-policy-cache-runbook.md) |
 | 用本地文件系统卷验证附件上传/扫描/下载 | [本地文件系统媒体测试](10-operations/local-filesystem-media-test.md) |
-
 | 消息发送、成功记录及结果恢复 | [当前发送合同](../../docs/reviews/message-send-contract.md) |
 | 当前 Actor 发送链路的性能测量 | [运行与优化记录](../../docs/reviews/send-throughput-5000-20261008.zh-CN.md) |
+
+## 容量与压测入口
+
+| 要测什么 | 复现方法与结果 | 读数边界 |
+| --- | --- | --- |
+| 固定 10,000 在线，增加业务节点 | [横向扩展实验](09-capacity/horizontal-scaling-2026-10-16.md) | 对照同一物理宿主机上的 1、2、4 节点，使用共享 PostgreSQL。 |
+| 固定每用户活跃度，增加用户和服务器 | [用户增长与在线扩容](09-capacity/horizontal-user-growth.md) | 已测规模及扩容过程；独立物理服务器的用户上限仍待测量。 |
+| 认证连接上的业务负载、恢复突发与 Actor 路由 | [高活跃场景](09-capacity/high-active-10000-load-test.md) · [恢复突发](09-capacity/gateway-recovery-burst-driver.md) · [Actor 压测手册](10-operations/actor-realtime-benchmark.md) | 按场景分别记录发送 ACK、前台追平和队列积压。 |
+| TLS 写队列中的慢读者隔离 | [正常、部分暂停与全部暂停对照](09-capacity/gateway-10000-slow-reader-transport-2026-09-26.md) | 原始字节传输；全暂停后完整积压排空仍未通过。 |
 
 ## 阅读约定
 

@@ -55,9 +55,7 @@ Actor 释放广播退休通知，调用仍以未知 Actor/旧 incarnation 为最
 
 ## 切换与验证
 
-旧 vendor 源码和专属 `swift-cluster-membership`、`swift-service-discovery`、`swift-backtrace` 依赖移除，其余依赖版本保持。历史证据文件留作历史，不代表新运行时已取得相同 Linux、数据库或性能结果。
-
-部署需要先排空旧进程，再部署全部新节点并重新发现引用，不能新旧运行时滚动混用。数据库业务 schema 不变，不需要清库。保留 TLS 证书、服务身份、trust roster 和现有业务资源配置。线上部署不包含在本次代码变更中。
+从旧运行时切换时，先排空旧进程，再部署全部新节点并重新发现引用。切换沿用数据库业务 schema、TLS 证书、服务身份和 trust roster。
 
 最小复核命令：
 
@@ -68,10 +66,4 @@ swift test --package-path IMV2Server -j 4 --filter 'IMWireTests|IMRuntimeLifecyc
 python3 IMV2Server/Tests/IMActorRuntimeProbe/run-smoke.py IMV2Server/.build/debug/IMActorRuntimeProbe
 ```
 
-初次实现阶段只做受影响构建、边界测试和小规模真实进程验证。随后按用户要求完成 [2026-11-06 同机固定负载对照与入口隔离修复](custom-runtime-benchmark.md)，包括 Linux Release 构建、mTLS smoke 和真实 PostgreSQL 消息负载；未执行完整 Linux 测试矩阵或容量搜索。首次运行时对照 CPU 变化很小、P99 回退；后续将已认证消息准入与同步控制 FIFO 分离，同一自定义运行时的修复前／后完整对照 ACK P99 为 169 → 69 ms。两者的结论边界分别记录，不能将网关入口修复等同于运行时容量提升。
-
-初次实现的验证：macOS Swift 6.4 全部产品构建通过；首轮定向验证 42 项通过，指标命名调整后共 50 项定向验证通过。独立进程 TLS 1.3 探针通过二进制调用、typed error、超时、取消、旧启动 UUID 拒绝、关闭、无客户端证书拒绝与超长帧头拒绝。出站总量预算及 watcher 关闭改动通过 12 项 shard 认证测试与 4 项运行时测试复核。随后压测阶段的修复和定向复核单独记录在对照报告中。
-
-2026-11-06 设计回归后的修复另做 **17 个 test / 31 个 case（去重）**，全部通过：运行时生命周期与通道隔离 8 个 case，Gateway 双控制 FIFO、分帧、认证、定时器和关闭 16 个 case，真实 PostgreSQL 16 的同步 ACK、锁等待吊销及重建回执 7 个 case。新观察流关闭用例覆盖了此前的互斥锁重入崩溃；通道数量测试分别限制发送端和接收端；出站 drain 覆盖并发关闭及超时后重试。ACK 重复确认通过 PostgreSQL `xmin` 验证没有新 UPDATE 版本，同时拒绝伪造和过期回执。
-
-本次 macOS Swift 6.4 构建、双进程 TLS 1.3 smoke、RPC 生成检查、Server 与 Actor 序列化边界检查通过，临时 PostgreSQL 已停止。未重跑 Linux 构建、完整测试矩阵或负载压测；同步 ACK 的 SQL 减少、心跳分流和运行时修复尚无新 P99/CPU 对照。没有仅凭代码猜测就改写全局锁、编码或任务调度热点。
+验证范围和开放问题见[运行时索引](README.md#尚未闭环)。

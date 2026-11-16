@@ -153,10 +153,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         try execution.validate(command)
     }
 
-    private func authorizationOperationKey(roomID: UUID, senderID: UUID, clientMessageID: UUID) -> String {
-        [roomID, senderID, clientMessageID].map { $0.uuidString.lowercased() }.joined(separator: ":")
-    }
-
     private var selectedOwnerGuard: V2RoomWriteSelectedOwnerGuard {
         .init(ownerSelection: ownerSelection, controlResolution: controlResolution)
     }
@@ -591,93 +587,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
                 clientMessageID: clientMessageID, sql: sql)
         }
         try await selectedOwnerGuard.prepareAuthorization(roomID: roomID, senderID: senderID, clientMessageID: clientMessageID, sql: sql)
-    }
-
-    /// 在单条语句中获取整个已排序微批的幂等围栏。
-    ///
-    /// 递归依赖是刻意的：它向 PostgreSQL 显式表达加锁顺序，
-    /// 而不是依赖集合返回查询偶然的执行器顺序。
-    /// 调用方必须把其权威预检作为*下一条*语句发出，
-    /// 以获得加锁后的新快照。
-    ///
-    /// - Parameter ordered: 已排序的房间写入请求。
-    /// - Throws: 加锁失败时抛出。
-    private func acquireMessageOperationLocks(
-        _ ordered: [OrderedRoomWriteRequest],
-        sql: any SQLDatabase
-    ) async throws {
-        if activationScope?.reliesOnRuntimeLifecycle == true { return }
-        guard !ordered.isEmpty,
-              ordered.enumerated().allSatisfy({ $0.offset == $0.element.preflightOrdinal })
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        let inputs = try ordered.enumerated().map { ordinal, item in
-            MessageOperationLockInput(
-                ordinal: ordinal,
-                roomID: item.roomID,
-                senderID: item.senderID,
-                clientMessageID: try uuid(item.request.command.clientMessageID)
-            )
-        }
-        // 生产环境的 PostgreSQL 通过命名语句接收有类型的数组，省去 JSON
-        // 序列化与解析，并让每条前台物理连接复用固定的递归加锁方案，
-        // 同时保持事务和有序加锁契约不变。
-        if let postgres = sql as? any PostgresDatabase {
-            let statement = MessageOperationLockBatchStatement(inputs: inputs)
-            let acquiredCount = try await postgres.withConnection { connection in
-                connection.eventLoop.makeFutureWithTask {
-                    let rows = try await connection.execute(
-                        statement,
-                        logger: connection.logger
-                    )
-                    var result: Int64?
-                    for try await row in rows {
-                        guard result == nil else {
-                            throw V2RoomWriteStoreError.corruptPersistenceState
-                        }
-                        result = row
-                    }
-                    return result
-                }
-            }.get()
-            guard acquiredCount == Int64(inputs.count) else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            try await prepareBatchAuthorizations(inputs, sql: sql)
-            return
-        }
-        let inputsJSON = try roomWriteJSON(inputs)
-        let expectedCount = Int64(inputs.count)
-        guard let row = try await sql.raw("""
-            WITH RECURSIVE key_input AS MATERIALIZED (
-                SELECT input.ordinal,
-                       hashtextextended(
-                           'v2-message-operation:' || input.room_id::text || ':' || input.sender_id::text || ':' || input.client_message_id::text,
-                           0
-                       ) AS lock_key
-                FROM jsonb_to_recordset(\(bind: inputsJSON)::jsonb) AS input(
-                    ordinal integer,
-                    room_id uuid,
-                    sender_id uuid,
-                    client_message_id uuid
-                )
-            ), \(unsafeRaw: MessageOperationLockBatchStatement.orderedLocksSQL)
-            """).first(decoding: MessageOperationLockBatchRow.self),
-              row.acquiredCount == expectedCount
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        try await prepareBatchAuthorizations(inputs, sql: sql)
-    }
-
-    private func prepareBatchAuthorizations(_ inputs: [MessageOperationLockInput], sql: any SQLDatabase) async throws {
-        guard controlResolution.policyExecution != nil else {
-            throw V2ActorContractError.invalidConfiguration("message policy execution required")
-        }
-        let ordered = inputs.sorted {
-            authorizationOperationKey(roomID: $0.roomID, senderID: $0.senderID, clientMessageID: $0.clientMessageID)
-                < authorizationOperationKey(roomID: $1.roomID, senderID: $1.senderID, clientMessageID: $1.clientMessageID)
-        }
-        for input in ordered {
-            try await selectedOwnerGuard.prepareAuthorization(roomID: input.roomID, senderID: input.senderID, clientMessageID: input.clientMessageID, sql: sql)
-        }
     }
 
 }

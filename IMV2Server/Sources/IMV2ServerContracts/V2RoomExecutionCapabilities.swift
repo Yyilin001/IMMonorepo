@@ -23,7 +23,6 @@ public struct V2PreparedRoomSendOperationBatch: Sendable {
 // SQL implementations are assembled by the server activation factory.
 package protocol V2RoomMessagingExecuting: Sendable {
     func execute(_ command: V2RoomMessagingCommand) async throws -> V2RoomMessagingResult
-    func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult]
     func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
                                    deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch
 }
@@ -53,9 +52,8 @@ package protocol V2RoomMediaAuthorizationExecuting: Sendable {
 /// A complete fenced messaging operation is performed atomically by its store.
 package protocol V2RoomMessagingPersisting: Sendable {
     func execute(_ command: V2RoomMessagingCommand) async throws -> V2RoomMessagingResult
-    func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult]
     func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
-                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch
+                                   deadline: ContinuousClock.Instant?) async throws -> V2PreparedRoomSendOperationBatch
 }
 
 

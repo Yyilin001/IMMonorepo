@@ -16,7 +16,7 @@
 
 ## 服务端模块边界
 
-服务端已将 Contracts、Application、Infrastructure、Gateway、HTTP 拆为独立 SwiftPM target；实施及验证状态见[解耦记录](proposals/server-decoupling-progress.md)。
+服务端已将 Contracts、Application、Infrastructure、Gateway、HTTP 拆为独立 SwiftPM target；该阶段的验证范围见[解耦验收记录](proposals/server-decoupling-validation.md)。
 
 - `IMV2ServerContracts`：领域请求/结果、错误与能力接口，不暴露数据库连接或传输框架类型。
 - `IMV2ServerApplication`：资源、房间及恢复编排、纯策略和指标聚合，通过能力接口访问持久化与外部服务。
@@ -59,7 +59,7 @@ flowchart LR
     C --> O["SQLite 有效活动排序与分页"]
 ```
 
-客户端先将命令写入本地 outbox；普通消息经 TLS/TCP 到达 RoomRef 和房间 Host，在 PostgreSQL 确认原子提交后返回接受结果。当前普通发送和恢复没有 HTTPS 后备入口。普通内存权限发送依靠房间顺序与在途退役边界；不逐条执行旧 activation SQL 写围栏。成功与明确拒绝、显式关闭共用 `message_send_completions` 的身份唯一键；终态永久保留，避免旧请求在重发后迟到提交。完整边界见[当前发送与恢复合同](reviews/message-send-contract.md)。
+客户端先将命令写入本地 outbox；普通消息经 TLS/TCP 到达 RoomRef 和房间 Host，在 PostgreSQL 确认原子提交后返回接受结果。发送方未收到 ACK 时，生产 Gateway 按房间分片直接恢复结果；首次提交期限内查询，期限结束后显式关闭。普通内存权限发送依靠房间顺序与在途退役边界；不逐条执行旧 activation SQL 写围栏。成功与明确拒绝、显式关闭共用 `message_send_completions` 的身份唯一键；终态永久保留，避免旧请求在重发后迟到提交。完整边界见[当前发送与恢复合同](reviews/message-send-contract.md)。
 Gateway 可托管房间或仅调用远端 Host；Account 的房间能力使用 caller-only 节点。寻址、租约、完整 token fence 和回收边界见[房间 Virtual Actor 合同](reviews/room-virtual-actor-contract.md)。
 私聊和群聊公共内容统一保存在房间日志，普通接受消息可由 message_row 承载，读取时与 room_events 合并。
 个人事件流保存成员变化、已读、偏好和单侧提示；公共消息不再按成员写入个人同步副本。

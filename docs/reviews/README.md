@@ -68,12 +68,10 @@
 | 主题 | 当前合同 | 覆盖 |
 | --- | --- | --- |
 | 房间读模型：投递、未读与保留窗口（**已实施**：单聊与标准群默认都走读模型、未读、保留窗口与运维重放；列表为本地优先 + 服务端未读；进入房间按 §5.4 推进到已应用序号／房间头） | [房间读模型合同](room-read-model-contract.md) | B03、B04、D07 |
-| 发送请求指纹与幂等 | [发送成功记录与恢复](message-send-contract.md) | B11、D07 |
+| 普通消息提交、能力协商、幂等与 ACK 恢复 | [当前发送合同](message-send-contract.md) | B11、B27、D07 |
 | 房间写入存储的职责拆分与事务边界 | [Room write Store decomposition](room-write-store-decomposition.md) | D07 |
-| 普通消息的当前传输入口与能力开关 | [当前发送合同](message-send-contract.md#入口与身份)；TCP-only，HTTPS 仅预留 | B27、D07 |
 | 静态房间归属与跨库持久发送授权 | [当前归属与发送授权合同](room-owner-migration-contract.md)；在线迁移章节仅供追溯 | B27、B04、B11、D07 |
 | 房间逻辑寻址、激活、事务资格与回收 | [房间 Virtual Actor 合同](room-virtual-actor-contract.md) | B27 |
-| 消息发送、成功结果与恢复 | [当前发送合同](message-send-contract.md) | B27 |
 | 作者资料的接收确认、页面绑定与写入竞态 | [作者资料接收确认合同](author-presentation-receipt-contract.md) | B03、B04 |
 | 作者资料共享内容、批量权限与任务生命周期 | [作者资料批量读取合同](author-presentation-read-contract.md) | B03、B04 |
 | 页面集合替换、滚动合并、连接隔离与反向索引 | [可见作者集合合同](author-presentation-interest-contract.md) | B03、B04 |

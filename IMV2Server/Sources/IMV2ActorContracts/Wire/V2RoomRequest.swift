@@ -100,11 +100,6 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         }
     }
 
-    public var canShareSendTurn: Bool {
-        // Bound operations retain their own receipt transaction and execute scalar turns.
-        return false
-    }
-
     /// 仅描述可合并的输入形状，不授予成员或资料读取权限。
     /// 单人信封绑定用户 principal；多观察者信封要求独立服务能力，仍按总目标数计费。
     public var profileVisibilityTargetCount: Int? {

@@ -1,11 +1,7 @@
-# Gateway 10,000 条 TLS 连接、1,000 条慢读取连接：本机传输实验
+# Gateway 10,000 条 TLS 连接的慢读者与恢复读取实验
 
 日期：2026-09-26
 状态：限定的传输层实验；不是完整网关容量或生产 SLO 验收
-
-后续将慢连接增加到全部 10,000 条、改为每条约 1 个 1 KiB 数据块/秒后，
-恢复读取检查未通过；见[全慢连接实验](gateway-10000-paused-readers-one-per-second-2026-09-26.md)。
-不能把本文的 1,000 条慢连接结果外推为 10,000 条慢连接容量。
 
 ## 问题与结论
 
@@ -107,3 +103,18 @@ IMV2_RUN_SLOW_FANOUT_BENCHMARK=1 IMV2_SLOW_FANOUT_PAUSED=1000 \
 ```
 
 实验实现位于 `IMV2Server/Tests/IMV2ServerTests/V2GatewaySlowFanoutBenchmarkTests.swift`。
+
+## 全部连接暂停读取
+
+同一夹具下，10,000 条连接全部暂停读取，双方请求 4 KiB 套接字缓冲。每秒向每条连接提交 1 KiB，300 轮后追加末尾探针。实际提交耗时 316.9 秒，共 3,010,000 块。恢复读取 300 秒后，收到末尾探针的连接为 **0 / 10,000**，平均每连接只读到约 18.2 KiB。发送前、发送结束和恢复结束的进程 RSS 分别为 1,060、1,221 和 1,737 MiB。进程 RSS 不含完整内核缓冲。
+
+相同块数压缩到约 3 秒突发发送时，队列替换了中间帧，全部连接收到最新探针。缓慢累积的完整积压仍未证实可排空，停顿发生在哪一层尚未定位。
+
+在仓库根目录运行以下命令。历史样本在恢复检查处超时，应保留退出码和实际送达数。
+
+```sh
+IMV2_RUN_SLOW_FANOUT_BENCHMARK=1 IMV2_SLOW_FANOUT_CONNECTIONS=10000 \
+IMV2_SLOW_FANOUT_PAUSED=10000 IMV2_SLOW_FANOUT_PRELOAD=0 IMV2_SLOW_FANOUT_ROUNDS=300 \
+IMV2_SLOW_FANOUT_SOCKET_BUFFER_BYTES=4096 IMV2_SLOW_FANOUT_INTERVAL_MS=1000 IMV2_SLOW_FANOUT_DRAIN_TIMEOUT_S=300 \
+swift test --package-path IMV2Server --filter V2GatewaySlowFanoutBenchmarkTests
+```

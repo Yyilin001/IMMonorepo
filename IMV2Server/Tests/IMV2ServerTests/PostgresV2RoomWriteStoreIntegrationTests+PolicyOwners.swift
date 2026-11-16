@@ -406,18 +406,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(denied.outcome == .rejected(.directPolicyDenied))
                     let rejectionQuery = try V2MessageSendOperationRecoveryRequest(identity: blockedCommand.identity,
                         fingerprint: blockedCommand.fingerprint, domainFingerprint: blockedCommand.command.fingerprint)
-                    #expect(try await PostgresV2MessageSendOperationStore.queryRecovery(rejectionQuery, database: owner) == .unresolved)
+                    #expect(try await PostgresV2MessageSendOperationStore.queryRecovery(rejectionQuery, database: owner) == .receipt(denied))
                     #expect(try await retiredDirectDenialTableIsAbsent(on: ownerSQL))
                     #expect(try await execute(prepare([first, second])) == accepted)
                     let unblock = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                         operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.unblock), now: Date())
                     _ = try await social.submitSocialOperation(unblock)
-                    // Rejections leave neither a durable result nor a replay
-                    // cache entry. The same identity now uses the new policy.
+                    // Unblocking permits new sends. The original operation keeps its terminal receipt.
                     let retriedBlocked = try await execute(prepare([blockedCommand]))
-                    guard case .sendOperation(.receipt(let retried))? = retriedBlocked.first,
-                          case .accepted = retried.outcome else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                    // A new store recovers both original and retried success.
+                    #expect(retriedBlocked == blockedResult)
                     let restarted = PostgresV2MessageSendOperationStore(database: owner, writes: writes)
                     for (repeated, expected) in [(first, Array(accepted.prefix(1))), (blockedCommand, retriedBlocked)] {
                         let request = V2MessageSendPreparationRequest(commands: [repeated], token: token,

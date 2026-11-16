@@ -239,7 +239,7 @@ private func g2Host(database: any Database, fixture: PostgresV2RoomWriteStoreInt
     let budget = V2RoomCommandBudget(configuration: configuration)
     return .init(host: .init(identity: identity, placement: placement,
         configuration: configuration, budget: budget,
-        classify: { $0.canShareSendTurn ? .send : .barrier }, factory: wrapped), budget: budget)
+        classify: { _ in .barrier }, factory: wrapped), budget: budget)
 }
 
 private func g2AssertConcreteRecovery(host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>,

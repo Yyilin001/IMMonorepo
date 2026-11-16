@@ -538,7 +538,7 @@ private func cancelMaintenanceHost(database: any Database,
     let placement = try await control.register(identity, shard: "room-a")
     return .init(host: .init(identity: identity, placement: placement,
         configuration: configuration, budget: budget,
-        classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory),
+        classify: { _ in .barrier }, factory: factory),
         budget: budget, resources: resources, placement: placement)
 }
 

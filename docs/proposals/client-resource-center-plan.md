@@ -33,7 +33,7 @@
 | 上传能力 | [OSSUploadTransport](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/OSS/V2OSSUploadTransport.swift) 提供 `httpPut` 与 `httpPartPut`；最多 256 MiB，逐片最多 8 MiB / 32 片 | 独立 PutObject 续传、最终校验和持久暂存回收已有实现；真实 OSS 与真机后台仍需验收，详见[接入合同](aliyun-oss-integration.md#分片续传与暂存回收) |
 | 下载与使用保护 | [下载服务](../../IMApp/IMApp/V2/V2ConversationMediaDownloadService.swift) 已作为展示桥接；[FileStore](../../IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceFileStore.swift)、[DownloadCache](../../IMV2ClientKit/Sources/IMV2ClientKit/Resources/V2ResourceDownloadCache.swift) 已承担授权缓存、借用、发布、退役与清理 | 补双根目录、逻辑保留策略、所有临时副本预算及真实消费端验收 |
 | Range 与上传切片 | [RangeDownloadTransport](../../IMV2ClientKit/Sources/IMV2ClientKit/V2RangeDownloadTransport.swift) 已有基础；上传切片已转入 FileStore，旧 V2ResourcePartFile 正在删除 | 纳入统一调度，补版本变化、中断和真实 OSS 验收 |
-| 系统后台 | [AppStore](../../IMApp/IMApp/V2/V2AppStore.swift) 已装配上传、下载协调器；[NativeBackgroundSession](../../IMV2ClientKit/Sources/IMV2ClientKit/V2NativeBackgroundSession.swift) 已接收系统文件 | 不是从零开发；重点统一任务映射、锁屏保护和恢复验收 |
+| 系统后台 | [AppStore](../../IMApp/IMApp/V2/V2AppStore.swift) 已装配上传、下载协调器；[NativeBackgroundSession](../../IMV2ClientKit/Sources/IMV2ClientApple/V2NativeBackgroundSession.swift) 已接收系统文件 | 不是从零开发；重点统一任务映射、锁屏保护和恢复验收 |
 | 后台文件保护 | 下载收件已接入 FileStore 最小 AFU permit 与统一容量交接，完成回调仅接受 HTTP 200；仍待真机验收 | 锁屏交付单独设计；原生后台整文件下载与前台 Range 不混为一条已验证能力 |
 | 图片导入 | 工作区 [PhotoLibraryPicker](../../IMApp/IMApp/V2/V2PhotoLibraryPicker.swift) 已实现选择及规范化 | 接入统一导入命令，保留有界解码、取消及暂存所有权 |
 | 目录和管理能力 | 工作区已有描述/引用目录、清理计划及会话资源 query；消息接受/编辑/撤回已同事务索引，快照已接入持久分批队列；已有文件与存储入口、目录、详情与清理页面的在途代码，尚未完成本轮运行验收 | 补齐索引覆盖、统一任务读模型、页面验证和偏好策略；不能把已有基础当作产品完成 |

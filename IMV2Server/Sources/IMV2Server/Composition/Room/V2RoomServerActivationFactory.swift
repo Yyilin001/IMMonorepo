@@ -396,7 +396,7 @@ private actor V2RoomServerActivation {
         let isOperationSendTurn = turn.items.allSatisfy({
             if case .messaging(.sendOperation(_)) = $0.request { return true }; return false
         })
-        guard turn.items.count == 1 || isProfileTurn || isOperationSendTurn || turn.items.allSatisfy({ $0.request.canShareSendTurn }) else {
+        guard turn.items.count == 1 || isProfileTurn || isOperationSendTurn else {
             return .rolledBack(.invalidRequest)
         }
         guard turn.items.allSatisfy({ ContinuousClock.now < $0.deadline }) else {

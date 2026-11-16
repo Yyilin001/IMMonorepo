@@ -188,7 +188,7 @@ retry预算 / recovery入口 / 终态证明 / 资源上限
 
 | 现有文件/区域 | 动作 |
 | --- | --- |
-| [V2SecureURLSession](../../IMV2ClientKit/Sources/IMV2ClientKit/V2SecureURLSession.swift) | 保留安全配置，扩展 metrics delegate、按任务取消与有界响应收集 |
+| [V2SecureURLSession](../../IMV2ClientKit/Sources/IMV2ClientNetwork/V2SecureURLSession.swift) | 保留安全配置，扩展 metrics delegate、按任务取消与有界响应收集 |
 | [V2SessionHTTPAuthorization](../../IMV2ClientKit/Sources/IMV2ClientKit/V2SessionHTTPAuthorization.swift) | 保留 epoch/token 栅栏；提供刷新结果给语义执行器，清楚区分普通 401 与会话终止 |
 | [V2HTTPAuthTransport](../../IMV2ClientKit/Sources/IMV2ClientKit/V2HTTPAuthTransport.swift) 及 HTTP clients | 归一化状态码、错误码、Retry-After、协议失败；不再压成无信息 networkFailure |
 | ClientKit 新 Networking 区域 | V2HTTPExecutor、V2AccountWorkScheduler、V2QueryCoordinator、V2QualityObserver、V2NetworkMetrics |

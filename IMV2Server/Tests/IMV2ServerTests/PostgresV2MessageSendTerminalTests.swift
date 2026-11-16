@@ -61,7 +61,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await v2WithRoomScopedTransaction(database: database) { transaction in
                     let tx = try #require(transaction as? any SQLDatabase)
                     let pid = try #require(try await tx.raw("SELECT pg_backend_pid() AS pid").first(decoding: SendTerminalPID.self)?.pid)
-                    let result = try await PostgresV2MessageSendResults.reject(identity: command.identity,
+                    let result = try await PostgresV2MessageSendResults.reject(key: .init(command.identity),
                         fingerprint: command.fingerprint, domain: command.command.fingerprint,
                         reason: .closedUnsubmitted, now: now, sql: tx)
                     await gate.hold(pid)

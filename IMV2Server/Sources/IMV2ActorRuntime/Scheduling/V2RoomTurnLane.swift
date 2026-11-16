@@ -14,7 +14,6 @@ public enum V2RoomTurnSchedulingClass: Equatable, Sendable {
 public extension V2RoomRequest {
     var turnSchedulingClass: V2RoomTurnSchedulingClass {
         if case .messaging(.sendOperation(_)) = self { return .sendOperation }
-        if canShareSendTurn { return .send }
         if let count = profileVisibilityTargetCount { return .profileVisibility(targetCount: count) }
         return .barrier
     }

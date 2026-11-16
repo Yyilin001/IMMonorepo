@@ -263,7 +263,7 @@ private func overloadHost(database: any Database,
     let budget = V2RoomCommandBudget(configuration: configuration)
     return .init(host: .init(identity: identity, placement: placement,
         configuration: configuration, budget: budget,
-        classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory),
+        classify: { _ in .barrier }, factory: factory),
         budget: budget, resources: resources, placement: placement)
 }
 

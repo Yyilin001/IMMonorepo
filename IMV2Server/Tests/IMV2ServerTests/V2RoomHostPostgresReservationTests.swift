@@ -283,7 +283,7 @@ private func makePairHost(database: any Database, profile: V2CapacityProfile,
         safetyActorUserID: senderID).runtimeFactory()
     return .init(host: .init(identity: identity, placement: placement,
         configuration: config, budget: budget,
-        classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory),
+        classify: { _ in .barrier }, factory: factory),
         budget: budget, admission: admission, configuration: config,
         tokens: PairTokenRegistry())
 }

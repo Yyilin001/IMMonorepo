@@ -237,7 +237,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(
                 identity: identity, placement: placement, configuration: configuration,
                 budget: .init(configuration: configuration),
-                classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory
+                classify: { _ in .barrier }, factory: factory
             )
             await host.start()
             do {
