@@ -40,6 +40,10 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        // Match the backend used by iOS device builds.
+        buildConfigField("String", "IM_V2_ACCOUNT_BASE_URL", "\"https://120.77.66.38\"")
+        buildConfigField("String", "IM_V2_GATEWAY_HOST", "\"120.77.66.38\"")
+        buildConfigField("int", "IM_V2_GATEWAY_PORT", "7443")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }

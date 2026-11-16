@@ -11,6 +11,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 internal object SharedAppSettings {
+    val defaultEndpoint = SharedEndpoint(
+        BuildConfig.IM_V2_ACCOUNT_BASE_URL, BuildConfig.IM_V2_GATEWAY_HOST, BuildConfig.IM_V2_GATEWAY_PORT
+    )
+
     fun load(context: Context): SharedEndpoint? {
         val preferences = context.getSharedPreferences("shared-endpoint", Context.MODE_PRIVATE)
         val url = preferences.getString("account", null) ?: return null
@@ -22,14 +26,15 @@ internal object SharedAppSettings {
     }
 }
 internal data class SharedAppState(val snapshot: SharedSnapshot? = null, val busy: Boolean = false,
-    val reportingVisible: Boolean = false, val error: String? = null, val endpoint: SharedEndpoint? = null, val generation: Long = 0, val exitPending: Boolean = false)
+    val reportingVisible: Boolean = false, val error: String? = null, val endpoint: SharedEndpoint = SharedAppSettings.defaultEndpoint, val generation: Long = 0, val exitPending: Boolean = false)
 
 /** UI owns a session, not protocol or database implementations. The owner scope remains alive
  * through onCleared only to drain Swift, then cancels itself; Activity stop drains foreground I/O. */
 internal class SharedAppViewModel(application: Application) : AndroidViewModel(application) {
     private val owner = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val lifecycleGate = Mutex()
-    private val mutable = MutableStateFlow(SharedAppState(endpoint = SharedAppSettings.load(application)))
+    private val savedEndpoint = SharedAppSettings.load(application)
+    private val mutable = MutableStateFlow(SharedAppState(endpoint = savedEndpoint ?: SharedAppSettings.defaultEndpoint))
     val state = mutable.asStateFlow()
     private var client: SharedClient? = null
     private var foregroundJob: Job? = null
@@ -37,7 +42,7 @@ internal class SharedAppViewModel(application: Application) : AndroidViewModel(a
     private var readReportJob: Job? = null
     private var active = false
     init {
-        mutable.value.endpoint?.let { endpoint ->
+        savedEndpoint?.let { endpoint ->
             operation = owner.launch {
                 lifecycleGate.withLock {
                     mutable.value = mutable.value.copy(busy = true)
@@ -88,11 +93,18 @@ internal class SharedAppViewModel(application: Application) : AndroidViewModel(a
             lifecycleGate.withLock {
                 mutable.value = mutable.value.copy(busy = true, error = null)
                 try {
-                    val endpoint = SharedEndpoint(url, java.net.URI(url).host ?: "", port)
+                    val selected = mutable.value.endpoint
+                    val host = when (url) {
+                        selected.accountURL -> selected.gatewayHost
+                        SharedAppSettings.defaultEndpoint.accountURL -> SharedAppSettings.defaultEndpoint.gatewayHost
+                        else -> java.net.URI(url).host.orEmpty()
+                    }
+                    val endpoint = SharedEndpoint(url, host, port)
                     if (mutable.value.endpoint != endpoint) { foregroundJob?.cancelAndJoin(); client?.close(); client = null }
                     val current = client ?: SharedClient.open(getApplication(), endpoint).also { client = it }
+                    mutable.value = mutable.value.copy(endpoint = endpoint)
                     withContext(Dispatchers.IO) { SharedAppSettings.save(getApplication(), endpoint) }
-                    mutable.value = mutable.value.copy(endpoint = endpoint, snapshot = current.login(account, password))
+                    mutable.value = mutable.value.copy(snapshot = current.login(account, password))
                     startForeground()
                 } catch (error: Exception) { handle(error) }
                 finally { mutable.value = mutable.value.copy(busy = false) }

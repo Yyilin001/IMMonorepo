@@ -2,6 +2,8 @@ package com.xmtx.im
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -63,12 +65,12 @@ import kotlinx.serialization.Serializable
                 var account by rememberSaveable { mutableStateOf("") }
                 // Password is never saved into Activity recreation state.
                 var password by remember { mutableStateOf("") }
-                var url by remember(state.endpoint) { mutableStateOf(state.endpoint?.accountURL ?: "") }
-                var port by remember(state.endpoint) { mutableStateOf((state.endpoint?.gatewayPort ?: 7443).toString()) }
-                Column(Modifier.safeDrawingPadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                var serverSettingsOpen by rememberSaveable { mutableStateOf(false) }
+                var url by rememberSaveable(state.endpoint) { mutableStateOf(state.endpoint.accountURL) }
+                var port by rememberSaveable(state.endpoint) { mutableStateOf(state.endpoint.gatewayPort.toString()) }
+                Column(Modifier.safeDrawingPadding().imePadding().verticalScroll(rememberScrollState()).padding(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("登录", style = MaterialTheme.typography.headlineLarge)
-                    OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.testTag("shared_server"))
-                    OutlinedTextField(port, { port = it }, label = { Text("连接端口") }, singleLine = true, modifier = Modifier.testTag("shared_port"))
                     OutlinedTextField(account, { account = it }, label = { Text("账号") }, singleLine = true, modifier = Modifier.testTag("shared_account"))
                     OutlinedTextField(password, { password = it }, label = { Text("密码") }, singleLine = true,
                         visualTransformation = PasswordVisualTransformation(), modifier = Modifier.testTag("shared_password"))
@@ -76,6 +78,13 @@ import kotlinx.serialization.Serializable
                     Button(onClick = { val oneTime = password; password = ""; model.login(account, oneTime, url, port.toIntOrNull() ?: 0) },
                         enabled = !state.busy && !state.exitPending, modifier = Modifier.testTag("shared_login")) { Text(if (state.busy) "正在登录" else "登录") }
                     state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    TextButton(onClick = { serverSettingsOpen = !serverSettingsOpen }) {
+                        Text(if (serverSettingsOpen) "收起服务器设置" else "服务器设置")
+                    }
+                    if (serverSettingsOpen) {
+                        OutlinedTextField(url, { url = it }, label = { Text("服务器地址") }, singleLine = true, modifier = Modifier.testTag("shared_server"))
+                        OutlinedTextField(port, { port = it }, label = { Text("网关端口") }, singleLine = true, modifier = Modifier.testTag("shared_port"))
+                    }
                 }
             } else {
                 key(state.snapshot?.userID, state.generation) { SharedSignedIn(state, model) }
