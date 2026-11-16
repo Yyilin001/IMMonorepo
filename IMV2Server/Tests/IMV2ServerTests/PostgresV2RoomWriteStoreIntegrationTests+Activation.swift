@@ -53,7 +53,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("message mutations check data ownership before replay and preserve successor operations",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"),
-          arguments: ["edit", "withdraw", "reaction"])
+          arguments: ["edit", "withdraw"])
     func activationMessageMutation(_ kind: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -67,21 +67,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let executor = try V2RoomMessagingExecutor(token: scope.token(for: roomUUID),
                     capacityProfile: request.capacityProfile, limits: .init(maxUTF8Bytes: 64),
                     maximumEditBytes: 64, now: { now },
-                    mutations:.init(database:database,contentReviewMode:.disabled,clock:{now}),reactionOperations:.init(database:database,clock:{now}))
+                    mutations:.init(database:database,contentReviewMode:.disabled,clock:{now}))
                 let result: V2RoomMessagingResult
                 switch kind {
                 case "edit":
                     result = try await executor.execute(.editOperation(.init(command:.init(roomID: roomID, actorUserID: senderID,
                             operationID: .init(uuid: operation), messageID: message.messageID,
                             expectedMessageRevision: 1, text: "after",maximumUTF8Bytes:64),firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)))
-                case "withdraw":
+                default:
                     result = try await executor.execute(.withdrawOperation(.init(command:.init(roomID: roomID, actorUserID: senderID,
                             operationID: .init(uuid: operation), messageID: message.messageID,
                             expectedMessageRevision: 1),firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)))
-                default:
-                    result = try await executor.execute(.reactionOperation(.init(command:.init(roomID: roomID, actorUserID: senderID,
-                            operationID: .init(uuid: operation), messageID: message.messageID,
-                            reaction: "👍", action: .add),expectedReactionRevision:0,firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)))
                 }
                 if case .failure(let failure) = result { Issue.record("unexpected domain failure: \(failure)") }
             }
@@ -93,8 +89,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             try await withRoomActivation(database: database, roomID: roomID, epoch: 1) { token in
                 try await execute(.init(tokens: [token]))
-                let table = kind == "reaction" ? "message_reaction_receipts" : "message_mutation_receipts"
-                #expect(try await count("im_v2." + table, on: sql) == 1)
+                #expect(try await count("im_v2.message_mutation_receipts", on: sql) == 1)
             }
         }
     }

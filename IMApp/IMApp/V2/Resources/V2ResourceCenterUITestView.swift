@@ -22,10 +22,14 @@ struct V2ResourceCenterUITestView: View {
                 if let conversations = fixture?.conversations {
                     V2ConversationListView(store: conversations, rootNavigation: navigation)
                 } else if fixture != nil {
-                    V2AccountHomeView(displayName: "资源测试账号", handle: "@resource-test",
-                        canOpenPublicIdentity: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-center-profile-picker"), canOpenDevices: false, canOpenSecurity: false,
-                        openPublicIdentity: { showingProfile = true }, openDevices: {}, openPrivacy: {}, openSecurity: {},
-                        openFavorites: {}, openResources: { navigation.path.append(V2ResourceRoute.home) }, signOut: {})
+                    VStack {
+                        V2AccountHomeView(displayName: "资源测试账号", handle: "@resource-test",
+                            canOpenPublicIdentity: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-center-profile-picker"), canOpenDevices: false, canOpenSecurity: false,
+                            openPublicIdentity: { showingProfile = true }, openDevices: {}, openPrivacy: {}, openSecurity: {},
+                            openFavorites: {}, signOut: {})
+                        Button("打开资源测试页面") { navigation.path.append(V2ResourceRoute.home) }
+                            .accessibilityIdentifier("v2.resources.open")
+                    }
                 } else { Text(status).accessibilityIdentifier("v2.resources.fixture-status") }
             }
             .navigationTitle("我的").navigationBarTitleDisplayMode(.inline)
@@ -37,14 +41,13 @@ struct V2ResourceCenterUITestView: View {
             .v2ResourceDestinations(service: fixture?.service, navigation: navigation, profile: fixture?.profileSettings)
         }
         .environment(\.v2MediaThumbnailCache, fixture?.thumbnails)
-        .environment(\.v2ResourceManagement, fixture?.service)
         .environment(\.v2ResourceNavigation, navigation)
         .sheet(isPresented: $showingProfile) {
             if let settings = fixture?.profileSettings {
                 NavigationStack {
                     V2PublicIdentitySettingsView(store: settings)
                         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showingProfile = false }.accessibilityIdentifier("v2.resources.fixture.profile.done") } }
-                }.environment(\.v2ResourceManagement, fixture?.service)
+                }
             }
         }
         .preferredColorScheme(ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-center-dark") ? .dark : nil)

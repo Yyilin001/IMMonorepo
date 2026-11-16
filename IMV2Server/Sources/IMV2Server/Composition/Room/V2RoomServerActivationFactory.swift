@@ -732,7 +732,7 @@ private actor V2RoomServerActivation {
                 maximumEditBytes: resources.maximumEditBytes, now: now,
                 mutations: resources.mutations, sendOperations: durable.store,
                 sendOperationOwnerBatcher: durable.batcher,
-                directSendPreparation: durable.directPreparation, reactionOperations:.init(database:resources.database,clock:now,committedMessageObserver:resources.committedMessageObserver))
+                directSendPreparation: durable.directPreparation)
             administration = try V2RoomAdministrationDomainExecutor(database: resources.database, invitationSecretIssuer: resources.invitationSecretIssuer, invitationIdentities: resources.invitationIdentities, token: token,
                 capacityProfile: resources.capacity, membershipIdentities: resources.identities, now: now)
             audit = try .init(token: token, store: .init(database: resources.database), now: now)

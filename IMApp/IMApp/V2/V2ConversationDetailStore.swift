@@ -31,7 +31,6 @@ final class V2ConversationDetailStore {
     private let dataSource: any V2ConversationDataSource
     private let messageSearcher: (any V2ConversationMessageSearching)?
     private let messageWithdrawer: (any V2MessageWithdrawing)?
-    private let messageReactionChanger: (any V2MessageReactionChanging)?
     private let messageEditor: (any V2MessageEditing)?
     private let readReceiptReporter: (any V2ConversationReadReporting)?
     private let messageFavoriter: (any V2MessageFavoriting)?
@@ -212,24 +211,6 @@ final class V2ConversationDetailStore {
         do { try await manager.cancelRemaining(workID:id) }
         catch { forwardSyncFeedback="无法保存停止剩余转发的请求。" }
     }
-    private(set) var pendingReactions:[V2MessageReactionPending] = []
-    private(set) var reactionSyncFeedback:String?
-    func observeReactionIntents() async {
-        guard let manager=messageReactionChanger as? any V2MessageReactionManaging else { return }
-        do {
-            for try await pending in try await manager.reactionUpdates(roomID:roomID) {
-                try Task.checkCancellation();pendingReactions=pending;reactionSyncFeedback=nil
-            }
-        } catch is CancellationError { }
-        catch { reactionSyncFeedback="无法读取已保存的反应目标。" }
-    }
-    func resumeReactionIntent(_ id:UUID) async {
-        guard let pending=pendingReactions.first(where:{$0.intent.id==id}),!pending.expiredUnsubmitted,
-            pending.preparationPaused || pending.work?.scheduling == .needsAttention,
-            let manager=messageReactionChanger as? any V2MessageReactionManaging else { return }
-        do { try await manager.resumeReactionConfirmation(intentID:id) }
-        catch { reactionSyncFeedback="无法继续确认原反应，请稍后重试。" }
-    }
     var canEditOwnGroupNickname: Bool { isGroupConversation && nameOperations != nil }
     func ownGroupNicknameEditor() -> V2NameEditorStore? {
         guard isGroupConversation, let nameOperations, let room = try? RoomID(roomID) else { return nil }
@@ -241,7 +222,6 @@ final class V2ConversationDetailStore {
         return .init(roomID: room, manager: groupAvatarManager, stager: attachmentStager, notifier: projectionChangeNotifier)
     }
 
-    let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
     init(environment: V2ConversationFeatureEnvironment, context: V2ConversationDetailContext) {
         dataSource = environment.projections.dataSource
@@ -264,7 +244,6 @@ final class V2ConversationDetailStore {
             publicIdentityResolver: environment.discovery.publicIdentityResolver, messageActions: messageActions)
         messageSearcher = environment.projections.messageSearcher
         messageWithdrawer = environment.messages.withdrawer
-        messageReactionChanger = environment.messages.reactionChanger
         messageEditor = environment.messages.editor
         readReceiptReporter = environment.messages.readReceiptReporter
         messageFavoriter = environment.messages.favoriter
@@ -1075,10 +1054,6 @@ final class V2ConversationDetailStore {
         }
     }
 
-    func canReactToMessage(_ message: V2ConversationMessageItem) -> Bool {
-        !message.isWithdrawn && !isMessageActionInFlight(message)
-    }
-
     func canEditMessage(_ message: V2ConversationMessageItem) -> Bool {
         message.isOutgoing && !message.isWithdrawn && message.revision > 0 && !isMessageActionInFlight(message)
     }
@@ -1131,37 +1106,6 @@ final class V2ConversationDetailStore {
         }
     }
 
-    func changeReaction(_ reaction: String, on message: V2ConversationMessageItem, action:V2MessageReactionAction = .add) async {
-        guard canReactToMessage(message) else { return }
-        guard beginMessageAction(for: message) else { return }
-        defer { finishMessageAction(for: message) }
-        guard let messageReactionChanger else {
-            messageActionFeedback = "反应暂不可用。"
-            return
-        }
-        do {
-            let outcome = try await messageReactionChanger.changeReaction(
-                messageID: message.id,
-                in: roomID,
-                reaction: reaction,
-                action: action
-            )
-            try Task.checkCancellation()
-            switch outcome {
-            case .accepted:
-                messageActionFeedback = "反应已提交，正在同步。"
-                await refresh()
-            case .queuedForRetry:
-                messageActionFeedback = "反应已安全保存，连接恢复后会重试。"
-            case .rejected(let code):
-                messageActionFeedback = "反应被拒绝（\(code)）。"
-            }
-        } catch is CancellationError {
-            return
-        } catch {
-            messageActionFeedback = "无法保存反应。"
-        }
-    }
 
     func setFavorite(_ message: V2ConversationMessageItem, desired: Bool? = nil) async {
         guard !message.isWithdrawn, beginMessageAction(for: message) else { return }

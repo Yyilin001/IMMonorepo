@@ -88,7 +88,7 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 - 私聊和群聊公共消息使用有序房间日志。消息受理与不可变回执在 ACK 前共同提交，重试返回原结果；内容由房间游标恢复。个人状态仍通过持久用户状态事件发件箱与用户投影传播。两条路径都不使用已退役的私聊扇出选择器或投递计划表。
 - 房间 Owner / Relay 通过签名 Actor 投递到持有已认证设备连接的 Gateway。账户成员覆盖与详情页订阅分开处理。公共内容由持久房间游标恢复；实时投递不替代持久历史，也不证明客户端已应用。NATS 及其旧房间唤醒配置已退役。见 [Relay 实现](../docs/reviews/room-subscription-relay-implementation.zh-CN.md)和[账户成员覆盖](../docs/reviews/account-membership-incremental-audit.md)。
 - `IM_V2_DURABLE_RETRY_*` 提供显式指数退避预算。初始/最大延迟、尝试预算和 0–100% 抖动均为必需部署输入。预算耗尽后，工作进入可告警的 `paused` 持久状态，必须通过受控运维重放处理，不会跳过目标。
-- 普通编辑、作者撤回和表情回应追加有序房间事件，使用不可变受理事实与当前操作授权；房间读取同时执行受理时和事件时的可见性约束。缺少受理事实时，在变更状态前拒绝新操作。已完成操作重放仍保持幂等。房间续读可以扫描不可见事件；新编辑携带完整替换状态，使客户端可以跨越已授权的版本缺口。见[变更授权](../docs/reviews/message-mutation-delivery-authority-contract.md)、[读取合同](../docs/reviews/message-mutation-read-contract.md)和[替换合同](../docs/reviews/message-edit-replacement-contract.md)。
+- 普通编辑和作者撤回追加有序房间事件，使用不可变受理事实与当前操作授权；房间读取同时执行受理时和事件时的可见性约束。缺少受理事实时，在变更状态前拒绝新操作。已完成操作重放仍保持幂等。房间续读可以扫描不可见事件；新编辑携带完整替换状态，使客户端可以跨越已授权的版本缺口。见[变更授权](../docs/reviews/message-mutation-delivery-authority-contract.md)、[读取合同](../docs/reviews/message-mutation-read-contract.md)和[替换合同](../docs/reviews/message-edit-replacement-contract.md)。
 - 成员增加/移除由 Owner 授权，并使用版本围栏。源事务共同记录持久操作结果、房间事件及必要的个人状态发件箱效果；响应丢失后可以重放原操作 ID，不产生第二次成员变更。
 - 每个副本的 `IM_V2_GATEWAY_NODE_ID` 必须唯一。它限定重放设备撤销事件和关闭本地实时连接所用的持久游标范围。
 - `IM_V2_USER_SHARD_BUCKET`、`IM_V2_USER_SHARD_ROUTER_EPOCH` 和 `IM_V2_USER_SHARD_STORES_JSON` 配置当前静态逻辑桶路由。个人状态投影写入配置的当前存储，控制面效果跨数据库保留持久幂等性。见[静态用户分片部署范围](../IMV2/docs/10-operations/user-shard-migration-runbook.md)。在线复制、切换与回滚不属于当前运行时。

@@ -45,9 +45,6 @@ import IMV2SharedApple
             _ = try await peer.command(["operation":"sendText", "roomID":room, "text":"桌面回复", "replyToMessageID":source.id])
             try await wait { try await first.current().chat?.messages.contains { $0.replyToID == source.id } == true }
             print("Desktop stage: reply received")
-            _ = try await peer.command(["operation":"reactMessage", "roomID":room, "messageID":source.id, "reaction":"👍", "action":"add"])
-            try await wait { try await first.current().chat?.messages.first { $0.id == source.id }?.reactions.contains { $0.value == "👍" && $0.count == 1 } == true }
-            print("Desktop stage: reaction received")
             let facade = try #require(await first.conversationBusiness)
             let historyWindow = try await facade.openTimeline(in: RoomID(room), limit: 1)
             let liveWindow = try await facade.openTimeline(in: RoomID(room), limit: 20)
@@ -89,17 +86,13 @@ import IMV2SharedApple
             let edited = try #require(try await peer.current().chat?.messages.first { $0.id == source.id })
             _ = try await commands.send(in: RoomID(room), text: "原生回复", replyTo: .init(messageID: MessageID(source.id)))
             try await wait { try await peer.current().chat?.messages.contains { $0.text == "原生回复" && $0.replyToID == source.id } == true }
-            _ = try await commands.react(in: RoomID(room), messageID: MessageID(source.id), reaction: "❤️", targetState: .present)
-            try await wait { try await peer.current().chat?.messages.first { $0.id == source.id }?.reactions.contains { $0.value == "❤️" && $0.includesMe == false } == true }
             // Wait for our own authoritative revision before freezing a forward plan.
             try await wait { try await first.current().chat?.messages.first { $0.id == source.id }?.revision == edited.revision }
             _ = try await commands.forward(sources: [.init(roomID: RoomID(room), messageID: MessageID(source.id), revision: .init(edited.revision))], to: [RoomID(room)])
             try await wait { try await peer.current().chat?.messages.contains { $0.forwardedFromID == source.id } == true }
-            _ = try await commands.react(in: RoomID(room), messageID: MessageID(source.id), reaction: "❤️", targetState: .absent)
-            try await wait { try await peer.current().chat?.messages.first { $0.id == source.id }?.reactions.contains { $0.value == "❤️" } == false }
             _ = try await commands.withdraw(in: RoomID(room), messageID: MessageID(source.id), expectedRevision: edited.revision)
             try await wait { try await peer.current().chat?.messages.first { $0.id == source.id }?.withdrawn == true }
-            print("Desktop stage: native facade send/edit/reply/forward/reaction/remove/withdraw confirmed by peer")
+            print("Desktop stage: native facade send/edit/reply/forward/withdraw confirmed by peer")
 
             fixture.cutConnections(installation: "a")
             try await wait { try await first.current().state == "offline" }
@@ -123,7 +116,7 @@ import IMV2SharedApple
             _ = try await first.command(["operation":"signOut"]); _ = try await first.command(["operation":"close"])
             _ = try await peer.command(["operation":"signOut"]); _ = try await peer.command(["operation":"close"])
             try await fixture.cleanSecureItems()
-            print("Desktop shared SDK: real HTTPS/TLS login, two-peer text/reply/reaction, Unicode search, physical disconnect, Keychain/database owner reopen, no duplicate send and third-account isolation passed.")
+            print("Desktop shared SDK: real HTTPS/TLS login, two-peer text/reply, Unicode search, physical disconnect, Keychain/database owner reopen, no duplicate send and third-account isolation passed.")
         } catch {
             _ = try? await first.command(["operation":"close"]); _ = try? await peer.command(["operation":"close"])
             try? await fixture.cleanSecureItems()

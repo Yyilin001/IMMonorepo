@@ -2039,7 +2039,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         }
         return try databasePool.read { db in
             if requiresAuthorization, try !Self.roomAllowsLocalRead(roomID: roomID, db: db) {
-                return (.init(messages: [], activities: [], reactions: [], pinnedMessageIDs: [], favoritedMessageIDs: [],
+                return (.init(messages: [], activities: [], pinnedMessageIDs: [], favoritedMessageIDs: [],
                               directReadReceipt: nil, olderCursor: nil),
                         .init(preparing: [], submitted: [], hasNext: false, localImages: [:]))
             }
@@ -2071,8 +2071,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         for userID: UserID,
         around messageID: MessageID,
         before: Int,
-        after: Int,
-        aggregateReactions: Bool = false
+        after: Int
     ) throws -> V2ClientTimelineLocation {
         guard (0..<800).contains(before), (0..<800).contains(after), before + after + 1 <= 800 else {
             throw V2ClientProjectionError.invalidMessagePayload
@@ -2096,7 +2095,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             let older = try Self.timelineCandidates(db: db, roomID: roomID, cursor: anchor.cursor, newer: false, limit: before + 1)
             let newer = try Self.timelineCandidates(db: db, roomID: roomID, cursor: anchor.cursor, newer: true, limit: after + 1)
             let selected = Array(older.prefix(before).reversed()) + [anchor] + Array(newer.prefix(after))
-            let page = try Self.timelinePage(db: db, roomID: roomID, selected: selected, hasOlder: older.count > before, presentationUserID: aggregateReactions ? userID : nil)
+            let page = try Self.timelinePage(db: db, roomID: roomID, selected: selected, hasOlder: older.count > before, presentationUserID: userID)
             return .found(.init(page: page, newerBoundary: newer.count > after ? newer[after].cursor : nil))
         }
     }
@@ -2127,45 +2126,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         let activities = selected.compactMap(\.activity)
         let messageIDs = messages.map(\.messageID)
 
-        let reactions: [V2ClientMessageReaction]
-        let reactionSummaries: [V2ClientMessageReactionSummary]?
         let pinnedMessageIDs: Set<MessageID>
         let favoritedMessageIDs: Set<MessageID>
         if messageIDs.isEmpty {
-            reactions = []
-            reactionSummaries = presentationUserID == nil ? nil : []
             pinnedMessageIDs = []
             favoritedMessageIDs = []
         } else {
             let placeholders = Array(repeating: "?", count: messageIDs.count).joined(separator: ", ")
             let messageArguments = StatementArguments(messageIDs.map(\.rawValue))
-            if let presentationUserID {
-                reactions = []
-                reactionSummaries = try Row.fetchAll(db, sql: """
-                    SELECT message_id, reaction, COUNT(*) AS reaction_count,
-                        MAX(actor_user_id = ?) AS includes_current_user
-                    FROM v2_message_reactions
-                    WHERE message_id IN (\(placeholders))
-                    GROUP BY message_id, reaction ORDER BY message_id, reaction
-                    """, arguments: StatementArguments([presentationUserID.rawValue]) + messageArguments).map { row in
-                        .init(messageID: try .init(row["message_id"] as String), reaction: row["reaction"],
-                              count: row["reaction_count"], includesCurrentUser: row["includes_current_user"])
-                    }
-            } else {
-                reactionSummaries = nil
-                reactions = try Row.fetchAll(
-                    db,
-                    sql: "SELECT room_id, message_id, actor_user_id, reaction FROM v2_message_reactions WHERE message_id IN (\(placeholders)) ORDER BY message_id, reaction, actor_user_id",
-                    arguments: messageArguments
-                ).map { row in
-                    try .init(
-                        roomID: .init(row["room_id"] as String),
-                        messageID: .init(row["message_id"] as String),
-                        actorUserID: .init(row["actor_user_id"] as String),
-                        reaction: row["reaction"]
-                    )
-                }
-            }
             pinnedMessageIDs = try Set(String.fetchAll(
                 db,
                 sql: "SELECT message_id FROM v2_group_pinned_messages WHERE room_id = ? AND is_pinned = 1 AND message_id IN (\(placeholders))",
@@ -2214,12 +2182,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         return .init(
             messages: messages,
             activities: activities,
-            reactions: reactions,
             pinnedMessageIDs: pinnedMessageIDs,
             favoritedMessageIDs: favoritedMessageIDs,
             directReadReceipt: directReadReceipt,
             olderCursor: olderCursor,
-            reactionSummaries: reactionSummaries,
             localSendIntentIDs: localSendIntentIDs
         )
     }
@@ -5158,7 +5124,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             try db.execute(sql: accountPreferenceWorkSchemaSQL)
             try db.execute(sql: accountPreferenceDraftSchemaSQL)
             try db.execute(sql: accountPreferenceAuthorityCacheSchemaSQL)
-            try db.execute(sql: messageReactionWorkSchemaSQL)
             try db.execute(sql: messageSendWorkSchemaSQL)
             try db.execute(sql: forwardPlanWorkSchemaSQL)
             try db.execute(sql: memberAdministrationWorkSchemaSQL)
@@ -5174,6 +5139,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             try db.execute(sql: groupNicknameInvalidationSchemaSQL)
             try db.execute(sql: localDirectMessagesSchemaSQL)
             try db.execute(sql: localProfileDisplaySchemaSQL)
+        }
+        migrator.registerMigration("retireMessageReactionWork") { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS v2_message_reaction_intents")
+            try db.execute(sql: "DELETE FROM v2_operation_work WHERE operation_kind = 'reaction'")
         }
         return migrator
     }()

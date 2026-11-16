@@ -233,7 +233,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var accountWorkPaused = false
     private(set) var isResumingAccountWork = false
     private(set) var conversationStore: V2ConversationListStore?
-    private(set) var resourceManagement: V2ResourceManagementService?
     private(set) var contactsStore: V2ContactsStore?
     private(set) var privacySettingsStore: V2PrivacySettingsStore?
     private(set) var userBlockSettingsStore: V2UserBlockSettingsStore?
@@ -241,7 +240,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
     private(set) var deviceSessionsStore: V2DeviceSessionsStore?
     private(set) var groupInvitationStore: V2GroupInvitationStore?
-    private(set) var makeGroupAvatarManagement: (@MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore)?
 
     init(
         startupMode: StartupMode = .production,
@@ -864,9 +862,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let closingStager = accountAttachmentStager
         let closingProfiles = accountProfileRepository
         accountProfileRepository = nil
-        makeGroupAvatarManagement = nil
         mediaCacheDownloader = nil
-        resourceManagement = nil
         accountAttachmentUploader = nil
         accountAttachmentStager = nil
         authenticatedLocalStore = nil
@@ -967,7 +963,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let previousProfiles = accountProfileRepository
         accountProfileRepository = nil
         mediaCacheDownloader = nil
-        resourceManagement = nil
         accountAttachmentUploader = nil
         accountAttachmentStager = nil
         try await V2AccountResourceCleanup.run([
@@ -1028,9 +1023,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 actorUserID: userID,
                 credentials: accountHTTP, transport: accountHTTP
             )
-            let resourceManagement = V2ResourceManagementService(center: resourceCenter, localStore: localStore,
-                downloader: realtime.mediaDownloader,
-                directory: try V2HTTPRoomResourceDirectoryClient(baseURL: configuration.accountBaseURL, credentials: accountHTTP, transport: accountHTTP))
             let roomRecovery = realtime.roomRecovery
             let conversationBusiness = try await sharedSession.conversations(for: localStore, accountID: userID,
                 requiresAuthorization: localIdentity != nil,
@@ -1056,7 +1048,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 messages: .init(
                     sender: realtime.sender,
                     withdrawer: realtime.messageWithdrawer,
-                    reactionChanger: realtime.messageReactionChanger,
                     editor: realtime.messageEditor,
                     readReceiptReporter: realtime.readReceiptReporter,
                     stateChanger: realtime.conversationStateChanger,
@@ -1192,11 +1183,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                     queries: invitationQueries, queryScope: invitationScope
                 ),operations:invitationOperations
             )
-            let groupAvatarManager = realtime.groupAvatarManager, groupAvatarNotifier = realtime.projectionChangeNotifier
-            let makeGroupAvatarManagement: @MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore = { roomID, operationID in
-                V2GroupAvatarManagementStore(roomID: roomID, manager: groupAvatarManager,
-                    stager: attachmentStager, notifier: groupAvatarNotifier, focusedOperationID: operationID)
-            }
             let pushWakeSettings: V2PushWakeSettingsStore?
             if let remoteNotificationRegistrar {
                 guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
@@ -1263,7 +1249,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             accountAttachmentStager = attachmentStager
             accountProfileRepository = realtime.profileRepository
             mediaCacheDownloader = realtime.mediaCacheMaintenance
-            self.resourceManagement = resourceManagement
             mediaThumbnailCache = thumbnails
             avatarPipeline = pipeline
             avatarInvalidationTask?.cancel()
@@ -1307,7 +1292,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             pushWakeSettingsStore = pushWakeSettings
             deviceSessionsStore = deviceSessions
             groupInvitationStore = groupInvitations
-            self.makeGroupAvatarManagement = makeGroupAvatarManagement
             accountSearch = searchBusiness
             authenticatedLocalStore = localStore
             accountAccessMode = .authenticated
@@ -1337,7 +1321,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             await realtime.accountRuntime.startActivity(id:"invitationPreparation") {try await invitationOperations.runPreparation()}
             await realtime.accountRuntime.startActivity(id:"membershipPreparation") { try await realtime.membershipOperations.runPreparation() }
             await realtime.accountRuntime.startActivity(id:"memberAdministrationPreparation") { try await realtime.memberAdministrationOperations.runPreparation() }
-            await realtime.accountRuntime.startActivity(id:"reactionPreparation") { try await realtime.messages.runReactionPreparation() }
             await realtime.accountRuntime.startActivity(id: "readReceiptPreparation") {
                 try await realtime.readReceipts.runPreparation()
             }

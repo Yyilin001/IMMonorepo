@@ -128,7 +128,6 @@ public struct V2AuthenticatedAccountRateLimitMiddleware: Middleware, Sendable {
         if path.hasPrefix("/v2/profile-presentations/groups/"),path.hasSuffix("/nickname/operations/recover") { return ("group-nickname-recovery",3) }
         if path.hasPrefix("/v2/rooms/"),path.contains("/message-operations/") { return ("message-operations",3) }
         if path.hasPrefix("/v2/rooms/"),path.contains("/message-mutations/") { return ("message-mutations",3) }
-        if path.hasPrefix("/v2/rooms/"),path.contains("/message-reactions/") { return ("message-reactions",3) }
         if path.hasPrefix("/v2/account-preferences/") { return ("account-preference-operations",3) }
         if path.hasPrefix("/v2/direct-room-operations/") { return ("direct-room-operations",3) }
         if path.hasPrefix("/v2/social/") { return ("social-operations",3) }

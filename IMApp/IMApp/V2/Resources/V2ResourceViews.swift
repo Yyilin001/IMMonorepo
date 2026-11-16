@@ -7,17 +7,10 @@ import SwiftUI
 enum V2ResourceRoute: Hashable {
     case home, library(RoomID?), detail(V2ResourceKey), storage, downloadSettings, transfers, businessOwners(V2ManagedResourceTransferID)
 }
-private struct V2ResourceManagementKey: EnvironmentKey {
-    static let defaultValue: V2ResourceManagementService? = nil
-}
 private struct V2ResourceNavigationKey: EnvironmentKey {
     static let defaultValue: V2RootNavigationStore? = nil
 }
 extension EnvironmentValues {
-    var v2ResourceManagement: V2ResourceManagementService? {
-        get { self[V2ResourceManagementKey.self] }
-        set { self[V2ResourceManagementKey.self] = newValue }
-    }
     var v2ResourceNavigation: V2RootNavigationStore? {
         get { self[V2ResourceNavigationKey.self] }
         set { self[V2ResourceNavigationKey.self] = newValue }
@@ -48,10 +41,8 @@ private struct V2ResourceDestinations: ViewModifier {
                 } else { ContentUnavailableView("资源中心不可用", systemImage: "folder", description: Text("请重新打开当前账号。")) }
             }
             .environment(\.v2ResourceNavigation, navigation)
-            .environment(\.v2ResourceManagement, service)
         }
         .environment(\.v2ResourceNavigation, navigation)
-        .environment(\.v2ResourceManagement, service)
     }
 }
 extension View {

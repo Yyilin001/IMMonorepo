@@ -31,25 +31,6 @@ public struct V2RoomRefMessagingClient: Sendable {
     public var managesForegroundWriteAdmission: Bool { true }
     package var usesDirectSendRecovery: Bool { recoveryQuery != nil }
 
-
-
-    public func reactionOperation(_ command:V2MessageReactionOperationCommand) async throws -> V2MessageReactionRecoveryResult {
-        try await reactionOperationCall(.reactionOperation(command),identity:command.identity,fingerprint:command.fingerprint)
-    }
-    public func recoverReaction(_ request:V2MessageReactionRecoveryRequest) async throws -> V2MessageReactionRecoveryResult {
-        try await reactionOperationCall(.recoverReaction(request),identity:request.identity,fingerprint:request.fingerprint)
-    }
-    public func reactionSnapshot(roomID:RoomID,actorUserID:UserID,messageID:MessageID,reaction:String) async throws -> V2MessageReactionSnapshot {
-        guard case .reactionSnapshot(let result)=try await call(.reactionSnapshot(.init(roomID:roomID,actorUserID:actorUserID,messageID:messageID,reaction:reaction)),actor:actorUserID),
-              result.roomID==roomID,result.actorUserID==actorUserID,result.messageID==messageID else { throw V2RoomCallFailure.outcomeUnknown }
-        return result
-    }
-    private func reactionOperationCall(_ command:V2RoomMessagingCommand,identity:V2OperationIdentity,fingerprint:V2OperationFingerprint) async throws -> V2MessageReactionRecoveryResult {
-        guard case .reactionOperation(let result)=try await call(command,actor:identity.accountID) else { throw V2RoomCallFailure.outcomeUnknown }
-        if case .receipt(let receipt)=result, !receipt.validates(identity:identity,fingerprint:fingerprint) { throw V2RoomCallFailure.outcomeUnknown }
-        if case .deferred(let hint)=result, !hint.validates(identity:identity,fingerprint:fingerprint) { throw V2RoomCallFailure.outcomeUnknown }
-        return result
-    }
     public func sendOperation(_ command:V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
         try await sendOperationCall(.sendOperation(command),identity:command.identity,fingerprint:command.fingerprint)
     }

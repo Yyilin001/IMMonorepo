@@ -111,9 +111,8 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
     let isFavorited: Bool
     let isPinnedInGroup: Bool
     let isForwarded: Bool
-    let reactions: [V2ConversationMessageReaction]
 
-    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = [], isReadByPeer: Bool = false, isFavorited: Bool = false, isPinnedInGroup: Bool = false, isForwarded: Bool = false, senderUserID: UserID? = nil, localSendIntentID: UUID? = nil) {
+    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, isReadByPeer: Bool = false, isFavorited: Bool = false, isPinnedInGroup: Bool = false, isForwarded: Bool = false, senderUserID: UserID? = nil, localSendIntentID: UUID? = nil) {
         self.localSendIntentID = localSendIntentID
         self.senderUserID = senderUserID
         self.id = id
@@ -133,7 +132,6 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
         self.isFavorited = isFavorited
         self.isPinnedInGroup = isPinnedInGroup
         self.isForwarded = isForwarded
-        self.reactions = reactions
     }
 
     func presentation(for media: V2MediaReference) -> V2MediaPresentation {
@@ -213,18 +211,6 @@ struct V2FavoriteConversationMessageItem: Hashable, Identifiable, Sendable {
     let label: V2ConversationLabel
     let text: String
     let createdAt: Date
-}
-
-/// 仅用于展示的表情聚合。
-///
-/// 单个互动者的标识留在本地投影边界内；消息气泡只暴露数量，
-/// 以及当前登录用户是否属于该表情集合。
-struct V2ConversationMessageReaction: Hashable, Identifiable, Sendable {
-    let reaction: String
-    let count: Int
-    let includesCurrentUser: Bool
-
-    var id: String { reaction }
 }
 
 struct V2ConversationAttachmentItem: Hashable, Identifiable, Sendable {
@@ -1763,18 +1749,6 @@ struct V2ConversationDetailView: View {
                         }.font(.caption).padding(.horizontal).disabled(store.changingForwardPlanID != nil)
                     }
                     if let feedback=store.forwardSyncFeedback { Text(feedback).font(.caption).padding(.horizontal) }
-                    ForEach(store.pendingReactions,id:\.intent.id) { pending in
-                        HStack {
-                            Text(pending.intent.reaction + (pending.intent.targetState == .present ? " 添加目标已保存" : " 移除目标已保存"))
-                            if pending.expiredUnsubmitted { Text("尚未提交，已过期") }
-                            else if pending.preparationPaused || pending.work?.scheduling == .needsAttention {
-                                Button("继续确认") { Task { await store.resumeReactionIntent(pending.intent.id) } }
-                            } else if pending.work?.execution == .conflicted { Text("反应版本已变化，请明确重新选择目标") }
-                            else if pending.work?.execution == .rejected { Text("服务器拒绝了此目标") }
-                            else if pending.work?.execution == .closed { Text("服务器确认未执行，可重新选择目标") }
-                        }.font(.caption).padding(.horizontal)
-                    }
-                    if let feedback=store.reactionSyncFeedback { Text(feedback).font(.caption).padding(.horizontal) }
                     ForEach(store.messageMutations, id:\.work.id) { snapshot in
                         if snapshot.work.scheduling == .needsAttention {
                             HStack {
@@ -2199,7 +2173,6 @@ struct V2ConversationDetailView: View {
         .task(id: store.composer.pendingResourceSendPage) { await store.observeResourceSends() }
         .task { await store.observeReadSync() }
         .task { await store.observeMessageMutations() }
-        .task { await store.observeReactionIntents() }
         .task { await store.groupManagement.observeMessageRemoval() }
         .task {
             await store.groupManagement.loadGroupMembers()
@@ -2511,7 +2484,7 @@ private struct V2ConversationMessageRow: View {
         }
 
         // Keep the row queryable without letting its identifier overwrite the
-        // independently actionable message controls (reaction, edit and
+        // independently actionable message controls (edit and
         // withdrawal) in SwiftUI's accessibility bridge.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("v2.message.row.\(message.id)")
@@ -2657,9 +2630,6 @@ private struct V2ConversationMessageBubble: View {
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("v2.group.message.pinned.\(message.id)")
             }
-            if !message.reactions.isEmpty {
-                V2ConversationReactionControls(store: store, message: message)
-            }
         }
     }
 
@@ -2668,9 +2638,6 @@ private struct V2ConversationMessageBubble: View {
         if !message.isWithdrawn {
             Button("回复", systemImage: "arrowshape.turn.up.left") { store.composer.beginReply(to: message) }
                 .accessibilityIdentifier("v2.message.reply.\(message.id)")
-        }
-        if store.canReactToMessage(message) {
-            V2ReactionPickerMenu(store: store, message: message)
         }
         if message.isOutgoing && store.isGroupConversation && !message.isWithdrawn {
             Button("查看已读", systemImage: "checkmark.message") { showReadReceipts() }
@@ -3021,56 +2988,6 @@ private struct V2MessageEditSheet: View {
     }
 }
 
-private struct V2ConversationReactionControls: View {
-    @Bindable var store: V2ConversationDetailStore
-    let message: V2ConversationMessageItem
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(message.reactions) { reaction in
-                Menu {
-                    Button("添加我的反应") { Task { await store.changeReaction(reaction.reaction,on:message,action:.add) } }
-                    Button("移除我的反应") { Task { await store.changeReaction(reaction.reaction,on:message,action:.remove) } }
-                } label: {
-                    Text("\(reaction.reaction) \(reaction.count)")
-                }
-                .buttonStyle(.bordered)
-                .tint(reaction.includesCurrentUser ? .accentColor : .secondary)
-                .frame(minWidth: 44, minHeight: 44)
-                .disabled(!store.canReactToMessage(message))
-                .accessibilityLabel(reaction.reaction + " 表情反应")
-                .accessibilityValue(reactionAccessibilityValue(reaction))
-                .accessibilityHint("选择添加或移除自己的反应")
-                .accessibilityIdentifier("v2.message.reaction.\(message.id).\(reaction.reaction)")
-            }
-
-        }
-    }
-
-    private func reactionAccessibilityValue(_ reaction: V2ConversationMessageReaction) -> String {
-        if reaction.includesCurrentUser {
-            return "\(reaction.count) 人已添加，包括你"
-        }
-        return "\(reaction.count) 人已添加，不包括你"
-    }
-}
-
-private struct V2ReactionPickerMenu: View {
-    let store: V2ConversationDetailStore
-    let message: V2ConversationMessageItem
-    var body: some View {
-        Menu("表情回应", systemImage: "face.smiling") {
-            ForEach(store.reactionPresets, id: \.self) { reaction in
-                Button(reaction) {
-                    let includesCurrentUser = message.reactions.contains { $0.reaction == reaction && $0.includesCurrentUser }
-                    Task { await store.changeReaction(reaction, on: message, action: includesCurrentUser ? .remove : .add) }
-                }
-                .accessibilityIdentifier("v2.message.reaction-picker.\(message.id).\(reaction)")
-            }
-        }
-        .accessibilityIdentifier("v2.message.reaction-picker.\(message.id)")
-    }
-}
 
 private struct V2ComposerContainer<Content: View>: View {
     @ViewBuilder let content: () -> Content

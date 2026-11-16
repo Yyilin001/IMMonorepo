@@ -116,7 +116,6 @@ private struct V2ConversationPerformanceRunView: View {
                     .environment(\.v2AuthorPresentationPageScope, nil)
                     .environment(\.v2UserInteractionContext, nil)
                     .environment(\.v2ResourceNavigation, nil)
-                    .environment(\.v2ResourceManagement, nil)
                     .environment(\.v2MediaThumbnailCache, nil)
                     .onChange(of: scenePhase) { _, phase in
                         if phase == .background { run.stop() }

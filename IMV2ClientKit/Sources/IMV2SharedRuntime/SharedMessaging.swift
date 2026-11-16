@@ -32,7 +32,6 @@ actor SharedMessaging {
     }
     func start() async {
         await searchService.startIndexing()
-        await interactions.start()
         preparation = Task { do { try await reads.runPreparation() } catch is CancellationError {} catch { failure = sharedFailure(error) } }
     }
     func handlers() async -> [V2OperationWorkDispatcher.Handler] {
@@ -77,8 +76,7 @@ actor SharedMessaging {
     func interact(_ request: SharedRequest, room: RoomID) async throws {
         if request.operation == .interactionAction { try await interactions.action(request, room: room); return }
         let value = try await message(room: room, id: MessageID(request.messageID ?? ""))
-        if request.operation == .reactMessage { try await interactions.react(request, message: value) }
-        else { try await interactions.forward(request, message: value) }
+        try await interactions.forward(request, message: value)
     }
     /// IDs are viewport evidence, never caller-provided sequence numbers. Resolve
     /// authorized projections and use roomSequence, not timelineSequence/ACK.

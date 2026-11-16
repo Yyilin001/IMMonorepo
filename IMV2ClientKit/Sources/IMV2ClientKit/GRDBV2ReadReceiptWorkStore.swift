@@ -158,7 +158,6 @@ extension GRDBV2LocalSyncStore {
                             UNION ALL SELECT COUNT(*),COALESCE(SUM(length(payload)),0) FROM v2_personal_preference_intents WHERE work_id IS NULL AND local_terminal IS NULL
                             UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_read_receipt_intents
                             UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_send_intents WHERE stage='preparing'
-                            UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_message_reaction_intents WHERE work_id IS NULL AND local_terminal IS NULL
                         )
                         """) }.removeDuplicates()
                     for try await _ in observation.values(in:pool,bufferingPolicy:.bufferingNewest(1)) { continuation.yield(()) }

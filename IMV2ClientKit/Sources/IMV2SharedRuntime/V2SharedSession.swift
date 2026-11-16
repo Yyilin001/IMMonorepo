@@ -155,7 +155,7 @@ public actor V2SharedSession {
 
     public func messages(for store: GRDBV2LocalSyncStore, accountID: UserID,
         sends: V2MessageSendOperationService, mutations: V2MessageMutationOperationService,
-        reactions: V2MessageReactionOperationService, forwards: V2ForwardPlanOperationService) throws -> V2MessageService {
+        forwards: V2ForwardPlanOperationService) throws -> V2MessageService {
         let key = ObjectIdentifier(store)
         guard !exitRequested, stores[key] != nil else { throw V2SharedSessionError.busy }
         if let existing = messageServices[key] {
@@ -163,7 +163,7 @@ public actor V2SharedSession {
             return existing
         }
         let service = V2MessageService(accountID: accountID, store: store, sends: sends,
-            mutations: mutations, reactions: reactions, forwards: forwards)
+            mutations: mutations, forwards: forwards)
         messageServices[key] = service
         return service
     }

@@ -12,7 +12,6 @@ import com.xmtx.im.sharedsdk.*
 
 @Composable internal fun SharedMessageInteractions(state: SharedAppState, room: String, message: SharedMessage, model: SharedAppViewModel, forward: () -> Unit) {
     var replying by remember(message.id) { mutableStateOf(false) }
-    var choosingReaction by remember(message.id) { mutableStateOf(false) }
     var text by remember(message.id) { mutableStateOf("") }
     message.replyToID?.let { id ->
         TextButton({ model.openConversation(room, id) }, enabled = !state.busy && message.replyPreview != null, modifier = Modifier.testTag("shared_reply_reference_${message.id}")) {
@@ -24,23 +23,12 @@ import com.xmtx.im.sharedsdk.*
         Row {
             TextButton({ replying = true }, enabled = !state.busy, modifier = Modifier.testTag("shared_reply_${message.id}")) { Text("回复") }
             TextButton(forward, enabled = !state.busy, modifier = Modifier.testTag("shared_forward_${message.id}")) { Text("转发") }
-            TextButton({ choosingReaction = true }, enabled = !state.busy, modifier = Modifier.testTag("shared_react_${message.id}")) { Text("回应") }
-        }
-        FlowRow {
-            message.reactions.forEach { reaction ->
-                FilterChip(selected = reaction.includesMe, onClick = { model.react(room, message.id, reaction.value, !reaction.includesMe) }, enabled = !state.busy,
-                    label = { Text("${reaction.value} ${reaction.count}") }, modifier = Modifier.testTag("shared_reaction_${message.id}_${reaction.value}"))
-            }
         }
     }
     if (replying) AlertDialog(onDismissRequest = { if (!state.busy) replying = false }, title = { Text("回复消息") },
         text = { Column { Text(if (message.withdrawn) "原消息已撤回" else message.text.ifEmpty { "[附件]" }.take(160)); OutlinedTextField(text, { text = it }, modifier = Modifier.testTag("shared_reply_text")) } },
         confirmButton = { TextButton({ model.reply(room, message.id, text) { replying = false; text = "" } }, enabled = !state.busy && !message.withdrawn && text.isNotBlank(), modifier = Modifier.testTag("shared_reply_send")) { Text("发送回复") } },
         dismissButton = { TextButton({ replying = false }, enabled = !state.busy) { Text("取消") } })
-    if (choosingReaction) AlertDialog(onDismissRequest = { choosingReaction = false }, title = { Text("选择回应") },
-        text = { FlowRow { listOf("👍", "❤️", "😂", "🎉", "😢", "🙏").forEach { value ->
-            TextButton({ model.react(room, message.id, value, true); choosingReaction = false }, enabled = !state.busy && !message.withdrawn, modifier = Modifier.testTag("shared_choose_reaction_$value")) { Text(value) }
-        } } }, confirmButton = { TextButton({ choosingReaction = false }) { Text("取消") } })
 }
 
 @Composable internal fun SharedForwardContent(state: SharedAppState, model: SharedAppViewModel, room: String, message: String, revision: Long, back: () -> Unit) {
@@ -61,10 +49,6 @@ import com.xmtx.im.sharedsdk.*
 
 @Composable internal fun SharedInteractionWorkContent(state: SharedAppState, room: String, model: SharedAppViewModel) {
     val work = state.snapshot?.messaging?.takeIf { it.roomID == room }?.interactions ?: return
-    work.reactions.forEach { row -> Column(Modifier.testTag("shared_reaction_work_${row.id}")) {
-        Text("${if (row.present) "添加" else "移除"} ${row.reaction}：${interactionStatus(row.status)}")
-        if (row.retryable) TextButton({ model.retryReaction(room, row.id) }, enabled = !state.busy) { Text("继续确认回应") }
-    } }
     work.forwards.forEach { row -> Column(Modifier.testTag("shared_forward_work_${row.id}")) {
         Text("转发：${interactionStatus(row.status)} · 成功 ${row.succeeded} / 拒绝 ${row.rejected} / 取消 ${row.cancelled} / 待确认 ${row.unresolved}")
         Row {

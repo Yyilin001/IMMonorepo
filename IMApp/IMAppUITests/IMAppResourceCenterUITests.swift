@@ -2,7 +2,7 @@ import XCTest
 import UIKit
 
 final class IMAppResourceCenterUITests: XCTestCase {
-    @MainActor func testChatSettingsOpensItsFilesAndReturnsToTheSameChat() {
+    @MainActor func testChatSettingsHidesFileManagementAndReturnsToTheSameChat() {
         let app = XCUIApplication()
         app.launchArguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-resource-center-scope", UUID().uuidString,
             "-v2-ui-testing-resource-center-chat", "-v2-ui-testing-resource-center-document", "-AppleLanguages", "(zh-Hans)"]
@@ -15,17 +15,8 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(chat.waitForExistence(timeout: 15)); chat.tap()
         let tools = app.buttons["v2.conversation.detail.tools"]
         XCTAssertTrue(tools.waitForExistence(timeout: 5)); tools.tap()
-        let files = app.buttons["v2.chat-settings.resources"]
-        XCTAssertTrue(files.waitForExistence(timeout: 5)); files.tap()
-        XCTAssertTrue(app.navigationBars["聊天文件"].waitForExistence(timeout: 5))
-        let document = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
-            "v2.resources.item.", "项目资源管理功能验证与交付说明")).firstMatch
-        XCTAssertTrue(document.waitForExistence(timeout: 5)); document.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["v2.resources.detail"].firstMatch.waitForExistence(timeout: 5))
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(app.navigationBars["聊天文件"].waitForExistence(timeout: 5))
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(files.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["群聊设置"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["v2.chat-settings.resources"].exists)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(tools.waitForExistence(timeout: 5))
         XCTAssertTrue(app.navigationBars["文件测试会话"].exists)

@@ -173,7 +173,5 @@ public enum V2RoomMessagingResult: Codable, Equatable, Sendable {
     case send(V2ActorSendMessageResultWire)
     case failure(V2ActorMessagingErrorWire)
     case mutation(V2MessageMutationRecoveryResult)
-    case reactionOperation(V2MessageReactionRecoveryResult)
-    case reactionSnapshot(V2MessageReactionSnapshot)
     case sendOperation(V2MessageSendOperationRecoveryResult)
 }

@@ -37,6 +37,7 @@ import kotlinx.serialization.Serializable
     @Serializable data class Search(val roomID: String?) : SharedRoute
     @Serializable data class Forward(val roomID: String, val messageID: String, val revision: Long) : SharedRoute
     @Serializable data class Readers(val roomID: String, val messageID: String) : SharedRoute
+    // Decode a saved stack from a previous install and return to its parent.
     @Serializable data object Transfers : SharedRoute
     @Serializable data class Avatar(val roomID: String?) : SharedRoute
     @Serializable data object Join : SharedRoute
@@ -84,7 +85,7 @@ import kotlinx.serialization.Serializable
     }
 }
 
-@Composable private fun SharedSignedIn(state: SharedAppState, model: SharedAppViewModel) {
+@Composable internal fun SharedSignedIn(state: SharedAppState, model: SharedAppViewModel) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val stack = rememberNavBackStack(SharedRoute.Home)
     val root = stack.lastOrNull() == SharedRoute.Home
@@ -129,7 +130,6 @@ import kotlinx.serialization.Serializable
                                 1 -> SharedContactsContent(state, model, profile = { id -> stack.add(SharedRoute.Profile(id)) }, join = { stack.add(SharedRoute.Join) }, groups = { model.clearDiscovery(); stack.add(SharedRoute.Groups) }, chat = { room -> model.clearDiscovery(); model.openConversation(room); stack.add(SharedRoute.Chat(room)) })
                                 2 -> {
                                     Button({ stack.add(SharedRoute.Avatar(null)) }, enabled = !state.busy, modifier = Modifier.testTag("shared_own_avatar")) { Text("编辑头像") }
-                                    TextButton({ stack.add(SharedRoute.Transfers) }, modifier = Modifier.testTag("shared_all_transfers")) { Text("上传与下载任务") }
                                     Text(when (state.snapshot?.allowsStrangerMessages) { true -> "陌生人消息：允许"; false -> "陌生人消息：拒绝"; null -> "账户已登录" }, modifier = Modifier.testTag("shared_preference"))
                                     Button(model::signOut, enabled = !state.busy, modifier = Modifier.testTag("shared_sign_out")) { Text("退出登录") }
                                     TextButton(model::signOut, enabled = !state.busy, modifier = Modifier.testTag("shared_switch_account")) { Text("切换账号") }
@@ -137,8 +137,12 @@ import kotlinx.serialization.Serializable
                             }
                         }
                     }
-                    entry<SharedRoute.Resource> { route -> SharedResourceContent(state, route.roomID, route.messageID, route.mediaID, model, back = { stack.removeLastOrNull() }, transfers = { stack.add(SharedRoute.Transfers) }) }
-                    entry<SharedRoute.Transfers> { SharedTransfersContent(state, model) { stack.removeLastOrNull() } }
+                    entry<SharedRoute.Resource> { route -> SharedResourceContent(state, route.roomID, route.messageID, route.mediaID, model, back = { stack.removeLastOrNull() }) }
+                    entry<SharedRoute.Transfers> {
+                        LaunchedEffect(Unit) {
+                            if (stack.lastOrNull() == SharedRoute.Transfers) stack.removeLastOrNull()
+                        }
+                    }
                     entry<SharedRoute.Avatar> { route -> SharedAvatarContent(state, model, route.roomID) { stack.removeLastOrNull() } }
                     entry<SharedRoute.Profile> { route -> SharedProfileContent(state, route.userID, model) { stack.removeLastOrNull() } }
                     entry<SharedRoute.Invitations> { route -> SharedInvitationsContent(state, route.roomID, model) { stack.removeLastOrNull() } }
@@ -160,14 +164,14 @@ import kotlinx.serialization.Serializable
                     entry<SharedRoute.Readers> { route -> SharedReadersContent(state, model, route.roomID, route.messageID, back = { stack.removeLastOrNull() }) }
                     entry<SharedRoute.Forward> { route -> SharedForwardContent(state, model, route.roomID, route.messageID, route.revision, back = { stack.removeLastOrNull() }) }
                     entry<SharedRoute.Chat> { route ->
-                        SharedChatContent(state, route.roomID, model, forward = { stack.add(SharedRoute.Forward(route.roomID, it.id, it.revision)) }, search = { stack.add(SharedRoute.Search(route.roomID)) }, readers = { stack.add(SharedRoute.Readers(route.roomID, it)) }, openResource = { message, media -> stack.add(SharedRoute.Resource(route.roomID, message, media)) }, transfers = { stack.add(SharedRoute.Transfers) }, back = { stack.removeLastOrNull() })
+                        SharedChatContent(state, route.roomID, model, forward = { stack.add(SharedRoute.Forward(route.roomID, it.id, it.revision)) }, search = { stack.add(SharedRoute.Search(route.roomID)) }, readers = { stack.add(SharedRoute.Readers(route.roomID, it)) }, openResource = { message, media -> stack.add(SharedRoute.Resource(route.roomID, message, media)) }, back = { stack.removeLastOrNull() })
                     }
                 })
         }
     }
 }
 
-@Composable private fun SharedChatContent(state: SharedAppState, roomID: String, model: SharedAppViewModel, forward: (SharedMessage) -> Unit, search: () -> Unit, readers: (String) -> Unit, openResource: (String, String) -> Unit, transfers: () -> Unit, back: () -> Unit) {
+@Composable private fun SharedChatContent(state: SharedAppState, roomID: String, model: SharedAppViewModel, forward: (SharedMessage) -> Unit, search: () -> Unit, readers: (String) -> Unit, openResource: (String, String) -> Unit, back: () -> Unit) {
     val chat = state.snapshot?.chat?.takeIf { it.roomID == roomID }
     val list = rememberLazyListState()
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
@@ -180,7 +184,6 @@ import kotlinx.serialization.Serializable
         Row {
             TextButton(back, modifier = Modifier.testTag("shared_chat_back")) { Text("返回") }
             TextButton(search, modifier = Modifier.testTag("shared_search_room")) { Text("搜索") }
-            TextButton(transfers, modifier = Modifier.testTag("shared_chat_transfers")) { Text("任务") }
             Text(state.snapshot?.conversations?.firstOrNull { it.id == roomID }?.title ?: "聊天", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
         if (chat == null) {

@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, reactMessage, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -22,7 +22,6 @@ package struct SharedRequest: Decodable, Sendable {
     var messageID: String?
     var replyToMessageID: String?
     var targetRoomID: String?
-    var reaction: String?
     var mediaID: String?
     var messageIDs: [String]?
     var image: String?
@@ -46,7 +45,7 @@ struct SharedMessage: Encodable, Sendable {
     let id: String; let senderID: String; let text: String; let sequence: UInt64
     let withdrawn: Bool; let hasMedia: Bool; let attachments: [SharedAttachment]
     let revision: UInt64; let canMutate: Bool; let readByPeer: Bool
-    let replyToID: String?; let replyPreview: String?; let forwardedFromID: String?; let reactions: [SharedReaction]
+    let replyToID: String?; let replyPreview: String?; let forwardedFromID: String?
 }
 struct SharedPendingMessage: Encodable, Sendable { let id: String; let text: String; let status: String }
 struct SharedChat: Encodable, Sendable {
@@ -218,7 +217,7 @@ package actor SharedRuntime {
         case .searchMessages:
             guard let messaging else { throw SharedFailure.authenticationRequired }; try await messaging.search(request)
         case .clearMessaging: await messaging?.clearTransient()
-        case .reactMessage, .forwardMessage, .interactionAction:
+        case .forwardMessage, .interactionAction:
             guard let messaging, let room = selectedRoom, request.roomID == room.rawValue else { throw SharedFailure.invalidInput }
             try await messaging.interact(request, room: room)
         case .messageAction, .markVisibleMessages, .messageReaders:
@@ -357,7 +356,6 @@ package actor SharedRuntime {
         let accountHTTP = V2SessionHTTPAuthorization(session: auth, epoch: await auth.currentEpoch(), transport: http)
         let business = try await session.messages(for: store, accountID: identity.userID, sends: sender,
             mutations: .init(accountID: identity.userID, store: store, client: try V2HTTPMessageMutationOperationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)),
-            reactions: .init(accountID: identity.userID, store: store, client: try V2HTTPMessageReactionOperationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)),
             forwards: .init(accountID: identity.userID, store: store, client: try V2HTTPForwardPlanOperationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)))
         messageBusiness = business
         let installation = try await store.boundInstallationBinding().value.uuidString
@@ -475,8 +473,7 @@ package actor SharedRuntime {
                     readByPeer: message.senderUserID.rawValue == userID && timeline.directReadReceipt?.isVisible == true && timeline.directReadReceipt?.readerUserID.rawValue != userID && (timeline.directReadReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
                     replyToID: message.isWithdrawn ? nil : message.replyTo?.messageID.rawValue,
                     replyPreview: message.isWithdrawn ? nil : message.replyTo.flatMap { replyPreviews[$0.messageID] },
-                    forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue,
-                    reactions: message.isWithdrawn ? [] : (timeline.reactionSummaries ?? []).filter { summary in summary.messageID == message.messageID }.map { .init(value: $0.reaction, count: $0.count, includesMe: $0.includesCurrentUser) })
+                    forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue)
             }, pending: pending.preparing.map { .init(id: $0.id.uuidString, text: $0.text, status: $0.isExpired ? "expiredUnsubmitted" : "preparing") }
                 + pending.submitted.map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status)) },
                 focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest, hasMorePending: pending.hasNext, pendingPage: pendingPage)

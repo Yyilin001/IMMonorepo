@@ -1041,9 +1041,6 @@ final class V2RootNavigationStore {
     var fixtureRoomID: String?
     var selectedTab: Tab = .conversations
 
-    func showResources(roomID: RoomID? = nil) { path.append(V2ResourceRoute.library(roomID)) }
-    func showResourceDownloadSettings() { path.append(V2ResourceRoute.downloadSettings) }
-
     /// In-context navigation keeps the originating tab and every back-stack entry.
     /// Cross-tab shortcuts continue to use showConversation(_:).
     func pushConversation(_ target: V2ConversationDestination) {

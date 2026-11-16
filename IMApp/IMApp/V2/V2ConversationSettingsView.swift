@@ -10,7 +10,6 @@ struct V2ConversationSettingsView: View {
     let focusMessage: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.v2UserInteractionContext) private var context
-    @Environment(\.v2ResourceManagement) private var resources
     @State private var avatarPageID = UUID()
     @State private var profile: V2UserProfileTarget?
     @State private var presentedSheet: PresentedSheet?
@@ -43,18 +42,11 @@ struct V2ConversationSettingsView: View {
     var body: some View {
         Form {
             identitySection
-            if resources != nil || store.canSearchMessages {
+            if store.canSearchMessages {
                 Section("聊天内容") {
-                    if resources != nil, let room = try? RoomID(store.roomID) {
-                        NavigationLink(value: V2ResourceRoute.library(room)) {
-                            rowLabel("聊天文件", symbol: "folder", color: .blue)
-                        }.accessibilityIdentifier("v2.chat-settings.resources")
-                    }
-                    if store.canSearchMessages {
-                        action("搜索聊天记录", symbol: "magnifyingglass", color: .indigo,
-                               identifier: "v2.message.search.current-room") {
-                            if let search = store.messageSearchStore() { presentedSheet = .search(search) }
-                        }
+                    action("搜索聊天记录", symbol: "magnifyingglass", color: .indigo,
+                           identifier: "v2.message.search.current-room") {
+                        if let search = store.messageSearchStore() { presentedSheet = .search(search) }
                     }
                 }
             }

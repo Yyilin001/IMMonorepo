@@ -6,7 +6,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -65,7 +64,7 @@ internal object SharedDocumentIO {
         }
     }
 }
-@Composable internal fun SharedResourceContent(state: SharedAppState, room: String, message: String, media: String, model: SharedAppViewModel, back: () -> Unit, transfers: () -> Unit) {
+@Composable internal fun SharedResourceContent(state: SharedAppState, room: String, message: String, media: String, model: SharedAppViewModel, back: () -> Unit) {
     val current = state.snapshot?.resource?.takeIf { it.roomID == room && it.messageID == message && it.selected?.id == media }
     var feedback by remember { mutableStateOf<String?>(null) }
     val generation by rememberUpdatedState(state.generation); var exportGeneration by remember { mutableStateOf<Long?>(null) }
@@ -90,24 +89,6 @@ internal object SharedDocumentIO {
                 if (attachment.bytes > 33_554_432) Text("当前支持下载最多 32 MiB 的文件")
             }
         }
-        item { TextButton(transfers, modifier = Modifier.testTag("shared_resource_transfers")) { Text("上传与下载任务") }; feedback?.let { Text(it, modifier = Modifier.testTag("shared_resource_saved")) } }
-    }
-}
-@Composable internal fun SharedTransfersContent(state: SharedAppState, model: SharedAppViewModel, back: () -> Unit) {
-    LazyColumn(Modifier.fillMaxSize().testTag("shared_transfers"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        item { TextButton(back) { Text("返回") }; Text("上传与下载", style = MaterialTheme.typography.titleLarge); Text("显示最近 50 个任务") }
-        items(state.snapshot?.resource?.transfers ?: kotlinx.collections.immutable.persistentListOf(), key = { it.kind + it.id }) { transfer ->
-            Column(Modifier.testTag("shared_transfer_${transfer.id}")) {
-                Text(transfer.name)
-                Text(when (transfer.phase) { "completed" -> "已完成"; "cancelled" -> "已取消"; "paused" -> "已暂停"; "failed", "requiresAttention" -> "需要处理"; "waitingRetry" -> "等待重试"; "queued" -> "已排队"; "transferring" -> "传输中"; "verifying" -> "正在校验"; "processing" -> "服务端处理中"; else -> "正在确认状态" })
-                transfer.bytes?.let { total -> Text("已确认 ${transfer.confirmed ?: 0} / $total 字节") }
-                Row {
-                    SharedTransferAction.entries.filter { it.wire in transfer.actions }.forEach { action ->
-                        TextButton({ model.transferAction(transfer.id, action) }, enabled = !state.busy) { Text(when (action) { SharedTransferAction.Pause -> "暂停"; SharedTransferAction.Resume -> "继续"; SharedTransferAction.Cancel -> "取消下载"; else -> "重试" }) }
-                    }
-                }
-            }
-        }
-        state.snapshot?.resource?.failure?.let { item { Text("资源服务暂不可用，请重新登录后重试") } }
+        feedback?.let { message -> item { Text(message, modifier = Modifier.testTag("shared_resource_saved")) } }
     }
 }

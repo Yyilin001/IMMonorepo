@@ -505,6 +505,7 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         XCTAssertTrue(privacy.waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["v2.message.favorites"].exists)
         XCTAssertTrue(app.buttons["v2.sign-out"].exists)
+        XCTAssertFalse(app.buttons["v2.resources.open"].exists)
         let account = XCTAttachment(screenshot: app.screenshot())
         account.name = "Account grouped settings hierarchy"
         account.lifetime = .keepAlways

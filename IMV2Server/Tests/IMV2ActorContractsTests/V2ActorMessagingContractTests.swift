@@ -16,8 +16,6 @@ struct V2ActorMessagingContractTests {
                 messageID: message, expectedMessageRevision: 2, text: "edited", maximumUTF8Bytes: 64), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)),
             .withdrawOperation(try .init(command: .init(roomID: room, actorUserID: user, operationID: .init(uuid: UUID()),
                 messageID: message, expectedMessageRevision: 3), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)),
-            .reactionOperation(try .init(command: .init(roomID: room, actorUserID: user, operationID: .init(uuid: UUID()),
-                messageID: message, reaction: "👍", action: .add), expectedReactionRevision: 0, firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)),
         ]
         for command in commands {
             #expect(command.roomID == room && command.actorUserID == user)
@@ -33,7 +31,6 @@ struct V2ActorMessagingContractTests {
         let results: [V2RoomMessagingResult] = [
             .sendOperation(.unresolved), .sendOperation(.fingerprintConflict),
             .mutation(.unresolved), .mutation(.fingerprintConflict),
-            .reactionOperation(.unresolved), .reactionOperation(.fingerprintConflict),
         ]
         for result in results {
             #expect(try JSONDecoder().decode(V2RoomMessagingResult.self, from: JSONEncoder().encode(result)) == result)

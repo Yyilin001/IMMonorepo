@@ -236,37 +236,8 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             return
         }
         messageBody.press(forDuration: 1)
-        let reactionPicker = app.buttons.matching(
-            NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.reaction-picker.\(messageID)", "表情回应")
-        ).firstMatch
-        let reactionPickerIsHittable = reactionPicker.waitForExistence(timeout: 5) && reactionPicker.isHittable
-        if !reactionPickerIsHittable {
-            let screenshot = XCTAttachment(screenshot: app.screenshot())
-            screenshot.name = "two-install-reaction-picker-not-hittable"
-            screenshot.lifetime = .keepAlways
-            add(screenshot)
-            let hierarchy = XCTAttachment(string: app.debugDescription)
-            hierarchy.name = "two-install-reaction-picker-ui-hierarchy"
-            hierarchy.lifetime = .keepAlways
-            add(hierarchy)
-            XCTFail("反应入口必须在发送消息后可见并可点击。")
-        }
-        reactionPicker.tap()
-        let thumbsUp = app.buttons.matching(
-            NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.reaction-picker.\(messageID).👍", "👍")
-        ).firstMatch
-        XCTAssertTrue(
-            thumbsUp.waitForExistence(timeout: 5),
-            "反应菜单必须暴露带稳定 identifier 的反应选项。"
-        )
-        thumbsUp.tap()
+        XCTAssertFalse(app.buttons["v2.message.reaction-picker.\(messageID)"].exists)
         let actionFeedback = app.staticTexts["v2.message.action-feedback"]
-        XCTAssertTrue(
-            actionFeedback.waitForExistence(timeout: 30),
-            "反应必须经真实持久化命令提交，并反馈正在同步的状态。"
-        )
-        XCTAssertTrue(actionFeedback.label.contains("反应已提交") || actionFeedback.label.contains("反应已安全保存"))
-        messageBody.press(forDuration: 1)
         let edit = app.buttons.matching(
             NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.edit.\(messageID)", "编辑")
         ).firstMatch
@@ -1660,11 +1631,6 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertNotEqual(editedText, "facade source")
         app.buttons["v2.message.edit-save"].tap()
         XCTAssertTrue(body(editedText).waitForExistence(timeout: 30))
-        menu("v2.message.reaction-picker.", on: editedText)
-        let thumbs = app.buttons.matching(NSPredicate(format: "label == %@ OR identifier ENDSWITH %@", "👍", ".👍")).firstMatch
-        XCTAssertTrue(thumbs.waitForExistence(timeout: 10)); thumbs.tap()
-        let reacted = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.reaction.")).firstMatch
-        XCTAssertTrue(reacted.waitForExistence(timeout: 30))
         menu("v2.message.forward.", on: editedText)
         let target = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.forward.target.")).firstMatch
         XCTAssertTrue(target.waitForExistence(timeout: 10)); target.tap()

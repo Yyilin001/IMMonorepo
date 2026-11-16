@@ -35,8 +35,6 @@ extension GRDBV2LocalSyncStore {
                       SELECT 1 FROM v2_read_receipt_operations p WHERE p.work_id=w.work_id))
                     OR (w.operation_kind IN ('editMessage','withdrawMessage') AND EXISTS(
                       SELECT 1 FROM v2_message_mutation_operations p WHERE p.work_id=w.work_id))
-                    OR (w.operation_kind='reaction' AND EXISTS(
-                      SELECT 1 FROM v2_message_reaction_intents p WHERE p.work_id=w.work_id))
                     OR (w.operation_kind='forwardMessage' AND EXISTS(
                       SELECT 1 FROM v2_forward_plan_operations p WHERE p.work_id=w.work_id))
                     OR (w.operation_kind IN ('memberMute','moderatedMemberRemoval') AND EXISTS(
@@ -84,7 +82,6 @@ extension GRDBV2LocalSyncStore {
                 try db.execute(sql: "DELETE FROM v2_name_operations WHERE work_id=?", arguments: [id])
                 try db.execute(sql: "DELETE FROM v2_read_receipt_operations WHERE work_id=?", arguments: [id])
                 try db.execute(sql: "DELETE FROM v2_message_mutation_operations WHERE work_id=?", arguments: [id])
-                try db.execute(sql: "DELETE FROM v2_message_reaction_intents WHERE work_id=?", arguments: [id])
                 try db.execute(sql: "DELETE FROM v2_forward_plan_operations WHERE work_id=?", arguments: [id])
                 try db.execute(sql: "DELETE FROM v2_member_administration_intents WHERE work_id=?", arguments: [id])
                 try db.execute(sql: "DELETE FROM v2_group_capability_intents WHERE work_id=?", arguments: [id])

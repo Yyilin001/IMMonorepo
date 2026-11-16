@@ -2,7 +2,7 @@
 
 本目录保存编译器导出的公开接口清单，不再维护独立 Kotlin 业务实现的逐项对齐表。第五阶段已移除旧 Kotlin `clientkit` / `platform`；Android 通过 `sharedsdk` 调用同一 Swift 运行时。
 
-当前基线包含 `IMV2ClientKit`、`IMV2ClientRuntime`、`IMV2ClientNetwork`、`IMV2ClientPlatform` 和 `IMV2ClientApple` 五个模块的 iOS 17 / arm64 模拟器公开符号：6,079 项，其中手写 4,239、生成 1,773、无源码位置 67。第十三阶段与第十二阶段相比，旧五模块的 6,079 条完整记录一致，无新增、删除或声明变化。
+当前基线包含 `IMV2ClientKit`、`IMV2ClientRuntime`、`IMV2ClientNetwork`、`IMV2ClientPlatform` 和 `IMV2ClientApple` 五个模块的 iOS 17 / arm64 模拟器公开符号：6,035 项，其中手写 4,196、生成 1,773、无源码位置 66。移除表情回应后，时间线接口不再返回反应集合，客户端不再公开表情回应的提交、恢复和重试接口。
 
 - `swift-public-api.jsonl`：公开符号的精确身份、声明、类型和仓库相对位置。
 - `manifest.json`：编译器、目标、输入图和源码摘要；源码覆盖整个 `IMV2ClientKit/Sources`、Package 与实时协议。

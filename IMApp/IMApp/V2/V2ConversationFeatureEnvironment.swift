@@ -39,7 +39,6 @@ struct V2ConversationProjectionDependencies {
 struct V2ConversationMessageDependencies {
     let sender: (any V2ConversationSending)?
     let withdrawer: (any V2MessageWithdrawing)?
-    let reactionChanger: (any V2MessageReactionChanging)?
     let editor: (any V2MessageEditing)?
     let readReceiptReporter: (any V2ConversationReadReporting)?
     let stateChanger: (any V2ConversationStateChanging)?
@@ -51,7 +50,6 @@ struct V2ConversationMessageDependencies {
     init(
         sender: (any V2ConversationSending)? = nil,
         withdrawer: (any V2MessageWithdrawing)? = nil,
-        reactionChanger: (any V2MessageReactionChanging)? = nil,
         editor: (any V2MessageEditing)? = nil,
         readReceiptReporter: (any V2ConversationReadReporting)? = nil,
         stateChanger: (any V2ConversationStateChanging)? = nil,
@@ -62,7 +60,6 @@ struct V2ConversationMessageDependencies {
     ) {
         self.sender = sender
         self.withdrawer = withdrawer
-        self.reactionChanger = reactionChanger
         self.editor = editor
         self.readReceiptReporter = readReceiptReporter
         self.stateChanger = stateChanger

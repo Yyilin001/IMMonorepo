@@ -1178,7 +1178,7 @@ extension V2LiveResourceAuthorTests {
         print("Live acceptance: moderation, mute/remove original recovery and post-change send denial passed.")
     }
 
-    @Test("real message edit, reaction, personal preferences, pin and withdrawal",
+    @Test("real message edit, personal preferences, pin and withdrawal",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
     func messageOperationAcceptance() async throws {
         let fixture = try LiveAccountFixture()
@@ -1216,21 +1216,6 @@ extension V2LiveResourceAuthorTests {
             }
             #expect(editCommit.messageRevision == 2)
             #expect(try await mutations.recover(.init(identity: edit.identity, fingerprint: edit.fingerprint, action: .query)) == edited)
-            let reactions = try V2HTTPMessageReactionOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
-            for action in [V2MessageReactionAction.add, .remove] {
-                let baseline = try await reactions.snapshot(roomID: room, messageID: sent.messageID, reaction: "👍")
-                let command = try V2MessageReactionOperationCommand(command: .init(roomID: room, actorUserID: author.userID,
-                    operationID: .init(uuid: UUID()), messageID: sent.messageID, reaction: "👍", action: action),
-                    expectedReactionRevision: baseline.revision, firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
-                let result = try await reactions.submit(command)
-                guard case .receipt(let receipt) = result, case .committed(let committed) = receipt.outcome else {
-                    throw ResourceLiveFailure.presentation
-                }
-                #expect(committed.targetState == (action == .add ? .present : .absent))
-                #expect(try await reactions.recover(.init(identity: command.identity, fingerprint: command.fingerprint, action: .query)) == result)
-                let persisted = try await reactions.snapshot(roomID: room, messageID: sent.messageID, reaction: "👍")
-                #expect(persisted.targetState == committed.targetState && persisted.revision == baseline.revision + 1)
-            }
             let conversation = try V2ConversationStateCommand(operationID: .init(uuid: UUID()), roomID: room,
                 isPinned: true, isArchived: false, muteUntil: nil, expectedRevision: .init(rawValue: 0)!,
                 firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
@@ -1303,7 +1288,7 @@ extension V2LiveResourceAuthorTests {
             print("Live acceptance: real TLS history to SQLite search; edit removes old text and withdrawal removes search hit.")
             await reader.disconnect(); await socket.disconnect()
         } catch { await reader.disconnect(); await socket.disconnect(); throw error }
-        print("Live acceptance: TCP send idempotency/recovery, edit, reaction add/remove, conversation preference, favorite, pin, forward, history and withdrawal passed.")
+        print("Live acceptance: TCP send idempotency/recovery, edit, conversation preference, favorite, pin, forward, history and withdrawal passed.")
     }
 
     @Test("real TCP acceptance waits for local projection before history GC and retains canonical content",

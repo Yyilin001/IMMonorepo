@@ -26,7 +26,7 @@ import java.util.UUID
 
 class SharedSDKInteractionsBackendTests {
     @get:Rule val compose = createEmptyComposeRule()
-    @Test fun repliesForwardingAndReactionsUseSharedRuntime() = runBlocking<Unit> {
+    @Test fun repliesAndForwardingUseSharedRuntime() = runBlocking<Unit> {
         val args = InstrumentationRegistry.getArguments(); org.junit.Assume.assumeTrue(args.getString("sharedURL") != null)
         val base=args.getString("sharedURL")!!; val port=args.getString("sharedTLSPort")!!.toInt(); val peerPort=args.getString("sharedPeerTLSPort")!!.toInt(); val control=args.getString("sharedControlPort")!!.toInt()
         val context=InstrumentationRegistry.getInstrumentation().targetContext
@@ -58,7 +58,6 @@ class SharedSDKInteractionsBackendTests {
         suspend fun peerMessage(text:String):SharedMessage=withTimeout(60000) { while(true) { peer.snapshot().chat?.messages?.firstOrNull { it.text==text }?.let { return@withTimeout it };delay(100) };error("unreachable") }
         fun appMessage(text:String):SharedMessage { compose.waitUntil(60000) { snap().chat?.messages?.any { it.text==text }==true };return snap().chat!!.messages.first { it.text==text } }
         fun reply(id:String,text:String) { click("shared_reply_$id","shared_messages");compose.onNodeWithTag("shared_reply_text").performTextReplacement(text);click("shared_reply_send");idle() }
-        fun react(id:String,value:String) { click("shared_react_$id","shared_messages");click("shared_choose_reaction_$value");idle() }
         fun forward(message:SharedMessage,target:String) { click("shared_forward_${message.id}","shared_messages");click("shared_forward_target_$target","shared_forward_targets");click("shared_forward_confirm");idle();assertNull(model!!.state.value.error) }
         fun forwardsDone(count:Int) { compose.waitUntil(60000) { snap().messaging!!.interactions.forwards.count { it.status=="committed" && it.succeeded==1 && it.rejected==0 }==count } }
         try {
@@ -83,15 +82,6 @@ class SharedSDKInteractionsBackendTests {
             click("shared_reply_reference_${answer.id}","shared_messages");compose.waitUntil(30000) { snap().chat?.focusMessageID==original.id }
             compose.onNodeWithTag("shared_message_${original.id}").assertIsDisplayed()
             evidence.put("sourceMessageID",original.id).put("replyMessageID",answer.id).put("replyReferenceAndNavigation",true)
-            stage("reaction")
-            react(original.id,"👍")
-            withTimeout(45000) { while(peer.snapshot().chat!!.messages.first { it.id==original.id }.reactions.none { it.value=="👍" && it.count==1 && !it.includesMe }) delay(100) }
-            peer.reactMessage(room,original.id,"👍",true)
-            compose.waitUntil(45000) { snap().chat!!.messages.first { it.id==original.id }.reactions.any { it.value=="👍" && it.count==2 && it.includesMe } }
-            click("shared_reaction_${original.id}_👍","shared_messages")
-            compose.waitUntil(45000) { snap().chat!!.messages.first { it.id==original.id }.reactions.any { it.value=="👍" && it.count==1 && !it.includesMe } }
-            withTimeout(45000) { while(peer.snapshot().chat!!.messages.first { it.id==original.id }.reactions.none { it.value=="👍" && it.count==1 && it.includesMe }) delay(100) }
-            evidence.put("reactionTwoUsersAddRemove",true)
             stage("text-forward")
             forward(original,group);forwardsDone(1);peer.openConversation(group)
             val forwarded=peerMessage(original.text);assertEquals(original.id,forwarded.forwardedFromID);assertNotEquals(original.id,forwarded.id)
@@ -119,27 +109,25 @@ class SharedSDKInteractionsBackendTests {
             compose.onNodeWithText("返回").performClick();click("shared_chat_back");openChat()
             peer.openConversation(room);stage("reopen")
             relay("pause");compose.waitUntil(20000) { snap().state!=SharedSessionState.Connected }
-            reply(original.id,"离线回复 $run");react(original.id,"🎉");forward(changed,group)
+            reply(original.id,"离线回复 $run");forward(changed,group)
             scenario!!.close();scenario=null;withTimeout(30000) { while(SharedClient.activeClientCount()!=1) delay(50) }
             relay("resume");launchApp();compose.waitUntil(60000) { model!!.state.value.snapshot?.state==SharedSessionState.Connected };openChat()
             val restoredReply=appMessage("离线回复 $run");assertEquals(original.id,restoredReply.replyToID);assertEquals(restoredReply.id,peerMessage(restoredReply.text).id)
-            compose.waitUntil(45000) { snap().chat!!.messages.first { it.id==original.id }.reactions.any { it.value=="🎉" && it.count==1 && it.includesMe } };forwardsDone(3)
+            forwardsDone(3)
             peer.openConversation(group);val restoredForward=peerMessage(changed.text);assertEquals(original.id,restoredForward.forwardedFromID)
             assertEquals(1,peer.snapshot().chat!!.messages.count { it.text==changed.text });assertEquals(3,peer.snapshot().chat!!.messages.count { it.forwardedFromID!=null })
             evidence.put("restoredReplyMessageID",restoredReply.id).put("restoredForwardMessageID",restoredForward.id).put("disconnectOwnerReopenNoDuplicates",true)
             stage("withdrawn-reference")
             peer.openConversation(room);peer.withdrawMessage(room,original.id,changed.revision)
             compose.waitUntil(45000) { snap().chat!!.messages.first { it.id==original.id }.withdrawn && snap().chat!!.messages.first { it.id==answer.id }.replyPreview==null }
-            assertTrue(snap().chat!!.messages.first { it.id==original.id }.reactions.isEmpty())
             compose.onNodeWithTag("shared_messages").performScrollToNode(hasTestTag("shared_reply_reference_${answer.id}"))
             compose.onNodeWithTag("shared_reply_reference_${answer.id}").assertIsNotEnabled()
             withTimeout(45000) { while(peer.snapshot().chat!!.messages.none { it.id==original.id && it.withdrawn }) delay(100) }
-            assertTrue(runCatching { peer.reactMessage(room,original.id,"🎉",true) }.isFailure)
             assertTrue(runCatching { peer.sendText(room,"invalid reply",original.id) }.isFailure)
             evidence.put("withdrawnReferenceRedactedAndActionsRejected",true)
             stage("isolation")
             idle();compose.runOnIdle { model!!.signOut() };compose.waitUntil(30000) { model!!.state.value.snapshot?.userID==null && !model!!.state.value.busy };login(2)
-            assertNull(snap().chat);assertTrue(snap().messaging!!.interactions.reactions.isEmpty());assertTrue(snap().messaging!!.interactions.forwards.isEmpty())
+            assertNull(snap().chat);assertTrue(snap().messaging!!.interactions.forwards.isEmpty())
             idle();compose.runOnIdle { model!!.signOut() };compose.waitUntil(30000) { model!!.state.value.snapshot?.userID==null && !model!!.state.value.busy }
             scenario!!.close();scenario=null;peerJob!!.cancelAndJoin();peerJob=null;peer.signOut();peer.close()
             assertEquals(0,SharedClient.activeClientCount());assertEquals(0,SharedClient.activeOperationCount());assertEquals(0,AndroidRuntimePlatform.install(context).activeHttpCount);assertEquals(0,AndroidRuntimePlatform.install(context).activeConnectionCount)

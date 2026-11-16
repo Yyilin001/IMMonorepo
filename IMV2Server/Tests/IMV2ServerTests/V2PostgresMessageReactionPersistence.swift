@@ -1,3 +1,5 @@
+// 供历史房间事件的 PostgreSQL 集成测试构造旧数据。
+@testable import IMV2ServerInfrastructure
 import IMV2ServerApplication
 import IMV2ServerContracts
 import FluentKit
@@ -9,12 +11,12 @@ import SQLKit
 ///
 /// 先串行化同一发起者的表情操作，再把集合变更与房间派生的传播工作放在同一个事务内提交。
 /// 加锁顺序与其他房间变更一致：操作 → 房间 → 消息 → 准入 → 分片。
-package struct V2PostgresMessageReactionPersistence: Sendable {
+struct V2PostgresMessageReactionPersistence: Sendable {
     private let database: any Database
     /// 组合数据库。
     ///
     /// - Parameter transaction: 存放房间、消息、表情与准入状态的数据库。
-    package init(transaction: any Database) throws {
+    init(transaction: any Database) throws {
         guard transaction.inTransaction else { throw V2MessageReactionStoreError.corruptPersistenceState }
         self.database = transaction
     }
@@ -28,7 +30,7 @@ package struct V2PostgresMessageReactionPersistence: Sendable {
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 表情变更结果。
     /// - Throws: 无权限、状态冲突、容量不足或持久化失败时抛出。
-    package func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome {
+    func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome {
         let transaction = database
         guard let sql = transaction as? any SQLDatabase else { throw V2MessageReactionStoreError.corruptPersistenceState }
         let roomID = try v2PersistenceUUID(command.roomID, invalid: V2MessageReactionStoreError.corruptPersistenceState), actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2MessageReactionStoreError.corruptPersistenceState)

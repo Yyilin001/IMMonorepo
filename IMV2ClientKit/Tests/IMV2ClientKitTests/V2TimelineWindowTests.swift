@@ -72,7 +72,7 @@ struct V2TimelineWindowTests {
         #expect(window.page.messages.map(\.roomSequence) == [4, 5])
         #expect(window.page.activities.map(\.timelineSequence) == [5])
         #expect(window.newerBoundary?.timelineSequence == 6)
-        #expect(window.page.reactions.count == 1 && window.page.favoritedMessageIDs == [target] && window.page.pinnedMessageIDs == [target])
+        #expect(window.page.favoritedMessageIDs == [target] && window.page.pinnedMessageIDs == [target])
         let refreshed = try await f.store.conversationTimelinePage(in: room, before: window.newerBoundary, limit: 3)
         #expect(refreshed == window.page)
         let activityCursor = V2ClientTimelineCursor(timelineSequence: 5, itemID: target.rawValue, kind: .activity)
@@ -83,35 +83,6 @@ struct V2TimelineWindowTests {
         guard case .found(let exact) = try await f.store.conversationTimelineWindow(in: room, for: user, around: target, before: 0, after: 0) else { throw CancellationError() }
         #expect(exact.newerBoundary?.kind == .activity)
         #expect(try await f.store.conversationTimelinePage(in: room, before: exact.newerBoundary, limit: 1).messages.map(\.messageID) == [target])
-        try await f.close()
-    }
-
-    @Test("reaction summaries aggregate counts and own participation while raw API stays compatible")
-    func reactionSummaries() async throws {
-        let f = try fixture()
-        try await seed(f.store, count: 2)
-        let target = messageID(1), other = UserID(uuid: UUID())
-        try await f.store.databasePool.write { db in
-            try db.execute(sql: "INSERT INTO v2_message_reactions VALUES (?, ?, ?, '👍')", arguments: [target.rawValue, room.rawValue, user.rawValue])
-            try db.execute(sql: "INSERT INTO v2_message_reactions VALUES (?, ?, ?, '👍')", arguments: [target.rawValue, room.rawValue, other.rawValue])
-            try db.execute(sql: "INSERT INTO v2_message_reactions VALUES (?, ?, ?, '❤️')", arguments: [target.rawValue, room.rawValue, other.rawValue])
-        }
-
-        guard case .found(let aggregated) = try await f.store.conversationTimelineWindow(
-            in: room, for: user, around: target, before: 0, after: 0, aggregateReactions: true
-        ) else { throw CancellationError() }
-        #expect(aggregated.page.reactions.isEmpty)
-        let summaries = try #require(aggregated.page.reactionSummaries)
-        #expect(summaries == [
-            .init(messageID: target, reaction: "❤️", count: 1, includesCurrentUser: false),
-            .init(messageID: target, reaction: "👍", count: 2, includesCurrentUser: true)
-        ])
-
-        guard case .found(let raw) = try await f.store.conversationTimelineWindow(
-            in: room, for: user, around: target, before: 0, after: 0
-        ) else { throw CancellationError() }
-        #expect(raw.page.reactionSummaries == nil)
-        #expect(raw.page.reactions.count == 3)
         try await f.close()
     }
 

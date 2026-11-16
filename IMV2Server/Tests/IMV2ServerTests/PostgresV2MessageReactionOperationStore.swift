@@ -1,3 +1,5 @@
+// 供历史房间事件的 PostgreSQL 集成测试构造旧数据。
+@testable import IMV2ServerInfrastructure
 import IMV2ServerApplication
 import IMV2ServerContracts
 import FluentKit
@@ -7,14 +9,14 @@ import IMV2Core
 import SQLKit
 
 /// Own-key revision and permanent original outcomes share the RoomRef write transaction.
-public struct PostgresV2MessageReactionOperationStore: Sendable {
+struct PostgresV2MessageReactionOperationStore: Sendable {
     private let database: any Database
     private let clock: @Sendable () -> Date
     private let committedMessageObserver: (any V2CommittedMessageBatchObserving)?
-    public init(database: any Database, clock: @escaping @Sendable () -> Date = Date.init, committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil) {
+    init(database: any Database, clock: @escaping @Sendable () -> Date = Date.init, committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil) {
         self.database = database; self.clock = clock; self.committedMessageObserver = committedMessageObserver
     }
-    public func change(_ command: V2MessageReactionOperationCommand, token: V2RoomActivationToken,
+    func change(_ command: V2MessageReactionOperationCommand, token: V2RoomActivationToken,
                        capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionRecoveryResult {
         let identity = try command.identity, fingerprint = try command.fingerprint
         let committed: (V2MessageReactionRecoveryResult, Bool) = try await v2WithRoomScopedTransaction(database: database) { transaction in
@@ -71,7 +73,7 @@ public struct PostgresV2MessageReactionOperationStore: Sendable {
         }
         return committed.0
     }
-    public func recover(_ request: V2MessageReactionRecoveryRequest, token: V2RoomActivationToken,
+    func recover(_ request: V2MessageReactionRecoveryRequest, token: V2RoomActivationToken,
                         now: Date) async throws -> V2MessageReactionRecoveryResult {
         try await v2RecoverMessageOperation(database: database, action: request.action, unresolved: .unresolved,
             lock: { try await self.lock(identity: request.identity, token: token, database: $0) },
@@ -79,7 +81,7 @@ public struct PostgresV2MessageReactionOperationStore: Sendable {
             close: { .receipt(try await self.persist(identity: request.identity, fingerprint: request.fingerprint,
                 outcome: .closed, now: now, sql: $0)) })
     }
-    public func snapshot(roomID: RoomID, actorUserID: UserID, messageID: MessageID, reaction: String,
+    func snapshot(roomID: RoomID, actorUserID: UserID, messageID: MessageID, reaction: String,
                          token: V2RoomActivationToken) async throws -> V2MessageReactionSnapshot {
         let normalized = try V2ChangeMessageReactionCommand(roomID: roomID, actorUserID: actorUserID,
             operationID: .init(uuid: UUID()), messageID: messageID, reaction: reaction, action: .add).reaction
@@ -146,8 +148,11 @@ public struct PostgresV2MessageReactionOperationStore: Sendable {
         try v2PersistenceMilliseconds(value, invalid: V2MessageOperationValidationError.invalidReceipt)
     }
 }
-private struct MembershipRow: Decodable { let membershipRevision: Int64; enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" } }
-private struct MessageRow: Decodable { let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case withdrawnAt = "withdrawn_at" } }
-private struct ExistsRow: Decodable { let present: Int }
-private struct KeyRow: Decodable { let revision: Int64; let targetState: String; enum CodingKeys: String, CodingKey { case revision, targetState = "target_state" } }
-private struct KeyState { let revision: UInt64; let targetState: V2MessageReactionTargetState }
+
+private extension PostgresV2MessageReactionOperationStore {
+    struct MembershipRow: Decodable { let membershipRevision: Int64; enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" } }
+    struct MessageRow: Decodable { let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case withdrawnAt = "withdrawn_at" } }
+    struct ExistsRow: Decodable { let present: Int }
+    struct KeyRow: Decodable { let revision: Int64; let targetState: String; enum CodingKeys: String, CodingKey { case revision, targetState = "target_state" } }
+    struct KeyState { let revision: UInt64; let targetState: V2MessageReactionTargetState }
+}

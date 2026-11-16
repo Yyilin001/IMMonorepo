@@ -19,10 +19,10 @@ struct V2LocalSchemaContractTests {
         let primary = try DatabasePool(path: url.path)
         let search = try DatabasePool(path: url.deletingPathExtension().appendingPathExtension("search.sqlite").path)
 
-        #expect(try migrationIdentifiers(in: primary) == ["createCurrentV2Schema"])
+        #expect(try migrationIdentifiers(in: primary) == ["createCurrentV2Schema", "retireMessageReactionWork"])
         #expect(try migrationIdentifiers(in: search) == ["createCurrentV2MessageSearchSchema"])
         let primaryObjectCount = try schemaObjectCount(in: primary)
-        #expect(primaryObjectCount == 283)
+        #expect(primaryObjectCount == 281)
         #expect(try schemaObjectExists(named: "v2_local_profile_display_meta", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_room_unread_directory", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_room_unread_rotation", in: primary) == false)
@@ -30,22 +30,52 @@ struct V2LocalSchemaContractTests {
         #expect(try schemaObjectExists(named: "v2_pending_forward_messages", in: primary) == false)
         // The current schema adds the common work/dependency journal and the
         // durable domain intents, message payloads and native background mappings.
-        for table in ["v2_account_room_heads", "v2_local_profile_display", "v2_operation_work", "v2_member_administration_intents", "v2_member_administration_ready", "v2_member_administration_order", "v2_operation_dependencies", "v2_profile_intents", "v2_own_profile_snapshot", "v2_personal_preference_intents", "v2_personal_preference_confirmed", "v2_name_operations", "v2_name_confirmed", "v2_contact_alias_invalidations", "v2_message_send_operations", "v2_message_mutation_operations", "v2_message_reaction_intents", "v2_forward_plan_operations", "v2_resource_import_active_admission", "v2_resource_transfer_active_admission", "v2_background_transfer_session", "v2_background_transfer_tasks"] {
+        for table in ["v2_account_room_heads", "v2_local_profile_display", "v2_operation_work", "v2_member_administration_intents", "v2_member_administration_ready", "v2_member_administration_order", "v2_operation_dependencies", "v2_profile_intents", "v2_own_profile_snapshot", "v2_personal_preference_intents", "v2_personal_preference_confirmed", "v2_name_operations", "v2_name_confirmed", "v2_contact_alias_invalidations", "v2_message_send_operations", "v2_message_mutation_operations", "v2_forward_plan_operations", "v2_resource_import_active_admission", "v2_resource_transfer_active_admission", "v2_background_transfer_session", "v2_background_transfer_tasks"] {
             #expect(try schemaObjectExists(named: table, in: primary))
         }
         #expect(try schemaObjectExists(named: "v2_pending_conversation_states", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_pending_message_favorites", in: primary) == false)
-        for table in ["v2_pending_member_mutes", "v2_pending_moderated_member_removals", "v2_forward_message_plans", "v2_forward_message_chunks", "v2_pending_message_commands", "v2_pending_message_edits", "v2_pending_message_withdrawals", "v2_pending_read_receipts", "v2_pending_message_reactions"] {
+        for table in ["v2_pending_member_mutes", "v2_pending_moderated_member_removals", "v2_forward_message_plans", "v2_forward_message_chunks", "v2_pending_message_commands", "v2_pending_message_edits", "v2_pending_message_withdrawals", "v2_pending_read_receipts", "v2_pending_message_reactions", "v2_message_reaction_intents"] {
             #expect(try schemaObjectExists(named: table, in: primary) == false)
         }
         let primaryFingerprint = try schemaFingerprint(in: primary)
         // One canonical baseline includes durable account-local display facts.
-        #expect(primaryFingerprint == 0xb0963d0349fbaef1)
+        #expect(primaryFingerprint == 0xc989_208a_1e34_14fd)
         #expect(try schemaObjectCount(in: search) == 6)
         #expect(try schemaFingerprint(in: search) == 0xc865_0994_a5ba_24a3)
 
         #expect(try schemaObjectExists(named: "v2_message_char_fts", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_message_char_fts", in: search))
+    }
+
+    @Test("opening a previous database retires only queued message reactions")
+    func upgradeRetiresReactionWork() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "account.sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        try await store.databasePool.write { db in
+            try db.execute(sql: """
+                DELETE FROM grdb_migrations WHERE identifier = 'retireMessageReactionWork';
+                CREATE TABLE v2_message_reaction_intents (
+                    intent_id TEXT PRIMARY KEY, work_id TEXT REFERENCES v2_operation_work(work_id) ON DELETE RESTRICT
+                );
+                INSERT INTO v2_operation_work
+                    (work_id, intent_id, account_id, identity_key, operation_kind, identity, fingerprint_version,
+                     fingerprint, ordering_key, payload_bytes, execution_state, scheduling_state, next_action_at, created_at)
+                SELECT kind, kind, 'account', kind, kind, x'01', 1, zeroblob(32), kind, 1, 'prepared', 'ready', 0, 0
+                FROM (SELECT 'reaction' AS kind UNION ALL SELECT 'sendMessage');
+                INSERT INTO v2_message_reaction_intents VALUES ('draft', NULL), ('prepared', 'reaction');
+                """)
+        }
+        try await store.close()
+        let upgraded = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        let remaining = try await upgraded.databasePool.read { db in
+            try String.fetchAll(db, sql: "SELECT operation_kind FROM v2_operation_work")
+        }
+        #expect(remaining == ["sendMessage"])
+        try await upgraded.close()
     }
 
     @Test("current identity and room-profile columns enforce their complete domains")

@@ -144,7 +144,6 @@ struct V2MockPreview: View {
                 deviceSessionsStore: nil,
                 groupInvitationStore: nil,
                 pendingGroupInvitationURL: .constant(nil),
-                makeGroupAvatarManagement: nil,
                 localE2EConversationLaunchFixture: nil,
                 passwordLifecycleClient: nil,
                 signOut: { screen = "login" },
@@ -240,7 +239,7 @@ private actor V2MockPreviewSource: V2GroupMemberDirectoryReading, V2GroupCreatio
     }
     func timelinePage(in roomID: String, for userID: String, before cursor: V2ConversationTimelineCursor?, limit: Int) async throws -> V2ConversationTimelinePage {
         let texts = ["大家早上好！我们今天一起看一下新的界面。", "会话列表和联系人页面都已经完成了。", "收到，我觉得布局挺清楚的 👍", "晚点我再补充一下交互细节。", "好的，下午三点一起讨论～"]
-        return .init(items: cursor == nil ? texts.indices.map { i in .message(.init(id: "mock-message-\(i)", roomSequence: UInt64(i + 1), revision: 1, text: texts[i], createdAt: Date().addingTimeInterval(Double(i - 5) * 120), isOutgoing: i == 2 || i == 4, isWithdrawn: false, reactions: i == 1 ? [.init(reaction: "👍", count: 3, includesCurrentUser: true)] : [], senderUserID: try! UserID("00000000-0000-0000-0000-000000000201")), timelineSequence: UInt64(i + 1)) } + (sentMessages[roomID] ?? []).enumerated().map { .message($0.element, timelineSequence: UInt64($0.offset + 6)) } : [], olderCursor: nil)
+        return .init(items: cursor == nil ? texts.indices.map { i in .message(.init(id: "mock-message-\(i)", roomSequence: UInt64(i + 1), revision: 1, text: texts[i], createdAt: Date().addingTimeInterval(Double(i - 5) * 120), isOutgoing: i == 2 || i == 4, isWithdrawn: false, senderUserID: try! UserID("00000000-0000-0000-0000-000000000201")), timelineSequence: UInt64(i + 1)) } + (sentMessages[roomID] ?? []).enumerated().map { .message($0.element, timelineSequence: UInt64($0.offset + 6)) } : [], olderCursor: nil)
     }
     func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation { .found(page: try await timelinePage(in: roomID, for: userID, before: nil, limit: 50), newerBoundary: nil) }
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage {

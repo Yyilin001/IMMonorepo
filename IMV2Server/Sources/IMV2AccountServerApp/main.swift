@@ -454,7 +454,6 @@ enum IMV2AccountServerApp {
             V2VaporMembershipOperationRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
             V2VaporMemberAdministrationRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
             V2VaporMessageModerationRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
-            V2VaporMessageReactionOperationRoutes(authenticator:authenticator,messages:V2RoomRefMessagingClient(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
             V2VaporReadReceiptRecoveryRoutes(authenticator:authenticator,queries:V2RoomRefQueryClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
             V2VaporProfileUpdateRoutes(
                 authenticator: authenticator,

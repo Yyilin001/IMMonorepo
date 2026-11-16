@@ -1,6 +1,6 @@
 import IMV2ServerContracts
 
-extension V2RoomRefMessagingClient: V2MessageMutationOperationHandling, V2MessageReactionOperationHandling {}
+extension V2RoomRefMessagingClient: V2MessageMutationOperationHandling {}
 extension V2RoomRefAdministrationClient: V2MemberAdministrationOperationHandling,
     V2MembershipOperationHandling, V2GroupCapabilityOperationHandling,
     V2MessageModerationOperationHandling, V2PersonalPreferenceRecovering {}

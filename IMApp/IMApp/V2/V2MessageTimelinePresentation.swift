@@ -161,7 +161,6 @@ struct V2MessageTimelineInheritedEnvironment: ViewModifier {
             .environment(\.v2AuthorPresentationPageScope, source.v2AuthorPresentationPageScope)
             .environment(\.v2MediaThumbnailCache, source.v2MediaThumbnailCache)
             .environment(\.v2UserInteractionContext, source.v2UserInteractionContext)
-            .environment(\.v2ResourceManagement, source.v2ResourceManagement)
             .environment(\.v2ResourceNavigation, source.v2ResourceNavigation)
             .environment(\.scenePhase, source.scenePhase)
             .environment(\.displayScale, source.displayScale)

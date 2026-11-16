@@ -146,9 +146,7 @@ internal class SharedAppViewModel(application: Application) : AndroidViewModel(a
     fun reply(room: String, message: String, text: String, saved: () -> Unit) = command { current ->
         withContext(NonCancellable) { current.sendText(room, text, message) }.also { saved() }
     }
-    fun react(room: String, message: String, reaction: String, present: Boolean) = command { it.reactMessage(room, message, reaction, present) }
     fun forward(room: String, message: String, revision: Long, target: String, saved: () -> Unit) = command { it.forwardMessage(room, message, revision, target).also { saved() } }
-    fun retryReaction(room: String, id: String) = command { it.retryReaction(room, id) }
     fun retryForward(room: String, id: String) = command { it.retryForward(room, id) }
     fun cancelForward(room: String, id: String) = command { it.cancelForward(room, id) }
     fun nextConversations() = command { it.nextConversations() }
@@ -191,7 +189,6 @@ internal class SharedAppViewModel(application: Application) : AndroidViewModel(a
     fun openResource(room: String, message: String, media: String) = command { it.openResource(room, message, media) }
     fun downloadResource() = command { it.downloadResource() }
     fun previewResource() = command { it.previewResource() }
-    fun transferAction(id: String, action: SharedTransferAction) = command { it.transferAction(id, action) }
     fun cancelAttachmentSend(id: String) = command { it.cancelAttachmentSend(id) }
     fun exportResource(room: String, message: String, media: String, uri: android.net.Uri, success: () -> Unit) = command {
         SharedDocumentIO.export(getApplication(), it, room, message, media, uri).also { success() }

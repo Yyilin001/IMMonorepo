@@ -15,12 +15,6 @@ public protocol V2MessageMutationOperationHandling: Sendable {
     func recoverMutation(_ request: V2MessageMutationRecoveryRequest) async throws -> V2MessageMutationRecoveryResult
 }
 
-public protocol V2MessageReactionOperationHandling: Sendable {
-    func reactionOperation(_ command: V2MessageReactionOperationCommand) async throws -> V2MessageReactionRecoveryResult
-    func recoverReaction(_ request: V2MessageReactionRecoveryRequest) async throws -> V2MessageReactionRecoveryResult
-    func reactionSnapshot(roomID: RoomID, actorUserID: UserID, messageID: MessageID, reaction: String) async throws -> V2MessageReactionSnapshot
-}
-
 public protocol V2MemberAdministrationOperationHandling: Sendable {
     func admitMemberAdministration(_ intent: V2MemberAdministrationIntent) async throws -> V2MemberAdministrationAdmissionResult
     func submitMemberAdministration(_ input: V2MemberAdministrationCommand) async throws -> V2MemberAdministrationRecoveryResult

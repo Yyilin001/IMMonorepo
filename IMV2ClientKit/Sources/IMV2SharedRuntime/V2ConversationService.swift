@@ -98,7 +98,7 @@ public actor V2ConversationService {
         try await perform { [self] in
             if requiresAuthorization, try await !store.roomAllowsLocalRead(roomID: roomID) { return .unavailable }
             return try await store.conversationTimelineWindow(in: roomID, for: accountID, around: messageID,
-                before: before, after: after, aggregateReactions: true)
+                before: before, after: after)
         }
     }
 

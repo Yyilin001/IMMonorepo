@@ -127,12 +127,10 @@ struct V2RootView: View {
                             deviceSessionsStore: store.deviceSessionsStore,
                             groupInvitationStore: store.groupInvitationStore,
                             pendingGroupInvitationURL: $pendingGroupInvitationURL,
-                            makeGroupAvatarManagement: store.makeGroupAvatarManagement,
                             localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                             passwordLifecycleClient: store.passwordLifecycleClient(),
                             signOut: { store.requestSignOut() }
                         )
-                        .environment(\.v2ResourceManagement, store.resourceManagement)
                         .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
                         .environment(\.v2AvatarPipeline, store.avatarPipeline)
                     } else {
@@ -437,7 +435,6 @@ struct V2SignedInRootView: View {
     let deviceSessionsStore: V2DeviceSessionsStore?
     let groupInvitationStore: V2GroupInvitationStore?
     @Binding var pendingGroupInvitationURL: URL?
-    let makeGroupAvatarManagement: (@MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore)?
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     let passwordLifecycleClient: V2PasswordLifecycleClient?
     let signOut: @MainActor @Sendable () async -> Void
@@ -478,7 +475,6 @@ struct V2SignedInRootView: View {
                 openPrivacy: { presentedSettingsSheet = .privacy },
                 openSecurity: { presentedSettingsSheet = .accountSecurity },
                 openFavorites: { presentedSettingsSheet = .favorites },
-                openResources: appStore.resourceManagement == nil ? nil : { rootNavigation.path.append(V2ResourceRoute.home) },
                 signOut: {
                     guard signOutTask == nil else { return }
                     signOutTask = Task {
@@ -567,8 +563,6 @@ struct V2SignedInRootView: View {
                     initiallyFocusedMessageID: route.messageID,
                     groupInvitationStore: groupInvitationStore)
             }
-            .v2ResourceDestinations(service: appStore.resourceManagement, navigation: rootNavigation,
-                profile: publicIdentitySettingsStore, groups: makeGroupAvatarManagement)
             .navigationDestination(for: V2LocalDirectConversationRoute.self) { route in
                 if let service = conversationStore.localDirectConversationService {
                     V2LocalDirectConversationView(operationID: route.operationID,
@@ -675,7 +669,6 @@ struct V2SignedInRootView: View {
         .task { await conversationStore.observeGroupCreation() }
         .authorPresentationPage(context: .list(signedInProfilePageID))
         .environment(\.v2ResourceNavigation, rootNavigation)
-        .environment(\.v2ResourceManagement, appStore.resourceManagement)
         .environment(\.v2UserInteractionContext, .init(contacts: contactsStore, conversations: conversationStore, navigation: rootNavigation))
     }
 }

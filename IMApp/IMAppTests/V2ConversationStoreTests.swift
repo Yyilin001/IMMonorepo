@@ -1492,7 +1492,6 @@ struct V2ConversationStoreTests {
         #expect(store.isMessageActionInFlight(message))
         #expect(!store.canWithdrawMessage(message))
         #expect(!store.canEditMessage(message))
-        #expect(!store.canReactToMessage(message))
         #expect(await withdrawer.requests().count == 1)
         #expect(await pinner.requestCount == 0)
 
@@ -1535,52 +1534,6 @@ struct V2ConversationStoreTests {
         #expect(await withdrawer.requests().isEmpty)
     }
 
-    @Test func messageReactionTogglesOnlyTheCurrentUsersSetMembership() async {
-        let message = V2ConversationMessageItem(
-            id: "message-a",
-            revision: 1,
-            text: "可反应",
-            createdAt: .now,
-            isOutgoing: false,
-            isWithdrawn: false,
-            reactions: [
-                .init(reaction: "👍", count: 2, includesCurrentUser: true),
-                .init(reaction: "🎉", count: 1, includesCurrentUser: false)
-            ]
-        )
-        let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
-        let changer = V2MessageReactionChangerFake(result: .accepted)
-        let store = makeConversationDetailStore(
-            dataSource: source,
-            sender: nil,
-            messageReactionChanger: changer,
-            userID: "current-user",
-            roomID: "room-a"
-        )
-
-        await store.changeReaction("👍", on: message,action:.remove)
-        await store.changeReaction("❤️", on: message,action:.add)
-
-        #expect(await changer.requests() == [
-            .init(messageID: "message-a", roomID: "room-a", reaction: "👍", action: .remove),
-            .init(messageID: "message-a", roomID: "room-a", reaction: "❤️", action: .add)
-        ])
-        #expect(await source.messageRequestCount() == 2)
-        #expect(store.messageActionFeedback == "反应已提交，正在同步。")
-    }
-
-    @Test func messageReactionIsNotAvailableAfterWithdrawal() async {
-        let message = V2ConversationMessageItem(id: "message-a", revision: 2, text: "消息已撤回", createdAt: .now, isOutgoing: true, isWithdrawn: true)
-        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
-        let changer = V2MessageReactionChangerFake(result: .accepted)
-        let store = makeConversationDetailStore(dataSource: source, sender: nil, messageReactionChanger: changer, userID: "current-user", roomID: "room-a")
-
-        await store.changeReaction("👍", on: message)
-
-        #expect(!store.canReactToMessage(message))
-        #expect(await changer.requests().isEmpty)
-    }
-
     @Test func messageEditUsesProjectionRevisionAndRefreshesAfterAcknowledgement() async {
         let message = V2ConversationMessageItem(id: "message-a", revision: 5, text: "原文", createdAt: .now, isOutgoing: true, isWithdrawn: false)
         let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
@@ -1612,35 +1565,6 @@ struct V2ConversationStoreTests {
         #expect(!shouldDismissEditor)
         #expect(await editor.requests().count == 1)
         #expect(store.messageActionFeedback == "编辑被拒绝（REVISION_CONFLICT），请刷新后重试。")
-    }
-
-    @Test func reactionExplicitOfflineTargetSurvivesPageAndUnknownNeedsUserContinuation() async throws {
-        let f=try V2AppMessageWorkFixture();defer { f.remove() }
-        let messageID=MessageID(uuid:UUID()),remote=V2AppReactionClient(account:f.account)
-        let service=V2MessageReactionOperationService(accountID:f.account,store:f.store,client:remote)
-        let message=V2ConversationMessageItem(id:messageID.rawValue,revision:1,text:"消息",createdAt:.now,isOutgoing:false,isWithdrawn:false)
-        let detail=makeConversationDetailStore(dataSource:V2ConversationDataSourceFake(summaries:[],messages:[]),sender:nil,messageReactionChanger:V2OperationMessageReactionChanger(service:service),userID:f.account.rawValue,roomID:f.room.rawValue)
-        let page=Task { await detail.observeReactionIntents() }
-        await detail.changeReaction("👍",on:message,action:.remove)
-        let intent=try #require(try await f.store.nextReactionDraft(now:Date()))
-        #expect(intent.targetState == .absent)
-        #expect(await remote.calls==0)
-        page.cancel();await page.value
-        #expect(try await f.store.nextReactionDraft(now:Date())==intent)
-        #expect(try await service.prepareNextIntent())
-        let work=try #require(try await f.store.operationWork(id:intent.id))
-        let claim=try await f.claim(work)
-        try await f.store.deferOperationWork(claim,until:Date(),code:"RESPONSE_LOST",scheduling:.needsAttention)
-        let secondPage=Task { await detail.observeReactionIntents() }
-        let deadline=ContinuousClock.now + .seconds(3)
-        while detail.pendingReactions.first?.work?.scheduling != .needsAttention { try #require(ContinuousClock.now<deadline);await Task.yield() }
-        await detail.refresh()
-        #expect(try await f.store.operationWork(id:intent.id)?.scheduling == .needsAttention)
-        await detail.resumeReactionIntent(intent.id)
-        #expect(try await f.store.operationWork(id:intent.id)?.nextAction == .reconcile)
-        #expect(try await f.store.reactionCommand(workID:intent.id).targetState == .absent)
-        secondPage.cancel();await secondPage.value
-        try await f.store.close()
     }
 
     @Test func messageMutationUnknownKeepsSavedDraftAndRequiresExplicitContinuation() async throws {
@@ -3496,7 +3420,6 @@ private func makeConversationDetailStore(
     messageSearcher: (any V2ConversationMessageSearching)? = nil,
     sender: (any V2ConversationSending)?,
     messageWithdrawer: (any V2MessageWithdrawing)? = nil,
-    messageReactionChanger: (any V2MessageReactionChanging)? = nil,
     messageEditor: (any V2MessageEditing)? = nil,
     messageModerator: V2MessageModerationOperationService? = nil,
     readReceiptReporter: (any V2ConversationReadReporting)? = nil,
@@ -3541,7 +3464,6 @@ private func makeConversationDetailStore(
         messages: .init(
             sender: sender,
             withdrawer: messageWithdrawer,
-            reactionChanger: messageReactionChanger,
             editor: messageEditor,
             readReceiptReporter: readReceiptReporter,
             favoriter: messageFavoriter,
@@ -3593,7 +3515,6 @@ private func makeConversationListStore(
     userID: String,
     sender: (any V2ConversationSending)? = nil,
     messageWithdrawer: (any V2MessageWithdrawing)? = nil,
-    messageReactionChanger: (any V2MessageReactionChanging)? = nil,
     messageEditor: (any V2MessageEditing)? = nil,
     readReceiptReporter: (any V2ConversationReadReporting)? = nil,
     conversationStateChanger: (any V2ConversationStateChanging)? = nil,
@@ -3624,7 +3545,6 @@ private func makeConversationListStore(
         messages: .init(
             sender: sender,
             withdrawer: messageWithdrawer,
-            reactionChanger: messageReactionChanger,
             editor: messageEditor,
             readReceiptReporter: readReceiptReporter,
             stateChanger: conversationStateChanger,
@@ -4350,27 +4270,6 @@ private actor V2SuspendingGroupMessagePinner: V2GroupMessagePinning {
     }
 
     func complete() { completion?.resume(); completion = nil }
-}
-
-private actor V2MessageReactionChangerFake: V2MessageReactionChanging {
-    struct Request: Equatable, Sendable {
-        let messageID: String
-        let roomID: String
-        let reaction: String
-        let action: V2MessageReactionAction
-    }
-
-    private let result: V2MessageReactionOutcome
-    private var requestsValue: [Request] = []
-
-    init(result: V2MessageReactionOutcome) { self.result = result }
-
-    func changeReaction(messageID: String, in roomID: String, reaction: String, action: V2MessageReactionAction) async throws -> V2MessageReactionOutcome {
-        requestsValue.append(.init(messageID: messageID, roomID: roomID, reaction: reaction, action: action))
-        return result
-    }
-
-    func requests() -> [Request] { requestsValue }
 }
 
 private actor V2MessageEditorFake: V2MessageEditing {

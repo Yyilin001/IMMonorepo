@@ -130,7 +130,7 @@ struct V2DurableResourceLifecycleTests {
             await imports.release()
             let deadline = ContinuousClock.now + .seconds(10)
             while try await store.managedResourceTransfers(.init(group: .attention)).entries.first?.phase != .paused { try #require(ContinuousClock.now < deadline); try await Task.sleep(for: .milliseconds(5)) }
-            #expect(try await sender.pending(in: room).first?.status == "附件准备已暂停，可在文件与存储中继续")
+            #expect(try await sender.pending(in: room).first?.status == "附件准备已暂停，可取消后重新发送")
             #expect(try await sender.pending(in: room).first?.canRetry == false)
             #expect(try await store.dueResourceImports(now: .distantFuture).isEmpty)
             let locator = try #require(try await store.resourceImport(id: id)?.status?.locator)

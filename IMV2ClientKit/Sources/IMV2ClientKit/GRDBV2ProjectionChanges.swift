@@ -97,7 +97,7 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
     /// - Parameter db: 已回滚的数据库。
     func databaseDidRollback(_ db: Database) { pending = .none; roomRows.removeAll(); hasUnscopedRoomChange = false; willCommit = nil }
 
-    private static let roomScopedTables: Set<String> = ["v2_message_projections", "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_room_read_watermarks"]
+    private static let roomScopedTables: Set<String> = ["v2_message_projections", "v2_direct_read_receipt_projections", "v2_room_read_watermarks"]
 
     /// 把单张表的变更映射到可见作用域。
     ///
@@ -140,7 +140,7 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             return .init(scopes: conversation, requiresImmediateRefresh: kind == .delete)
         case "v2_sync_rebuild_requests", "v2_sync_cursor", "v2_sync_events", "v2_group_events", "v2_group_event_cursors",
              "v2_snapshot_import", "v2_reset_rollback",
-             "v2_local_installation", "v2_push_intent", "v2_message_search_jobs", "v2_message_search_state", "v2_message_effects", "v2_reaction_versions", "v2_reaction_effects", "v2_announcement_effects", "v2_pin_effects", "v2_role_policy_effects":
+             "v2_local_installation", "v2_push_intent", "v2_message_search_jobs", "v2_message_search_state", "v2_message_effects", "v2_message_reactions", "v2_reaction_versions", "v2_reaction_effects", "v2_announcement_effects", "v2_pin_effects", "v2_role_policy_effects":
             return .none
         // Derived summary rows may be deleted/reinserted for an ordinary new
         // message. Their source projection separately raises urgent changes.
@@ -154,7 +154,7 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             return .init(scopes: [.contacts, .conversations, .conversationDetails, .presentations], requiresImmediateRefresh: kind != .insert)
         case "v2_role_policy_recovery_requests":
             return .init(scopes: .conversationMetadata, requiresImmediateRefresh: false)
-        case "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_room_read_watermarks", "v2_message_reaction_intents", "v2_read_receipt_intents", "v2_read_receipt_operations":
+        case "v2_direct_read_receipt_projections", "v2_room_read_watermarks", "v2_read_receipt_intents", "v2_read_receipt_operations":
             return .init(scopes: .conversationTimeline, requiresImmediateRefresh: false)
         case "v2_read_receipt_archives":
             return .init(scopes: [.conversations, .conversationTimeline], requiresImmediateRefresh: false)

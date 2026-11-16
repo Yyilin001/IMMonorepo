@@ -27,7 +27,7 @@ try {
 
 ## 共享消息业务（第十五阶段）
 
-`sendText`（含回复）、`editMessage`、`withdrawMessage`、`forwardMessage`、`reactMessage` 以及对应重试/取消操作均进入 Swift `V2MessageService`。附件发送先沿用资源适配器准备文件，再通过同一门面冻结消息和上传依赖。原有 Kotlin 调用、JSON 请求和页面反馈保持兼容；未新增 Kotlin 业务逻辑。最终结果仍以同步投影与持久化操作状态为准，取消等待不撤销已经保存的发送。关闭或退出账号会排空门面，旧原生服务不能再提交新消息。真实后端证据见 [第十五阶段](../../experiments/swift-desktop/verification/phase15/RESULTS.md)。
+`sendText`（含回复）、`editMessage`、`withdrawMessage`、`forwardMessage` 以及对应重试/取消操作均进入 Swift `V2MessageService`。附件发送先沿用资源适配器准备文件，再通过同一门面冻结消息和上传依赖。最终结果仍以同步投影与持久化操作状态为准，取消等待不撤销已经保存的发送。关闭或退出账号会排空门面，旧原生服务不能再提交新消息。真实后端证据见 [第十五阶段](../../experiments/swift-desktop/verification/phase15/RESULTS.md)。
 
 ## 共享搜索和回执业务（第十六阶段）
 
@@ -154,7 +154,7 @@ python3 IMAndroid/scripts/verify_shared_sdk.py --serial <设备序列号> \
 - 平台 `V2AndroidStreamingHTTP` / OkHttp 只处理流式 HTTPS 字节，响应头先交给 Swift 验证，再以 64 KiB 分块读取。上传文件路径只在 Swift 与平台之间流转，不出现在 App DTO。保持系统/应用证书信任，禁用跳转、自动重试、缓存及日志；同一取消句柄等待实际 I/O 退出再释放。平台不可用映射为传输失败；对象 HTTP 状态、Retry-After 和过期计划交给原有 Swift 有界恢复策略处理。
 - App 支持图片选取（保持长宽比、长边最多 2048、编码 JPEG 去除元数据）、文件选取、附件发送、图片缩略预览、下载原件及 `CreateDocument` 保存。保存通过 256 KiB SDK 分块，每块重新借用授权文件；失败尝试删除未完成的输出文档。外部保存副本由用户所选位置管理，不属于 SDK 缓存。
 - 消息 DTO 的 `attachments` 为不可变列表，只含服务端媒体身份和展示元数据。资源页面不接收 URL；Swift 验证消息归属和授权。图片内存展示受原目标期限约束，后台、离页和账号切换撤下。
-- `transferAction` 使用类型化动作，权限由共享资源服务控制。任务页当前展示最近 50 项，不宣称完整资源目录、批量多附件、音视频播放、系统后台传输或通用外部文件打开已完成。
+- `transferAction` 使用类型化动作，权限由共享资源服务控制。用户可在聊天内下载和保存附件。账户级传输列表仅供 SDK 使用，不宣称完整资源目录、批量多附件、音视频播放、系统后台传输或通用外部文件打开已完成。
 - Android Range 临时文件使用私有权限及既有 noBackup/cache 目录，不设置 Apple 备份资源属性；Apple 分支保持原样。导出直接读取有授权的租约，不依赖 Android 不支持的硬链接展示/导出别名。
 - 验收与边界见 [第九阶段结果](../../experiments/swift-android/verification/phase9/RESULTS.md)。
 
@@ -167,10 +167,9 @@ python3 IMAndroid/scripts/verify_shared_sdk.py --serial <设备序列号> \
 - 群消息作者可通过 `messageReaders` 查看服务端已过滤的阅读者，每页 50 个用户 ID，30 秒后隐藏旧页并要求刷新；当前不取回成员资料或宣称列表等于全部实际阅读者。后台、退出、离页清理搜索/阅读者展示。现有 SDK 和服务器已读隐私策略仍生效，本阶段未新增隐私设置页面。
 - `SharedMessagingView` 与消息 DTO 使用深度不可变集合；Kotlin 只做 JSON 绑定、导航、编辑确认和可见区域事件采集。验收范围见 [第十阶段结果](../../experiments/swift-android/verification/phase10/RESULTS.md)。
 
-## 第十一阶段：回复、转发和表情回应
+## 第十一阶段：回复和转发
 
 - `sendText(roomID, text, replyToMessageID)` 使用既有 `V2MessageSendOperationService` 冻结回复引用和正文，继续按原发送身份恢复。Swift 验证同会话且仍可读的原消息；快照按当前授权解析引用预览，撤回或失效后不再展示原文。Android 提供回复确认框和引用定位。
 - `forwardMessage` 仅传源房间、消息 ID、用户选定版本和目标房间，不在 Kotlin 复制正文、媒体或构造转发协议。`V2ForwardPlanOperationService` 持有整份计划、幂等身份、进度、重试和取消剩余操作。首期页面一次转发一条消息到一个已有会话，支持原消息附件；目标会话可分页选择。
-- `reactMessage` 传明确的添加/移除目标状态；`V2MessageReactionOperationService` 合并未冻结意图、获取服务端版本并执行或恢复。界面提供六种常用回应入口，也显示服务端同步来的其他回应，点击计数可添加/移除自己的回应。聚合人数和本人状态由共享 SQLite 展示查询提供，Kotlin 不维护计数。
-- `SharedInteractionView` 每类最多展示 50 项状态，包含转发成功/拒绝/取消/未决数量以及重试、取消能力；退出账号排空准备、观察和执行任务。页面先显示真实已同步状态，未确认的回应单独显示为操作记录。
-- 当前回复编辑框只发送非空文本；未接入多选批量/多目标转发、合并转发、回复附带附件或完整自定义表情选择器。转发来源显示为标记，不提供跨房间原文跳转。验收与限制见 [第十一阶段结果](../../experiments/swift-android/verification/phase11/RESULTS.md)。
+- `SharedInteractionView` 最多展示 50 项转发状态，包含转发成功/拒绝/取消/未决数量以及重试、取消能力；退出账号排空准备、观察和执行任务。
+- 当前回复编辑框只发送非空文本；未接入多选批量/多目标转发、合并转发或回复附带附件。转发来源显示为标记，不提供跨房间原文跳转。验收与限制见 [第十一阶段结果](../../experiments/swift-android/verification/phase11/RESULTS.md)。

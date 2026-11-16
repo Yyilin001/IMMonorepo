@@ -17,7 +17,7 @@
 
 搜索写入锁已隔离到 `CSearchFileLock`：Apple / Android 继续使用 `flock`；Windows 分支使用 UTF-16 路径、`CreateFileW` / `LockFileEx`，尚未在原生 Windows 编译运行。共享 C ABI 已移除 `strdup/free` 平台导入，暂存文件创建由适配器提供。尚未完成的 Windows 源码边界包括 `V2ResourceDirectoryIO`、`V2ResourceFileStore`、`V2BackgroundResultInbox` 等 POSIX 文件操作。zlib 链接与 SQLite、GRDB、Crypto、Protobuf、Foundation 的具体版本组合仍需 Windows 实测，保留现有数据、Unicode 搜索和幂等合同。[Swift 已提供 Windows 工具链](https://www.swift.org/install/windows/)，这不代表本 SDK 已支持 Windows；WSL / Linux 或 macOS 探针不能代替原生 Windows 验收。
 
-下一步优先取得原生 Windows 环境，执行最小探针并补齐上述适配，再扩展桌面 UI 与安装包验收。macOS 已通过共享 SDK 登录、双端文本/回复/回应、中文搜索、物理 TLS 断线、客户端关闭重开后的凭据/数据库恢复、发送不重复与第三账号隔离；测试信任仅限定隔离后端 CA 和 localhost，未修改系统信任库。平台专属的导出、链接和体积优化不得改变其他端的默认行为。
+下一步优先取得原生 Windows 环境，执行最小探针并补齐上述适配，再扩展桌面 UI 与安装包验收。macOS 已通过共享 SDK 登录、双端文本/回复、中文搜索、物理 TLS 断线、客户端关闭重开后的凭据/数据库恢复、发送不重复与第三账号隔离；测试信任仅限定隔离后端 CA 和 localhost，未修改系统信任库。平台专属的导出、链接和体积优化不得改变其他端的默认行为。
 
 `IMV2ClientKit` 拥有独立的本地缓存与协议边界。当前已实现以下持久化边界：
 
@@ -89,7 +89,7 @@ await window.close()
 
 ## 统一消息业务门面（第十五阶段）
 
-`V2SharedSession.messages` 注册账号级 `V2MessageService`。iOS 的发送、编辑、撤回、转发和回应适配器，以及 Android 的 `SharedRuntime` / `SharedMessaging` / `SharedInteractions`，均调用该服务。Kotlin API 与页面交互不变，没有新增 Kotlin 业务实现。
+`V2SharedSession.messages` 注册账号级 `V2MessageService`。iOS 的发送、编辑、撤回和转发适配器，以及 Android 的 `SharedRuntime` / `SharedMessaging` / `SharedInteractions`，均调用该服务。
 
 ```swift
 let intentID = try await messages.send(in: roomID, text: "hello", replyTo: replyReference)
@@ -100,7 +100,7 @@ for try await state in await messages.sendConfirmations(intentID) {
 }
 ```
 
-门面保留原操作服务的幂等身份、修订号、未知结果确认、转发计划和回应目标状态合并。文本发送冻结后交给原持久化执行器；取消不会删除已冻结的意图，离线恢复继续使用同一身份。附件由原资源引擎准备，消息消费者与上传依赖通过门面原子冻结。`retrySend`、`retryMutation`、`retryReaction`、`retryForward` 和 `cancelForward` 复用原持久化重试与取消语义。
+门面保留原操作服务的幂等身份、修订号、未知结果确认和转发计划。文本发送冻结后交给原持久化执行器；取消不会删除已冻结的意图，离线恢复继续使用同一身份。附件由原资源引擎准备，消息消费者与上传依赖通过门面原子冻结。`retrySend`、`retryMutation`、`retryForward` 和 `cancelForward` 复用原持久化重试与取消语义。
 
 消息状态流按订阅者独立观察；关闭门面会拒绝新命令，取消订阅和执行中的工作，并等待物理完成后允许关闭数据库。账号运行时仍负责调度器与连接，门面的 `handlers()` 只将既有执行器接入账号 dispatcher。页面不创建第二套 HTTP 客户端或执行器。
 

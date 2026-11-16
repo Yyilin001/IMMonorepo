@@ -11,25 +11,7 @@ public enum V2ActorMessagingOperationID: Codable, Equatable, Sendable {
     case send(ClientMessageID)
     case edit(MessageEditOperationID)
     case withdraw(MessageWithdrawalOperationID)
-    case reaction(MessageReactionOperationID)
     case mutation(V2OperationReference)
-}
-
-
-
-
-
-
-
-public struct V2ActorMessageReactionSnapshotWire: Codable, Equatable, Sendable {
-    public let roomID: RoomID
-    public let actorUserID: UserID
-    public let messageID: MessageID
-    public let reaction: String
-    public let requestID: UUID
-    public init(roomID: RoomID, actorUserID: UserID, messageID: MessageID, reaction: String, requestID: UUID = UUID()) {
-        self.roomID=roomID; self.actorUserID=actorUserID; self.messageID=messageID; self.reaction=reaction; self.requestID=requestID
-    }
 }
 
 /// D1 房间范围命令族的判别字段。
@@ -39,15 +21,9 @@ public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
     case editOperation(V2MessageEditOperationCommand)
     case withdrawOperation(V2MessageWithdrawalOperationCommand)
     case recoverMutation(V2MessageMutationRecoveryRequest)
-    case reactionOperation(V2MessageReactionOperationCommand)
-    case recoverReaction(V2MessageReactionRecoveryRequest)
-    case reactionSnapshot(V2ActorMessageReactionSnapshotWire)
 
     public var roomID: RoomID {
         switch self {
-        case .reactionOperation(let value): value.roomID
-        case .reactionSnapshot(let value): value.roomID
-        case .recoverReaction(let value): if case .message(let room,_) = value.identity.scope { room } else { preconditionFailure("validated reaction scope") }
         case .sendOperation(let value): value.command.roomID
         case .recoverSendOperation(let value): if case .room(let room)=value.identity.scope { room } else { preconditionFailure("validated send scope") }
         case .editOperation(let value): value.roomID
@@ -57,9 +33,6 @@ public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
     }
     public var actorUserID: UserID {
         switch self {
-        case .reactionOperation(let value): value.actorUserID
-        case .reactionSnapshot(let value): value.actorUserID
-        case .recoverReaction(let value): value.identity.accountID
         case .sendOperation(let value): value.command.senderUserID
         case .recoverSendOperation(let value): value.identity.accountID
         case .editOperation(let value): value.actorUserID
@@ -69,9 +42,6 @@ public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
     }
     public var operationID: V2ActorMessagingOperationID {
         switch self {
-        case .reactionOperation(let value): .reaction(value.operationID)
-        case .reactionSnapshot(let value): .reaction(.init(uuid:value.requestID))
-        case .recoverReaction(let value): .mutation(value.identity.operation)
         case .sendOperation(let value): .send(value.command.clientMessageID)
         case .recoverSendOperation(let value): .mutation(value.identity.operation)
         case .editOperation(let value): .edit(value.operationID)

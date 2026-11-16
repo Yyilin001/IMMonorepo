@@ -228,18 +228,14 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
     }
 
     private static func timelinePage(_ page: V2ClientConversationTimelinePage, userID: String) -> V2ConversationTimelinePage {
-        let reactionsByMessageID = Dictionary(grouping: page.reactions, by: \.messageID)
-        let summariesByMessageID = page.reactionSummaries.map { Dictionary(grouping: $0, by: \.messageID) }
         let renderedMessages: [V2ConversationTimelineItem] = page.messages.map { message in
             .message(
                 Self.messageItem(
                     message,
                     userID: userID,
-                    reactions: reactionsByMessageID[message.messageID] ?? [],
                     pinnedMessageIDs: page.pinnedMessageIDs,
                     favoritedMessageIDs: page.favoritedMessageIDs,
                     directReceipt: page.directReadReceipt,
-                    reactionSummary: summariesByMessageID.map { $0[message.messageID] ?? [] },
                     localSendIntentID: page.localSendIntentIDs[message.messageID]
                 ),
                 timelineSequence: message.timelineSequence
@@ -335,11 +331,9 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
     private static func messageItem(
         _ message: V2ClientMessageProjection,
         userID: String,
-        reactions: [V2ClientMessageReaction],
         pinnedMessageIDs: Set<MessageID>,
         favoritedMessageIDs: Set<MessageID>,
         directReceipt: V2DirectReadReceiptProjection?,
-        reactionSummary: [V2ClientMessageReactionSummary]? = nil,
         localSendIntentID: UUID? = nil
     ) -> V2ConversationMessageItem {
         .init(
@@ -355,9 +349,6 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
             createdAt: message.createdAt,
             isOutgoing: message.senderUserID.rawValue == userID,
             isWithdrawn: message.isWithdrawn,
-            reactions: reactionSummary.map { summaries in
-                summaries.map { .init(reaction: $0.reaction, count: $0.count, includesCurrentUser: $0.includesCurrentUser) }
-            } ?? reactionSummaries(reactions, currentUserID: userID),
             isReadByPeer: message.senderUserID.rawValue == userID
                 && (directReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
             isFavorited: favoritedMessageIDs.contains(message.messageID),
@@ -367,15 +358,4 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
         )
     }
 
-    private static func reactionSummaries(_ reactions: [V2ClientMessageReaction], currentUserID: String) -> [V2ConversationMessageReaction] {
-        Dictionary(grouping: reactions, by: \.reaction)
-            .map { reaction, entries in
-                .init(
-                    reaction: reaction,
-                    count: entries.count,
-                    includesCurrentUser: entries.contains { $0.actorUserID.rawValue == currentUserID }
-                )
-            }
-            .sorted { $0.reaction < $1.reaction }
-    }
 }

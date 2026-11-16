@@ -144,7 +144,6 @@ struct V2AccountHomeView: View {
     let openPrivacy: () -> Void
     let openSecurity: () -> Void
     let openFavorites: () -> Void
-    var openResources: (() -> Void)? = nil
     let signOut: () -> Void
 
     private var profileHeader: some View {
@@ -187,12 +186,6 @@ struct V2AccountHomeView: View {
                         V2SettingsLabel(title: "收藏", symbol: "star", tint: V2VisualStyle.AccountIcon.favorites)
                     }
                         .accessibilityIdentifier("v2.message.favorites")
-                    if let openResources {
-                        Button(action: openResources) {
-                            V2SettingsLabel(title: "文件与存储", symbol: "folder", tint: V2VisualStyle.AccountIcon.resources)
-                        }
-                            .accessibilityIdentifier("v2.resources.open")
-                    }
                 }
                 Section("设置") {
                     Button(action: openPrivacy) {

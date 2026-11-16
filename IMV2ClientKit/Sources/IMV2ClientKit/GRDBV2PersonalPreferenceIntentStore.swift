@@ -46,7 +46,6 @@ extension GRDBV2LocalSyncStore {
                 UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_personal_preference_intents WHERE work_id IS NULL AND local_terminal IS NULL AND intent_id<>?
                 UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_read_receipt_intents WHERE room_id<>?
                 UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_send_intents WHERE stage='preparing' AND intent_id<>?
-                UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_message_reaction_intents WHERE work_id IS NULL AND local_terminal IS NULL AND intent_id<>?
                 UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_member_administration_intents WHERE work_id IS NULL AND preparation_state<>'cancelled' AND intent_id<>?
                 UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_membership_intents WHERE work_id IS NULL AND preparation_state<>'cancelled' AND intent_id<>?
                 UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_group_capability_intents WHERE work_id IS NULL AND preparation_state<>'cancelled' AND intent_id<>?
@@ -54,7 +53,7 @@ extension GRDBV2LocalSyncStore {
                 UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_social_operation_proposals WHERE state='pending' AND intent_id<>?
                 UNION ALL SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM v2_invitation_operation_intents WHERE work_id IS NULL AND preparation_state<>'cancelled' AND intent_id<>?
             )
-            """, arguments: [excluded, excluded, excludingReadReceiptRoom ?? "",excluded,excluded,excluded,excluded,excluded,excluded,excluded,excluded])!
+            """, arguments: [excluded, excluded, excludingReadReceiptRoom ?? "",excluded,excluded,excluded,excluded,excluded,excluded,excluded])!
         return (row["n"], row["b"])
     }
 

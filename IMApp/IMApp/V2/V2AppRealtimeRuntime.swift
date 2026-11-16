@@ -55,23 +55,6 @@ protocol V2MessageWithdrawing: Sendable {
     func withdraw(messageID: String, in roomID: String, expectedMessageRevision: UInt64) async throws -> V2MessageWithdrawalOutcome
 }
 
-enum V2MessageReactionOutcome: Equatable, Sendable {
-    case accepted
-    case queuedForRetry
-    case rejected(code: String)
-}
-
-/// 面向界面的消息表情边界。
-///
-/// 持久化命令被确认之后，可见表情集合仍以消息投影为权威。
-protocol V2MessageReactionManaging:Sendable {
-    func reactionUpdates(roomID:String) async throws -> AsyncThrowingStream<[V2MessageReactionPending],any Error>
-    func resumeReactionConfirmation(intentID:UUID) async throws
-}
-protocol V2MessageReactionChanging: Sendable {
-    func changeReaction(messageID: String, in roomID: String, reaction: String, action: V2MessageReactionAction) async throws -> V2MessageReactionOutcome
-}
-
 enum V2MessageEditOutcome: Equatable, Sendable {
     case accepted
     case queuedForRetry
@@ -362,26 +345,6 @@ actor V2OperationMessageWithdrawer: V2MessageWithdrawing {
     func withdraw(messageID:String,in roomID:String,expectedMessageRevision:UInt64) async throws -> V2MessageWithdrawalOutcome {
         try Task.checkCancellation()
         _ = try await enqueue(.init(roomID), .init(messageID), expectedMessageRevision)
-        return .queuedForRetry
-    }
-}
-
-actor V2OperationMessageReactionChanger: V2MessageReactionChanging,V2MessageReactionManaging {
-    private let enqueue: @Sendable (RoomID, MessageID, String, V2MessageReactionTargetState) async throws -> UUID
-    private let updates: @Sendable (RoomID) async -> AsyncThrowingStream<[V2MessageReactionPending], any Error>
-    private let retry: @Sendable (UUID) async throws -> Void
-    init(service: V2MessageReactionOperationService) {
-        enqueue = { try await service.enqueue(roomID: $0, messageID: $1, reaction: $2, targetState: $3) }
-        updates = { await service.updates(roomID: $0) }; retry = { try await service.resumeConfirmation(intentID: $0) }
-    }
-    init(service: V2MessageService) {
-        enqueue = { try await service.react(in: $0, messageID: $1, reaction: $2, targetState: $3) }
-        updates = { await service.reactionUpdates(in: $0) }; retry = { try await service.retryReaction($0) }
-    }
-    func reactionUpdates(roomID: String) async throws -> AsyncThrowingStream<[V2MessageReactionPending], any Error> { await updates(try .init(roomID)) }
-    func resumeReactionConfirmation(intentID: UUID) async throws { try await retry(intentID) }
-    func changeReaction(messageID: String, in roomID: String, reaction: String, action: V2MessageReactionAction) async throws -> V2MessageReactionOutcome {
-        _ = try await enqueue(.init(roomID), .init(messageID), reaction, action == .add ? .present : .absent)
         return .queuedForRetry
     }
 }
@@ -1017,8 +980,6 @@ struct V2AppRealtimeRuntime {
     let projectionChangeNotifier: V2ProjectionChangeNotifier
     let sender: any V2ConversationSending
     let messageWithdrawer: any V2MessageWithdrawing
-    let messageReactionOperations:V2MessageReactionOperationService
-    let messageReactionChanger: any V2MessageReactionChanging
     let messageSendOperations: V2MessageSendOperationService
     let messages: V2MessageService
     let readReceipts: V2ReadReceiptService
@@ -1119,9 +1080,6 @@ struct V2AppRealtimeRuntime {
         let memberAdministrationOperations=V2MemberAdministrationOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
             client:try V2HTTPMemberAdministrationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
         self.memberAdministrationOperations=memberAdministrationOperations
-        let messageReactionOperations=V2MessageReactionOperationService(accountID:actorUserID,store:localStore,
-            client:try V2HTTPMessageReactionOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
-        self.messageReactionOperations=messageReactionOperations
         let messageMutationOperations=V2MessageMutationOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPMessageMutationOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
         self.messageMutationOperations=messageMutationOperations
@@ -1149,10 +1107,10 @@ struct V2AppRealtimeRuntime {
         if let sharedSession {
             messages = try await sharedSession.messages(for: localStore, accountID: actorUserID,
                 sends: messageSendOperations, mutations: messageMutationOperations,
-                reactions: messageReactionOperations, forwards: forwardPlanOperations)
+                forwards: forwardPlanOperations)
         } else {
             messages = V2MessageService(accountID: actorUserID, store: localStore, sends: messageSendOperations,
-                mutations: messageMutationOperations, reactions: messageReactionOperations, forwards: forwardPlanOperations)
+                mutations: messageMutationOperations, forwards: forwardPlanOperations)
         }
         self.messages = messages
         let mediaDownloadResolver = try V2HTTPMediaDownloadTargetResolver(
@@ -1316,7 +1274,6 @@ struct V2AppRealtimeRuntime {
         self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
         sender = V2OperationConversationSender(service: messages)
         messageWithdrawer = V2OperationMessageWithdrawer(service: messages)
-        messageReactionChanger = V2OperationMessageReactionChanger(service: messages)
         messageEditor = V2OperationMessageEditor(service: messages)
         readReceiptReporter = V2OperationConversationReadReporter(service: readReceipts)
         conversationStateChanger = V2OutboxConversationStateChanger(service: personalPreferences)

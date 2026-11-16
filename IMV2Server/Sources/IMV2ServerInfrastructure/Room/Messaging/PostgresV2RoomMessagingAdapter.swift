@@ -12,7 +12,6 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     private let sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher?
     private let directSendPreparation: V2RoomSendPreparation?
     private let mutations: PostgresV2MessageMutationOperationStore?
-    private let reactionOperations: PostgresV2MessageReactionOperationStore?
     private let capacityProfile: V2CapacityProfile
     private let maximumEditBytes: Int
     private let now: @Sendable () -> Date
@@ -22,7 +21,6 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
          maximumEditBytes: Int, now: @escaping @Sendable () -> Date,
          mutations: PostgresV2MessageMutationOperationStore?,
          sendOperations: PostgresV2MessageSendOperationStore?,
-         reactionOperations: PostgresV2MessageReactionOperationStore?,
          sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher?,
          directSendPreparation: V2RoomSendPreparation?) throws {
         _ = try V2RoomActivationWriteScope(tokens: [token])
@@ -36,7 +34,6 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
         self.sendOperationOwnerBatcher = sendOperationOwnerBatcher
         self.directSendPreparation = directSendPreparation
         self.mutations = mutations
-        self.reactionOperations = reactionOperations
         self.capacityProfile = capacityProfile
         self.maximumEditBytes = maximumEditBytes
         self.now = now
@@ -44,18 +41,6 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
 
     func execute(_ command: V2RoomMessagingCommand) async throws -> V2RoomMessagingResult {
         switch command {
-        case .reactionOperation(let value):
-            guard let reactionOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-            return .reactionOperation(try await reactionOperations.change(value, token: token,
-                capacityProfile: capacityProfile, eventID: .init(uuid: UUID()), now: now()))
-        case .recoverReaction(let value):
-            guard let reactionOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-            return .reactionOperation(try await reactionOperations.recover(value, token: token, now: now()))
-        case .reactionSnapshot(let value):
-            guard let reactionOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-            return .reactionSnapshot(try await reactionOperations.snapshot(roomID: value.roomID,
-                actorUserID: value.actorUserID, messageID: value.messageID,
-                reaction: value.reaction, token: token))
         case .sendOperation(let value):
             let results = try await executeSendOperationBatch([value])
             guard results.count == 1, let result = results.first else {
@@ -111,12 +96,11 @@ public extension V2RoomMessagingExecutor {
          mutations: PostgresV2MessageMutationOperationStore? = nil,
          sendOperations: PostgresV2MessageSendOperationStore? = nil,
          sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher? = nil,
-         directSendPreparation: V2RoomSendPreparation? = nil,
-         reactionOperations: PostgresV2MessageReactionOperationStore? = nil) throws {
+         directSendPreparation: V2RoomSendPreparation? = nil) throws {
         let adapter = try PostgresV2RoomMessagingAdapter(token: token,
             capacityProfile: capacityProfile,
             maximumEditBytes: maximumEditBytes, now: now, mutations: mutations,
-            sendOperations: sendOperations, reactionOperations: reactionOperations,
+            sendOperations: sendOperations,
             sendOperationOwnerBatcher: sendOperationOwnerBatcher,
             directSendPreparation: directSendPreparation)
         try self.init(token: token, persistence: adapter,

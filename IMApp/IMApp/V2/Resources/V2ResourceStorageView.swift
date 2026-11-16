@@ -33,7 +33,7 @@ struct V2ResourceStorageView: View {
                     Text("降低额度会回收可重建缓存。保留文件、待发送原件和使用中的文件不会因此被删除。").foregroundStyle(Color.primary)
                 }
                 Section {
-                    Button { navigation?.showResourceDownloadSettings() } label: {
+                    Button { navigation?.path.append(V2ResourceRoute.downloadSettings) } label: {
                         HStack {
                             V2ResourceNavigationLabel(title: "下载设置", symbol: "arrow.down.circle")
                             Image(systemName: "chevron.right").accessibilityHidden(true)

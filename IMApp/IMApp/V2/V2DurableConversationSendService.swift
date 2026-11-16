@@ -221,7 +221,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
     nonisolated static func present(_ snapshot: V2PendingResourceSendSnapshot, recoveryError: String?) -> PendingPage {
         var result: [Pending] = []
         for intent in snapshot.preparing {
-            let status = recoveryError ?? (intent.isRejected ? "附件处理失败" : intent.isExpired ? "发送准备已过期，可重新准备后发送" : intent.isUserPaused ? "附件准备已暂停，可在文件与存储中继续" : intent.isPaused ? "上传已暂停，可重试" : intent.isProcessing ? "正在安全处理" : intent.total == 0 ? "等待发送" : "正在准备附件")
+            let status = recoveryError ?? (intent.isRejected ? "附件处理失败" : intent.isExpired ? "发送准备已过期，可重新准备后发送" : intent.isUserPaused ? "附件准备已暂停，可取消后重新发送" : intent.isPaused ? "上传已暂停，可重试" : intent.isProcessing ? "正在安全处理" : intent.total == 0 ? "等待发送" : "正在准备附件")
             result.append(.init(id: intent.id, createdAt: intent.createdAt, text: intent.text, completed: intent.completed, total: intent.total,
                                 status: status, canRetry: !intent.isRejected && (intent.isExpired || (intent.isPaused && !intent.isUserPaused)),
                                 retryTitle: intent.isExpired ? "重新准备" : "重试准备", canCancel: true, images: snapshot.localImages[intent.id] ?? []))

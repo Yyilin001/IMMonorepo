@@ -101,13 +101,6 @@ extension V2MessageMutationRecoveryResult: V2HTTPOperationResult {
     }
 }
 
-extension V2MessageReactionRecoveryResult: V2HTTPOperationResult {
-    var httpRetryHint: V2MessageOperationRetryHint? {
-        if case .deferred(let hint) = self { return hint }
-        return nil
-    }
-}
-
 extension V2GroupCreationOperationResult: V2HTTPOperationResult {
     var httpRetryHint: V2MessageOperationRetryHint? {
         if case .deferred(let hint) = self { return hint }

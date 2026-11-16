@@ -140,7 +140,6 @@ struct V2UserProfileSheet: View {
     @State private var messageTask: Task<Void, Never>?
     @State private var messageFeedback: String?
     @State private var profileNavigation: V2RootNavigationStore
-    @Environment(\.v2ResourceManagement) private var resourceManagement
     init(key: V2ProfileViewLookupKey, usesNavigationStack: Bool = true,
          navigation: V2RootNavigationStore = .init()) {
         self.key = key
@@ -166,7 +165,7 @@ struct V2UserProfileSheet: View {
                                     service: service, conversations: context.conversations, groupInvitations: nil)
                             }
                         }
-                        .v2ResourceDestinations(service: resourceManagement, navigation: profileNavigation)
+                        .environment(\.v2ResourceNavigation, profileNavigation)
                 }
                 .environment(\.v2UserInteractionContext, context.map {
                     .init(contacts: $0.contacts, conversations: $0.conversations, navigation: profileNavigation)

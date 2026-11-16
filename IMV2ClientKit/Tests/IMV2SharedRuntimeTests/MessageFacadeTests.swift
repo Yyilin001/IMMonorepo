@@ -27,36 +27,12 @@ import IMV2Core
         #expect(try await updates.next()?.map(\.work.id) == [first])
         try await f.close()
     }
-    @Test func forwardAndReactionsUseDurablePlansAndIndependentObservers() async throws {
+    @Test func forwardUsesDurablePlan() async throws {
         let f = try Fixture(); try await f.seed()
-        var first = await f.service.reactionUpdates(in: f.room).makeAsyncIterator()
-        var second = await f.service.reactionUpdates(in: f.room).makeAsyncIterator()
-        _ = try await first.next(); _ = try await second.next()
-        let reaction = try await f.service.react(in: f.room, messageID: f.message, reaction: "👍", targetState: .present)
-        #expect(try await first.next()?.first?.intent.id == reaction)
-        #expect(try await second.next()?.first?.intent.id == reaction)
         let plan = try await f.service.forward(sources: [.init(roomID: f.room, messageID: f.message, revision: .init(1))], to: [f.room])
         #expect(try await f.store.forwardPlanSnapshot(workID: plan).command.actorUserID == f.user)
         try await f.service.cancelForward(plan)
         #expect(try await f.store.forwardPlanSnapshot(workID: plan).cancellationRequested)
-        try await f.close()
-    }
-    @Test func closingDrainsPreparationAndDoesNotDeleteDurableReaction() async throws {
-        let f = try Fixture(); try await f.seed()
-        await f.remote.block()
-        let id = try await f.service.react(in: f.room, messageID: f.message, reaction: "👍", targetState: .present)
-        let preparation = Task { try await f.service.runReactionPreparation() }
-        try await f.remote.waitUntilEntered()
-        let closing = Task { await f.service.close(); #expect(await f.remote.released) }
-        while true {
-            do { _ = try await f.service.message(in: f.room, id: f.message); await Task.yield() }
-            catch V2MessageServiceError.closed { break }
-            catch is CancellationError { break }
-        }
-        await f.remote.release()
-        await closing.value; _ = await preparation.result
-        var persisted = f.store.reactionPendingUpdates(roomID: f.room).makeAsyncIterator()
-        #expect(try await persisted.next()?.contains { $0.intent.id == id } == true)
         try await f.close()
     }
 }
@@ -72,7 +48,7 @@ private struct Fixture: Sendable {
         store = try GRDBV2LocalSyncStore(databaseURL: root.appendingPathComponent("local.sqlite"), installationBinding: .init(value: UUID()), userID: user)
         service = .init(accountID: user, store: store,
             sends: .init(accountID: user, store: store, client: remote), mutations: .init(accountID: user, store: store, client: remote),
-            reactions: .init(accountID: user, store: store, client: remote), forwards: .init(accountID: user, store: store, client: remote))
+            forwards: .init(accountID: user, store: store, client: remote))
     }
     func seed() async throws {
         try await store.databasePool.write { db in
@@ -83,23 +59,11 @@ private struct Fixture: Sendable {
     }
     func close() async throws { await service.close(); try await store.close(); try FileManager.default.removeItem(at: root) }
 }
-private actor OfflineRemote: V2MessageSendOperationClient, V2MessageMutationOperationClient, V2MessageReactionOperationClient, V2ForwardPlanOperationClient {
-    private var shouldBlock = false, entered = false
-    private(set) var released = false
-    private var continuation: CheckedContinuation<Void, Never>?
-    func block() { shouldBlock = true }
-    func waitUntilEntered() async throws { while !entered { try Task.checkCancellation(); await Task.yield() } }
-    func release() { released = true; continuation?.resume(); continuation = nil }
-    func snapshot(roomID: RoomID, messageID: MessageID, reaction: String) async throws -> V2MessageReactionSnapshot {
-        if shouldBlock { entered = true; await withCheckedContinuation { continuation = $0 } }
-        throw URLError(.notConnectedToInternet)
-    }
+private actor OfflineRemote: V2MessageSendOperationClient, V2MessageMutationOperationClient, V2ForwardPlanOperationClient {
     func submit(_ command: V2MessageSendOperationCommand) throws -> V2MessageSendOperationRecoveryResult { throw URLError(.notConnectedToInternet) }
     func recover(_ request: V2MessageSendOperationRecoveryRequest) throws -> V2MessageSendOperationRecoveryResult { throw URLError(.notConnectedToInternet) }
     func submit(_ payload: V2MessageMutationPayload) throws -> V2MessageMutationRecoveryResult { throw URLError(.notConnectedToInternet) }
     func recover(_ request: V2MessageMutationRecoveryRequest) throws -> V2MessageMutationRecoveryResult { throw URLError(.notConnectedToInternet) }
-    func submit(_ command: V2MessageReactionOperationCommand) throws -> V2MessageReactionRecoveryResult { throw URLError(.notConnectedToInternet) }
-    func recover(_ request: V2MessageReactionRecoveryRequest) throws -> V2MessageReactionRecoveryResult { throw URLError(.notConnectedToInternet) }
     func submit(_ command: V2ForwardPlanOperationCommand) throws -> V2ForwardPlanRecoveryResult { throw URLError(.notConnectedToInternet) }
     func recover(_ command: V2ForwardPlanOperationCommand, action: V2ForwardPlanRecoveryAction) throws -> V2ForwardPlanRecoveryResult { throw URLError(.notConnectedToInternet) }
 }

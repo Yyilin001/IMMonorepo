@@ -11,7 +11,6 @@ public actor V2MessageService {
     private let store: GRDBV2LocalSyncStore
     private let sends: V2MessageSendOperationService
     private let mutations: V2MessageMutationOperationService
-    private let reactions: V2MessageReactionOperationService
     private let forwards: V2ForwardPlanOperationService
     private let operations = V2ResourceOperationScope(limit: 128)
     private var closed = false
@@ -20,10 +19,10 @@ public actor V2MessageService {
 
     /// Composition boundary; production services are registered with V2SharedSession.
     public init(accountID: UserID, store: GRDBV2LocalSyncStore, sends: V2MessageSendOperationService,
-                mutations: V2MessageMutationOperationService, reactions: V2MessageReactionOperationService,
+                mutations: V2MessageMutationOperationService,
                 forwards: V2ForwardPlanOperationService) {
         self.accountID = accountID; self.store = store; self.sends = sends
-        self.mutations = mutations; self.reactions = reactions; self.forwards = forwards
+        self.mutations = mutations; self.forwards = forwards
     }
 
     private func run<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) async throws -> T {
@@ -81,12 +80,6 @@ public actor V2MessageService {
         let message = try await readableMessage(in: room, id: id)
         guard message.senderUserID == accountID, !message.isWithdrawn, message.messageRevision == revision else { throw V2MessageServiceError.invalidInput }
     }
-    @discardableResult public func react(in room: RoomID, messageID: MessageID, reaction: String, targetState: V2MessageReactionTargetState) async throws -> UUID {
-        try await run { [self] in
-            _ = try await readableMessage(in: room, id: messageID)
-            return try await reactions.enqueue(roomID: room, messageID: messageID, reaction: reaction, targetState: targetState)
-        }
-    }
     @discardableResult public func forward(sources: [V2ForwardMessageReference], to targets: [RoomID]) async throws -> UUID {
         try await run { [self] in
             for source in sources {
@@ -104,7 +97,6 @@ public actor V2MessageService {
 
     public func retrySend(_ id: UUID) async throws { try await run { [sends] in try await sends.resumeConfirmation(intentID: id) } }
     public func retryMutation(_ id: UUID) async throws { try await run { [mutations] in try await mutations.resumeConfirmation(workID: id) } }
-    public func retryReaction(_ id: UUID) async throws { try await run { [reactions] in try await reactions.resumeConfirmation(intentID: id) } }
     public func retryForward(_ id: UUID) async throws { try await run { [forwards] in try await forwards.resumeConfirmation(workID: id) } }
     public func cancelForward(_ id: UUID) async throws { try await run { [forwards] in try await forwards.cancelRemaining(workID: id) } }
 
@@ -113,9 +105,6 @@ public actor V2MessageService {
     }
     public func mutationUpdates(in room: RoomID) -> AsyncThrowingStream<[V2MessageMutationSnapshot], any Error> {
         observe { [mutations] in await mutations.updates(roomID: room) }
-    }
-    public func reactionUpdates(in room: RoomID) -> AsyncThrowingStream<[V2MessageReactionPending], any Error> {
-        observe { [reactions] in await reactions.updates(roomID: room) }
     }
     public func forwardUpdates(in room: RoomID) -> AsyncThrowingStream<[V2ForwardPlanSnapshot], any Error> {
         observe { [forwards] in await forwards.updates(sourceRoomID: room) }
@@ -145,10 +134,8 @@ public actor V2MessageService {
         [.init(kind: .sendMessage) { [self] claim in try await run { [sends] in try await sends.execute(claim) } },
          .init(kind: .editMessage) { [self] claim in try await run { [mutations] in try await mutations.execute(claim) } },
          .init(kind: .withdrawMessage) { [self] claim in try await run { [mutations] in try await mutations.execute(claim) } },
-         .init(kind: .reaction) { [self] claim in try await run { [reactions] in try await reactions.execute(claim) } },
          .init(kind: .forwardMessage) { [self] claim in try await run { [forwards] in try await forwards.execute(claim) } }]
     }
-    public func runReactionPreparation() async throws { try await run { [reactions] in try await reactions.runPreparation() } }
 
     public func close() async {
         if let closing { await closing.value; return }
