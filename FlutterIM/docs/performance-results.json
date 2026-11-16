@@ -1,0 +1,95 @@
+{
+  "date": "2026-11-13",
+  "mode": "immediate_per_message_with_history",
+  "environment": {
+    "cpu": "Apple M4 Pro",
+    "memory_gib": 48,
+    "os": "macOS 27.0 arm64",
+    "flutter": "3.50.0",
+    "dart": "3.14.0",
+    "flutter_riverpod": "3.5.0"
+  },
+  "conversation_count": 10000,
+  "aot_data_pipeline": [
+    {
+      "mode": "immediate_per_message_with_history",
+      "archived_messages": 19999,
+      "target_per_second": 1000,
+      "seconds": 20.001,
+      "received": 19999,
+      "actual_per_second": 1000,
+      "cache_count": 18426,
+      "evicted": 1573,
+      "message_p95_ms": 0.035,
+      "message_max_ms": 10.126,
+      "peak_process_rss_mb": 57.734375
+    },
+    {
+      "mode": "immediate_per_message_with_history",
+      "archived_messages": 58800,
+      "target_per_second": 3000,
+      "seconds": 20.001,
+      "received": 59997,
+      "actual_per_second": 3000,
+      "cache_count": 40000,
+      "evicted": 19997,
+      "message_p95_ms": 0.021,
+      "message_max_ms": 7.618,
+      "peak_process_rss_mb": 78.703125
+    },
+    {
+      "mode": "immediate_per_message_with_history",
+      "archived_messages": 94813,
+      "target_per_second": 5000,
+      "seconds": 20.001,
+      "received": 99998,
+      "actual_per_second": 4999,
+      "cache_count": 40000,
+      "evicted": 59998,
+      "message_p95_ms": 0.014,
+      "message_max_ms": 3.982,
+      "peak_process_rss_mb": 84.703125
+    }
+  ],
+  "macos_profile_ui": [
+    {
+      "mode": "riverpod_direct_notifiers_per_message",
+      "retained_sessions": 20,
+      "target_per_second": 1000,
+      "actual_per_second": 1000.143935656584,
+      "sample_seconds": 21.064968,
+      "frame_p95_ms": 1.548,
+      "slow_frames": 1,
+      "frame_samples": 2504,
+      "rss_mb": 222.609375,
+      "cached_messages": 21270
+    },
+    {
+      "mode": "riverpod_direct_notifiers_per_message",
+      "retained_sessions": 20,
+      "target_per_second": 5000,
+      "actual_per_second": 4889.432023211195,
+      "sample_seconds": 26.162548,
+      "frame_p95_ms": 4.007,
+      "slow_frames": 5,
+      "frame_samples": 1445,
+      "rss_mb": 228.734375,
+      "cached_messages": 40000
+    }
+  ],
+  "notes": [
+    "Each live message is archived, ingested, indexed and notified individually; there is no receive/publish time window.",
+    "AOT pipeline: each target sampled for 20 seconds, includes bounded live history archive writes, excludes Flutter rendering.",
+    "UI: fullyLive policy, independent samples after warmup; scrolling, search, send, overlapping/unordered history pages and return-to-latest are exercised.",
+    "Frame duration is max(buildDuration, rasterDuration); slow frame threshold is 16.67ms.",
+    "History request delays simulate server latency; they do not merge or throttle the live message stream.",
+    "History and live cache are in-memory; all runtime data resets on restart.",
+    "Results are machine-specific; iOS and Android physical devices have not been benchmarked.",
+    "UI results were rerun with 20 retained chat sessions; AOT results are retained from the preceding history pagination revision and were not rerun.",
+    "Session cache retains the 20 most recently opened windows; draft storage survives provider disposal and window eviction.",
+    "UI uses Riverpod 3.5.0 native Notifier families. Stores contain no listener callbacks; live notifier handles are registered by build/onDispose and only changed states are published synchronously.",
+    "49 tests pass, including synchronous per-message notifications, actual widget rebuild scope, direct publication isolation, duplicate-ID rejection, provider invalidation/disposal and bounded session/history behavior.",
+    "Final UI sample: 1000/s frame P95 1.548ms; 5000/s frame P95 4.007ms. The earlier retained-session revision measured 1.642ms and 1.398ms respectively; high-rate frame cost has increased. These separate local runs do not establish the sole cause of the difference."
+  ],
+  "ui_revision": "riverpod_direct_notifiers"
+}

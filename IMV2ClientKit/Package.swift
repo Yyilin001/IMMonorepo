@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "IMV2ClientRuntime", targets: ["IMV2ClientRuntime"]),
         .library(name: "IMV2ClientNetwork", targets: ["IMV2ClientNetwork"]),
         .library(name: "IMV2ClientAndroid", targets: ["IMV2ClientAndroid"]),
+        .library(name: "IMV2SharedApple", targets: ["IMV2SharedApple"]),
         .library(name: "IMV2SharedSDK", type: .dynamic, targets: ["IMV2SharedSDK", "CIMV2SharedSDK"]),
     ],
     dependencies: [

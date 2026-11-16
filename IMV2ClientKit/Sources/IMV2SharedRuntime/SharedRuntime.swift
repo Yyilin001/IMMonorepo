@@ -40,9 +40,22 @@ package struct SharedRequest: Decodable, Sendable {
     var members: [String]?
     var permissions: [String]?
 }
-struct SharedConversation: Encodable, Sendable { let id: String; let title: String; let preview: String }
+struct SharedConversation: Encodable, Sendable {
+    let id: String; let title: String; let preview: String
+    var unread: Int64 = 0
+    var updatedAt: Int64?
+    var isGroup = false
+    var peerID: String?
+
+    static func row(_ entry: V2ClientConversationListEntry, list: V2ConversationListSnapshot) -> Self {
+        .init(id: entry.roomID.rawValue, title: list.titles[entry.roomID] ?? "会话",
+              preview: entry.latestVisible?.latest?.preview ?? entry.lastMessage.map { $0.isWithdrawn ? "消息已撤回" : String($0.text.prefix(160)) } ?? "",
+              unread: Int64(clamping: list.unread[entry.roomID] ?? 0), updatedAt: Int64(entry.lastActivity.timeIntervalSince1970 * 1000),
+              isGroup: entry.roomProfile != nil && entry.directIdentity == nil, peerID: entry.directIdentity?.publicIdentity.userID.rawValue)
+    }
+}
 struct SharedMessage: Encodable, Sendable {
-    let id: String; let senderID: String; let text: String; let sequence: UInt64
+    let id: String; let senderID: String; let text: String; let sequence: UInt64; var createdAt: Int64?
     let withdrawn: Bool; let hasMedia: Bool; let attachments: [SharedAttachment]
     let revision: UInt64; let canMutate: Bool; let readByPeer: Bool
     let replyToID: String?; let replyPreview: String?; let forwardedFromID: String?
@@ -441,8 +454,7 @@ package actor SharedRuntime {
         switch content {
         case .conversations(let value):
             hasMore = value.page.nextCursor != nil
-            rows = value.page.entries.map { .init(id: $0.roomID.rawValue, title: value.titles[$0.roomID] ?? "会话",
-                preview: $0.latestVisible?.latest?.preview ?? $0.lastMessage.map { $0.isWithdrawn ? "消息已撤回" : String($0.text.prefix(160)) } ?? "") }
+            rows = value.page.entries.map { .row($0, list: value) }
         case .timeline(let value):
             guard let room = reader.room else { throw SharedFailure.invalidInput }
             chat = await renderChat(timeline: value.page, pending: value.pending, room: room, isLatest: first)
@@ -468,7 +480,7 @@ package actor SharedRuntime {
             }
             return .init(roomID: room.rawValue, messages: timeline.messages.map { message in
                 .init(id: message.messageID.rawValue, senderID: message.senderUserID.rawValue, text: message.isWithdrawn ? "" : message.text,
-                    sequence: message.timelineSequence, withdrawn: message.isWithdrawn, hasMedia: !message.media.isEmpty, attachments: message.isWithdrawn ? [] : message.mediaPresentations.map(SharedAttachment.init),
+                    sequence: message.timelineSequence, createdAt: Int64(message.createdAt.timeIntervalSince1970 * 1000), withdrawn: message.isWithdrawn, hasMedia: !message.media.isEmpty, attachments: message.isWithdrawn ? [] : message.mediaPresentations.map(SharedAttachment.init),
                     revision: message.messageRevision, canMutate: message.senderUserID.rawValue == userID && !message.isWithdrawn && message.messageRevision > 0,
                     readByPeer: message.senderUserID.rawValue == userID && timeline.directReadReceipt?.isVisible == true && timeline.directReadReceipt?.readerUserID.rawValue != userID && (timeline.directReadReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
                     replyToID: message.isWithdrawn ? nil : message.replyTo?.messageID.rawValue,
@@ -486,8 +498,7 @@ package actor SharedRuntime {
         let list = try await conversationBusiness?.list(isArchived: false, before: conversationCursor, limit: 50)
         let page = list?.page
         nextConversationCursor = page?.nextCursor
-        let rows = page?.entries ?? []
-        let titles = list?.titles ?? [:]
+        let rows = list.map { list in list.page.entries.map { SharedConversation.row($0, list: list) } } ?? []
         let failure = await runtime?.lastBackgroundFailure().map(sharedFailure) ?? maintenanceFailure
         let preference = try await store?.strangerMessagePreference()
         var chat: SharedChat?
@@ -505,7 +516,7 @@ package actor SharedRuntime {
         }
         return .init(state: currentState, userID: userID, allowsStrangerMessages: preference?.allowsStrangerMessages, appliedSequence: cursor?.appliedSequence ?? 0,
             acknowledgedSequence: cursor?.serverAcknowledgedSequence ?? 0, connections: connections,
-            conversations: rows.map { .init(id: $0.roomID.rawValue, title: titles[$0.roomID] ?? "会话", preview: $0.latestVisible?.latest?.preview ?? $0.lastMessage.map { $0.isWithdrawn ? "消息已撤回" : String($0.text.prefix(160)) } ?? "") }, failure: failure?.rawValue,
+            conversations: rows, failure: failure?.rawValue,
             hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot())
     }
 }

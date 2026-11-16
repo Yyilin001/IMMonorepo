@@ -1,0 +1,23 @@
+name: im_flutter_sdk
+description: Flutter bindings for the shared IM Swift SDK.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.14.0
+  flutter: '>=3.50.0'
+dependencies:
+  flutter:
+    sdk: flutter
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  pigeon: 30.0.2
+  flutter_lints: ^6.0.0
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.xmtx.im.flutter
+        pluginClass: ImFlutterSdkPlugin
+      ios:
+        pluginClass: ImFlutterSdkPlugin

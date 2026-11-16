@@ -25,8 +25,16 @@ data class SharedEndpoint(val accountURL: String, val gatewayHost: String, val g
 enum class SharedSessionState { SignedOut, SigningOut, Ready, Connecting, Connected, Offline, Closed }
 enum class SharedError { InvalidConfiguration, InvalidInput, Busy, Closed, AuthenticationRequired, NetworkUnavailable, StorageUnavailable, OperationFailed, Cancelled }
 class SharedSdkException(val reason: SharedError) : Exception(reason.name)
-data class SharedConversation(val id: String, val title: String, val preview: String)
-data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?)
+data class SharedConversation(
+    val id: String, val title: String, val preview: String,
+    val unread: Long = 0, val isGroup: Boolean = false, val updatedAt: Long? = null, val peerID: String? = null
+)
+private fun JSONObject.optionalLong(key: String): Long? = if (isNull(key)) null else getLong(key)
+private fun JSONObject.conversation() = SharedConversation(
+    getString("id"), getString("title"), getString("preview"), optLong("unread"),
+    optBoolean("isGroup"), optionalLong("updatedAt"), optString("peerID").takeIf(String::isNotEmpty)
+)
+data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?, val createdAt: Long? = null)
 enum class SharedSendStatus { Preparing, Pending, WaitingForNetwork, WaitingForAuthentication, AcceptedAwaitingProjection, ConfirmingOutcome, NeedsAttention, ExpiredUnsubmitted, Closed, Rejected }
 data class SharedPendingMessage(val id: String, val text: String, val status: SharedSendStatus)
 data class SharedChat(val roomID: String, val messages: PersistentList<SharedMessage>, val pending: PersistentList<SharedPendingMessage>, val hasOlder: Boolean, val isLatest: Boolean, val hasMorePending: Boolean, val pendingPage: Int, val focusMessageID: String?)
@@ -298,12 +306,12 @@ class SharedClient private constructor(private val handle: Long) {
         val rows = value.getJSONArray("conversations")
         return SharedSnapshot(SharedSessionState.entries.first { it.name.equals(value.getString("state"), true) },
             value.optString("userID").takeIf { it.isNotEmpty() }, if (value.has("allowsStrangerMessages")) value.getBoolean("allowsStrangerMessages") else null, value.getLong("appliedSequence"), value.getLong("acknowledgedSequence"),
-            value.getLong("connections"), (0 until rows.length()).map { index -> rows.getJSONObject(index).let { SharedConversation(it.getString("id"), it.getString("title"), it.getString("preview")) } }.toPersistentList(),
+            value.getLong("connections"), (0 until rows.length()).map { index -> rows.getJSONObject(index).conversation() }.toPersistentList(),
             value.optString("failure").takeIf { it.isNotEmpty() }?.let(::error), value.getBoolean("hasMoreConversations"), value.getBoolean("isFirstConversationPage"),
             value.optJSONObject("chat")?.let { chat ->
                 val messages = chat.getJSONArray("messages"); val pending = chat.getJSONArray("pending")
                 SharedChat(chat.getString("roomID"), (0 until messages.length()).map { index -> messages.getJSONObject(index).let {
-                    SharedMessage(it.getString("id"), it.getString("senderID"), it.getString("text"), it.getLong("sequence"), it.getBoolean("withdrawn"), it.getBoolean("hasMedia"), it.getJSONArray("attachments").let { rows -> (0 until rows.length()).map { index -> decodeAttachment(rows.getJSONObject(index)) }.toPersistentList() }, it.getLong("revision"), it.getBoolean("canMutate"), it.getBoolean("readByPeer"), it.optString("replyToID").takeIf(String::isNotEmpty), it.optString("replyPreview").takeIf(String::isNotEmpty), it.optString("forwardedFromID").takeIf(String::isNotEmpty))
+                    SharedMessage(it.getString("id"), it.getString("senderID"), it.getString("text"), it.getLong("sequence"), it.getBoolean("withdrawn"), it.getBoolean("hasMedia"), it.getJSONArray("attachments").let { rows -> (0 until rows.length()).map { index -> decodeAttachment(rows.getJSONObject(index)) }.toPersistentList() }, it.getLong("revision"), it.getBoolean("canMutate"), it.getBoolean("readByPeer"), it.optString("replyToID").takeIf(String::isNotEmpty), it.optString("replyPreview").takeIf(String::isNotEmpty), it.optString("forwardedFromID").takeIf(String::isNotEmpty), it.optionalLong("createdAt"))
                 } }.toPersistentList(), (0 until pending.length()).map { index -> pending.getJSONObject(index).let {
                     SharedPendingMessage(it.getString("id"), it.getString("text"), SharedSendStatus.entries.first { status -> status.name.equals(it.getString("status"), true) })
                 } }.toPersistentList(), chat.getBoolean("hasOlder"), chat.getBoolean("isLatest"), chat.getBoolean("hasMorePending"), chat.getInt("pendingPage"), chat.optString("focusMessageID").takeIf { it.isNotEmpty() })

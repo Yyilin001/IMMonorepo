@@ -8,6 +8,7 @@ IM V2 是使用 Swift 构建的即时通信项目，包含 iOS 客户端、客�
 | --- | --- |
 | `IMApp/` | iOS SwiftUI 应用与 V2 依赖组装。 |
 | `IMAndroid/` | Android Compose / Navigation 3 开发版本，业务与存储统一使用共享 Swift SDK；旧 Kotlin SDK 已移除，迁移范围见其 README。 |
+| [FlutterIM/](FlutterIM/README.md) | Flutter 移动端示例与 `im_flutter_sdk` Pigeon 插件，接入共享 Swift 会话和消息服务。 |
 | `ConversationListKit/` | 独立的 Swift 包，提供会话排序索引和 iOS 固定位置列表渲染器。 |
 | `IMV2Core/` | 领域类型、帧与命令规则，以及准入、扇出和同步约束。 |
 | `IMV2ClientKit/` | 设备 Keychain 会话、SQLite 同步投影、持久化客户端发件箱，以及 TLS/HTTPS 传输。 |
