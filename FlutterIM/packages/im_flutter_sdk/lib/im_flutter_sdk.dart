@@ -40,6 +40,13 @@ enum ImSendStatus {
   unknown,
 }
 
+typedef ImReaders = ({
+  String roomId,
+  String messageId,
+  List<String> users,
+  bool hasNext,
+  int remainingMilliseconds,
+});
 typedef ImSearchHit = ({String id, String roomId, String text});
 typedef ImSearchPage = ({String status, List<ImSearchHit> hits, bool hasNext});
 
@@ -64,6 +71,7 @@ typedef ImConversation = ({
   int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImGroupNickname = ({String roomId, String? name, int? revision});
 typedef ImInvite = ({
   String id,
   String url,
@@ -436,6 +444,42 @@ final class ImClient {
     () => _host.changeMembership(roomId, revision, action.name, target, role),
   );
 
+  Future<ImGroupNickname?> groupNickname(String roomId) =>
+      _ordered(() async {
+        final value = await _host.groupNickname(roomId);
+        return value == null
+            ? null
+            : (
+                roomId: value.roomId,
+                name: value.name,
+                revision: value.revision,
+              );
+      });
+  Future<void> saveGroupNickname(
+    String roomId,
+    String? name, {
+    int? revision,
+  }) => _ordered(() => _host.saveGroupNickname(roomId, name, revision));
+  Future<void> updateGroupPermissions(
+    String roomId,
+    int revision,
+    String role,
+    Set<String> permissions,
+  ) => _ordered(
+    () => _host.updateGroupPermissions(
+      roomId,
+      revision,
+      role,
+      permissions.toList(growable: false),
+    ),
+  );
+  Future<void> moderateMemberRemoval(
+    String roomId,
+    String userId,
+    int revision,
+  ) => _ordered(
+    () => _host.moderateMemberRemoval(roomId, userId, revision),
+  );
   Future<void> updateAnnouncement(String roomId, int revision, String text) =>
       _ordered(() => _host.updateAnnouncement(roomId, revision, text));
 
@@ -447,6 +491,8 @@ final class ImClient {
       String actorRole,
       Set<String> permissions,
       Map<String, String> members,
+      List<({String role, Set<String> permissions, int revision})> policies,
+      bool policiesReady,
       bool hasMore,
     })
   >
@@ -459,6 +505,15 @@ final class ImClient {
       actorRole: page.actorRole,
       permissions: page.permissions.toSet(),
       members: {for (final member in page.members) member.userId: member.role},
+      policies: [
+        for (final policy in page.policies)
+          (
+            role: policy.role,
+            permissions: policy.permissions.toSet(),
+            revision: policy.revision,
+          ),
+      ],
+      policiesReady: page.policiesReady,
       hasMore: page.hasMore,
     );
   });
@@ -726,6 +781,20 @@ final class ImClient {
     );
   });
   Future<void> clearMessageSearch() => _ordered(_host.clearMessageSearch);
+  Future<ImReaders> messageReaders(
+    String roomId,
+    String messageId, {
+    bool next = false,
+  }) => _ordered(() async {
+    final value = await _host.messageReaders(roomId, messageId, next);
+    return (
+      roomId: value.roomId,
+      messageId: value.messageId,
+      users: List<String>.unmodifiable(value.users),
+      hasNext: value.hasNext,
+      remainingMilliseconds: value.remainingMilliseconds,
+    );
+  });
 
   Future<void> recoverSend(String intentId, {required bool resend}) =>
       _ordered(() => _host.recoverSend(intentId, resend));

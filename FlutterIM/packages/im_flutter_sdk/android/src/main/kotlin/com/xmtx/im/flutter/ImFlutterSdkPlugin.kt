@@ -136,13 +136,28 @@ private class MobileHost(private val context: Context) : ImHost {
         val newRole = role?.let { value -> SharedRole.entries.firstOrNull { it.wire == value } ?: throw FlutterError("invalidInput") }
         mutations.withLock { sdk { client.groupAction(roomId, change, revision, targetUserID = target, role = newRole) } }
     }
+    override suspend fun groupNickname(roomId: String): ImGroupNickname? = mutations.withLock { sdk {
+        client.groupNickname(roomId).directory?.groupNickname?.let { ImGroupNickname(it.roomID, it.name, it.revision) }
+    } }
+    override suspend fun saveGroupNickname(roomId: String, name: String?, revision: Long?) {
+        mutations.withLock { sdk { client.saveGroupNickname(roomId, name, revision) } }
+    }
+    override suspend fun updateGroupPermissions(roomId: String, revision: Long, role: String, permissions: List<String>) {
+        val target = SharedRole.entries.firstOrNull { it.wire == role } ?: throw FlutterError("invalidInput")
+        val values = permissions.map { value -> SharedPermission.entries.firstOrNull { it.wire == value } ?: throw FlutterError("invalidInput") }
+        mutations.withLock { sdk { client.groupAction(roomId, SharedGroupAction.Permissions, revision, role = target, permissions = values) } }
+    }
+    override suspend fun moderateMemberRemoval(roomId: String, userId: String, revision: Long) {
+        mutations.withLock { sdk { client.moderateMemberRemoval(roomId, userId, revision) } }
+    }
     override suspend fun updateAnnouncement(roomId: String, revision: Long, text: String) {
         mutations.withLock { sdk { client.groupAction(roomId, SharedGroupAction.Announcement, revision, text = text) } }
     }
     override suspend fun groupMembers(roomId: String, next: Boolean): GroupPage = mutations.withLock { sdk {
         val snapshot = if (next) client.nextGroupMembers(roomId) else client.openGroup(roomId)
         val group = snapshot.directory?.group?.takeIf { it.roomID == roomId } ?: throw FlutterError("operationFailed")
-        GroupPage(group.announcement, group.announcementRevision.takeIf { SharedPermission.ManageAnnouncements in group.permissions }, group.revision, group.actorRole.wire, group.permissions.map { it.wire }, group.members.map { GroupMember(it.userID, it.role.wire) }, group.hasMore)
+        GroupPage(group.announcement, group.announcementRevision.takeIf { SharedPermission.ManageAnnouncements in group.permissions }, group.revision, group.actorRole.wire, group.permissions.map { it.wire }, group.members.map { GroupMember(it.userID, it.role.wire) },
+            group.policies.map { ImGroupPolicy(it.role.wire, it.permissions.map { permission -> permission.wire }, it.revision) }, group.policiesReady, group.hasMore)
     } }
     private fun SharedCommunity.wire(): ImCommunity = ImCommunity(roomID,
         invites.map { ImInvite(it.id, it.url, it.expires, it.used.toLong(), it.maximum.toLong()) },
@@ -200,6 +215,11 @@ private class MobileHost(private val context: Context) : ImHost {
         }
     }
     override suspend fun clearMessageSearch() { mutations.withLock { sdk { client.clearMessaging() } } }
+    override suspend fun messageReaders(roomId: String, messageId: String, next: Boolean): ImReaders = mutations.withLock { sdk {
+        val readers = client.messageReaders(roomId, messageId, next).messaging?.readers ?: throw FlutterError("operationFailed")
+        ImReaders(readers.roomID, readers.messageID, readers.users, readers.hasNext,
+            (readers.expiresAtElapsed - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0))
+    } }
     override suspend fun recoverSend(intentId: String, resend: Boolean) {
         mutations.withLock { sdk { if (resend) client.resendUnsent(intentId) else client.retrySend(intentId) } }
     }

@@ -209,6 +209,24 @@ class GroupMember {
   String role;
 }
 
+class ImGroupNickname {
+  ImGroupNickname({required this.roomId, this.name, this.revision});
+  String roomId;
+  String? name;
+  int? revision;
+}
+
+class ImGroupPolicy {
+  ImGroupPolicy({
+    required this.role,
+    required this.permissions,
+    required this.revision,
+  });
+  String role;
+  List<String> permissions;
+  int revision;
+}
+
 class GroupPage {
   GroupPage({
     required this.announcement,
@@ -217,6 +235,8 @@ class GroupPage {
     required this.actorRole,
     required this.permissions,
     required this.members,
+    required this.policies,
+    required this.policiesReady,
     required this.hasMore,
   });
   String announcement;
@@ -225,6 +245,8 @@ class GroupPage {
   String actorRole;
   List<String> permissions;
   List<GroupMember> members;
+  List<ImGroupPolicy> policies;
+  bool policiesReady;
   bool hasMore;
 }
 
@@ -290,6 +312,21 @@ class ImCommunity {
   bool hasMore;
   ImInvitePreview? preview;
   String? failure;
+}
+
+class ImReaders {
+  ImReaders({
+    required this.roomId,
+    required this.messageId,
+    required this.users,
+    required this.hasNext,
+    required this.remainingMilliseconds,
+  });
+  String roomId;
+  String messageId;
+  List<String> users;
+  bool hasNext;
+  int remainingMilliseconds;
 }
 
 class WindowView {
@@ -377,6 +414,19 @@ abstract class ImHost {
   @async
   void updateAnnouncement(String roomId, int revision, String text);
   @async
+  ImGroupNickname? groupNickname(String roomId);
+  @async
+  void saveGroupNickname(String roomId, String? name, int? revision);
+  @async
+  void updateGroupPermissions(
+    String roomId,
+    int revision,
+    String role,
+    List<String> permissions,
+  );
+  @async
+  void moderateMemberRemoval(String roomId, String userId, int revision);
+  @async
   GroupPage groupMembers(String roomId, bool next);
   @async
   ImCommunity invitations(String roomId);
@@ -416,6 +466,8 @@ abstract class ImHost {
   WindowView locateMessage(String roomId, String messageId);
   @async
   SearchPage searchMessages(String? roomId, String query, bool next);
+  @async
+  ImReaders messageReaders(String roomId, String messageId, bool next);
   @async
   void clearMessageSearch();
   @async

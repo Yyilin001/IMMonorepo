@@ -31,6 +31,7 @@ actor SharedPeople {
     private let store: GRDBV2LocalSyncStore
     private var pages: [String: Page] = [:]
     private var work: SharedWork?
+    private var groupNickname: SharedGroupNickname?
     private let imageHTTP: any V2AuthHTTPTransport
     private var failure: SharedFailure?
     init(account: UserID, device: DeviceID, store: GRDBV2LocalSyncStore, base: URL, http: V2SessionHTTPAuthorization, imageHTTP: any V2AuthHTTPTransport) throws {
@@ -131,6 +132,18 @@ actor SharedPeople {
               SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == grant.avatar.checksum.value else { throw SharedFailure.operationFailed }
         pages[pageID]?.image = (key, grant, data)
     }
+    func loadGroupNickname(room: RoomID) async throws {
+        let value = try await names.refresh(.group(room))
+        groupNickname = SharedGroupNickname(roomID: room.rawValue, name: value.name, revision: value.revision?.rawValue)
+    }
+    func saveGroupNickname(_ request: SharedRequest) async throws {
+        guard let raw = request.roomID else { throw SharedFailure.invalidInput }
+        let room = try RoomID(raw)
+        let revision = request.revision.flatMap(V2ProfileRevision.init(rawValue:))
+        guard request.revision == nil || revision != nil else { throw SharedFailure.invalidInput }
+        _ = try await names.save(.group(room), name: request.text?.isEmpty == false ? request.text : nil, expectedRevision: revision)
+    }
+    var currentGroupNickname: SharedGroupNickname? { groupNickname }
     func save(_ request: SharedRequest) async throws {
         guard let page = pages["selected"], let id = page.selected, id.rawValue == request.targetUserID,
               page.context == .relationship else { throw SharedFailure.invalidInput }

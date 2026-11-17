@@ -131,6 +131,10 @@ actor SharedCommunity {
         case .muteMember:
             guard let revision = request.revision, let target = request.targetUserID else { throw SharedFailure.invalidInput }
             _ = try await moderation.enqueue(roomID: room, targetUserID: UserID(target), action: .mute(untilMilliseconds: UInt64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)), reasonCode: .init("group_rules"), expectedMembershipRevision: revision)
+        case .moderateMemberRemoval:
+            guard let revision = request.revision, let target = request.targetUserID else { throw SharedFailure.invalidInput }
+            _ = try await moderation.enqueue(roomID: room, targetUserID: UserID(target), action: .remove,
+                reasonCode: .init("ADMIN_ACTION"), expectedMembershipRevision: revision)
         default: throw SharedFailure.invalidInput
         }
     }

@@ -79,6 +79,13 @@ public final class V2MobileClient: Sendable {
         public let data: Data
         public let remainingMilliseconds: Int64
     }
+    public struct Readers: Sendable {
+        public let roomID: String
+        public let messageID: String
+        public let users: [String]
+        public let hasNext: Bool
+        public let remainingMilliseconds: Int64
+    }
     public struct Failure: Error, Sendable { public let code: String }
 
     private static let owners = V2Lock(initialState: Set<String>())
@@ -150,6 +157,15 @@ public final class V2MobileClient: Sendable {
         return .init(status: page.status, hits: page.hits.map { .init(id: $0.id, roomID: $0.roomID, text: $0.text) }, hasNext: page.hasNext)
     }
     public func clearMessageSearch() async throws { _ = try await run(.init(operation: .clearMessaging)) }
+    public func messageReaders(roomID: String, messageID: String, next: Bool) async throws -> Readers {
+        let value = try await run(.init(operation: .messageReaders, messageID: messageID,
+                                        roomID: roomID, action: next ? "next" : "first"))
+        guard let readers = value.messaging?.readers, readers.roomID == roomID, readers.messageID == messageID else {
+            throw Failure(code: "operationFailed")
+        }
+        return Readers(roomID: readers.roomID, messageID: readers.messageID, users: readers.users,
+                       hasNext: readers.hasNext, remainingMilliseconds: readers.remainingMilliseconds)
+    }
 
     public func directory() async throws -> [DirectoryEntry] {
         try await directoryPage(nextGroups: nil).entries
@@ -288,6 +304,16 @@ public final class V2MobileClient: Sendable {
                 state: $0.state, member: $0.member, canSubmit: $0.canSubmit, canCancel: $0.canCancel) },
             failure: community.failure)
     }
+    public struct GroupNickname: Sendable {
+        public let roomID: String
+        public let name: String?
+        public let revision: UInt64?
+    }
+    public struct GroupPolicy: Sendable {
+        public let role: String
+        public let permissions: [String]
+        public let revision: UInt64
+    }
     public struct GroupPage: Sendable {
         public let announcement: String
         public let editableAnnouncementRevision: Int64?
@@ -295,6 +321,8 @@ public final class V2MobileClient: Sendable {
         public let actorRole: String
         public let permissions: [String]
         public let members: [(userID: String, role: String)]
+        public let policies: [GroupPolicy]
+        public let policiesReady: Bool
         public let hasMore: Bool
     }
     public func changeMembership(roomID: String, revision: UInt64, action: String, target: String?, role: String?) async throws {
@@ -307,7 +335,22 @@ public final class V2MobileClient: Sendable {
         let result = try await run(.init(operation: next ? .groupMembersNext : .openGroup, roomID: roomID))
         guard let group = result.directory?.group, group.roomID == roomID else { throw Failure(code: "operationFailed") }
         guard let revision = Int64(exactly: group.revision) else { throw Failure(code: "operationFailed") }
-        return GroupPage(announcement: group.announcement, editableAnnouncementRevision: group.permissions.contains("manage_announcements") ? Int64(exactly: group.announcementRevision) : nil, membershipRevision: revision, actorRole: group.actorRole, permissions: group.permissions, members: group.members.map { ($0.userID, $0.role) }, hasMore: group.hasMore)
+        return GroupPage(announcement: group.announcement, editableAnnouncementRevision: group.permissions.contains("manage_announcements") ? Int64(exactly: group.announcementRevision) : nil, membershipRevision: revision, actorRole: group.actorRole, permissions: group.permissions, members: group.members.map { ($0.userID, $0.role) }, policies: group.policies.map { GroupPolicy(role: $0.role, permissions: $0.permissions, revision: $0.revision) }, policiesReady: group.policiesReady, hasMore: group.hasMore)
+    }
+    public func groupNickname(roomID: String) async throws -> GroupNickname? {
+        let value = try await run(.init(operation: .groupNickname, roomID: roomID))
+        guard let nickname = value.directory?.groupNickname else { return nil }
+        return GroupNickname(roomID: nickname.roomID, name: nickname.name, revision: nickname.revision)
+    }
+    public func saveGroupNickname(roomID: String, name: String?, revision: UInt64?) async throws {
+        _ = try await run(.init(operation: .saveGroupNickname, roomID: roomID, text: name, revision: revision))
+    }
+    public func updateGroupPermissions(roomID: String, revision: UInt64, role: String, permissions: [String]) async throws {
+        _ = try await run(.init(operation: .groupAction, roomID: roomID, action: "permissions",
+                                revision: revision, role: role, permissions: permissions))
+    }
+    public func moderateMemberRemoval(roomID: String, userID: String, revision: UInt64) async throws {
+        _ = try await run(.init(operation: .moderateMemberRemoval, roomID: roomID, targetUserID: userID, revision: revision))
     }
     public func createGroup(title: String, members: [String]) async throws {
         _ = try await run(.init(operation: .createGroup, text: title, members: members))

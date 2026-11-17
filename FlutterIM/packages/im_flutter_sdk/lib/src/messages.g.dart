@@ -1032,6 +1032,116 @@ class GroupMember {
   }
 }
 
+class ImGroupNickname {
+  ImGroupNickname({
+    required this.roomId,
+    this.name,
+    this.revision,
+  });
+
+  String roomId;
+
+  String? name;
+
+  int? revision;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      roomId,
+      name,
+      revision,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImGroupNickname decode(Object result) {
+    result as List<Object?>;
+    return ImGroupNickname(
+      roomId: result[0]! as String,
+      name: result[1] as String?,
+      revision: result[2] as int?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImGroupNickname || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(roomId, other.roomId) && _deepEquals(name, other.name) && _deepEquals(revision, other.revision);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImGroupNickname(roomId: $roomId, name: $name, revision: $revision)';
+  }
+}
+
+class ImGroupPolicy {
+  ImGroupPolicy({
+    required this.role,
+    required this.permissions,
+    required this.revision,
+  });
+
+  String role;
+
+  List<String> permissions;
+
+  int revision;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      role,
+      permissions,
+      revision,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImGroupPolicy decode(Object result) {
+    result as List<Object?>;
+    return ImGroupPolicy(
+      role: result[0]! as String,
+      permissions: (result[1]! as List<Object?>).cast<String>(),
+      revision: result[2]! as int,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImGroupPolicy || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(role, other.role) && _deepEquals(permissions, other.permissions) && _deepEquals(revision, other.revision);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImGroupPolicy(role: $role, permissions: $permissions, revision: $revision)';
+  }
+}
+
 class GroupPage {
   GroupPage({
     required this.announcement,
@@ -1040,6 +1150,8 @@ class GroupPage {
     required this.actorRole,
     required this.permissions,
     required this.members,
+    required this.policies,
+    required this.policiesReady,
     required this.hasMore,
   });
 
@@ -1055,6 +1167,10 @@ class GroupPage {
 
   List<GroupMember> members;
 
+  List<ImGroupPolicy> policies;
+
+  bool policiesReady;
+
   bool hasMore;
 
   List<Object?> _toList() {
@@ -1065,6 +1181,8 @@ class GroupPage {
       actorRole,
       permissions,
       members,
+      policies,
+      policiesReady,
       hasMore,
     ];
   }
@@ -1081,7 +1199,9 @@ class GroupPage {
       actorRole: result[3]! as String,
       permissions: (result[4]! as List<Object?>).cast<String>(),
       members: (result[5]! as List<Object?>).cast<GroupMember>(),
-      hasMore: result[6]! as bool,
+      policies: (result[6]! as List<Object?>).cast<ImGroupPolicy>(),
+      policiesReady: result[7]! as bool,
+      hasMore: result[8]! as bool,
     );
   }
 
@@ -1094,7 +1214,7 @@ class GroupPage {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(announcement, other.announcement) && _deepEquals(editableAnnouncementRevision, other.editableAnnouncementRevision) && _deepEquals(membershipRevision, other.membershipRevision) && _deepEquals(actorRole, other.actorRole) && _deepEquals(permissions, other.permissions) && _deepEquals(members, other.members) && _deepEquals(hasMore, other.hasMore);
+    return _deepEquals(announcement, other.announcement) && _deepEquals(editableAnnouncementRevision, other.editableAnnouncementRevision) && _deepEquals(membershipRevision, other.membershipRevision) && _deepEquals(actorRole, other.actorRole) && _deepEquals(permissions, other.permissions) && _deepEquals(members, other.members) && _deepEquals(policies, other.policies) && _deepEquals(policiesReady, other.policiesReady) && _deepEquals(hasMore, other.hasMore);
   }
 
   @override
@@ -1103,7 +1223,7 @@ class GroupPage {
 
   @override
   String toString() {
-    return 'GroupPage(announcement: $announcement, editableAnnouncementRevision: $editableAnnouncementRevision, membershipRevision: $membershipRevision, actorRole: $actorRole, permissions: $permissions, members: $members, hasMore: $hasMore)';
+    return 'GroupPage(announcement: $announcement, editableAnnouncementRevision: $editableAnnouncementRevision, membershipRevision: $membershipRevision, actorRole: $actorRole, permissions: $permissions, members: $members, policies: $policies, policiesReady: $policiesReady, hasMore: $hasMore)';
   }
 }
 
@@ -1377,6 +1497,71 @@ class ImCommunity {
   }
 }
 
+class ImReaders {
+  ImReaders({
+    required this.roomId,
+    required this.messageId,
+    required this.users,
+    required this.hasNext,
+    required this.remainingMilliseconds,
+  });
+
+  String roomId;
+
+  String messageId;
+
+  List<String> users;
+
+  bool hasNext;
+
+  int remainingMilliseconds;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      roomId,
+      messageId,
+      users,
+      hasNext,
+      remainingMilliseconds,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImReaders decode(Object result) {
+    result as List<Object?>;
+    return ImReaders(
+      roomId: result[0]! as String,
+      messageId: result[1]! as String,
+      users: (result[2]! as List<Object?>).cast<String>(),
+      hasNext: result[3]! as bool,
+      remainingMilliseconds: result[4]! as int,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImReaders || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(roomId, other.roomId) && _deepEquals(messageId, other.messageId) && _deepEquals(users, other.users) && _deepEquals(hasNext, other.hasNext) && _deepEquals(remainingMilliseconds, other.remainingMilliseconds);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImReaders(roomId: $roomId, messageId: $messageId, users: $users, hasNext: $hasNext, remainingMilliseconds: $remainingMilliseconds)';
+  }
+}
+
 class WindowView {
   WindowView({
     required this.conversations,
@@ -1487,23 +1672,32 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is GroupMember) {
       buffer.putUint8(142);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is ImGroupNickname) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvite) {
+    }    else if (value is ImGroupPolicy) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
-    }    else if (value is ImJoinRequest) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvitePreview) {
+    }    else if (value is ImInvite) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    }    else if (value is ImCommunity) {
+    }    else if (value is ImJoinRequest) {
       buffer.putUint8(147);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is ImInvitePreview) {
       buffer.putUint8(148);
+      writeValue(buffer, value.encode());
+    }    else if (value is ImCommunity) {
+      buffer.putUint8(149);
+      writeValue(buffer, value.encode());
+    }    else if (value is ImReaders) {
+      buffer.putUint8(150);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(151);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1542,16 +1736,22 @@ class _PigeonCodec extends StandardMessageCodec {
       case 142:
         return GroupMember.decode(readValue(buffer)!);
       case 143:
-        return GroupPage.decode(readValue(buffer)!);
+        return ImGroupNickname.decode(readValue(buffer)!);
       case 144:
-        return ImInvite.decode(readValue(buffer)!);
+        return ImGroupPolicy.decode(readValue(buffer)!);
       case 145:
-        return ImJoinRequest.decode(readValue(buffer)!);
+        return GroupPage.decode(readValue(buffer)!);
       case 146:
-        return ImInvitePreview.decode(readValue(buffer)!);
+        return ImInvite.decode(readValue(buffer)!);
       case 147:
-        return ImCommunity.decode(readValue(buffer)!);
+        return ImJoinRequest.decode(readValue(buffer)!);
       case 148:
+        return ImInvitePreview.decode(readValue(buffer)!);
+      case 149:
+        return ImCommunity.decode(readValue(buffer)!);
+      case 150:
+        return ImReaders.decode(readValue(buffer)!);
+      case 151:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1928,6 +2128,75 @@ class ImHost {
     ;
   }
 
+  Future<ImGroupNickname?> groupNickname(String roomId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.groupNickname$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+    return pigeonVar_replyValue as ImGroupNickname?;
+  }
+
+  Future<void> saveGroupNickname(String roomId, String? name, int? revision) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.saveGroupNickname$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, name, revision]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> updateGroupPermissions(String roomId, int revision, String role, List<String> permissions) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.updateGroupPermissions$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, revision, role, permissions]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> moderateMemberRemoval(String roomId, String userId, int revision) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.moderateMemberRemoval$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, userId, revision]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
   Future<GroupPage> groupMembers(String roomId, bool next) async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.groupMembers$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
@@ -2222,6 +2491,24 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as SearchPage;
+  }
+
+  Future<ImReaders> messageReaders(String roomId, String messageId, bool next) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.messageReaders$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, messageId, next]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as ImReaders;
   }
 
   Future<void> clearMessageSearch() async {

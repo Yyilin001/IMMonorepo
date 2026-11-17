@@ -720,3 +720,294 @@ class _GroupAvatarPageState extends State<_GroupAvatarPage> {
     );
   }
 }
+
+class _MessageReadersPage extends StatefulWidget {
+  const _MessageReadersPage({required this.roomId, required this.messageId});
+  final String roomId, messageId;
+
+  @override
+  State<_MessageReadersPage> createState() => _MessageReadersPageState();
+}
+
+class _MessageReadersPageState extends State<_MessageReadersPage> {
+  final List<String> users = [];
+  final Map<String, ImProfile> profiles = {};
+  bool loading = true, more = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(load());
+    });
+  }
+
+  Future<void> load({bool next = false}) async {
+    if (loading || more) return;
+    setState(() {
+      if (next) {
+        more = true;
+      } else {
+        loading = true;
+      }
+      error = null;
+    });
+    try {
+      final page = await _SdkScope.of(context)!.client!.messageReaders(
+        widget.roomId,
+        widget.messageId,
+        next: next,
+      );
+      if (!mounted) return;
+      setState(() {
+        if (!next) users.clear();
+        for (final user in page.users) {
+          if (!users.contains(user)) users.add(user);
+        }
+        more = page.hasNext;
+        loading = false;
+      });
+      unawaited(_loadProfiles());
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        loading = false;
+      });
+    }
+  }
+
+  Future<void> _loadProfiles() async {
+    final ids = users
+        .where((id) => id.isNotEmpty && !profiles.containsKey(id))
+        .take(50)
+        .toList(growable: false);
+    if (ids.isEmpty) return;
+    try {
+      final rows = await _SdkScope.of(context)!.client!.profiles(
+        page: 'readers:${widget.roomId}:${widget.messageId}',
+        context: 'room',
+        roomId: widget.roomId,
+        userIds: ids,
+      );
+      if (!mounted) return;
+      setState(() {
+        for (final row in rows) {
+          profiles[row.userId] = row;
+        }
+      });
+    } catch (_) {
+      // Public IDs remain visible when profile cards are unavailable.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => _ProfileScaffold(
+    title: '已读成员',
+    actions: [
+      IconButton(
+        tooltip: '刷新',
+        onPressed: loading || more ? null : load,
+        icon: const Icon(Icons.refresh_rounded),
+      ),
+    ],
+    children: [
+      if (error != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Text(
+            error!,
+            style: const TextStyle(color: Color(0xFFB3261E)),
+          ),
+        ),
+      if (loading)
+        const Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: CircularProgressIndicator()),
+        )
+      else ...[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+          child: Text(
+            '${users.length} 位成员已读',
+            style: const TextStyle(fontSize: 13, color: muted),
+          ),
+        ),
+        for (final user in users)
+          ListTile(
+            leading: SdkAvatar(
+              userId: user,
+              name: profiles[user]?.name ?? user,
+              context: 'room',
+              roomId: widget.roomId,
+              size: 40,
+            ),
+            title: Text(profiles[user]?.name ?? user),
+          ),
+        if (more)
+          TextButton(
+            onPressed: () => load(next: true),
+            child: const Text('加载更多'),
+          ),
+        if (users.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(20),
+            child: Text('暂无已读成员', style: TextStyle(color: muted)),
+          ),
+      ],
+    ],
+  );
+}
+
+const _groupPermissionLabels = <String, String>{
+  'send_messages': '发送消息',
+  'invite_members': '添加成员',
+  'remove_members': '移除成员',
+  'change_member_roles': '设置角色',
+  'pin_messages': '置顶消息',
+  'manage_announcements': '管理公告',
+  'moderate_messages': '管理消息',
+  'mute_members': '管理禁言',
+};
+
+class _GroupPermissionsPage extends StatefulWidget {
+  const _GroupPermissionsPage({
+    required this.roomId,
+    required this.membershipRevision,
+    required this.actorRole,
+    required this.policies,
+    required this.policiesReady,
+  });
+  final String roomId;
+  final int membershipRevision;
+  final String actorRole;
+  final List<({String role, Set<String> permissions, int revision})> policies;
+  final bool policiesReady;
+
+  @override
+  State<_GroupPermissionsPage> createState() => _GroupPermissionsPageState();
+}
+
+class _GroupPermissionsPageState extends State<_GroupPermissionsPage> {
+  late final Map<String, Set<String>> values = {
+    for (final policy in widget.policies)
+      policy.role: policy.permissions.toSet(),
+    if (!widget.policies.any((policy) => policy.role == 'admin'))
+      'admin': {...?widget.policies
+          .where((policy) => policy.role == 'admin')
+          .firstOrNull
+          ?.permissions},
+    if (!widget.policies.any((policy) => policy.role == 'member'))
+      'member': {
+        'send_messages',
+        'invite_members',
+        'manage_announcements',
+        'pin_messages',
+      },
+  };
+  String role = 'member';
+  bool saving = false;
+  String? error;
+
+  Future<void> save() async {
+    if (saving || widget.actorRole != 'owner' || !widget.policiesReady) return;
+    setState(() => saving = true);
+    try {
+      await _SdkScope.of(context)!.client!.updateGroupPermissions(
+        widget.roomId,
+        widget.membershipRevision,
+        role,
+        values[role] ?? const {},
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('群权限已提交')),
+      );
+      Navigator.of(context).pop(true);
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        saving = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = values[role] ?? <String>{};
+    return _ProfileScaffold(
+      title: '群权限',
+      actions: [
+        if (widget.actorRole == 'owner' && widget.policiesReady)
+          TextButton(
+            key: const Key('save-group-permissions'),
+            onPressed: saving ? null : save,
+            child: saving ? const Text('保存中') : const Text('保存'),
+          ),
+      ],
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'member', label: Text('普通成员')),
+              ButtonSegment(value: 'admin', label: Text('管理员')),
+            ],
+            selected: {role},
+            onSelectionChanged: (value) => setState(() => role = value.first),
+          ),
+        ),
+        if (!widget.policiesReady)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 8, 20, 0),
+            child: Text(
+              '群权限正在同步，暂不能保存。',
+              style: TextStyle(fontSize: 13, color: muted),
+            ),
+          )
+        else if (widget.actorRole != 'owner')
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 8, 20, 0),
+            child: Text(
+              '只有群主可以修改群权限。',
+              style: TextStyle(fontSize: 13, color: muted),
+            ),
+          ),
+        for (final entry in _groupPermissionLabels.entries)
+          SwitchListTile(
+            key: Key('group-permission-${entry.key}'),
+            title: Text(entry.value),
+            value: selected.contains(entry.key),
+            onChanged: widget.actorRole == 'owner' && widget.policiesReady
+                ? (enabled) => setState(() {
+                    final next = {...selected};
+                    if (enabled) {
+                      next.add(entry.key);
+                    } else {
+                      next.remove(entry.key);
+                    }
+                    values[role] = next;
+                  })
+                : null,
+          ),
+        if (error != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Text(
+              error!,
+              style: const TextStyle(color: Color(0xFFB3261E)),
+            ),
+          ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Text(
+            '权限只影响新操作，服务端会按提交时的策略再次校验。',
+            style: TextStyle(fontSize: 12, color: muted, height: 1.5),
+          ),
+        ),
+      ],
+    );
+  }
+}

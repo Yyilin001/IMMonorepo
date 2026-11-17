@@ -14,10 +14,12 @@ struct SharedGroup: Encodable, Sendable {
     let announcement: String; let announcementRevision: UInt64; let policies: [SharedRolePolicy]
     let permissions: [String]; let policiesReady: Bool
 }
+struct SharedGroupNickname: Encodable, Sendable { let roomID: String; let name: String?; let revision: UInt64? }
 struct SharedDirectory: Encodable, Sendable {
     let contacts: [SharedContact]; let scope: String; let hasMoreContacts: Bool; let firstContacts: Bool
     let groups: [SharedConversation]; let hasMoreGroups: Bool; let firstGroups: Bool
     let avatarEditor: SharedAvatarEditor?
+    let groupNickname: SharedGroupNickname?
     let profiles: [SharedProfile]; let selectedProfile: String?; let community: SharedCommunitySnapshot
     let identity: SharedIdentity?; let group: SharedGroup?; let works: [SharedWork]; let failure: String?
 }
@@ -150,6 +152,11 @@ actor SharedSocialGroups {
         case .createGroup:
             guard let title = request.text, let ids = request.members, ids.count <= 100 else { throw SharedFailure.invalidInput }
             _ = try await creation.enqueue(title: title, members: ids.map { try UserID($0) })
+        case .groupNickname:
+            guard let raw = request.roomID else { throw SharedFailure.invalidInput }
+            try await people.loadGroupNickname(room: try RoomID(raw))
+        case .saveGroupNickname:
+            try await people.saveGroupNickname(request)
         case .profiles:
             guard let page = request.page, let ids = request.members else { throw SharedFailure.invalidInput }
             let context = try profileContext(request.scope ?? "relationship", roomID: request.roomID)
@@ -281,7 +288,7 @@ actor SharedSocialGroups {
         if let work = profiles.1 { works.append(work) }
         return .init(contacts: contacts, scope: scope, hasMoreContacts: nextContact != nil, firstContacts: contactCursor == nil,
             groups: groups.items.map { .init(id: $0.roomID.rawValue, title: $0.title, preview: "") }, hasMoreGroups: nextGroup != nil, firstGroups: groupCursor == nil,
-            avatarEditor: try await avatars.snapshot(), profiles: profiles.0, selectedProfile: await people.selected?.rawValue, community: communitySnapshot, identity: lookup.map { .init(userID: $0.identity.userID.rawValue, handle: $0.identity.handle.rawValue, name: $0.identity.displayName) }, group: group, works: works, failure: failure?.rawValue)
+            avatarEditor: try await avatars.snapshot(), groupNickname: await people.currentGroupNickname, profiles: profiles.0, selectedProfile: await people.selected?.rawValue, community: communitySnapshot, identity: lookup.map { .init(userID: $0.identity.userID.rawValue, handle: $0.identity.handle.rawValue, name: $0.identity.displayName) }, group: group, works: works, failure: failure?.rawValue)
     }
 }
 private extension V2ClientUserBlockProjection {

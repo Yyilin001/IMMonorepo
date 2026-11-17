@@ -711,6 +711,20 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                       !activeMutations.contains(item.id)
                                   ? () => forwardMessage(item, item.revision!)
                                   : null,
+                              onReaders:
+                                  room.isGroup &&
+                                      mine &&
+                                      !item.withdrawn &&
+                                      item.revision != null
+                                  ? () => Navigator.of(context).push(
+                                      MaterialPageRoute<void>(
+                                        builder: (_) => _MessageReadersPage(
+                                          roomId: room.id,
+                                          messageId: item.id,
+                                        ),
+                                      ),
+                                    )
+                                  : null,
                               onEdit:
                                   item.mutableRevision != null &&
                                       !activeMutations.contains(item.id)

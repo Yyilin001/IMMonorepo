@@ -54,6 +54,14 @@ void main() {
                       role: next ? 'member' : 'owner',
                     ),
                   ],
+                  policies: [
+                    wire.ImGroupPolicy(
+                      role: 'member',
+                      permissions: ['send_messages'],
+                      revision: 4,
+                    ),
+                  ],
+                  policiesReady: true,
                   hasMore: !next,
                 ),
               ];
@@ -73,6 +81,9 @@ void main() {
       final first = await client.groupMembers('room');
       expect(first.members, {'user-1': 'owner'});
       expect(first.announcement, '周六见');
+      expect(first.policies.single.role, 'member');
+      expect(first.policies.single.permissions, {'send_messages'});
+      expect(first.policiesReady, true);
       expect(first.hasMore, true);
       await client.updateAnnouncement(
         'room',

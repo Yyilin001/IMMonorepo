@@ -163,7 +163,11 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
   int? editableAnnouncementRevision, membershipRevision;
   String actorRole = '';
   Set<String> permissions = {};
+  List<({String role, Set<String> permissions, int revision})> policies = [];
+  bool policiesReady = false;
   bool submitting = false;
+  String? myGroupNickname;
+  int? myGroupNicknameRevision;
 
   Future<void> change(
     ImMembershipAction action,
@@ -235,30 +239,90 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
 
   Widget? memberMenu(String user, String role) {
     if (role == 'owner' || user == _SdkScope.of(context)!.userId) return null;
-    final actions = {
+    final actions = <String, String>{
       if (permissions.contains('change_member_roles'))
-        ImMembershipAction.role: role == 'admin' ? '设为成员' : '设为管理员',
-      if (permissions.contains('remove_members'))
-        ImMembershipAction.remove: '移除成员',
-      if (actorRole == 'owner') ImMembershipAction.transfer: '转让群主',
+        'role': role == 'admin' ? '设为成员' : '设为管理员',
+      if (permissions.contains('remove_members')) 'remove': '移除成员',
+      if (permissions.contains('mute_members')) 'mute': '禁言 1 小时',
+      if (actorRole == 'owner') 'transfer': '转让群主',
+      if (actorRole != 'member') 'moderateRemove': '管理员移除',
     };
     if (actions.isEmpty) return null;
-    return PopupMenuButton<ImMembershipAction>(
+    return PopupMenuButton<String>(
       tooltip: '成员操作',
       enabled: !loading && !submitting && error == null,
       itemBuilder: (_) => [
         for (final action in actions.entries)
           PopupMenuItem(value: action.key, child: Text(action.value)),
       ],
-      onSelected: (action) => change(
-        action,
-        actions[action]!,
-        target: user,
-        role: action == ImMembershipAction.role
-            ? (role == 'admin' ? 'member' : 'admin')
-            : null,
+      onSelected: (action) {
+        if (action == 'mute' || action == 'moderateRemove') {
+          moderate(action, user);
+          return;
+        }
+        final membership = switch (action) {
+          'role' => ImMembershipAction.role,
+          'remove' => ImMembershipAction.remove,
+          'transfer' => ImMembershipAction.transfer,
+          _ => null,
+        };
+        if (membership == null) return;
+        change(
+          membership,
+          actions[action]!,
+          target: user,
+          role: action == 'role'
+              ? (role == 'admin' ? 'member' : 'admin')
+              : null,
+        );
+      },
+    );
+  }
+
+  Future<void> moderate(String action, String user) async {
+    final revision = membershipRevision;
+    if (revision == null || submitting || loading) return;
+    final label = action == 'mute' ? '禁言 1 小时' : '管理员移除';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: Text('确认$label？'),
+        content: Text(
+          action == 'mute'
+              ? '该成员将在 1 小时内不能发送消息。'
+              : '该成员将被移出群聊，操作会写入管理员审计记录。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: Text(label),
+          ),
+        ],
       ),
     );
+    if (confirmed != true || !mounted) return;
+    setState(() => submitting = true);
+    try {
+      final client = _SdkScope.of(context)!.client!;
+      if (action == 'mute') {
+        await client.muteMember(widget.roomId, user, revision);
+      } else {
+        await client.moderateMemberRemoval(widget.roomId, user, revision);
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('已提交「$label」')));
+      await load();
+    } catch (failure) {
+      if (mounted) setState(() => error = _errorText(failure));
+    } finally {
+      if (mounted) setState(() => submitting = false);
+    }
   }
 
   String? error;
@@ -294,12 +358,85 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
       membershipRevision = page.membershipRevision;
       actorRole = page.actorRole;
       permissions = page.permissions;
+      policies = page.policies;
+      policiesReady = page.policiesReady;
       more = page.hasMore;
       unawaited(loadProfiles());
+      unawaited(loadMyNickname());
     } catch (failure) {
       if (mounted) error = _errorText(failure);
     } finally {
       if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> loadMyNickname() async {
+    try {
+      final value = await _SdkScope.of(
+        context,
+      )!.client!.groupNickname(widget.roomId);
+      if (!mounted) return;
+      setState(() {
+        myGroupNickname = value?.name;
+        myGroupNicknameRevision = value?.revision;
+      });
+    } catch (_) {
+      // The member list remains usable when the nickname read fails.
+    }
+  }
+
+  Future<void> editMyNickname() async {
+    final controller = TextEditingController(text: myGroupNickname ?? '');
+    final text = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('我在本群的昵称'),
+        content: TextField(
+          key: const Key('group-nickname-input'),
+          controller: controller,
+          autofocus: true,
+          maxLength: 24,
+          decoration: const InputDecoration(
+            labelText: '群昵称',
+            hintText: '留空恢复使用账号昵称',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, controller.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (text == null || !mounted) return;
+    final clean = text.trim();
+    setState(() => submitting = true);
+    try {
+      await _SdkScope.of(context)!.client!.saveGroupNickname(
+        widget.roomId,
+        clean.isEmpty ? null : clean,
+        revision: myGroupNicknameRevision,
+      );
+      if (!mounted) return;
+      setState(() {
+        myGroupNickname = clean.isEmpty ? null : clean;
+        myGroupNicknameRevision = null;
+        submitting = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('群昵称已提交，正在同步')),
+      );
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => submitting = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
     }
   }
 
@@ -434,6 +571,40 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
                 builder: (_) => _GroupInvitesPage(
                   roomId: widget.roomId,
                   membershipRevision: membershipRevision!,
+                ),
+              ),
+            );
+            if (mounted) await load();
+          },
+        ),
+      ListTile(
+        key: const Key('my-group-nickname'),
+        leading: const Icon(Icons.badge_outlined, color: green),
+        title: const Text('我在本群的昵称'),
+        subtitle: Text(
+          myGroupNickname?.isNotEmpty == true ? myGroupNickname! : '未设置',
+        ),
+        trailing: const Icon(Icons.chevron_right_rounded, color: muted),
+        onTap: submitting ? null : editMyNickname,
+      ),
+      if (membershipRevision != null && policies.isNotEmpty)
+        ListTile(
+          key: const Key('group-permissions'),
+          leading: const Icon(Icons.admin_panel_settings_outlined, color: green),
+          title: const Text('群权限'),
+          subtitle: Text(
+            policiesReady ? '管理员与普通成员的可用操作' : '权限同步中',
+          ),
+          trailing: const Icon(Icons.chevron_right_rounded, color: muted),
+          onTap: () async {
+            await Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => _GroupPermissionsPage(
+                  roomId: widget.roomId,
+                  membershipRevision: membershipRevision!,
+                  actorRole: actorRole,
+                  policies: policies,
+                  policiesReady: policiesReady,
                 ),
               ),
             );

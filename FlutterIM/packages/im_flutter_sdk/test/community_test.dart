@@ -20,6 +20,11 @@ void main() {
       'submitJoin',
       'cancelJoin',
       'muteMember',
+      'messageReaders',
+      'updateGroupPermissions',
+      'moderateMemberRemoval',
+      'groupNickname',
+      'saveGroupNickname',
       'close',
     ]) {
       final channel = BasicMessageChannel<Object?>(
@@ -53,6 +58,24 @@ void main() {
                   ),
                 ],
                 hasMore: true,
+              ),
+            ];
+          case 'groupNickname':
+            return [
+              wire.ImGroupNickname(
+                roomId: 'room',
+                name: '群里的我',
+                revision: 3,
+              ),
+            ];
+          case 'messageReaders':
+            return [
+              wire.ImReaders(
+                roomId: 'room',
+                messageId: 'message',
+                users: ['a', 'b'],
+                hasNext: true,
+                remainingMilliseconds: 30000,
               ),
             ];
           case 'previewInvite':
@@ -109,6 +132,32 @@ void main() {
     expect(calls['cancelJoin'], ['room']);
     await client.muteMember('room', 'peer', 7);
     expect(calls['muteMember'], ['room', 'peer', 7]);
+    final readers = await client.messageReaders('room', 'message');
+    expect(readers.users, ['a', 'b']);
+    expect(readers.hasNext, true);
+    expect(readers.remainingMilliseconds, 30000);
+    expect(calls['messageReaders'], ['room', 'message', false]);
+    await client.messageReaders('room', 'message', next: true);
+    expect(calls['messageReaders'], ['room', 'message', true]);
+
+    await client.updateGroupPermissions('room', 7, 'member', {
+      'send_messages',
+    });
+    expect(calls['updateGroupPermissions'], [
+      'room',
+      7,
+      'member',
+      ['send_messages'],
+    ]);
+    await client.moderateMemberRemoval('room', 'peer', 7);
+    expect(calls['moderateMemberRemoval'], ['room', 'peer', 7]);
+
+    final nickname = await client.groupNickname('room');
+    expect(nickname?.name, '群里的我');
+    expect(nickname?.revision, 3);
+    expect(calls['groupNickname'], ['room']);
+    await client.saveGroupNickname('room', '新群昵称', revision: 3);
+    expect(calls['saveGroupNickname'], ['room', '新群昵称', 3]);
     await client.close();
   });
 }

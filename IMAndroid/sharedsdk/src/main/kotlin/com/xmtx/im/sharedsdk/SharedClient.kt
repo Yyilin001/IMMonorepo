@@ -188,6 +188,9 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun avatar(userID: String, context: String, roomID: String? = null): SharedSnapshot =
         execute(JSONObject().put("operation", "avatar").put("page", "avatar").put("scope", context)
             .put("targetUserID", userID).apply { if (roomID != null) put("roomID", roomID) })
+    suspend fun groupNickname(roomID: String): SharedSnapshot = directoryCall("groupNickname", "roomID" to roomID)
+    suspend fun saveGroupNickname(roomID: String, name: String?, revision: Long?): SharedSnapshot =
+        directoryCall("saveGroupNickname", "roomID" to roomID, "text" to (name ?: ""), "revision" to revision)
     suspend fun openProfile(userID: String, context: String = "relationship", roomID: String? = null): SharedSnapshot =
         directoryCall("openProfile", "targetUserID" to userID, "scope" to context, "roomID" to roomID)
     suspend fun saveAlias(userID: String, name: String?, revision: Long?): SharedSnapshot = directoryCall("saveAlias", "targetUserID" to userID, "text" to (name ?: ""), "revision" to revision)
@@ -198,6 +201,8 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun inviteAction(roomID: String, action: SharedInviteAction, revision: Long? = null, id: String? = null, note: String? = null): SharedSnapshot =
         directoryCall("inviteAction", "roomID" to roomID, "action" to action.wire, "revision" to revision, "intentID" to id, "text" to note)
     suspend fun muteMember(roomID: String, userID: String, revision: Long): SharedSnapshot = directoryCall("muteMember", "roomID" to roomID, "targetUserID" to userID, "revision" to revision)
+    suspend fun moderateMemberRemoval(roomID: String, userID: String, revision: Long): SharedSnapshot =
+        directoryCall("moderateMemberRemoval", "roomID" to roomID, "targetUserID" to userID, "revision" to revision)
     suspend fun discardDirectoryDraft(id: String): SharedSnapshot = directoryCall("discardDirectoryDraft", "intentID" to id)
     suspend fun retryDirectoryWork(id: String): SharedSnapshot = directoryCall("retryDirectoryWork", "intentID" to id)
     suspend fun openAvatarEditor(roomID: String? = null): SharedSnapshot = directoryCall("openAvatarEditor", "roomID" to roomID)

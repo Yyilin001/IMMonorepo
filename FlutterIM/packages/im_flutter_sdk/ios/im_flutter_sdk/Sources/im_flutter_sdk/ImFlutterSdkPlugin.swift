@@ -147,6 +147,28 @@ private actor MobileHost: ImHost {
         guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
         try await ordered { try await self.client.changeMembership(roomID: roomId, revision: expected, action: action, target: target, role: role) }
     }
+    func groupNickname(roomId: String) async throws -> ImGroupNickname? {
+        try await ordered {
+            guard let value = try await self.client.groupNickname(roomID: roomId) else { return nil }
+            return ImGroupNickname(roomId: value.roomID, name: value.name,
+                                   revision: value.revision.map { Int64(clamping: $0) })
+        }
+    }
+    func saveGroupNickname(roomId: String, name: String?, revision: Int64?) async throws {
+        let expected = try revision.map { value -> UInt64 in
+            guard let expected = UInt64(exactly: value) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+            return expected
+        }
+        try await ordered { try await self.client.saveGroupNickname(roomID: roomId, name: name, revision: expected) }
+    }
+    func updateGroupPermissions(roomId: String, revision: Int64, role: String, permissions: [String]) async throws {
+        guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered { try await self.client.updateGroupPermissions(roomID: roomId, revision: expected, role: role, permissions: permissions) }
+    }
+    func moderateMemberRemoval(roomId: String, userId: String, revision: Int64) async throws {
+        guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered { try await self.client.moderateMemberRemoval(roomID: roomId, userID: userId, revision: expected) }
+    }
     func updateAnnouncement(roomId: String, revision: Int64, text: String) async throws {
         guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
         try await ordered { try await self.client.updateAnnouncement(roomID: roomId, revision: expected, text: text) }
@@ -154,7 +176,7 @@ private actor MobileHost: ImHost {
     func groupMembers(roomId: String, next: Bool) async throws -> GroupPage {
         try await ordered {
             let page = try await self.client.groupMembers(roomID: roomId, next: next)
-            return GroupPage(announcement: page.announcement, editableAnnouncementRevision: page.editableAnnouncementRevision, membershipRevision: page.membershipRevision, actorRole: page.actorRole, permissions: page.permissions, members: page.members.map { GroupMember(userId: $0.userID, role: $0.role) }, hasMore: page.hasMore)
+            return GroupPage(announcement: page.announcement, editableAnnouncementRevision: page.editableAnnouncementRevision, membershipRevision: page.membershipRevision, actorRole: page.actorRole, permissions: page.permissions, members: page.members.map { GroupMember(userId: $0.userID, role: $0.role) }, policies: page.policies.map { ImGroupPolicy(role: $0.role, permissions: $0.permissions, revision: Int64(clamping: $0.revision)) }, policiesReady: page.policiesReady, hasMore: page.hasMore)
         }
     }
     func invitations(roomId: String) async throws -> ImCommunity {
@@ -213,6 +235,13 @@ private actor MobileHost: ImHost {
         }
     }
     func clearMessageSearch() async throws { try await ordered { try await self.client.clearMessageSearch() } }
+    func messageReaders(roomId: String, messageId: String, next: Bool) async throws -> ImReaders {
+        try await ordered {
+            let value = try await self.client.messageReaders(roomID: roomId, messageID: messageId, next: next)
+            return ImReaders(roomId: value.roomID, messageId: value.messageID, users: value.users,
+                             hasNext: value.hasNext, remainingMilliseconds: value.remainingMilliseconds)
+        }
+    }
     func recoverSend(intentId: String, resend: Bool) async throws {
         try await ordered { try await self.client.recoverSend(intentID: intentId, resend: resend) }
     }
