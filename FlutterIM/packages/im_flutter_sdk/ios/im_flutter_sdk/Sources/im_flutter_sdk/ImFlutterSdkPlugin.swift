@@ -63,6 +63,24 @@ private actor MobileHost: ImHost {
                                                        isArchived: isArchived, muteUntil: muteUntil)
         }
     }
+    func openAvatarEditor(roomId: String?) async throws -> ImAvatarEditor? {
+        try await ordered {
+            guard let editor = try await self.client.openAvatarEditor(roomID: roomId) else { return nil }
+            return ImAvatarEditor(roomId: editor.roomID, revision: Int64(clamping: editor.revision),
+                                  canManage: editor.canManage, remainingMilliseconds: editor.remainingMilliseconds,
+                                  hasAvatar: editor.hasAvatar, name: editor.name, handle: editor.handle,
+                                  image: editor.image.map { FlutterStandardTypedData(bytes: $0) })
+        }
+    }
+    func changeAvatar(roomId: String?, revision: Int64, jpeg: FlutterStandardTypedData?, width: Int64?,
+                      height: Int64?, displayName: String?, action: String?) async throws {
+        guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered {
+            try await self.client.changeAvatar(roomID: roomId, revision: expected, jpeg: jpeg?.data,
+                                               width: width.map(Int.init), height: height.map(Int.init),
+                                               displayName: displayName, action: action)
+        }
+    }
     func nextUpdate(windowId: String) async throws -> WindowView {
         do {
             let view = try await client.nextUpdate(windowID: windowId)

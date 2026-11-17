@@ -634,6 +634,71 @@ data class ImProfile (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class ImAvatarEditor (
+  val roomId: String? = null,
+  val revision: Long,
+  val canManage: Boolean,
+  val remainingMilliseconds: Long,
+  val hasAvatar: Boolean,
+  val name: String? = null,
+  val handle: String? = null,
+  val image: ByteArray? = null
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImAvatarEditor {
+      val roomId = pigeonVar_list[0] as String?
+      val revision = pigeonVar_list[1] as Long
+      val canManage = pigeonVar_list[2] as Boolean
+      val remainingMilliseconds = pigeonVar_list[3] as Long
+      val hasAvatar = pigeonVar_list[4] as Boolean
+      val name = pigeonVar_list[5] as String?
+      val handle = pigeonVar_list[6] as String?
+      val image = pigeonVar_list[7] as ByteArray?
+      return ImAvatarEditor(roomId, revision, canManage, remainingMilliseconds, hasAvatar, name, handle, image)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      roomId,
+      revision,
+      canManage,
+      remainingMilliseconds,
+      hasAvatar,
+      name,
+      handle,
+      image,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImAvatarEditor
+    return MessagesPigeonUtils.deepEquals(this.roomId, other.roomId) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.canManage, other.canManage) && MessagesPigeonUtils.deepEquals(this.remainingMilliseconds, other.remainingMilliseconds) && MessagesPigeonUtils.deepEquals(this.hasAvatar, other.hasAvatar) && MessagesPigeonUtils.deepEquals(this.name, other.name) && MessagesPigeonUtils.deepEquals(this.handle, other.handle) && MessagesPigeonUtils.deepEquals(this.image, other.image)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.roomId)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.revision)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.canManage)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.remainingMilliseconds)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.hasAvatar)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.name)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.handle)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.image)
+    return result
+  }
+  override fun toString(): String {
+    return "ImAvatarEditor(roomId=$roomId, revision=$revision, canManage=$canManage, remainingMilliseconds=$remainingMilliseconds, hasAvatar=$hasAvatar, name=$name, handle=$handle, image=${image?.contentToString()})"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class DirectoryEntry (
   val id: String,
   val title: String,
@@ -1003,35 +1068,40 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       136.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryEntry.fromList(it)
+          ImAvatarEditor.fromList(it)
         }
       }
       137.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchHit.fromList(it)
+          DirectoryEntry.fromList(it)
         }
       }
       138.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchPage.fromList(it)
+          SearchHit.fromList(it)
         }
       }
       139.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryPage.fromList(it)
+          SearchPage.fromList(it)
         }
       }
       140.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupMember.fromList(it)
+          DirectoryPage.fromList(it)
         }
       }
       141.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          GroupMember.fromList(it)
         }
       }
       142.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          GroupPage.fromList(it)
+        }
+      }
+      143.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -1069,32 +1139,36 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(135)
         writeValue(stream, value.toList())
       }
-      is DirectoryEntry -> {
+      is ImAvatarEditor -> {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is SearchHit -> {
+      is DirectoryEntry -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is SearchPage -> {
+      is SearchHit -> {
         stream.write(138)
         writeValue(stream, value.toList())
       }
-      is DirectoryPage -> {
+      is SearchPage -> {
         stream.write(139)
         writeValue(stream, value.toList())
       }
-      is GroupMember -> {
+      is DirectoryPage -> {
         stream.write(140)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is GroupMember -> {
         stream.write(141)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is GroupPage -> {
         stream.write(142)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(143)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -1119,6 +1193,8 @@ interface ImHost {
   suspend fun openProfile(userId: String, context: String, roomId: String?): List<ImProfile>
   suspend fun saveAlias(userId: String, alias: String?, revision: Long?)
   suspend fun clearProfiles(page: String)
+  suspend fun openAvatarEditor(roomId: String?): ImAvatarEditor?
+  suspend fun changeAvatar(roomId: String?, revision: Long, jpeg: ByteArray?, width: Long?, height: Long?, displayName: String?, action: String?)
   suspend fun resolveUserId(handle: String): String
   suspend fun changeMembership(roomId: String, revision: Long, action: String, target: String?, role: String?)
   suspend fun updateAnnouncement(roomId: String, revision: Long, text: String)
@@ -1422,6 +1498,51 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 api.clearProfiles(pageArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.openAvatarEditor$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String?
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.openAvatarEditor(roomIdArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeAvatar$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String?
+            val revisionArg = args[1] as Long
+            val jpegArg = args[2] as ByteArray?
+            val widthArg = args[3] as Long?
+            val heightArg = args[4] as Long?
+            val displayNameArg = args[5] as String?
+            val actionArg = args[6] as String?
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.changeAvatar(roomIdArg, revisionArg, jpegArg, widthArg, heightArg, displayNameArg, actionArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart' show openFile;
 import 'package:flutter_file_dialog/flutter_file_dialog.dart';
 import 'package:mime/mime.dart' show lookupMimeType;
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 import 'package:material_ui/material_ui.dart';
 

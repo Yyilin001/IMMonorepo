@@ -601,16 +601,7 @@ class PersonalPane extends ConsumerWidget {
                       ? () => _openSdkLogin(context)
                       : () => Navigator.of(context).push(
                           MaterialPageRoute<void>(
-                            builder: (_) => _ProfileScaffold(
-                              title: '个人资料',
-                              children: [
-                                _ProfileHeader(
-                                  id: MyProfile.avatarId,
-                                  name: profile.name,
-                                  handle: sdk.userId!,
-                                ),
-                              ],
-                            ),
+                            builder: (_) => const _SdkMyProfilePage(),
                           ),
                         ),
                   child: Padding(

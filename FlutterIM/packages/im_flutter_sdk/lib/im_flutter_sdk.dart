@@ -76,6 +76,16 @@ typedef ImProfile = ({
   int remainingMilliseconds,
   Uint8List? avatar,
 });
+typedef ImAvatarEditor = ({
+  String? roomId,
+  int revision,
+  bool canManage,
+  int remainingMilliseconds,
+  bool hasAvatar,
+  String? name,
+  String? handle,
+  Uint8List? image,
+});
 typedef ImTransfer = ({
   String id,
   String name,
@@ -305,6 +315,43 @@ final class ImClient {
       moreGroups: page.moreGroups,
     );
   });
+
+  Future<ImAvatarEditor?> openAvatarEditor({String? roomId}) =>
+      _ordered(() async {
+        final value = await _host.openAvatarEditor(roomId);
+        return value == null
+            ? null
+            : (
+                roomId: value.roomId,
+                revision: value.revision,
+                canManage: value.canManage,
+                remainingMilliseconds: value.remainingMilliseconds,
+                hasAvatar: value.hasAvatar,
+                name: value.name,
+                handle: value.handle,
+                image: value.image,
+              );
+      });
+
+  Future<void> changeAvatar({
+    String? roomId,
+    required int revision,
+    Uint8List? jpeg,
+    int? width,
+    int? height,
+    String? displayName,
+    String? action,
+  }) => _ordered(
+    () => _host.changeAvatar(
+      roomId,
+      revision,
+      jpeg,
+      width,
+      height,
+      displayName,
+      action,
+    ),
+  );
 
   Future<List<ImProfile>> profiles({
     required String page,

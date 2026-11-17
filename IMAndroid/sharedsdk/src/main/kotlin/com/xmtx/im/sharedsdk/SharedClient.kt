@@ -197,7 +197,9 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun discardDirectoryDraft(id: String): SharedSnapshot = directoryCall("discardDirectoryDraft", "intentID" to id)
     suspend fun retryDirectoryWork(id: String): SharedSnapshot = directoryCall("retryDirectoryWork", "intentID" to id)
     suspend fun openAvatarEditor(roomID: String? = null): SharedSnapshot = directoryCall("openAvatarEditor", "roomID" to roomID)
-    suspend fun changeAvatar(roomID: String?, revision: Long, jpeg: String? = null, width: Int? = null, height: Int? = null): SharedSnapshot = directoryCall("changeAvatar", "roomID" to roomID, "revision" to revision, "image" to jpeg, "width" to width, "height" to height)
+    suspend fun changeAvatar(roomID: String?, revision: Long, jpeg: String? = null, width: Int? = null, height: Int? = null,
+                             text: String? = null, action: String? = null): SharedSnapshot = directoryCall("changeAvatar", "roomID" to roomID,
+        "revision" to revision, "image" to jpeg, "width" to width, "height" to height, "text" to text, "action" to action)
     suspend fun avatarAction(roomID: String?, id: String, action: SharedAvatarAction): SharedSnapshot = directoryCall("avatarAction", "roomID" to roomID, "intentID" to id, "action" to action.wire)
     /** Stream device bytes in bounded chunks; Swift owns staging, validation and atomic handoff. */
     suspend fun importAttachment(roomID: String, name: String, contentType: String, input: java.io.InputStream, width: Int? = null, height: Int? = null): SharedSnapshot = mutation.withLock {

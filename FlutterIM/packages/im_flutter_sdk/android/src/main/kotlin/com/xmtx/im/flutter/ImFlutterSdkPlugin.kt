@@ -98,6 +98,18 @@ private class MobileHost(private val context: Context) : ImHost {
         groupNicknameRevision, (expiresAtElapsed - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0),
         avatar?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) })
 
+    override suspend fun openAvatarEditor(roomId: String?): ImAvatarEditor? = mutations.withLock { sdk {
+        client.openAvatarEditor(roomId).directory?.avatarEditor?.let {
+            ImAvatarEditor(it.roomID, it.revision, it.canManage, (it.expiresAtElapsed - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0),
+                it.hasAvatar, it.name, it.handle, it.image?.let { encoded -> android.util.Base64.decode(encoded, android.util.Base64.DEFAULT) })
+        }
+    } }
+    override suspend fun changeAvatar(roomId: String?, revision: Long, jpeg: ByteArray?, width: Long?, height: Long?,
+                                      displayName: String?, action: String?) {
+        mutations.withLock { sdk { client.changeAvatar(roomId, revision,
+            jpeg?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) },
+            width?.toInt(), height?.toInt(), displayName, action) } }
+    }
     override suspend fun profiles(page: String, context: String, roomId: String?, userIds: List<String>): List<ImProfile> = mutations.withLock {
         sdk { client.profiles(page, context, roomId, userIds).directory?.profiles?.map { it.wire() } ?: throw FlutterError("authenticationRequired") }
     }

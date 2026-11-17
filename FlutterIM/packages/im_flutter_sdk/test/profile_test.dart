@@ -17,6 +17,8 @@ void main() {
       'openProfile',
       'saveAlias',
       'clearProfiles',
+      'openAvatarEditor',
+      'changeAvatar',
       'close',
     ]) {
       final channel = BasicMessageChannel<Object?>(
@@ -41,6 +43,18 @@ void main() {
                   remainingMilliseconds: 120000,
                 ),
               ],
+            ];
+          case 'openAvatarEditor':
+            return [
+              wire.ImAvatarEditor(
+                revision: 8,
+                canManage: true,
+                remainingMilliseconds: 60000,
+                hasAvatar: true,
+                name: '我的昵称',
+                handle: '@me',
+                image: Uint8List.fromList([9, 8, 7]),
+              ),
             ];
           case 'openProfile':
             return [
@@ -97,6 +111,32 @@ void main() {
 
     await client.clearProfiles('contacts');
     expect(calls['clearProfiles'], ['contacts']);
+
+    final editor = await client.openAvatarEditor();
+    expect(editor?.revision, 8);
+    expect(editor?.name, '我的昵称');
+    expect(editor?.handle, '@me');
+    expect(editor?.image, [9, 8, 7]);
+
+    await client.changeAvatar(revision: 8, displayName: '新昵称');
+    expect(calls['changeAvatar'], [null, 8, null, null, null, '新昵称', null]);
+
+    await client.changeAvatar(
+      revision: 9,
+      jpeg: Uint8List.fromList([0xff, 0xd8, 0xff]),
+      width: 512,
+      height: 512,
+      action: 'remove',
+    );
+    expect(calls['changeAvatar'], [
+      null,
+      9,
+      [0xff, 0xd8, 0xff],
+      512,
+      512,
+      null,
+      'remove',
+    ]);
     await client.close();
   });
 }

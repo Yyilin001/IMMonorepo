@@ -632,6 +632,86 @@ class ImProfile {
   }
 }
 
+class ImAvatarEditor {
+  ImAvatarEditor({
+    this.roomId,
+    required this.revision,
+    required this.canManage,
+    required this.remainingMilliseconds,
+    required this.hasAvatar,
+    this.name,
+    this.handle,
+    this.image,
+  });
+
+  String? roomId;
+
+  int revision;
+
+  bool canManage;
+
+  int remainingMilliseconds;
+
+  bool hasAvatar;
+
+  String? name;
+
+  String? handle;
+
+  Uint8List? image;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      roomId,
+      revision,
+      canManage,
+      remainingMilliseconds,
+      hasAvatar,
+      name,
+      handle,
+      image,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImAvatarEditor decode(Object result) {
+    result as List<Object?>;
+    return ImAvatarEditor(
+      roomId: result[0] as String?,
+      revision: result[1]! as int,
+      canManage: result[2]! as bool,
+      remainingMilliseconds: result[3]! as int,
+      hasAvatar: result[4]! as bool,
+      name: result[5] as String?,
+      handle: result[6] as String?,
+      image: result[7] as Uint8List?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImAvatarEditor || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(roomId, other.roomId) && _deepEquals(revision, other.revision) && _deepEquals(canManage, other.canManage) && _deepEquals(remainingMilliseconds, other.remainingMilliseconds) && _deepEquals(hasAvatar, other.hasAvatar) && _deepEquals(name, other.name) && _deepEquals(handle, other.handle) && _deepEquals(image, other.image);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImAvatarEditor(roomId: $roomId, revision: $revision, canManage: $canManage, remainingMilliseconds: $remainingMilliseconds, hasAvatar: $hasAvatar, name: $name, handle: $handle, image: $image)';
+  }
+}
+
 class DirectoryEntry {
   DirectoryEntry({
     required this.id,
@@ -1066,26 +1146,29 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is ImProfile) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryEntry) {
+    }    else if (value is ImAvatarEditor) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is SearchHit) {
+    }    else if (value is DirectoryEntry) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is SearchPage) {
+    }    else if (value is SearchHit) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryPage) {
+    }    else if (value is SearchPage) {
       buffer.putUint8(139);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupMember) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(140);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(141);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(142);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(143);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1110,18 +1193,20 @@ class _PigeonCodec extends StandardMessageCodec {
       case 135:
         return ImProfile.decode(readValue(buffer)!);
       case 136:
-        return DirectoryEntry.decode(readValue(buffer)!);
+        return ImAvatarEditor.decode(readValue(buffer)!);
       case 137:
-        return SearchHit.decode(readValue(buffer)!);
+        return DirectoryEntry.decode(readValue(buffer)!);
       case 138:
-        return SearchPage.decode(readValue(buffer)!);
+        return SearchHit.decode(readValue(buffer)!);
       case 139:
-        return DirectoryPage.decode(readValue(buffer)!);
+        return SearchPage.decode(readValue(buffer)!);
       case 140:
-        return GroupMember.decode(readValue(buffer)!);
+        return DirectoryPage.decode(readValue(buffer)!);
       case 141:
-        return GroupPage.decode(readValue(buffer)!);
+        return GroupMember.decode(readValue(buffer)!);
       case 142:
+        return GroupPage.decode(readValue(buffer)!);
+      case 143:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1384,6 +1469,41 @@ class ImHost {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[page]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<ImAvatarEditor?> openAvatarEditor(String? roomId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.openAvatarEditor$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+    return pigeonVar_replyValue as ImAvatarEditor?;
+  }
+
+  Future<void> changeAvatar(String? roomId, int revision, Uint8List? jpeg, int? width, int? height, String? displayName, String? action) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.changeAvatar$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, revision, jpeg, width, height, displayName, action]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     _extractReplyValueOrThrow(
         pigeonVar_replyList,

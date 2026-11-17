@@ -65,6 +65,16 @@ public final class V2MobileClient: Sendable {
         public let remainingMilliseconds: Int64
         public let avatar: Data?
     }
+    public struct AvatarEditor: Sendable {
+        public let roomID: String?
+        public let revision: UInt64
+        public let canManage: Bool
+        public let remainingMilliseconds: Int64
+        public let hasAvatar: Bool
+        public let name: String?
+        public let handle: String?
+        public let image: Data?
+    }
     public struct Failure: Error, Sendable { public let code: String }
 
     private static let owners = V2Lock(initialState: Set<String>())
@@ -166,6 +176,19 @@ public final class V2MobileClient: Sendable {
     public func requestContact(handle: String) async throws {
         let userID = try await resolveUserID(handle: handle)
         try await socialAction(userID: userID, action: "request")
+    }
+    public func openAvatarEditor(roomID: String?) async throws -> AvatarEditor? {
+        let value = try await run(.init(operation: .openAvatarEditor, roomID: roomID))
+        guard let editor = value.directory?.avatarEditor else { return nil }
+        return AvatarEditor(roomID: editor.roomID, revision: editor.revision, canManage: editor.canManage,
+            remainingMilliseconds: editor.remainingMilliseconds, hasAvatar: editor.hasAvatar,
+            name: editor.name, handle: editor.handle,
+            image: editor.image.flatMap { Data(base64Encoded: $0) })
+    }
+    public func changeAvatar(roomID: String?, revision: UInt64, jpeg: Data?, width: Int?, height: Int?,
+                             displayName: String?, action: String?) async throws {
+        _ = try await run(.init(operation: .changeAvatar, image: jpeg?.base64EncodedString(),
+            width: width, height: height, roomID: roomID, text: displayName, action: action, revision: revision))
     }
     public func profiles(page: String, context: String, roomID: String?, userIDs: [String]) async throws -> [Profile] {
         let value = try await run(.init(operation: .profiles, roomID: roomID, scope: context, page: page, members: userIDs))

@@ -807,3 +807,375 @@ class _SdkContactProfilePageState extends State<_SdkContactProfilePage> {
     );
   }
 }
+
+/// Own profile card backed by the shared avatar/profile intent service. The
+/// revision is captured when the page opens and revalidated by the runtime.
+class _SdkMyProfilePage extends StatefulWidget {
+  const _SdkMyProfilePage();
+
+  @override
+  State<_SdkMyProfilePage> createState() => _SdkMyProfilePageState();
+}
+
+class _SdkMyProfilePageState extends State<_SdkMyProfilePage> {
+  ImAvatarEditor? editor;
+  String? name;
+  String? error;
+  bool initialized = false, loading = true, saving = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!initialized) {
+      initialized = true;
+      unawaited(load());
+    }
+  }
+
+  Future<void> load() async {
+    final client = _SdkScope.of(context)?.client;
+    if (client == null) return;
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final value = await client.openAvatarEditor();
+      if (!mounted) return;
+      setState(() {
+        editor = value;
+        name = value?.name ?? _SdkScope.of(context)?.accountName;
+        loading = false;
+      });
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        loading = false;
+      });
+    }
+  }
+
+  Future<void> editName() async {
+    final value = editor;
+    if (value == null || saving) return;
+    final controller = TextEditingController(text: name ?? '');
+    final text = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('修改昵称'),
+        content: TextField(
+          key: const Key('my-profile-name-input'),
+          controller: controller,
+          autofocus: true,
+          maxLength: 24,
+          decoration: const InputDecoration(labelText: '昵称'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, controller.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    final clean = text?.trim();
+    if (clean == null || clean.isEmpty || !mounted) return;
+    final client = _SdkScope.of(context)!.client!;
+    setState(() => saving = true);
+    try {
+      await client.changeAvatar(
+        revision: value.revision,
+        displayName: clean,
+      );
+      if (!mounted) return;
+      setState(() {
+        name = clean;
+        saving = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('昵称已提交，正在同步')),
+      );
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  Future<void> changeAvatar() async {
+    final value = editor;
+    if (value == null || saving) return;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('从相册选择'),
+              onTap: () => Navigator.pop(sheet, ImageSource.gallery),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('拍照'),
+              onTap: () => Navigator.pop(sheet, ImageSource.camera),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source == null || !mounted) return;
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 2048,
+      maxHeight: 2048,
+    );
+    if (picked == null || !mounted) return;
+    final bytes = await picked.readAsBytes();
+    final jpeg = await compute(_squareAvatarJpeg, bytes);
+    if (jpeg == null || !mounted) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('无法读取这张图片')));
+      }
+      return;
+    }
+    final client = _SdkScope.of(context)!.client!;
+    setState(() => saving = true);
+    try {
+      await client.changeAvatar(
+        revision: value.revision,
+        jpeg: jpeg,
+        width: 512,
+        height: 512,
+      );
+      if (!mounted) return;
+      setState(() {
+        editor = (
+          roomId: value.roomId,
+          revision: value.revision,
+          canManage: value.canManage,
+          remainingMilliseconds: value.remainingMilliseconds,
+          hasAvatar: true,
+          name: value.name,
+          handle: value.handle,
+          image: jpeg,
+        );
+        saving = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('头像已提交，正在同步')),
+      );
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  Future<void> removeAvatar() async {
+    final value = editor;
+    if (value == null || !value.hasAvatar || saving) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('移除头像？'),
+        content: const Text('移除后，联系人和群成员将看到默认头像。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('移除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final client = _SdkScope.of(context)!.client!;
+    setState(() => saving = true);
+    try {
+      await client.changeAvatar(
+        revision: value.revision,
+        action: 'remove',
+      );
+      if (!mounted) return;
+      setState(() {
+        editor = (
+          roomId: value.roomId,
+          revision: value.revision,
+          canManage: value.canManage,
+          remainingMilliseconds: value.remainingMilliseconds,
+          hasAvatar: false,
+          name: value.name,
+          handle: value.handle,
+          image: null,
+        );
+        saving = false;
+      });
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sdk = _SdkScope.of(context);
+    final displayName = name ?? sdk?.accountName ?? '我的资料';
+    final handle = editor?.handle ?? sdk?.userId ?? '';
+    return _ProfileScaffold(
+      title: '个人资料',
+      actions: [
+        IconButton(
+          tooltip: '刷新资料',
+          onPressed: loading || saving ? null : load,
+          icon: const Icon(Icons.refresh_rounded),
+        ),
+      ],
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: Column(
+            children: [
+              Stack(
+                alignment: Alignment.bottomRight,
+                children: [
+                  ChatAvatar(
+                    id: 0,
+                    name: displayName,
+                    size: 88,
+                    avatar: editor?.image,
+                  ),
+                  if (!loading)
+                    IconButton.filledTonal(
+                      key: const Key('change-my-avatar'),
+                      tooltip: '更换头像',
+                      onPressed: saving ? null : changeAvatar,
+                      icon: const Icon(Icons.photo_camera_outlined, size: 18),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                displayName,
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.w700,
+                  color: ink,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    handle,
+                    style: const TextStyle(fontSize: 14, color: muted),
+                  ),
+                  IconButton(
+                    tooltip: '复制公开 ID',
+                    icon: const Icon(
+                      Icons.copy_rounded,
+                      size: 16,
+                      color: muted,
+                    ),
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: handle));
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('公开 ID 已复制')),
+                        );
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        if (error != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Text(
+              error!,
+              style: const TextStyle(color: Color(0xFFB3261E)),
+            ),
+          ),
+        if (loading && editor == null)
+          const Padding(
+            padding: EdgeInsets.all(12),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ListTile(
+          key: const Key('edit-my-name'),
+          leading: const Icon(Icons.badge_outlined, color: green),
+          title: const Text('昵称'),
+          subtitle: Text(displayName),
+          trailing: saving
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.chevron_right_rounded, color: muted),
+          onTap: loading || saving || editor == null ? null : editName,
+        ),
+        ListTile(
+          key: const Key('remove-my-avatar'),
+          leading: const Icon(Icons.hide_image_outlined, color: green),
+          title: const Text('移除头像'),
+          enabled: editor?.hasAvatar == true && !saving,
+          onTap: removeAvatar,
+        ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Text(
+            '公开 ID 用于查找和添加好友，目前不可修改。昵称和头像的修改会同步到账号内的其他设备。',
+            style: TextStyle(fontSize: 12, color: muted, height: 1.5),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+Uint8List? _squareAvatarJpeg(Uint8List bytes) {
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) return null;
+  final side = min(decoded.width, decoded.height);
+  if (side < 1) return null;
+  final cropped = img.copyCrop(
+    decoded,
+    x: (decoded.width - side) ~/ 2,
+    y: (decoded.height - side) ~/ 2,
+    width: side,
+    height: side,
+  );
+  final resized = img.copyResize(
+    cropped,
+    width: 512,
+    height: 512,
+    interpolation: img.Interpolation.average,
+  );
+  var encoded = img.encodeJpg(resized, quality: 88);
+  if (encoded.length > 512 * 1024) {
+    encoded = img.encodeJpg(resized, quality: 70);
+  }
+  return Uint8List.fromList(encoded);
+}

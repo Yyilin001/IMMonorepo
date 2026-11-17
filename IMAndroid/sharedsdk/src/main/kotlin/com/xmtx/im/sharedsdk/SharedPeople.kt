@@ -30,12 +30,13 @@ internal fun decodeCommunity(value: JSONObject) = SharedCommunity(value.optional
     value.optional("failure")?.let { raw -> SharedError.entries.firstOrNull { it.name.equals(raw, true) } ?: SharedError.OperationFailed })
 
 data class SharedAvatarEditor(val roomID: String?, val revision: Long, val canManage: Boolean, val expiresAtElapsed: Long,
-    val image: String?, val hasAvatar: Boolean, val works: PersistentList<SharedWork>, val failure: SharedError?) {
+    val image: String?, val hasAvatar: Boolean, val works: PersistentList<SharedWork>, val failure: SharedError?,
+    val name: String? = null, val handle: String? = null) {
     override fun toString() = "SharedAvatarEditor(<private>)"
 }
 internal fun decodeAvatarEditor(value: JSONObject, startedAt: Long) = SharedAvatarEditor(value.optional("roomID"), value.getLong("revision"),
     value.getBoolean("canManage"), startedAt + value.getLong("remainingMilliseconds"), value.optional("image"), value.getBoolean("hasAvatar"),
     value.getJSONArray("works").rows { SharedWork(it.getString("id"), it.getString("kind"), it.getString("target"), it.getString("status"), it.getBoolean("retryable"), it.optional("roomID")) },
-    value.optional("failure")?.let { SharedError.OperationFailed })
+    value.optional("failure")?.let { SharedError.OperationFailed }, value.optional("name"), value.optional("handle"))
 
 enum class SharedAvatarAction(val wire: String) { Retry("retry"), Reapply("reapply"), Query("query"), Cancel("cancel"), CloseIfAbsent("close"), Discard("discard") }

@@ -20,7 +20,8 @@ private struct SharedProfileUpload: V2ProfileAvatarPreparing {
 }
 struct SharedAvatarEditor: Encodable, Sendable {
     let roomID: String?; let revision: UInt64; let canManage: Bool; let remainingMilliseconds: Int64
-    let image: String?; let hasAvatar: Bool; let works: [SharedWork]; let failure: String?
+    let image: String?; let hasAvatar: Bool; let name: String?; let handle: String?
+    let works: [SharedWork]; let failure: String?
 }
 /// Account-owned composition of existing resource, profile and group-avatar services.
 actor SharedAvatars {
@@ -39,7 +40,7 @@ actor SharedAvatars {
     private var groupID: GroupAvatarOperationID?
     private var groupPage: V2GroupAvatarActivation?
     private var profilePage: V2ProfilePageActivation?
-    private var view: (room: RoomID?, revision: UInt64, canManage: Bool, hasAvatar: Bool, deadline: ContinuousClock.Instant)?
+    private var view: (room: RoomID?, revision: UInt64, canManage: Bool, hasAvatar: Bool, deadline: ContinuousClock.Instant, name: String?, handle: String?)?
     private var image: (V2AvatarReadGrant, Data)?
     private let imageHTTP: any V2AuthHTTPTransport
     private var failure: SharedFailure?
@@ -104,11 +105,12 @@ actor SharedAvatars {
             let page = try await groups.activate(roomID: room); groupPage = page
             let value = try await groups.presentation(for: page)
             guard let deadline = try await groups.authorizationDeadline(for: page) else { throw SharedFailure.operationFailed }
-            view = (room, value.state.revision, value.canManage, value.state.mediaID != nil, deadline)
+            view = (room, value.state.revision, value.canManage, value.state.mediaID != nil, deadline, nil, nil)
             if let grant = try await groups.avatarReadGrant(for: page) { try await bytes(grant) }
         } else {
             let value = try await profile.refreshProfile()
-            view = (nil, value.revision.rawValue, true, value.avatar != nil, .now.advanced(by: .seconds(60)))
+            view = (nil, value.revision.rawValue, true, value.avatar != nil, .now.advanced(by: .seconds(60)),
+                    value.publicIdentity?.displayName, value.publicIdentity?.handle.rawValue)
             if let intent = try await profile.pendingIntent() { await observe(intent) }
             let page = await people.activate(); profilePage = page
             let key = V2ProfileViewLookupKey(userID: account, context: .relationship)
@@ -118,6 +120,7 @@ actor SharedAvatars {
     }
     func change(_ request: SharedRequest) async throws {
         let room = try request.roomID.map(RoomID.init)
+        guard room == nil || request.text == nil else { throw SharedFailure.invalidInput }
         guard let view, view.room == room, view.canManage, view.deadline > .now,
               let revision = request.revision, revision == view.revision else { throw SharedFailure.invalidInput }
         if let room {
@@ -150,7 +153,14 @@ actor SharedAvatars {
                 guard let expected = V2ProfileRevision(rawValue: revision) else { throw SharedFailure.invalidInput }
                 let id = UUID()
                 let upload = try asset.map { try V2ProfileAvatarUpload(id: id, localAssetID: $0.id, displayName: $0.displayName.value, contentType: $0.contentType.value, byteCount: $0.byteCount) }
-                let intent = try await profile.enqueue(expectedRevision: expected, patch: .init(avatar: asset == nil ? .remove : .set(.init(mediaID: .init(uuid: id)))), avatarUpload: upload)
+                let name: V2ProfileDisplayNamePatch = request.text.flatMap { $0.isEmpty ? nil : .set($0) } ?? .unchanged
+                let avatar: V2ProfileAvatarPatch
+                if request.action == "remove" { avatar = .remove }
+                else if asset != nil { avatar = .set(.init(mediaID: .init(uuid: id))) }
+                else { avatar = .unchanged }
+                guard name != .unchanged || avatar != .unchanged else { return }
+                let intent = try await profile.enqueue(expectedRevision: expected,
+                    patch: try .init(displayName: name, avatar: avatar), avatarUpload: upload)
                 await observe(intent)
             }
         } catch { if let asset { try? await resources.discardLocalSelection(asset.id) }; throw error }
@@ -199,6 +209,7 @@ actor SharedAvatars {
         let duration = ContinuousClock.now.duration(to: deadline)
         let ms = max(0, duration.components.seconds * 1000 + duration.components.attoseconds / 1_000_000_000_000_000)
         return .init(roomID: view.room?.rawValue, revision: view.revision, canManage: valid && view.canManage,
-            remainingMilliseconds: valid ? ms : 0, image: encoded, hasAvatar: view.hasAvatar, works: works, failure: failure?.rawValue)
+            remainingMilliseconds: valid ? ms : 0, image: encoded, hasAvatar: view.hasAvatar,
+            name: view.name, handle: view.handle, works: works, failure: failure?.rawValue)
     }
 }

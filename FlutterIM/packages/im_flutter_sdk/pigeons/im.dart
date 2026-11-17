@@ -140,6 +140,27 @@ class ImProfile {
   Uint8List? avatar;
 }
 
+class ImAvatarEditor {
+  ImAvatarEditor({
+    required this.roomId,
+    required this.revision,
+    required this.canManage,
+    required this.remainingMilliseconds,
+    required this.hasAvatar,
+    this.name,
+    this.handle,
+    this.image,
+  });
+  String? roomId;
+  int revision;
+  bool canManage;
+  int remainingMilliseconds;
+  bool hasAvatar;
+  String? name;
+  String? handle;
+  Uint8List? image;
+}
+
 class DirectoryEntry {
   DirectoryEntry({
     required this.id,
@@ -254,6 +275,18 @@ abstract class ImHost {
   void saveAlias(String userId, String? alias, int? revision);
   @async
   void clearProfiles(String page);
+  @async
+  ImAvatarEditor? openAvatarEditor(String? roomId);
+  @async
+  void changeAvatar(
+    String? roomId,
+    int revision,
+    Uint8List? jpeg,
+    int? width,
+    int? height,
+    String? displayName,
+    String? action,
+  );
   @async
   String resolveUserId(String handle);
   @async
