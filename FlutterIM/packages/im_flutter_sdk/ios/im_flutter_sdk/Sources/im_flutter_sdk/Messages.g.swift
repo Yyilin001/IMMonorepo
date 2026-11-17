@@ -1002,6 +1002,7 @@ protocol ImHost {
   func changeWindowPage(windowId: String, latest: Bool) async throws
   func closeWindow(windowId: String) async throws
   func cancelPendingSend(intentId: String) async throws
+  func locateMessage(roomId: String, messageId: String) async throws -> WindowView
   func searchMessages(roomId: String?, query: String, next: Bool) async throws -> SearchPage
   func clearMessageSearch() async throws
   func recoverSend(intentId: String, resend: Bool) async throws
@@ -1353,6 +1354,24 @@ class ImHostSetup {
       }
     } else {
       cancelPendingSendChannel.setMessageHandler(nil)
+    }
+    let locateMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.locateMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      locateMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.locateMessage(roomId: roomIdArg, messageId: messageIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      locateMessageChannel.setMessageHandler(nil)
     }
     let searchMessagesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.searchMessages\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

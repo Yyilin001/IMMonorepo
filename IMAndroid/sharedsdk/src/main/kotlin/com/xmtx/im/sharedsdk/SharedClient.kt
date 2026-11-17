@@ -125,6 +125,7 @@ class SharedClient private constructor(private val handle: Long) {
     /** Persistent local exit + revocation handoff; cancel the foreground collector before calling. */
     suspend fun signOut(): SharedSnapshot = withContext(NonCancellable) { mutate("signOut") }
     suspend fun openConversation(roomID: String, messageID: String? = null): SharedSnapshot = directoryCall("openConversation", "roomID" to roomID, "messageID" to messageID)
+    suspend fun locateMessage(roomID: String, messageID: String): SharedSnapshot = directoryCall("locateMessage", "roomID" to roomID, "messageID" to messageID)
     suspend fun searchMessages(query: String, roomID: String? = null): SharedSnapshot = directoryCall("searchMessages", "text" to query, "roomID" to roomID)
     suspend fun nextSearch(): SharedSnapshot = directoryCall("searchMessages", "action" to "next")
     suspend fun clearMessaging(): SharedSnapshot = mutate("clearMessaging")

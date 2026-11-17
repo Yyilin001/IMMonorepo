@@ -213,6 +213,14 @@ void main() {
     await tester.pumpAndSettle();
     await until(find.text(hello), 'room search returned the Android message');
     await until(find.text(reply), 'room search returned the iOS reply');
+    await tester.tap(find.text(hello));
+    await tester.pumpAndSettle();
+    await until(find.text('消息上下文'), 'opened original message context');
+    await until(find.text(hello), 'original message is visible');
+    await until(find.text(reply), 'adjacent reply is visible');
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
     await tester.pageBack();
     await tester.pumpAndSettle();
     await tester.pageBack();
@@ -277,6 +285,20 @@ void main() {
             key.value.$2 == expectedRoom;
       });
       await until(row, 'global search found message in expected room');
+      if (expectedRoom == destinations.first) {
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+        await until(
+          find.text('消息上下文'),
+          'opened forwarded message in its destination',
+        );
+        await until(
+          find.text(source.text),
+          'destination context shows original hit text',
+        );
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+      }
     }
     await tester.pageBack();
     await tester.pumpAndSettle();

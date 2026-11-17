@@ -87,7 +87,12 @@ public final class V2MobileClient: Sendable {
         return id
     }
     public func nextUpdate(windowID: String) async throws -> Window {
-        let value = try await run(.init(operation: .watchWindow, windowID: windowID))
+        try await window(from: run(.init(operation: .watchWindow, windowID: windowID)))
+    }
+    public func locateMessage(roomID: String, messageID: String) async throws -> Window {
+        try await window(from: run(.init(operation: .locateMessage, messageID: messageID, roomID: roomID)))
+    }
+    private func window(from value: SharedSnapshot) -> Window {
         let messages = (value.chat?.messages ?? []).map {
             Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map(Attachment.init), readByPeer: $0.readByPeer, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, revision: Int64(exactly: $0.revision), mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, preparedAttachments: nil, totalAttachments: nil, pendingStatus: nil, createdAt: $0.createdAt)
         }

@@ -228,6 +228,8 @@ abstract class ImHost {
   @async
   void cancelPendingSend(String intentId);
   @async
+  WindowView locateMessage(String roomId, String messageId);
+  @async
   SearchPage searchMessages(String? roomId, String query, bool next);
   @async
   void clearMessageSearch();

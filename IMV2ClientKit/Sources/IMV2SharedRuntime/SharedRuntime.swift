@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -249,6 +249,15 @@ package actor SharedRuntime {
             _ = try await sync.synchronizeIncludingResets()
         case .signOut:
             try await signOut()
+        case .locateMessage:
+            guard let business = conversationBusiness, let rawRoom = request.roomID, let rawID = request.messageID else { throw SharedFailure.invalidInput }
+            let room = try RoomID(rawRoom), id = try MessageID(rawID)
+            guard case .found(let window) = try await business.locate(in: room, messageID: id, before: 24, after: 25) else { throw SharedFailure.invalidInput }
+            let chat = await renderChat(timeline: window.page, pending: nil, room: room, isLatest: false, focused: id)
+            guard conversationBusiness === business else { throw SharedFailure.closed }
+            return .init(state: state, userID: userID, allowsStrangerMessages: nil, appliedSequence: 0, acknowledgedSequence: 0,
+                         connections: connections, conversations: [], failure: nil, hasMoreConversations: false, isFirstConversationPage: true,
+                         chat: chat, directory: nil, resource: nil, messaging: nil)
         case .searchMessages:
             guard let messaging else { throw SharedFailure.authenticationRequired }; try await messaging.search(request)
         case .clearMessaging: await messaging?.clearTransient()
@@ -495,7 +504,7 @@ package actor SharedRuntime {
         }
     }
 
-    private func renderChat(timeline: V2ClientConversationTimelinePage, pending: V2PendingResourceSendSnapshot,
+    private func renderChat(timeline: V2ClientConversationTimelinePage, pending: V2PendingResourceSendSnapshot?,
         room: RoomID, isLatest: Bool, focused: MessageID? = nil, pendingPage: Int = 0) async -> SharedChat {
             var replyPreviews: [MessageID: String] = [:]
             for id in Set(timeline.messages.filter { !$0.isWithdrawn }.compactMap { $0.replyTo?.messageID }) {
@@ -511,9 +520,9 @@ package actor SharedRuntime {
                     replyToID: message.isWithdrawn ? nil : message.replyTo?.messageID.rawValue,
                     replyPreview: message.isWithdrawn ? nil : message.replyTo.flatMap { replyPreviews[$0.messageID] },
                     forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue)
-            }, pending: pending.preparing.map(SharedPendingMessage.preparing)
-                + pending.submitted.map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status), createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000)) },
-                focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest, hasMorePending: pending.hasNext, pendingPage: pendingPage)
+            }, pending: (pending?.preparing ?? []).map(SharedPendingMessage.preparing)
+                + (pending?.submitted ?? []).map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status), createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000)) },
+                focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest, hasMorePending: pending?.hasNext ?? false, pendingPage: pendingPage)
     }
 
     private func snapshot(resourceChunk: String? = nil) async throws -> SharedSnapshot {

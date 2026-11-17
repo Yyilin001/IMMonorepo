@@ -60,11 +60,17 @@ private actor MobileHost: ImHost {
     func nextUpdate(windowId: String) async throws -> WindowView {
         do {
             let view = try await client.nextUpdate(windowID: windowId)
-            return WindowView(conversations: view.conversations.map { .init(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, isGroup: $0.isGroup, updatedAt: $0.updatedAt, peerId: $0.peerID) },
-                              messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map { Attachment(id: $0.id, name: $0.name, contentType: $0.contentType, bytes: $0.bytes) }, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, revision: $0.revision, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
+            return windowView(view)
         } catch let failure as V2MobileClient.Failure {
             throw PigeonError(code: failure.code, message: nil, details: nil)
         }
+    }
+    func locateMessage(roomId: String, messageId: String) async throws -> WindowView {
+        try await ordered { self.windowView(try await self.client.locateMessage(roomID: roomId, messageID: messageId)) }
+    }
+    private func windowView(_ view: V2MobileClient.Window) -> WindowView {
+        return WindowView(conversations: view.conversations.map { .init(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, isGroup: $0.isGroup, updatedAt: $0.updatedAt, peerId: $0.peerID) },
+                              messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map { Attachment(id: $0.id, name: $0.name, contentType: $0.contentType, bytes: $0.bytes) }, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, revision: $0.revision, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
     }
     func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage {
         try await ordered {

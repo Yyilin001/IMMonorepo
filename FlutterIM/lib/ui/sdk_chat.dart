@@ -1022,7 +1022,13 @@ class _MessageSearchPageState extends State<_MessageSearchPage> {
               for (final hit in hits.values)
                 ListTile(
                   key: ValueKey(('search-hit', hit.roomId, hit.id)),
-                  title: SelectableText(hit.text),
+                  title: Text(hit.text),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          _LocatedMessagePage(client: widget.client, hit: hit),
+                    ),
+                  ),
                   subtitle: widget.room == null
                       ? Text(widget.roomTitles[hit.roomId] ?? hit.roomId)
                       : null,
@@ -1036,6 +1042,72 @@ class _MessageSearchPageState extends State<_MessageSearchPage> {
           ),
         ),
       ],
+    ),
+  );
+}
+
+class _LocatedMessagePage extends StatefulWidget {
+  const _LocatedMessagePage({required this.client, required this.hit});
+  final ImClient client;
+  final ImSearchHit hit;
+  @override
+  State<_LocatedMessagePage> createState() => _LocatedMessagePageState();
+}
+
+class _LocatedMessagePageState extends State<_LocatedMessagePage> {
+  late final messages = widget.client.locateMessage(
+    widget.hit.roomId,
+    widget.hit.id,
+  );
+  final center = GlobalKey();
+
+  Widget row(ImMessage item) => ListTile(
+    key: ValueKey(item.id),
+    selected: item.id == widget.hit.id,
+    selectedTileColor: Theme.of(context).colorScheme.secondaryContainer,
+    title: Text(item.senderId),
+    subtitle: SelectableText(
+      item.withdrawn
+          ? '消息已撤回'
+          : [
+              if (item.text.isNotEmpty) item.text,
+              for (final attachment in item.attachments) attachment.name,
+              if (item.hasMedia && item.attachments.isEmpty) '[附件]',
+            ].join('\n'),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('消息上下文')),
+    body: FutureBuilder<List<ImMessage>>(
+      future: messages,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Center(child: Text('无法定位原消息。 ${_errorText(snapshot.error!)}'));
+        }
+        final items = snapshot.data;
+        if (items == null) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final index = items.indexWhere((item) => item.id == widget.hit.id);
+        if (index < 0) return const Center(child: Text('原消息已不可用'));
+        return CustomScrollView(
+          center: center,
+          anchor: .35,
+          slivers: [
+            SliverList.builder(
+              itemCount: index,
+              itemBuilder: (_, i) => row(items[index - i - 1]),
+            ),
+            SliverList.builder(
+              key: center,
+              itemCount: items.length - index,
+              itemBuilder: (_, i) => row(items[index + i]),
+            ),
+          ],
+        );
+      },
     ),
   );
 }

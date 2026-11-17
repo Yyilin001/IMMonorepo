@@ -62,11 +62,17 @@ private class MobileHost(private val context: Context) : ImHost {
     }
     override suspend fun nextUpdate(windowId: String): WindowView = sdk {
         val window = windows[windowId] ?: throw FlutterError("closed")
-        val value = window.states().first()
+        window.states().first().toWindowView()
+    }
+    override suspend fun locateMessage(roomId: String, messageId: String): WindowView = mutations.withLock {
+        sdk { client.locateMessage(roomId, messageId).toWindowView() }
+    }
+    private fun SharedSnapshot.toWindowView(): WindowView {
+        val value = this
         val messages = value.chat?.messages.orEmpty().map {
             ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, it.revision, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt)
         }
-        WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
+        return WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
             messages + value.chat?.pending.orEmpty().map {
                 ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, emptyList(), false, false, pendingStatus = it.preparationStatus ?: it.status.name.wire(), createdAt = it.createdAt,
                     preparedAttachments = it.preparedAttachments, totalAttachments = it.totalAttachments)

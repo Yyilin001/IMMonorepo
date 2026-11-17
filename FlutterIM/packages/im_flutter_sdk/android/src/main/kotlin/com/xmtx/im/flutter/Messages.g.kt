@@ -1026,6 +1026,7 @@ interface ImHost {
   suspend fun changeWindowPage(windowId: String, latest: Boolean)
   suspend fun closeWindow(windowId: String)
   suspend fun cancelPendingSend(intentId: String)
+  suspend fun locateMessage(roomId: String, messageId: String): WindowView
   suspend fun searchMessages(roomId: String?, query: String, next: Boolean): SearchPage
   suspend fun clearMessageSearch()
   suspend fun recoverSend(intentId: String, resend: Boolean)
@@ -1418,6 +1419,26 @@ interface ImHost {
               val wrapped: List<Any?> = try {
                 api.cancelPendingSend(intentIdArg)
                 listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.locateMessage$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val messageIdArg = args[1] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.locateMessage(roomIdArg, messageIdArg))
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

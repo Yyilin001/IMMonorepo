@@ -490,6 +490,14 @@ final class ImClient {
   Future<void> cancelPendingSend(String intentId) =>
       _ordered(() => _host.cancelPendingSend(intentId));
 
+  Future<List<ImMessage>> locateMessage(String roomId, String messageId) =>
+      _ordered(() async {
+        final view = await _host.locateMessage(roomId, messageId);
+        return view.messages
+            .map((message) => message.value)
+            .toList(growable: false);
+      });
+
   Future<ImSearchPage> searchMessages(
     String? roomId,
     String query, {
