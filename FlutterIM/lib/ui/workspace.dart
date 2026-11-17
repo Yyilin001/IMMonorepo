@@ -629,7 +629,7 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
         ),
       );
     }
-    return RefreshIndicator(
+    final rowsView = RefreshIndicator(
       onRefresh: sdk.syncNow,
       child: ListView.builder(
       key: const Key('conversation-list'),
@@ -725,6 +725,23 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
         );
       },
       ),
+    );
+    if (sdk.client?.session.state != ImSessionState.offlineReadOnly) {
+      return rowsView;
+    }
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          color: const Color(0xFFFFF3D6),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: const Text(
+            '离线只读：当前展示已同步的会话，发送和修改需恢复网络后重试。',
+            style: TextStyle(fontSize: 12, color: Color(0xFF7A5A12)),
+          ),
+        ),
+        Expanded(child: rowsView),
+      ],
     );
   }
 

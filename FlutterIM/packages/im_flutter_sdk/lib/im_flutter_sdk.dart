@@ -17,6 +17,7 @@ enum ImSessionState {
   connecting,
   connected,
   offline,
+  offlineReadOnly,
   closed,
 }
 

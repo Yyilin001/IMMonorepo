@@ -48,7 +48,11 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   }
 
   Future<void> sendTyping(bool typing) async {
-    if (typingSent == typing) return;
+    if (typingSent == typing ||
+        _SdkScope.of(context)?.client?.session.state ==
+            ImSessionState.offlineReadOnly) {
+      return;
+    }
     typingSent = typing;
     try {
       await _SdkScope.of(
@@ -426,7 +430,12 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
 
   Future<void> send() async {
     final text = input.text;
-    if (sending || text.trim().isEmpty) return;
+    if (sending ||
+        text.trim().isEmpty ||
+        _SdkScope.of(context)?.client?.session.state ==
+            ImSessionState.offlineReadOnly) {
+      return;
+    }
     setState(() => sending = true);
     final reply = replyTarget;
     try {
@@ -459,7 +468,12 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   }
 
   Future<void> attach() async {
-    if (sending || replyTarget != null) return;
+    if (sending ||
+        replyTarget != null ||
+        _SdkScope.of(context)?.client?.session.state ==
+            ImSessionState.offlineReadOnly) {
+      return;
+    }
     final client = _SdkScope.of(context)!.client!;
     setState(() => sending = true);
     try {
@@ -790,6 +804,8 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   @override
   Widget build(BuildContext context) {
     final sdk = _SdkScope.of(context)!;
+    final readOnly =
+        sdk.client?.session.state == ImSessionState.offlineReadOnly;
     final room =
         sdk.rooms.where((r) => r.id == widget.room.id).firstOrNull ??
         widget.room;
@@ -1326,7 +1342,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               children: [
                 TextButton.icon(
                   key: const Key('add-mentions'),
-                  onPressed: sending ? null : pickMentions,
+                  onPressed: sending || readOnly ? null : pickMentions,
                   icon: const Icon(Icons.alternate_email, size: 18),
                   label: const Text('提及'),
                 ),
@@ -1366,16 +1382,28 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                   : () => setState(() => replyTarget = null),
             ),
           ),
+        if (readOnly)
+          Container(
+            width: double.infinity,
+            color: const Color(0xFFFFF3D6),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: const Text(
+              '离线只读：可以阅读已同步的消息，恢复网络后可继续发送。',
+              style: TextStyle(fontSize: 12, color: Color(0xFF7A5A12)),
+            ),
+          ),
         _MobileComposer(
           id: id,
           input: input,
           focus: focus,
-          onSend: sending ? null : send,
+          onSend: sending || readOnly ? null : send,
           attachmentButton: _ComposerActionButton(
             tooltip: '发送附件',
             icon: Icons.add_rounded,
             outlined: true,
-            onPressed: sending || replyTarget != null ? null : attach,
+            onPressed: sending || readOnly || replyTarget != null
+                ? null
+                : attach,
           ),
         ),
       ],

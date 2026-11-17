@@ -285,7 +285,17 @@ package actor SharedRuntime {
             if case .unauthenticated = authState { state = "signedOut"; return try await snapshot() }
             let local = try await session.openLocallyEstablishedSession()
             store = local.store; userID = local.identity.userID.rawValue; state = "ready"
-            try await configureConnection()
+            do { try await configureConnection() }
+            catch {
+                // Local projections stay readable when the network or credential
+                // path cannot be configured; sending remains unavailable.
+                state = "offlineReadOnly"
+                maintenanceFailure = sharedFailure(error)
+                if conversationBusiness == nil, let localStore = store {
+                    conversationBusiness = try? await session.conversations(for: localStore,
+                        accountID: local.identity.userID, requiresAuthorization: false)
+                }
+            }
         case .login:
             guard store == nil, try await credentialStore.load() == nil else { throw SharedFailure.busy }
             guard let account = request.account, let password = request.password else { throw SharedFailure.invalidInput }
@@ -445,6 +455,11 @@ package actor SharedRuntime {
             state = "ready"
             try await configureConnection()
         case .connect:
+            if state == "offlineReadOnly", runtime == nil {
+                do { try await configureConnection(); state = "ready" }
+                catch { state = "offlineReadOnly"; throw error }
+                return try await snapshot()
+            }
             guard let runtime else { throw SharedFailure.authenticationRequired }
             if case .running = await runtime.currentState() { return try await snapshot() }
             state = "connecting"

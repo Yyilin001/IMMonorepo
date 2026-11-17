@@ -1026,6 +1026,7 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
     ImSessionState.connecting => '正在连接',
     ImSessionState.connected => '已连接',
     ImSessionState.offline => '连接已断开',
+    ImSessionState.offlineReadOnly => '离线只读',
     ImSessionState.closed => '已关闭',
   };
 
