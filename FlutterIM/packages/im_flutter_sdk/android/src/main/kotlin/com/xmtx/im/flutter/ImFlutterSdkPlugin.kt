@@ -102,7 +102,8 @@ private class MobileHost(private val context: Context) : ImHost {
     private fun SharedSnapshot.toWindowView(): WindowView {
         val value = this
         val messages = value.chat?.messages.orEmpty().map {
-            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, it.revision, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt, replyToId = it.replyToID, mentionSummary = it.mentionSummary)
+            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, it.revision, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt, replyToId = it.replyToID, mentionSummary = it.mentionSummary,
+                entities = it.entities.map { entity -> ImEntity(entity.kind, entity.offset.toLong(), entity.length.toLong(), entity.url) })
         }
         return WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.isPinned, it.isArchived, it.updatedAt, it.peerID, it.muteUntil) },
             messages + value.chat?.pending.orEmpty().map {

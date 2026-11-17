@@ -460,6 +460,56 @@ struct Attachment: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct ImEntity: Hashable, CustomStringConvertible {
+  var kind: String
+  var offset: Int64
+  var length: Int64
+  var url: String? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImEntity? {
+    let kind = pigeonVar_list[0] as! String
+    let offset = pigeonVar_list[1] as! Int64
+    let length = pigeonVar_list[2] as! Int64
+    let url: String? = nilOrValue(pigeonVar_list[3])
+
+    return ImEntity(
+      kind: kind,
+      offset: offset,
+      length: length,
+      url: url
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      kind,
+      offset,
+      length,
+      url,
+    ]
+  }
+  static func == (lhs: ImEntity, rhs: ImEntity) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.kind, rhs.kind) && MessagesPigeonInternal.deepEquals(lhs.offset, rhs.offset) && MessagesPigeonInternal.deepEquals(lhs.length, rhs.length) && MessagesPigeonInternal.deepEquals(lhs.url, rhs.url)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImEntity")
+    MessagesPigeonInternal.deepHash(value: kind, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: offset, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: length, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: url, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImEntity(kind: \(String(describing: kind)), offset: \(String(describing: offset)), length: \(String(describing: length)), url: \(String(describing: url)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct ImMessage: Hashable, CustomStringConvertible {
   var id: String
   var senderId: String
@@ -478,6 +528,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
   var totalAttachments: Int64? = nil
   var replyToId: String? = nil
   var mentionSummary: String? = nil
+  var entities: [ImEntity]? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -499,6 +550,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
     let totalAttachments: Int64? = nilOrValue(pigeonVar_list[14])
     let replyToId: String? = nilOrValue(pigeonVar_list[15])
     let mentionSummary: String? = nilOrValue(pigeonVar_list[16])
+    let entities: [ImEntity]? = nilOrValue(pigeonVar_list[17])
 
     return ImMessage(
       id: id,
@@ -517,7 +569,8 @@ struct ImMessage: Hashable, CustomStringConvertible {
       preparedAttachments: preparedAttachments,
       totalAttachments: totalAttachments,
       replyToId: replyToId,
-      mentionSummary: mentionSummary
+      mentionSummary: mentionSummary,
+      entities: entities
     )
   }
   func toList() -> [Any?] {
@@ -539,13 +592,14 @@ struct ImMessage: Hashable, CustomStringConvertible {
       totalAttachments,
       replyToId,
       mentionSummary,
+      entities,
     ]
   }
   static func == (lhs: ImMessage, rhs: ImMessage) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.preparedAttachments, rhs.preparedAttachments) && MessagesPigeonInternal.deepEquals(lhs.totalAttachments, rhs.totalAttachments) && MessagesPigeonInternal.deepEquals(lhs.replyToId, rhs.replyToId) && MessagesPigeonInternal.deepEquals(lhs.mentionSummary, rhs.mentionSummary)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.preparedAttachments, rhs.preparedAttachments) && MessagesPigeonInternal.deepEquals(lhs.totalAttachments, rhs.totalAttachments) && MessagesPigeonInternal.deepEquals(lhs.replyToId, rhs.replyToId) && MessagesPigeonInternal.deepEquals(lhs.mentionSummary, rhs.mentionSummary) && MessagesPigeonInternal.deepEquals(lhs.entities, rhs.entities)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -567,10 +621,11 @@ struct ImMessage: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: totalAttachments, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: replyToId, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: mentionSummary, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: entities, hasher: &hasher)
   }
 
   public var description: String {
-    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)), preparedAttachments: \(String(describing: preparedAttachments)), totalAttachments: \(String(describing: totalAttachments)), replyToId: \(String(describing: replyToId)), mentionSummary: \(String(describing: mentionSummary)))"
+    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)), preparedAttachments: \(String(describing: preparedAttachments)), totalAttachments: \(String(describing: totalAttachments)), replyToId: \(String(describing: replyToId)), mentionSummary: \(String(describing: mentionSummary)), entities: \(String(describing: entities)))"
   }
 }
 
@@ -1768,50 +1823,52 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 133:
       return Attachment.fromList(self.readValue() as! [Any?])
     case 134:
-      return ImMessage.fromList(self.readValue() as! [Any?])
+      return ImEntity.fromList(self.readValue() as! [Any?])
     case 135:
-      return ImProfile.fromList(self.readValue() as! [Any?])
+      return ImMessage.fromList(self.readValue() as! [Any?])
     case 136:
-      return ImAvatarEditor.fromList(self.readValue() as! [Any?])
+      return ImProfile.fromList(self.readValue() as! [Any?])
     case 137:
-      return ImAvatarImage.fromList(self.readValue() as! [Any?])
+      return ImAvatarEditor.fromList(self.readValue() as! [Any?])
     case 138:
-      return DirectoryEntry.fromList(self.readValue() as! [Any?])
+      return ImAvatarImage.fromList(self.readValue() as! [Any?])
     case 139:
-      return SearchHit.fromList(self.readValue() as! [Any?])
+      return DirectoryEntry.fromList(self.readValue() as! [Any?])
     case 140:
-      return SearchPage.fromList(self.readValue() as! [Any?])
+      return SearchHit.fromList(self.readValue() as! [Any?])
     case 141:
-      return DirectoryPage.fromList(self.readValue() as! [Any?])
+      return SearchPage.fromList(self.readValue() as! [Any?])
     case 142:
-      return GroupMember.fromList(self.readValue() as! [Any?])
+      return DirectoryPage.fromList(self.readValue() as! [Any?])
     case 143:
-      return ImPrivacy.fromList(self.readValue() as! [Any?])
+      return GroupMember.fromList(self.readValue() as! [Any?])
     case 144:
-      return ImDeviceSession.fromList(self.readValue() as! [Any?])
+      return ImPrivacy.fromList(self.readValue() as! [Any?])
     case 145:
-      return ImDeviceSessions.fromList(self.readValue() as! [Any?])
+      return ImDeviceSession.fromList(self.readValue() as! [Any?])
     case 146:
-      return ImGroupNickname.fromList(self.readValue() as! [Any?])
+      return ImDeviceSessions.fromList(self.readValue() as! [Any?])
     case 147:
-      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
+      return ImGroupNickname.fromList(self.readValue() as! [Any?])
     case 148:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
     case 149:
-      return ImInvite.fromList(self.readValue() as! [Any?])
+      return GroupPage.fromList(self.readValue() as! [Any?])
     case 150:
-      return ImJoinRequest.fromList(self.readValue() as! [Any?])
+      return ImInvite.fromList(self.readValue() as! [Any?])
     case 151:
-      return ImInvitePreview.fromList(self.readValue() as! [Any?])
+      return ImJoinRequest.fromList(self.readValue() as! [Any?])
     case 152:
-      return ImCommunity.fromList(self.readValue() as! [Any?])
+      return ImInvitePreview.fromList(self.readValue() as! [Any?])
     case 153:
-      return ImFavoriteMessage.fromList(self.readValue() as! [Any?])
+      return ImCommunity.fromList(self.readValue() as! [Any?])
     case 154:
-      return ImFavorites.fromList(self.readValue() as! [Any?])
+      return ImFavoriteMessage.fromList(self.readValue() as! [Any?])
     case 155:
-      return ImReaders.fromList(self.readValue() as! [Any?])
+      return ImFavorites.fromList(self.readValue() as! [Any?])
     case 156:
+      return ImReaders.fromList(self.readValue() as! [Any?])
+    case 157:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -1836,74 +1893,77 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? Attachment {
       super.writeByte(133)
       super.writeValue(value.toList())
-    } else if let value = value as? ImMessage {
+    } else if let value = value as? ImEntity {
       super.writeByte(134)
       super.writeValue(value.toList())
-    } else if let value = value as? ImProfile {
+    } else if let value = value as? ImMessage {
       super.writeByte(135)
       super.writeValue(value.toList())
-    } else if let value = value as? ImAvatarEditor {
+    } else if let value = value as? ImProfile {
       super.writeByte(136)
       super.writeValue(value.toList())
-    } else if let value = value as? ImAvatarImage {
+    } else if let value = value as? ImAvatarEditor {
       super.writeByte(137)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryEntry {
+    } else if let value = value as? ImAvatarImage {
       super.writeByte(138)
       super.writeValue(value.toList())
-    } else if let value = value as? SearchHit {
+    } else if let value = value as? DirectoryEntry {
       super.writeByte(139)
       super.writeValue(value.toList())
-    } else if let value = value as? SearchPage {
+    } else if let value = value as? SearchHit {
       super.writeByte(140)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryPage {
+    } else if let value = value as? SearchPage {
       super.writeByte(141)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupMember {
+    } else if let value = value as? DirectoryPage {
       super.writeByte(142)
       super.writeValue(value.toList())
-    } else if let value = value as? ImPrivacy {
+    } else if let value = value as? GroupMember {
       super.writeByte(143)
       super.writeValue(value.toList())
-    } else if let value = value as? ImDeviceSession {
+    } else if let value = value as? ImPrivacy {
       super.writeByte(144)
       super.writeValue(value.toList())
-    } else if let value = value as? ImDeviceSessions {
+    } else if let value = value as? ImDeviceSession {
       super.writeByte(145)
       super.writeValue(value.toList())
-    } else if let value = value as? ImGroupNickname {
+    } else if let value = value as? ImDeviceSessions {
       super.writeByte(146)
       super.writeValue(value.toList())
-    } else if let value = value as? ImGroupPolicy {
+    } else if let value = value as? ImGroupNickname {
       super.writeByte(147)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? ImGroupPolicy {
       super.writeByte(148)
       super.writeValue(value.toList())
-    } else if let value = value as? ImInvite {
+    } else if let value = value as? GroupPage {
       super.writeByte(149)
       super.writeValue(value.toList())
-    } else if let value = value as? ImJoinRequest {
+    } else if let value = value as? ImInvite {
       super.writeByte(150)
       super.writeValue(value.toList())
-    } else if let value = value as? ImInvitePreview {
+    } else if let value = value as? ImJoinRequest {
       super.writeByte(151)
       super.writeValue(value.toList())
-    } else if let value = value as? ImCommunity {
+    } else if let value = value as? ImInvitePreview {
       super.writeByte(152)
       super.writeValue(value.toList())
-    } else if let value = value as? ImFavoriteMessage {
+    } else if let value = value as? ImCommunity {
       super.writeByte(153)
       super.writeValue(value.toList())
-    } else if let value = value as? ImFavorites {
+    } else if let value = value as? ImFavoriteMessage {
       super.writeByte(154)
       super.writeValue(value.toList())
-    } else if let value = value as? ImReaders {
+    } else if let value = value as? ImFavorites {
       super.writeByte(155)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? ImReaders {
       super.writeByte(156)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(157)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)

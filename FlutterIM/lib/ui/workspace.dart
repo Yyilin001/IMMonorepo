@@ -14,6 +14,7 @@ import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 import 'package:material_ui/material_ui.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -1628,6 +1629,7 @@ class _MessageBubble extends ConsumerWidget {
     this.onFavorite,
     this.onEnterSelection,
     this.mentionSummary,
+    this.entities = const [],
     this.selecting = false,
     this.selected = false,
     this.onToggleSelect,
@@ -1643,6 +1645,7 @@ class _MessageBubble extends ConsumerWidget {
   final VoidCallback? onFavorite, onEnterSelection, onToggleSelect;
   final bool selecting, selected;
   final String? mentionSummary;
+  final List<ImEntity> entities;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1698,14 +1701,33 @@ class _MessageBubble extends ConsumerWidget {
                 bottomRight: const Radius.circular(12),
               ),
             ),
-            child: Text(
-              message.text,
-              style: TextStyle(
-                fontSize: (mobile ? 16 : 12) + fontDelta,
-                height: mobile ? 1.4 : 1.6,
-                color: mobile && mine ? Colors.white : ink,
-              ),
-            ),
+            child: entities.isEmpty
+                ? Text(
+                    message.text,
+                    style: TextStyle(
+                      fontSize: (mobile ? 16 : 12) + fontDelta,
+                      height: mobile ? 1.4 : 1.6,
+                      color: mobile && mine ? Colors.white : ink,
+                    ),
+                  )
+                : Text.rich(
+                    TextSpan(
+                      style: TextStyle(
+                        fontSize: (mobile ? 16 : 12) + fontDelta,
+                        height: mobile ? 1.4 : 1.6,
+                        color: mobile && mine ? Colors.white : ink,
+                      ),
+                      children: _richMessageSpans(
+                        message.text,
+                        entities,
+                        TextStyle(
+                          fontSize: (mobile ? 16 : 12) + fontDelta,
+                          height: mobile ? 1.4 : 1.6,
+                          color: mobile && mine ? Colors.white : ink,
+                        ),
+                      ),
+                    ),
+                  ),
           );
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -1825,6 +1847,27 @@ class _MessageBubble extends ConsumerWidget {
                   ),
                 ),
                 if (isForwarded) const Text('转发的消息'),
+                for (final link in {
+                  for (final entity in entities)
+                    if (entity.kind == 'link' && entity.url != null) entity.url!,
+                })
+                  InkWell(
+                    onTap: () => launchUrl(
+                      Uri.parse(link),
+                      mode: LaunchMode.externalApplication,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        '打开链接：${Uri.tryParse(link)?.host ?? link}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF1D6FD8),
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ),
                 if (mentionSummary case final summary?)
                   Padding(
                     padding: const EdgeInsets.only(top: 3),
@@ -2939,4 +2982,59 @@ class _MessageItem extends ConsumerWidget {
             child: bubble,
           );
   }
+}
+
+
+List<InlineSpan> _richMessageSpans(
+  String text,
+  List<ImEntity> entities,
+  TextStyle base,
+) {
+  if (entities.isEmpty || text.isEmpty) {
+    return [TextSpan(text: text, style: base)];
+  }
+  final boundaries = <int>{0, text.length};
+  for (final entity in entities) {
+    final start = entity.offset.clamp(0, text.length);
+    final end = (entity.offset + entity.length).clamp(0, text.length);
+    if (start < end) boundaries.addAll([start, end]);
+  }
+  final points = boundaries.toList()..sort();
+  final spans = <InlineSpan>[];
+  for (var i = 0; i + 1 < points.length; i++) {
+    final start = points[i], end = points[i + 1];
+    if (start == end) continue;
+    var style = base;
+    for (final entity in entities) {
+      final entityStart = entity.offset.clamp(0, text.length);
+      final entityEnd = (entity.offset + entity.length).clamp(0, text.length);
+      if (start < entityStart || end > entityEnd) continue;
+      switch (entity.kind) {
+        case 'bold':
+          style = style.copyWith(fontWeight: FontWeight.w700);
+        case 'italic':
+          style = style.copyWith(fontStyle: FontStyle.italic);
+        case 'code':
+        case 'preformatted':
+          style = style.copyWith(
+            fontFamily: 'Menlo',
+            fontFamilyFallback: const ['Courier'],
+            backgroundColor: base.color == Colors.white
+                ? const Color(0x1A000000)
+                : const Color(0x33FFFFFF),
+          );
+        case 'link':
+          style = style.copyWith(
+            color: base.color == Colors.white
+                ? const Color(0xFFCDE9FF)
+                : const Color(0xFF1D6FD8),
+            decoration: TextDecoration.underline,
+          );
+      }
+    }
+    spans.add(
+      TextSpan(text: text.substring(start, end), style: style),
+    );
+  }
+  return spans;
 }

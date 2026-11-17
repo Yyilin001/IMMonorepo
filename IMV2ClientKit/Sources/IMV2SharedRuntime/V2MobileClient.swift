@@ -47,6 +47,13 @@ public final class V2MobileClient: Sendable {
         public let pendingStatus: String?
         public let createdAt: Int64?
         public let mentionSummary: String?
+        public let entities: [Entity]
+    }
+    public struct Entity: Sendable {
+        public let kind: String
+        public let offset: Int
+        public let length: Int
+        public let url: String?
     }
     public struct FavoriteMessage: Sendable {
         public let id: String
@@ -186,11 +193,12 @@ public final class V2MobileClient: Sendable {
     }
     private func window(from value: SharedSnapshot) -> Window {
         let messages = (value.chat?.messages ?? []).map {
-            Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map(Attachment.init), readByPeer: $0.readByPeer, replyToID: $0.replyToID, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, revision: Int64(exactly: $0.revision), mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, preparedAttachments: nil, totalAttachments: nil, pendingStatus: nil, createdAt: $0.createdAt, mentionSummary: $0.mentionSummary)
+            Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map(Attachment.init), readByPeer: $0.readByPeer, replyToID: $0.replyToID, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, revision: Int64(exactly: $0.revision), mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, preparedAttachments: nil, totalAttachments: nil, pendingStatus: nil, createdAt: $0.createdAt, mentionSummary: $0.mentionSummary,
+                                     entities: $0.entities.map { Entity(kind: $0.kind, offset: $0.offset, length: $0.length, url: $0.url) })
         }
         return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID, isPinned: $0.isPinned, isArchived: $0.isArchived, muteUntil: $0.muteUntil) },
                       messages: messages + (value.chat?.pending ?? []).map {
-                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyToID: nil, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, pendingStatus: $0.preparationStatus ?? $0.status, createdAt: $0.createdAt, mentionSummary: nil)
+                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyToID: nil, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, pendingStatus: $0.preparationStatus ?? $0.status, createdAt: $0.createdAt, mentionSummary: nil, entities: [])
                       }, hasOlder: value.chat?.hasOlder ?? false, isLatest: value.chat?.isLatest ?? true)
     }
     public struct DirectoryEntry: Sendable {

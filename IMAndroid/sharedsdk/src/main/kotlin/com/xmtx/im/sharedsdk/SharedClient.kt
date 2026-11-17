@@ -3,6 +3,7 @@ package com.xmtx.im.sharedsdk
 import android.content.Context
 import com.xmtx.im.swiftplatform.AndroidRuntimePlatform
 import kotlinx.collections.immutable.PersistentList
+import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
@@ -36,7 +37,8 @@ private fun JSONObject.conversation() = SharedConversation(
     optBoolean("isGroup"), optionalLong("updatedAt"), optString("peerID").takeIf(String::isNotEmpty),
     optBoolean("isPinned"), optBoolean("isArchived"), optionalLong("muteUntil")
 )
-data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?, val createdAt: Long? = null, val mentionSummary: String? = null)
+data class SharedEntity(val kind: String, val offset: Int, val length: Int, val url: String?)
+data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?, val createdAt: Long? = null, val mentionSummary: String? = null, val entities: PersistentList<SharedEntity> = persistentListOf())
 enum class SharedSendStatus { Preparing, Pending, WaitingForNetwork, WaitingForAuthentication, AcceptedAwaitingProjection, ConfirmingOutcome, NeedsAttention, ExpiredUnsubmitted, Closed, Rejected }
 data class SharedPendingMessage(val id: String, val text: String, val status: SharedSendStatus, val preparationStatus: String? = null, val createdAt: Long? = null,
                               val preparedAttachments: Long? = null, val totalAttachments: Long? = null)
@@ -384,7 +386,12 @@ class SharedClient private constructor(private val handle: Long) {
             value.optJSONObject("chat")?.let { chat ->
                 val messages = chat.getJSONArray("messages"); val pending = chat.getJSONArray("pending")
                 SharedChat(chat.getString("roomID"), (0 until messages.length()).map { index -> messages.getJSONObject(index).let {
-                    SharedMessage(it.getString("id"), it.getString("senderID"), it.getString("text"), it.getLong("sequence"), it.getBoolean("withdrawn"), it.getBoolean("hasMedia"), it.getJSONArray("attachments").let { rows -> (0 until rows.length()).map { index -> decodeAttachment(rows.getJSONObject(index)) }.toPersistentList() }, it.getLong("revision"), it.getBoolean("canMutate"), it.getBoolean("readByPeer"), it.optString("replyToID").takeIf(String::isNotEmpty), it.optString("replyPreview").takeIf(String::isNotEmpty), it.optString("forwardedFromID").takeIf(String::isNotEmpty), it.optionalLong("createdAt"), it.optString("mentionSummary").takeIf(String::isNotEmpty))
+                    SharedMessage(it.getString("id"), it.getString("senderID"), it.getString("text"), it.getLong("sequence"), it.getBoolean("withdrawn"), it.getBoolean("hasMedia"), it.getJSONArray("attachments").let { rows -> (0 until rows.length()).map { index -> decodeAttachment(rows.getJSONObject(index)) }.toPersistentList() }, it.getLong("revision"), it.getBoolean("canMutate"), it.getBoolean("readByPeer"), it.optString("replyToID").takeIf(String::isNotEmpty), it.optString("replyPreview").takeIf(String::isNotEmpty), it.optString("forwardedFromID").takeIf(String::isNotEmpty), it.optionalLong("createdAt"), it.optString("mentionSummary").takeIf(String::isNotEmpty),
+                        (0 until it.optJSONArray("entities").let { rows -> rows?.length() ?: 0 }).map { index ->
+                            val entity = it.getJSONArray("entities").getJSONObject(index)
+                            SharedEntity(entity.getString("kind"), entity.getInt("offset"), entity.getInt("length"),
+                                entity.optString("url").takeIf(String::isNotEmpty))
+                        }.toPersistentList())
                 } }.toPersistentList(), (0 until pending.length()).map { index -> pending.getJSONObject(index).let {
                     SharedPendingMessage(it.getString("id"), it.getString("text"), SharedSendStatus.entries.first { status -> status.name.equals(it.getString("status"), true) },
                         it.optString("preparationStatus").takeIf(String::isNotEmpty), it.optionalLong("createdAt"),

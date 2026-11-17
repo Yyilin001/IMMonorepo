@@ -464,6 +464,55 @@ data class Attachment (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class ImEntity (
+  val kind: String,
+  val offset: Long,
+  val length: Long,
+  val url: String? = null
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImEntity {
+      val kind = pigeonVar_list[0] as String
+      val offset = pigeonVar_list[1] as Long
+      val length = pigeonVar_list[2] as Long
+      val url = pigeonVar_list[3] as String?
+      return ImEntity(kind, offset, length, url)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      kind,
+      offset,
+      length,
+      url,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImEntity
+    return MessagesPigeonUtils.deepEquals(this.kind, other.kind) && MessagesPigeonUtils.deepEquals(this.offset, other.offset) && MessagesPigeonUtils.deepEquals(this.length, other.length) && MessagesPigeonUtils.deepEquals(this.url, other.url)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.kind)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.offset)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.length)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.url)
+    return result
+  }
+  override fun toString(): String {
+    return "ImEntity(kind=$kind, offset=$offset, length=$length, url=$url)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class ImMessage (
   val id: String,
   val senderId: String,
@@ -481,7 +530,8 @@ data class ImMessage (
   val preparedAttachments: Long? = null,
   val totalAttachments: Long? = null,
   val replyToId: String? = null,
-  val mentionSummary: String? = null
+  val mentionSummary: String? = null,
+  val entities: List<ImEntity>? = null
 )
  {
   companion object {
@@ -503,7 +553,8 @@ data class ImMessage (
       val totalAttachments = pigeonVar_list[14] as Long?
       val replyToId = pigeonVar_list[15] as String?
       val mentionSummary = pigeonVar_list[16] as String?
-      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, revision, mutableRevision, replyPreview, pendingStatus, createdAt, preparedAttachments, totalAttachments, replyToId, mentionSummary)
+      val entities = pigeonVar_list[17] as List<ImEntity>?
+      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, revision, mutableRevision, replyPreview, pendingStatus, createdAt, preparedAttachments, totalAttachments, replyToId, mentionSummary, entities)
     }
   }
   fun toList(): List<Any?> {
@@ -525,6 +576,7 @@ data class ImMessage (
       totalAttachments,
       replyToId,
       mentionSummary,
+      entities,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -535,7 +587,7 @@ data class ImMessage (
       return true
     }
     val other = other as ImMessage
-    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.preparedAttachments, other.preparedAttachments) && MessagesPigeonUtils.deepEquals(this.totalAttachments, other.totalAttachments) && MessagesPigeonUtils.deepEquals(this.replyToId, other.replyToId) && MessagesPigeonUtils.deepEquals(this.mentionSummary, other.mentionSummary)
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.preparedAttachments, other.preparedAttachments) && MessagesPigeonUtils.deepEquals(this.totalAttachments, other.totalAttachments) && MessagesPigeonUtils.deepEquals(this.replyToId, other.replyToId) && MessagesPigeonUtils.deepEquals(this.mentionSummary, other.mentionSummary) && MessagesPigeonUtils.deepEquals(this.entities, other.entities)
   }
 
   override fun hashCode(): Int {
@@ -557,10 +609,11 @@ data class ImMessage (
     result = 31 * result + MessagesPigeonUtils.deepHash(this.totalAttachments)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.replyToId)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.mentionSummary)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.entities)
     return result
   }
   override fun toString(): String {
-    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, revision=$revision, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt, preparedAttachments=$preparedAttachments, totalAttachments=$totalAttachments, replyToId=$replyToId, mentionSummary=$mentionSummary)"
+    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, revision=$revision, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt, preparedAttachments=$preparedAttachments, totalAttachments=$totalAttachments, replyToId=$replyToId, mentionSummary=$mentionSummary, entities=$entities)"
   }
 }
 
@@ -1735,115 +1788,120 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       134.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImMessage.fromList(it)
+          ImEntity.fromList(it)
         }
       }
       135.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImProfile.fromList(it)
+          ImMessage.fromList(it)
         }
       }
       136.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImAvatarEditor.fromList(it)
+          ImProfile.fromList(it)
         }
       }
       137.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImAvatarImage.fromList(it)
+          ImAvatarEditor.fromList(it)
         }
       }
       138.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryEntry.fromList(it)
+          ImAvatarImage.fromList(it)
         }
       }
       139.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchHit.fromList(it)
+          DirectoryEntry.fromList(it)
         }
       }
       140.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchPage.fromList(it)
+          SearchHit.fromList(it)
         }
       }
       141.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryPage.fromList(it)
+          SearchPage.fromList(it)
         }
       }
       142.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupMember.fromList(it)
+          DirectoryPage.fromList(it)
         }
       }
       143.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImPrivacy.fromList(it)
+          GroupMember.fromList(it)
         }
       }
       144.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImDeviceSession.fromList(it)
+          ImPrivacy.fromList(it)
         }
       }
       145.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImDeviceSessions.fromList(it)
+          ImDeviceSession.fromList(it)
         }
       }
       146.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImGroupNickname.fromList(it)
+          ImDeviceSessions.fromList(it)
         }
       }
       147.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImGroupPolicy.fromList(it)
+          ImGroupNickname.fromList(it)
         }
       }
       148.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          ImGroupPolicy.fromList(it)
         }
       }
       149.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImInvite.fromList(it)
+          GroupPage.fromList(it)
         }
       }
       150.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImJoinRequest.fromList(it)
+          ImInvite.fromList(it)
         }
       }
       151.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImInvitePreview.fromList(it)
+          ImJoinRequest.fromList(it)
         }
       }
       152.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImCommunity.fromList(it)
+          ImInvitePreview.fromList(it)
         }
       }
       153.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImFavoriteMessage.fromList(it)
+          ImCommunity.fromList(it)
         }
       }
       154.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImFavorites.fromList(it)
+          ImFavoriteMessage.fromList(it)
         }
       }
       155.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImReaders.fromList(it)
+          ImFavorites.fromList(it)
         }
       }
       156.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          ImReaders.fromList(it)
+        }
+      }
+      157.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -1873,96 +1931,100 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(133)
         writeValue(stream, value.toList())
       }
-      is ImMessage -> {
+      is ImEntity -> {
         stream.write(134)
         writeValue(stream, value.toList())
       }
-      is ImProfile -> {
+      is ImMessage -> {
         stream.write(135)
         writeValue(stream, value.toList())
       }
-      is ImAvatarEditor -> {
+      is ImProfile -> {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is ImAvatarImage -> {
+      is ImAvatarEditor -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is DirectoryEntry -> {
+      is ImAvatarImage -> {
         stream.write(138)
         writeValue(stream, value.toList())
       }
-      is SearchHit -> {
+      is DirectoryEntry -> {
         stream.write(139)
         writeValue(stream, value.toList())
       }
-      is SearchPage -> {
+      is SearchHit -> {
         stream.write(140)
         writeValue(stream, value.toList())
       }
-      is DirectoryPage -> {
+      is SearchPage -> {
         stream.write(141)
         writeValue(stream, value.toList())
       }
-      is GroupMember -> {
+      is DirectoryPage -> {
         stream.write(142)
         writeValue(stream, value.toList())
       }
-      is ImPrivacy -> {
+      is GroupMember -> {
         stream.write(143)
         writeValue(stream, value.toList())
       }
-      is ImDeviceSession -> {
+      is ImPrivacy -> {
         stream.write(144)
         writeValue(stream, value.toList())
       }
-      is ImDeviceSessions -> {
+      is ImDeviceSession -> {
         stream.write(145)
         writeValue(stream, value.toList())
       }
-      is ImGroupNickname -> {
+      is ImDeviceSessions -> {
         stream.write(146)
         writeValue(stream, value.toList())
       }
-      is ImGroupPolicy -> {
+      is ImGroupNickname -> {
         stream.write(147)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is ImGroupPolicy -> {
         stream.write(148)
         writeValue(stream, value.toList())
       }
-      is ImInvite -> {
+      is GroupPage -> {
         stream.write(149)
         writeValue(stream, value.toList())
       }
-      is ImJoinRequest -> {
+      is ImInvite -> {
         stream.write(150)
         writeValue(stream, value.toList())
       }
-      is ImInvitePreview -> {
+      is ImJoinRequest -> {
         stream.write(151)
         writeValue(stream, value.toList())
       }
-      is ImCommunity -> {
+      is ImInvitePreview -> {
         stream.write(152)
         writeValue(stream, value.toList())
       }
-      is ImFavoriteMessage -> {
+      is ImCommunity -> {
         stream.write(153)
         writeValue(stream, value.toList())
       }
-      is ImFavorites -> {
+      is ImFavoriteMessage -> {
         stream.write(154)
         writeValue(stream, value.toList())
       }
-      is ImReaders -> {
+      is ImFavorites -> {
         stream.write(155)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is ImReaders -> {
         stream.write(156)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(157)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)

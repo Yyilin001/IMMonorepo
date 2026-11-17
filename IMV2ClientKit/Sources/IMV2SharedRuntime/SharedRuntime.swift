@@ -74,6 +74,7 @@ struct SharedFavoriteMessage: Encodable, Sendable {
     let text: String; let createdAt: Int64?; let attachmentNames: [String]
 }
 struct SharedFavorites: Encodable, Sendable { let messages: [SharedFavoriteMessage]; let hasMore: Bool }
+struct SharedEntity: Encodable, Sendable { let kind: String; let offset: Int; let length: Int; let url: String? }
 struct SharedMessage: Encodable, Sendable {
     let id: String; let senderID: String; let text: String; let sequence: UInt64; var createdAt: Int64?
     let withdrawn: Bool; let hasMedia: Bool; let attachments: [SharedAttachment]
@@ -81,6 +82,7 @@ struct SharedMessage: Encodable, Sendable {
     let replyToID: String?; let replyPreview: String?; let forwardedFromID: String?
     var isFavorited = false
     let mentionSummary: String?
+    let entities: [SharedEntity]
 }
 struct SharedPendingMessage: Encodable, Sendable {
     let id: String
@@ -739,7 +741,11 @@ package actor SharedRuntime {
                     replyPreview: message.isWithdrawn ? nil : message.replyTo.flatMap { replyPreviews[$0.messageID] },
                     forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue,
                     isFavorited: favorites.contains(message.messageID),
-                    mentionSummary: Self.mentionSummary(message.mentions))
+                    mentionSummary: Self.mentionSummary(message.mentions),
+                    entities: message.isWithdrawn ? [] : message.entities.map {
+                        SharedEntity(kind: $0.kind.rawValue, offset: $0.offsetUTF16, length: $0.lengthUTF16,
+                                     url: $0.linkURL?.absoluteString)
+                    })
             }, pending: (pending?.preparing ?? []).map(SharedPendingMessage.preparing)
                 + (pending?.submitted ?? []).map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status), createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000)) },
                 focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest, hasMorePending: pending?.hasNext ?? false, pendingPage: pendingPage)

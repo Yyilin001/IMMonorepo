@@ -422,6 +422,66 @@ class Attachment {
   }
 }
 
+class ImEntity {
+  ImEntity({
+    required this.kind,
+    required this.offset,
+    required this.length,
+    this.url,
+  });
+
+  String kind;
+
+  int offset;
+
+  int length;
+
+  String? url;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      kind,
+      offset,
+      length,
+      url,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImEntity decode(Object result) {
+    result as List<Object?>;
+    return ImEntity(
+      kind: result[0]! as String,
+      offset: result[1]! as int,
+      length: result[2]! as int,
+      url: result[3] as String?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImEntity || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(kind, other.kind) && _deepEquals(offset, other.offset) && _deepEquals(length, other.length) && _deepEquals(url, other.url);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImEntity(kind: $kind, offset: $offset, length: $length, url: $url)';
+  }
+}
+
 class ImMessage {
   ImMessage({
     required this.id,
@@ -441,6 +501,7 @@ class ImMessage {
     this.totalAttachments,
     this.replyToId,
     this.mentionSummary,
+    this.entities,
   });
 
   String id;
@@ -477,6 +538,8 @@ class ImMessage {
 
   String? mentionSummary;
 
+  List<ImEntity>? entities;
+
   List<Object?> _toList() {
     return <Object?>[
       id,
@@ -496,6 +559,7 @@ class ImMessage {
       totalAttachments,
       replyToId,
       mentionSummary,
+      entities,
     ];
   }
 
@@ -522,6 +586,7 @@ class ImMessage {
       totalAttachments: result[14] as int?,
       replyToId: result[15] as String?,
       mentionSummary: result[16] as String?,
+      entities: (result[17] as List<Object?>?)?.cast<ImEntity>(),
     );
   }
 
@@ -534,7 +599,7 @@ class ImMessage {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(revision, other.revision) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt) && _deepEquals(preparedAttachments, other.preparedAttachments) && _deepEquals(totalAttachments, other.totalAttachments) && _deepEquals(replyToId, other.replyToId) && _deepEquals(mentionSummary, other.mentionSummary);
+    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(revision, other.revision) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt) && _deepEquals(preparedAttachments, other.preparedAttachments) && _deepEquals(totalAttachments, other.totalAttachments) && _deepEquals(replyToId, other.replyToId) && _deepEquals(mentionSummary, other.mentionSummary) && _deepEquals(entities, other.entities);
   }
 
   @override
@@ -543,7 +608,7 @@ class ImMessage {
 
   @override
   String toString() {
-    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, revision: $revision, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt, preparedAttachments: $preparedAttachments, totalAttachments: $totalAttachments, replyToId: $replyToId, mentionSummary: $mentionSummary)';
+    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, revision: $revision, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt, preparedAttachments: $preparedAttachments, totalAttachments: $totalAttachments, replyToId: $replyToId, mentionSummary: $mentionSummary, entities: $entities)';
   }
 }
 
@@ -1970,74 +2035,77 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is Attachment) {
       buffer.putUint8(133);
       writeValue(buffer, value.encode());
-    }    else if (value is ImMessage) {
+    }    else if (value is ImEntity) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    }    else if (value is ImProfile) {
+    }    else if (value is ImMessage) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is ImAvatarEditor) {
+    }    else if (value is ImProfile) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is ImAvatarImage) {
+    }    else if (value is ImAvatarEditor) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryEntry) {
+    }    else if (value is ImAvatarImage) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    }    else if (value is SearchHit) {
+    }    else if (value is DirectoryEntry) {
       buffer.putUint8(139);
       writeValue(buffer, value.encode());
-    }    else if (value is SearchPage) {
+    }    else if (value is SearchHit) {
       buffer.putUint8(140);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryPage) {
+    }    else if (value is SearchPage) {
       buffer.putUint8(141);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupMember) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(142);
       writeValue(buffer, value.encode());
-    }    else if (value is ImPrivacy) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    }    else if (value is ImDeviceSession) {
+    }    else if (value is ImPrivacy) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
-    }    else if (value is ImDeviceSessions) {
+    }    else if (value is ImDeviceSession) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupNickname) {
+    }    else if (value is ImDeviceSessions) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupPolicy) {
+    }    else if (value is ImGroupNickname) {
       buffer.putUint8(147);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is ImGroupPolicy) {
       buffer.putUint8(148);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvite) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(149);
       writeValue(buffer, value.encode());
-    }    else if (value is ImJoinRequest) {
+    }    else if (value is ImInvite) {
       buffer.putUint8(150);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvitePreview) {
+    }    else if (value is ImJoinRequest) {
       buffer.putUint8(151);
       writeValue(buffer, value.encode());
-    }    else if (value is ImCommunity) {
+    }    else if (value is ImInvitePreview) {
       buffer.putUint8(152);
       writeValue(buffer, value.encode());
-    }    else if (value is ImFavoriteMessage) {
+    }    else if (value is ImCommunity) {
       buffer.putUint8(153);
       writeValue(buffer, value.encode());
-    }    else if (value is ImFavorites) {
+    }    else if (value is ImFavoriteMessage) {
       buffer.putUint8(154);
       writeValue(buffer, value.encode());
-    }    else if (value is ImReaders) {
+    }    else if (value is ImFavorites) {
       buffer.putUint8(155);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is ImReaders) {
       buffer.putUint8(156);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(157);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -2058,50 +2126,52 @@ class _PigeonCodec extends StandardMessageCodec {
       case 133:
         return Attachment.decode(readValue(buffer)!);
       case 134:
-        return ImMessage.decode(readValue(buffer)!);
+        return ImEntity.decode(readValue(buffer)!);
       case 135:
-        return ImProfile.decode(readValue(buffer)!);
+        return ImMessage.decode(readValue(buffer)!);
       case 136:
-        return ImAvatarEditor.decode(readValue(buffer)!);
+        return ImProfile.decode(readValue(buffer)!);
       case 137:
-        return ImAvatarImage.decode(readValue(buffer)!);
+        return ImAvatarEditor.decode(readValue(buffer)!);
       case 138:
-        return DirectoryEntry.decode(readValue(buffer)!);
+        return ImAvatarImage.decode(readValue(buffer)!);
       case 139:
-        return SearchHit.decode(readValue(buffer)!);
+        return DirectoryEntry.decode(readValue(buffer)!);
       case 140:
-        return SearchPage.decode(readValue(buffer)!);
+        return SearchHit.decode(readValue(buffer)!);
       case 141:
-        return DirectoryPage.decode(readValue(buffer)!);
+        return SearchPage.decode(readValue(buffer)!);
       case 142:
-        return GroupMember.decode(readValue(buffer)!);
+        return DirectoryPage.decode(readValue(buffer)!);
       case 143:
-        return ImPrivacy.decode(readValue(buffer)!);
+        return GroupMember.decode(readValue(buffer)!);
       case 144:
-        return ImDeviceSession.decode(readValue(buffer)!);
+        return ImPrivacy.decode(readValue(buffer)!);
       case 145:
-        return ImDeviceSessions.decode(readValue(buffer)!);
+        return ImDeviceSession.decode(readValue(buffer)!);
       case 146:
-        return ImGroupNickname.decode(readValue(buffer)!);
+        return ImDeviceSessions.decode(readValue(buffer)!);
       case 147:
-        return ImGroupPolicy.decode(readValue(buffer)!);
+        return ImGroupNickname.decode(readValue(buffer)!);
       case 148:
-        return GroupPage.decode(readValue(buffer)!);
+        return ImGroupPolicy.decode(readValue(buffer)!);
       case 149:
-        return ImInvite.decode(readValue(buffer)!);
+        return GroupPage.decode(readValue(buffer)!);
       case 150:
-        return ImJoinRequest.decode(readValue(buffer)!);
+        return ImInvite.decode(readValue(buffer)!);
       case 151:
-        return ImInvitePreview.decode(readValue(buffer)!);
+        return ImJoinRequest.decode(readValue(buffer)!);
       case 152:
-        return ImCommunity.decode(readValue(buffer)!);
+        return ImInvitePreview.decode(readValue(buffer)!);
       case 153:
-        return ImFavoriteMessage.decode(readValue(buffer)!);
+        return ImCommunity.decode(readValue(buffer)!);
       case 154:
-        return ImFavorites.decode(readValue(buffer)!);
+        return ImFavoriteMessage.decode(readValue(buffer)!);
       case 155:
-        return ImReaders.decode(readValue(buffer)!);
+        return ImFavorites.decode(readValue(buffer)!);
       case 156:
+        return ImReaders.decode(readValue(buffer)!);
+      case 157:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);

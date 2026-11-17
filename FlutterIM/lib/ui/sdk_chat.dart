@@ -922,6 +922,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                               selected: selected.contains(item.id),
                               onToggleSelect: () => toggleSelection(item),
                               mentionSummary: item.mentionSummary,
+                              entities: item.entities,
                               onFavorite:
                                   !item.withdrawn &&
                                       item.pendingStatus == null

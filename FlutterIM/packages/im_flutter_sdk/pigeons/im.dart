@@ -78,6 +78,19 @@ class Attachment {
   int bytes;
 }
 
+class ImEntity {
+  ImEntity({
+    required this.kind,
+    required this.offset,
+    required this.length,
+    this.url,
+  });
+  String kind;
+  int offset;
+  int length;
+  String? url;
+}
+
 class ImMessage {
   ImMessage({
     required this.id,
@@ -97,6 +110,7 @@ class ImMessage {
     this.totalAttachments,
     this.replyToId,
     this.mentionSummary,
+    this.entities,
   });
   String id;
   String senderId;
@@ -115,6 +129,7 @@ class ImMessage {
   int? totalAttachments;
   String? replyToId;
   String? mentionSummary;
+  List<ImEntity>? entities;
 }
 
 class ImProfile {

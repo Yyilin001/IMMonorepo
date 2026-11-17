@@ -174,6 +174,12 @@ typedef ImAttachment = ({
   String contentType,
   int bytes,
 });
+typedef ImEntity = ({
+  String kind,
+  int offset,
+  int length,
+  String? url,
+});
 typedef ImMessage = ({
   String id,
   String senderId,
@@ -192,6 +198,7 @@ typedef ImMessage = ({
   int? preparedAttachments,
   int? totalAttachments,
   String? mentionSummary,
+  List<ImEntity> entities,
 });
 
 extension on wire.ImSession {
@@ -226,6 +233,11 @@ extension on wire.ImMessage {
     preparedAttachments: preparedAttachments,
     totalAttachments: totalAttachments,
     mentionSummary: mentionSummary,
+    entities: List<ImEntity>.unmodifiable(
+      (entities ?? const []).map(
+        (e) => (kind: e.kind, offset: e.offset, length: e.length, url: e.url),
+      ),
+    ),
     pendingStatus: pendingStatus == null
         ? null
         : ImSendStatus.values.firstWhere(

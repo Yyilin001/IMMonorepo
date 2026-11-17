@@ -114,6 +114,15 @@ void main() {
             ],
             readByPeer: false,
             isForwarded: false,
+            entities: [
+              wire.ImEntity(kind: 'bold', offset: 0, length: 2),
+              wire.ImEntity(
+                kind: 'link',
+                offset: 3,
+                length: 4,
+                url: 'https://example.test',
+              ),
+            ],
           ),
           for (final status in [
             'preparationPaused',
@@ -161,6 +170,8 @@ void main() {
     expect(iterator.current.messages.last.preparedAttachments, 1);
     expect(iterator.current.messages.last.totalAttachments, 3);
     expect(message.totalAttachments, isNull);
+    expect(message.entities.map((entity) => entity.kind), ['bold', 'link']);
+    expect(message.entities.last.url, 'https://example.test');
     final attachment = message.attachments.single;
     expect(
       (attachment.name, attachment.contentType, attachment.bytes),
