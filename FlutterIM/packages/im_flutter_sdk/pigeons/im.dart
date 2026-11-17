@@ -115,7 +115,11 @@ abstract class ImHost {
   @async
   WindowView nextUpdate(String windowId);
   @async
-  DirectoryPage directory(bool? nextGroups);
+  DirectoryPage directory(bool? nextGroups, String scope);
+  @async
+  void requestContact(String handle);
+  @async
+  void socialAction(String userId, String action);
   @async
   void changeWindowPage(String windowId, bool latest);
   @async

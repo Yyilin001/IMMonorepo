@@ -96,18 +96,26 @@ public final class V2MobileClient: Sendable {
         public let moreContacts: Bool
         public let moreGroups: Bool
     }
-    public func directoryPage(nextGroups: Bool?) async throws -> DirectoryPage {
+    public func directoryPage(nextGroups: Bool?, scope: String = "accepted") async throws -> DirectoryPage {
         let result: SharedSnapshot
         if let nextGroups {
             result = try await run(.init(operation: nextGroups ? .groupsNext : .contactsNext))
         } else {
-            _ = try await run(.init(operation: .contacts, scope: "accepted"))
+            _ = try await run(.init(operation: .contacts, scope: scope))
             result = try await run(.init(operation: .groupsFirst))
         }
         guard let directory = result.directory else { throw Failure(code: "authenticationRequired") }
         let entries = directory.contacts.map { DirectoryEntry(id: $0.userID, title: $0.userID, isGroup: false) }
             + directory.groups.map { DirectoryEntry(id: $0.id, title: $0.title, isGroup: true) }
         return DirectoryPage(entries: entries, moreContacts: directory.hasMoreContacts, moreGroups: directory.hasMoreGroups)
+    }
+    public func requestContact(handle: String) async throws {
+        let result = try await run(.init(operation: .lookupIdentity, text: handle))
+        guard let identity = result.directory?.identity else { throw Failure(code: "identityUnavailable") }
+        try await socialAction(userID: identity.userID, action: "request")
+    }
+    public func socialAction(userID: String, action: String) async throws {
+        _ = try await run(.init(operation: .socialAction, targetUserID: userID, action: action))
     }
     public func changeWindowPage(_ id: String, latest: Bool) async throws {
         _ = try await run(.init(operation: latest ? .resetWindow : .nextWindowPage, windowID: id))

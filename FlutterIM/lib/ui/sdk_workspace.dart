@@ -30,16 +30,29 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
   String? directoryError;
   bool loadingDirectory = false;
 
+  ImContactScope contactScope = ImContactScope.accepted;
   bool moreContacts = false, moreGroups = false;
-  Future<void> refreshDirectory({bool? nextGroups}) async {
+  Future<void> refreshDirectory({
+    bool? nextGroups,
+    ImContactScope? scope,
+  }) async {
     final sessionNavigator = navigator;
     if (userId == null || loadingDirectory) return;
     setState(() {
+      if (scope != null && scope != contactScope) {
+        contactScope = scope;
+        entries = {};
+        directory = ContactDirectory.fromEntries([]);
+        moreContacts = moreGroups = false;
+      }
       loadingDirectory = true;
       directoryError = null;
     });
     try {
-      final page = await client!.directoryPage(nextGroups: nextGroups);
+      final page = await client!.directoryPage(
+        nextGroups: nextGroups,
+        scope: contactScope,
+      );
       if (!mounted || navigator != sessionNavigator) return;
       entries = {
         if (nextGroups != null) ...entries,
@@ -124,6 +137,7 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
       userId = session.userId;
       navigator = GlobalKey<NavigatorState>();
       _keys.clear();
+      contactScope = ImContactScope.accepted;
       entries = {};
       moreContacts = moreGroups = false;
       directory = ContactDirectory.fromEntries([]);
@@ -320,6 +334,7 @@ String _errorText(Object error) {
   return switch (code) {
     'authenticationRequired' => '登录失败，请检查账号和密码',
     'networkUnavailable' => '无法连接服务器，请检查网络后重试',
+    'identityUnavailable' => '未找到该公开账号',
     'storageUnavailable' => '本地存储暂不可用',
     'busy' => '当前会话正忙，请重试',
     _ =>

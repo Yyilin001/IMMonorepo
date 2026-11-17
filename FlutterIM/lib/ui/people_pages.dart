@@ -176,6 +176,7 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
         widget.searchPage ||
         (!mobile && (searchFocus.hasFocus || filter.query.isNotEmpty));
     final directory = ref.watch(contactDirectoryProvider);
+    final owner = _SdkScope.of(context);
     return _SearchScope(
       active: searching && !widget.searchPage,
       onPageExit: widget.searchPage ? _rememberSearch : null,
@@ -204,7 +205,7 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          '${number(directory.friends.length)} 位好友 · ${number(directory.groups.length)} 个群聊',
+                          '${number(directory.friends.length)} ${owner != null && owner.contactScope != ImContactScope.accepted ? '条关系记录' : '位好友'} · ${number(directory.groups.length)} 个群聊',
                           style: const TextStyle(fontSize: 13, color: muted),
                         ),
                       ],
@@ -236,7 +237,9 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                     children: [
                       _Filter(
                         mobile: true,
-                        label: '好友',
+                        label: owner == null
+                            ? '好友'
+                            : _scopeLabel(owner.contactScope),
                         selected: !groups,
                         onTap: () {
                           searchFocus.unfocus();
@@ -253,11 +256,45 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                           _filter(groups: true);
                         },
                       ),
+                      if (owner?.userId != null)
+                        IconButton(
+                          tooltip: '添加好友',
+                          icon: const Icon(Icons.person_add_outlined),
+                          onPressed: () async {
+                            final requested = await showDialog<bool>(
+                              context: context,
+                              builder: (_) =>
+                                  _RequestContactDialog(client: owner!.client!),
+                            );
+                            if (requested == true && context.mounted) {
+                              _filter(groups: false);
+                              await owner!.refreshDirectory(
+                                scope: ImContactScope.outgoing,
+                              );
+                            }
+                          },
+                        ),
+                      if (owner?.userId != null)
+                        PopupMenuButton<ImContactScope>(
+                          tooltip: '切换联系人分类',
+                          enabled: !owner!.loadingDirectory,
+                          onSelected: (scope) {
+                            _filter(groups: false);
+                            unawaited(owner.refreshDirectory(scope: scope));
+                          },
+                          itemBuilder: (_) => [
+                            for (final scope in ImContactScope.values)
+                              PopupMenuItem(
+                                value: scope,
+                                child: Text(_scopeLabel(scope)),
+                              ),
+                          ],
+                        ),
                     ],
                   ),
                 ),
                 if (searching && filter.query.isNotEmpty)
-                  _SearchResultsLabel(groups ? '群聊搜索结果' : '好友搜索结果'),
+                  _SearchResultsLabel(groups ? '群聊搜索结果' : '联系人搜索结果'),
                 Expanded(
                   child: searching && filter.query.isEmpty
                       ? _RecentSearchPanel(
@@ -333,7 +370,7 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                                                 ? '正在加载…'
                                                 : groups
                                                 ? '加载更多群聊'
-                                                : '加载更多好友',
+                                                : '加载更多${_scopeLabel(sdk.contactScope)}',
                                           ),
                                         );
                                       }
@@ -1229,5 +1266,154 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
         borderSide: const BorderSide(color: line),
       ),
     ),
+  );
+}
+
+String _scopeLabel(ImContactScope scope) => switch (scope) {
+  ImContactScope.accepted => '好友',
+  ImContactScope.incoming => '收到的申请',
+  ImContactScope.outgoing => '发出的申请',
+  ImContactScope.blocked => '黑名单',
+};
+
+class _ContactRelationshipActions extends StatefulWidget {
+  const _ContactRelationshipActions({
+    required this.userId,
+    required this.name,
+    required this.scope,
+  });
+  final String userId, name;
+  final ImContactScope scope;
+
+  @override
+  State<_ContactRelationshipActions> createState() =>
+      _ContactRelationshipActionsState();
+}
+
+class _ContactRelationshipActionsState
+    extends State<_ContactRelationshipActions> {
+  bool busy = false;
+  String? error;
+
+  Future<void> submit(ImSocialAction action, String label) async {
+    if (busy) return;
+    final sdk = _SdkScope.of(context)!;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: Text('确认$label？'),
+          content: Text(widget.name),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: Text(label),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      await sdk.client!.socialAction(widget.userId, action);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已提交「$label」')));
+      unawaited(sdk.refreshDirectory());
+      Navigator.pop(context);
+    } catch (failure) {
+      if (mounted) setState(() => error = _errorText(failure));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final actions = switch (widget.scope) {
+      ImContactScope.accepted => {
+        ImSocialAction.remove: '删除好友',
+        ImSocialAction.block: '加入黑名单',
+      },
+      ImContactScope.incoming => {
+        ImSocialAction.accept: '接受申请',
+        ImSocialAction.reject: '拒绝申请',
+        ImSocialAction.block: '加入黑名单',
+      },
+      ImContactScope.outgoing => {ImSocialAction.block: '加入黑名单'},
+      ImContactScope.blocked => {ImSocialAction.unblock: '移出黑名单'},
+    };
+    return Column(
+      children: [
+        if (widget.scope == ImContactScope.outgoing) const Text('等待对方处理'),
+        for (final entry in actions.entries)
+          TextButton(
+            onPressed: busy ? null : () => submit(entry.key, entry.value),
+            child: Text(entry.value),
+          ),
+        if (error != null) Text(error!),
+      ],
+    );
+  }
+}
+
+class _RequestContactDialog extends StatefulWidget {
+  const _RequestContactDialog({required this.client});
+  final ImClient client;
+
+  @override
+  State<_RequestContactDialog> createState() => _RequestContactDialogState();
+}
+
+class _RequestContactDialogState extends State<_RequestContactDialog> {
+  String handle = '';
+  String? error;
+  bool busy = false;
+
+  Future<void> submit() async {
+    if (busy || handle.isEmpty) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await widget.client.requestContact(handle);
+      if (mounted) Navigator.pop(context, true);
+    } catch (failure) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          error = _errorText(failure);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('添加好友'),
+    content: TextField(
+      enabled: !busy,
+      autofocus: true,
+      autocorrect: false,
+      decoration: InputDecoration(labelText: '对方的公开账号', errorText: error),
+      onChanged: (value) => setState(() => handle = value.trim()),
+    ),
+    actions: [
+      TextButton(
+        onPressed: busy ? null : () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      FilledButton(
+        onPressed: busy || handle.isEmpty ? null : submit,
+        child: const Text('发送申请'),
+      ),
+    ],
   );
 }

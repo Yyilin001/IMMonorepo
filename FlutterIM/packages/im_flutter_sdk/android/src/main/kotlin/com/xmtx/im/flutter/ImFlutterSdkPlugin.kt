@@ -71,18 +71,27 @@ private class MobileHost(private val context: Context) : ImHost {
                 ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, false, false, pendingStatus = it.status.name.wire())
             }, value.chat?.hasOlder ?: false, value.chat?.isLatest ?: true)
     }
-    override suspend fun directory(nextGroups: Boolean?): DirectoryPage = sdk {
+    override suspend fun directory(nextGroups: Boolean?, scope: String): DirectoryPage = sdk {
         val directory = when (nextGroups) {
             true -> client.nextGroups()
             false -> client.nextContacts()
             null -> {
-                client.contacts(SharedContactScope.Accepted)
+                client.contacts(SharedContactScope.entries.firstOrNull { it.wire == scope } ?: throw FlutterError("invalidInput"))
                 client.firstGroups()
             }
         }.directory ?: throw FlutterError("authenticationRequired")
         val entries = directory.contacts.map { DirectoryEntry(it.userID, it.userID, false) } +
             directory.groups.map { DirectoryEntry(it.id, it.title, true) }
         DirectoryPage(entries, directory.hasMoreContacts, directory.hasMoreGroups)
+    }
+    override suspend fun requestContact(handle: String) {
+        mutations.withLock { sdk {
+            val identity = client.lookupIdentity(handle).directory?.identity ?: throw FlutterError("identityUnavailable")
+            client.socialAction(identity.userID, SharedSocialAction.Request)
+        } }
+    }
+    override suspend fun socialAction(userId: String, action: String) {
+        mutations.withLock { sdk { client.socialAction(userId, SharedSocialAction.entries.firstOrNull { it.wire == action } ?: throw FlutterError("invalidInput")) } }
     }
     override suspend fun changeWindowPage(windowId: String, latest: Boolean) {
         mutations.withLock { sdk {

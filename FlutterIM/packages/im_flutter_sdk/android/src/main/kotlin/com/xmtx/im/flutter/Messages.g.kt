@@ -593,7 +593,9 @@ interface ImHost {
   suspend fun disconnect()
   suspend fun openWindow(roomId: String?): String
   suspend fun nextUpdate(windowId: String): WindowView
-  suspend fun directory(nextGroups: Boolean?): DirectoryPage
+  suspend fun directory(nextGroups: Boolean?, scope: String): DirectoryPage
+  suspend fun requestContact(handle: String)
+  suspend fun socialAction(userId: String, action: String)
   suspend fun changeWindowPage(windowId: String, latest: Boolean)
   suspend fun closeWindow(windowId: String)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
@@ -766,9 +768,51 @@ interface ImHost {
           channel.setMessageHandler { message, reply ->
             val args = message as List<Any?>
             val nextGroupsArg = args[0] as Boolean?
+            val scopeArg = args[1] as String
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
-                listOf(api.directory(nextGroupsArg))
+                listOf(api.directory(nextGroupsArg, scopeArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.requestContact$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val handleArg = args[0] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.requestContact(handleArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.socialAction$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val userIdArg = args[0] as String
+            val actionArg = args[1] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.socialAction(userIdArg, actionArg)
+                listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

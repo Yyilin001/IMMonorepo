@@ -586,7 +586,9 @@ protocol ImHost {
   func disconnect() async throws
   func openWindow(roomId: String?) async throws -> String
   func nextUpdate(windowId: String) async throws -> WindowView
-  func directory(nextGroups: Bool?) async throws -> DirectoryPage
+  func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage
+  func requestContact(handle: String) async throws
+  func socialAction(userId: String, action: String) async throws
   func changeWindowPage(windowId: String, latest: Bool) async throws
   func closeWindow(windowId: String) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
@@ -738,9 +740,10 @@ class ImHostSetup {
       directoryChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
         let nextGroupsArg: Bool? = nilOrValue(args[0])
+        let scopeArg = args[1] as! String
         Task { @MainActor in
           do {
-            let result = try await api.directory(nextGroups: nextGroupsArg)
+            let result = try await api.directory(nextGroups: nextGroupsArg, scope: scopeArg)
             reply(wrapResult(result))
           } catch {
             reply(wrapError(error))
@@ -749,6 +752,41 @@ class ImHostSetup {
       }
     } else {
       directoryChannel.setMessageHandler(nil)
+    }
+    let requestContactChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.requestContact\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      requestContactChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let handleArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            try await api.requestContact(handle: handleArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      requestContactChannel.setMessageHandler(nil)
+    }
+    let socialActionChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.socialAction\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      socialActionChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let userIdArg = args[0] as! String
+        let actionArg = args[1] as! String
+        Task { @MainActor in
+          do {
+            try await api.socialAction(userId: userIdArg, action: actionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      socialActionChannel.setMessageHandler(nil)
     }
     let changeWindowPageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeWindowPage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

@@ -171,6 +171,12 @@ class _MobileWorkspaceState extends ConsumerState<_MobileWorkspace> {
                   );
                 },
               ),
+            if (!entry.isGroup)
+              _ContactRelationshipActions(
+                userId: entry.id,
+                name: title,
+                scope: sdk.contactScope,
+              ),
           ],
         ),
       ),

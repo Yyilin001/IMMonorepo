@@ -4,6 +4,10 @@ import 'package:flutter/services.dart';
 
 import 'src/messages.g.dart' as wire;
 
+enum ImContactScope { accepted, incoming, outgoing, blocked }
+
+enum ImSocialAction { accept, reject, remove, block, unblock }
+
 enum ImSessionState {
   signedOut,
   signingOut,
@@ -210,8 +214,11 @@ final class ImClient {
 
   /// A null selector restarts both lists. Otherwise advance only the selected list.
   Future<({List<ImDirectoryEntry> entries, bool moreContacts, bool moreGroups})>
-  directoryPage({bool? nextGroups}) => _ordered(() async {
-    final page = await _host.directory(nextGroups);
+  directoryPage({
+    bool? nextGroups,
+    ImContactScope scope = ImContactScope.accepted,
+  }) => _ordered(() async {
+    final page = await _host.directory(nextGroups, scope.name);
     return (
       entries: page.entries
           .map(
@@ -222,6 +229,12 @@ final class ImClient {
       moreGroups: page.moreGroups,
     );
   });
+
+  Future<void> requestContact(String handle) =>
+      _ordered(() => _host.requestContact(handle));
+
+  Future<void> socialAction(String userId, ImSocialAction action) =>
+      _ordered(() => _host.socialAction(userId, action.name));
 
   Stream<List<ImMessage>> watchMessages(String roomId) =>
       watchTimeline(roomId).map((page) => page.messages);
