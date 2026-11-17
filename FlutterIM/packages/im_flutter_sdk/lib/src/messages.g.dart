@@ -577,6 +577,116 @@ class DirectoryEntry {
   }
 }
 
+class SearchHit {
+  SearchHit({
+    required this.id,
+    required this.roomId,
+    required this.text,
+  });
+
+  String id;
+
+  String roomId;
+
+  String text;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      id,
+      roomId,
+      text,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static SearchHit decode(Object result) {
+    result as List<Object?>;
+    return SearchHit(
+      id: result[0]! as String,
+      roomId: result[1]! as String,
+      text: result[2]! as String,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! SearchHit || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(id, other.id) && _deepEquals(roomId, other.roomId) && _deepEquals(text, other.text);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'SearchHit(id: $id, roomId: $roomId, text: $text)';
+  }
+}
+
+class SearchPage {
+  SearchPage({
+    required this.status,
+    required this.hits,
+    required this.hasNext,
+  });
+
+  String status;
+
+  List<SearchHit> hits;
+
+  bool hasNext;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      status,
+      hits,
+      hasNext,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static SearchPage decode(Object result) {
+    result as List<Object?>;
+    return SearchPage(
+      status: result[0]! as String,
+      hits: (result[1]! as List<Object?>).cast<SearchHit>(),
+      hasNext: result[2]! as bool,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! SearchPage || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(status, other.status) && _deepEquals(hits, other.hits) && _deepEquals(hasNext, other.hasNext);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'SearchPage(status: $status, hits: $hits, hasNext: $hasNext)';
+  }
+}
+
 class DirectoryPage {
   DirectoryPage({
     required this.entries,
@@ -846,17 +956,23 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is DirectoryEntry) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryPage) {
+    }    else if (value is SearchHit) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupMember) {
+    }    else if (value is SearchPage) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(139);
+      writeValue(buffer, value.encode());
+    }    else if (value is GroupPage) {
+      buffer.putUint8(140);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(141);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -881,12 +997,16 @@ class _PigeonCodec extends StandardMessageCodec {
       case 135:
         return DirectoryEntry.decode(readValue(buffer)!);
       case 136:
-        return DirectoryPage.decode(readValue(buffer)!);
+        return SearchHit.decode(readValue(buffer)!);
       case 137:
-        return GroupMember.decode(readValue(buffer)!);
+        return SearchPage.decode(readValue(buffer)!);
       case 138:
-        return GroupPage.decode(readValue(buffer)!);
+        return DirectoryPage.decode(readValue(buffer)!);
       case 139:
+        return GroupMember.decode(readValue(buffer)!);
+      case 140:
+        return GroupPage.decode(readValue(buffer)!);
+      case 141:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1234,6 +1354,41 @@ class ImHost {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[intentId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<SearchPage> searchMessages(String roomId, String query, bool next) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.searchMessages$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, query, next]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as SearchPage;
+  }
+
+  Future<void> clearMessageSearch() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.clearMessageSearch$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     _extractReplyValueOrThrow(
         pigeonVar_replyList,

@@ -204,6 +204,19 @@ void main() {
       bubble('附件字节已校验 ios $run'),
       'attachment acknowledgement visible after reopening',
     );
+    await tester.tap(find.byKey(const Key('chat-profile')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('搜索聊天记录'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(EditableText), run);
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+    await until(find.text(hello), 'room search returned the Android message');
+    await until(find.text(reply), 'room search returned the iOS reply');
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.pageBack();
+    await tester.pumpAndSettle();
     final destinations = sender
         ? const [
             String.fromEnvironment('IM_ANDROID_FORWARD_FIRST'),

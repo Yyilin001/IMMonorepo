@@ -118,6 +118,20 @@ class DirectoryEntry {
   bool isGroup;
 }
 
+class SearchHit {
+  SearchHit({required this.id, required this.roomId, required this.text});
+  String id;
+  String roomId;
+  String text;
+}
+
+class SearchPage {
+  SearchPage({required this.status, required this.hits, required this.hasNext});
+  String status;
+  List<SearchHit> hits;
+  bool hasNext;
+}
+
 class DirectoryPage {
   DirectoryPage({
     required this.entries,
@@ -213,6 +227,10 @@ abstract class ImHost {
   void closeWindow(String windowId);
   @async
   void cancelPendingSend(String intentId);
+  @async
+  SearchPage searchMessages(String roomId, String query, bool next);
+  @async
+  void clearMessageSearch();
   @async
   void recoverSend(String intentId, bool resend);
   @async

@@ -40,6 +40,9 @@ enum ImSendStatus {
   unknown,
 }
 
+typedef ImSearchHit = ({String id, String roomId, String text});
+typedef ImSearchPage = ({String status, List<ImSearchHit> hits, bool hasNext});
+
 typedef ImTimelinePage = ({
   String windowId,
   List<ImMessage> messages,
@@ -486,6 +489,22 @@ final class ImClient {
 
   Future<void> cancelPendingSend(String intentId) =>
       _ordered(() => _host.cancelPendingSend(intentId));
+
+  Future<ImSearchPage> searchMessages(
+    String roomId,
+    String query, {
+    bool next = false,
+  }) => _ordered(() async {
+    final page = await _host.searchMessages(roomId, query.trim(), next);
+    return (
+      status: page.status,
+      hits: page.hits
+          .map((hit) => (id: hit.id, roomId: hit.roomId, text: hit.text))
+          .toList(growable: false),
+      hasNext: page.hasNext,
+    );
+  });
+  Future<void> clearMessageSearch() => _ordered(_host.clearMessageSearch);
 
   Future<void> recoverSend(String intentId, {required bool resend}) =>
       _ordered(() => _host.recoverSend(intentId, resend));

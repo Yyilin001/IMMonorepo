@@ -122,6 +122,15 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun cancelPendingSend(intentId: String) {
         mutations.withLock { sdk { client.cancelAttachmentSend(intentId) } }
     }
+    override suspend fun searchMessages(roomId: String, query: String, next: Boolean): SearchPage = mutations.withLock {
+        sdk {
+            val snapshot = if (next) client.nextSearch() else client.searchMessages(query, roomId)
+            val page = snapshot.messaging?.search ?: throw FlutterError("invalidInput")
+            if (page.roomID != roomId || page.query != query) throw FlutterError("invalidInput")
+            SearchPage(page.status, page.hits.map { SearchHit(it.id, it.roomID, it.text) }, page.hasNext)
+        }
+    }
+    override suspend fun clearMessageSearch() { mutations.withLock { sdk { client.clearMessaging() } } }
     override suspend fun recoverSend(intentId: String, resend: Boolean) {
         mutations.withLock { sdk { if (resend) client.resendUnsent(intentId) else client.retrySend(intentId) } }
     }

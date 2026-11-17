@@ -396,6 +396,16 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               handle: room.peerId ?? room.id,
               group: room.isGroup,
             ),
+            ListTile(
+              leading: const Icon(Icons.search),
+              title: const Text('搜索聊天记录'),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) =>
+                      _RoomMessageSearch(client: sdk.client!, room: room),
+                ),
+              ),
+            ),
             const _TransfersLink(),
             if (room.isGroup) _GroupDetailsButton(roomId: room.id),
           ],
@@ -911,5 +921,110 @@ class _AttachmentImagePreviewState extends State<AttachmentImagePreview>
         ),
       ),
     ],
+  );
+}
+
+class _RoomMessageSearch extends StatefulWidget {
+  const _RoomMessageSearch({required this.client, required this.room});
+  final ImClient client;
+  final ImConversation room;
+  @override
+  State<_RoomMessageSearch> createState() => _RoomMessageSearchState();
+}
+
+class _RoomMessageSearchState extends State<_RoomMessageSearch> {
+  final input = TextEditingController();
+  final hits = <String, ImSearchHit>{};
+  bool busy = false, hasNext = false;
+  String? status;
+
+  Future<void> search({bool next = false}) async {
+    final query = input.text.trim();
+    if (busy || query.isEmpty) return;
+    setState(() {
+      busy = true;
+      if (!next) hits.clear();
+      hasNext = false;
+      status = null;
+    });
+    try {
+      final page = await widget.client.searchMessages(
+        widget.room.id,
+        query,
+        next: next,
+      );
+      if (!mounted) return;
+      setState(() {
+        for (final hit in page.hits) {
+          hits[hit.id] = hit;
+        }
+        hasNext = page.hasNext;
+        status = switch (page.status) {
+          'ready' => hits.isEmpty ? '没有匹配的消息' : null,
+          'refreshRequired' => '结果已变化，请重新搜索',
+          _ => '搜索索引暂不可用，请稍后重试',
+        };
+      });
+    } catch (error) {
+      if (mounted) setState(() => status = _errorText(error));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    input.dispose();
+    unawaited(widget.client.clearMessageSearch().catchError((Object _) {}));
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('搜索聊天记录')),
+    body: Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: TextField(
+            controller: input,
+            autofocus: true,
+            readOnly: busy,
+            textInputAction: TextInputAction.search,
+            onSubmitted: (_) => search(),
+            onChanged: (_) => setState(() {
+              hits.clear();
+              hasNext = false;
+              status = null;
+            }),
+            decoration: InputDecoration(
+              hintText: '输入消息正文',
+              suffixIcon: IconButton(
+                tooltip: '搜索',
+                icon: const Icon(Icons.search),
+                onPressed: busy || input.text.trim().isEmpty
+                    ? null
+                    : () => search(),
+              ),
+            ),
+          ),
+        ),
+        if (busy) const LinearProgressIndicator(),
+        if (status != null) Text(status!),
+        Expanded(
+          child: ListView(
+            children: [
+              for (final hit in hits.values)
+                ListTile(title: SelectableText(hit.text)),
+              if (hasNext)
+                TextButton(
+                  onPressed: busy ? null : () => search(next: true),
+                  child: const Text('更多结果'),
+                ),
+            ],
+          ),
+        ),
+      ],
+    ),
   );
 }

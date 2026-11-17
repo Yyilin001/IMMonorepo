@@ -102,6 +102,15 @@ public final class V2MobileClient: Sendable {
         public let isGroup: Bool
     }
 
+    public struct SearchHit: Sendable { public let id: String; public let roomID: String; public let text: String }
+    public struct SearchPage: Sendable { public let status: String; public let hits: [SearchHit]; public let hasNext: Bool }
+    public func searchMessages(roomID: String, query: String, next: Bool) async throws -> SearchPage {
+        let result = try await run(.init(operation: .searchMessages, roomID: roomID, text: query, action: next ? "next" : nil))
+        guard let page = result.messaging?.search, page.roomID == roomID, page.query == query else { throw Failure(code: "invalidInput") }
+        return .init(status: page.status, hits: page.hits.map { .init(id: $0.id, roomID: $0.roomID, text: $0.text) }, hasNext: page.hasNext)
+    }
+    public func clearMessageSearch() async throws { _ = try await run(.init(operation: .clearMessaging)) }
+
     public func directory() async throws -> [DirectoryEntry] {
         try await directoryPage(nextGroups: nil).entries
     }

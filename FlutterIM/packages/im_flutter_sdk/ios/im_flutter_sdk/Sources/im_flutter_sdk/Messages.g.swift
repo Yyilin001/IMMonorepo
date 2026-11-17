@@ -595,6 +595,96 @@ struct DirectoryEntry: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct SearchHit: Hashable, CustomStringConvertible {
+  var id: String
+  var roomId: String
+  var text: String
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> SearchHit? {
+    let id = pigeonVar_list[0] as! String
+    let roomId = pigeonVar_list[1] as! String
+    let text = pigeonVar_list[2] as! String
+
+    return SearchHit(
+      id: id,
+      roomId: roomId,
+      text: text
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      roomId,
+      text,
+    ]
+  }
+  static func == (lhs: SearchHit, rhs: SearchHit) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("SearchHit")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: text, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "SearchHit(id: \(String(describing: id)), roomId: \(String(describing: roomId)), text: \(String(describing: text)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct SearchPage: Hashable, CustomStringConvertible {
+  var status: String
+  var hits: [SearchHit]
+  var hasNext: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> SearchPage? {
+    let status = pigeonVar_list[0] as! String
+    let hits = pigeonVar_list[1] as! [SearchHit]
+    let hasNext = pigeonVar_list[2] as! Bool
+
+    return SearchPage(
+      status: status,
+      hits: hits,
+      hasNext: hasNext
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      status,
+      hits,
+      hasNext,
+    ]
+  }
+  static func == (lhs: SearchPage, rhs: SearchPage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.status, rhs.status) && MessagesPigeonInternal.deepEquals(lhs.hits, rhs.hits) && MessagesPigeonInternal.deepEquals(lhs.hasNext, rhs.hasNext)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("SearchPage")
+    MessagesPigeonInternal.deepHash(value: status, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hits, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasNext, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "SearchPage(status: \(String(describing: status)), hits: \(String(describing: hits)), hasNext: \(String(describing: hasNext)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct DirectoryPage: Hashable, CustomStringConvertible {
   var entries: [DirectoryEntry]
   var moreContacts: Bool
@@ -812,12 +902,16 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 135:
       return DirectoryEntry.fromList(self.readValue() as! [Any?])
     case 136:
-      return DirectoryPage.fromList(self.readValue() as! [Any?])
+      return SearchHit.fromList(self.readValue() as! [Any?])
     case 137:
-      return GroupMember.fromList(self.readValue() as! [Any?])
+      return SearchPage.fromList(self.readValue() as! [Any?])
     case 138:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return DirectoryPage.fromList(self.readValue() as! [Any?])
     case 139:
+      return GroupMember.fromList(self.readValue() as! [Any?])
+    case 140:
+      return GroupPage.fromList(self.readValue() as! [Any?])
+    case 141:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -848,17 +942,23 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? DirectoryEntry {
       super.writeByte(135)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryPage {
+    } else if let value = value as? SearchHit {
       super.writeByte(136)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupMember {
+    } else if let value = value as? SearchPage {
       super.writeByte(137)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? DirectoryPage {
       super.writeByte(138)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? GroupMember {
       super.writeByte(139)
+      super.writeValue(value.toList())
+    } else if let value = value as? GroupPage {
+      super.writeByte(140)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(141)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -902,6 +1002,8 @@ protocol ImHost {
   func changeWindowPage(windowId: String, latest: Bool) async throws
   func closeWindow(windowId: String) async throws
   func cancelPendingSend(intentId: String) async throws
+  func searchMessages(roomId: String, query: String, next: Bool) async throws -> SearchPage
+  func clearMessageSearch() async throws
   func recoverSend(intentId: String, resend: Bool) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
   func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws
@@ -1251,6 +1353,40 @@ class ImHostSetup {
       }
     } else {
       cancelPendingSendChannel.setMessageHandler(nil)
+    }
+    let searchMessagesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.searchMessages\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      searchMessagesChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let queryArg = args[1] as! String
+        let nextArg = args[2] as! Bool
+        Task { @MainActor in
+          do {
+            let result = try await api.searchMessages(roomId: roomIdArg, query: queryArg, next: nextArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      searchMessagesChannel.setMessageHandler(nil)
+    }
+    let clearMessageSearchChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.clearMessageSearch\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      clearMessageSearchChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.clearMessageSearch()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      clearMessageSearchChannel.setMessageHandler(nil)
     }
     let recoverSendChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.recoverSend\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

@@ -106,6 +106,13 @@ private actor MobileHost: ImHost {
     func cancelPendingSend(intentId: String) async throws {
         try await ordered { try await self.client.cancelPendingSend(intentID: intentId) }
     }
+    func searchMessages(roomId: String, query: String, next: Bool) async throws -> SearchPage {
+        try await ordered {
+            let page = try await self.client.searchMessages(roomID: roomId, query: query, next: next)
+            return SearchPage(status: page.status, hits: page.hits.map { SearchHit(id: $0.id, roomId: $0.roomID, text: $0.text) }, hasNext: page.hasNext)
+        }
+    }
+    func clearMessageSearch() async throws { try await ordered { try await self.client.clearMessageSearch() } }
     func recoverSend(intentId: String, resend: Bool) async throws {
         try await ordered { try await self.client.recoverSend(intentID: intentId, resend: resend) }
     }
