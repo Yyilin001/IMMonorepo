@@ -200,6 +200,14 @@ public final class V2MobileClient: Sendable {
     public func transferAction(id: String, action: String) async throws {
         _ = try await run(.init(operation: .transferAction, intentID: id, action: action))
     }
+    public func previewAttachment(roomID: String, messageID: String, mediaID: String) async throws -> (data: Data, remainingMilliseconds: Int64) {
+        _ = try await run(.init(operation: .openResource, messageID: messageID, mediaID: mediaID, roomID: roomID))
+        let result = try await run(.init(operation: .previewResource))
+        guard let resource = result.resource, resource.roomID == roomID, resource.messageID == messageID,
+              resource.selected?.id == mediaID, resource.remainingMilliseconds > 0,
+              let encoded = resource.image, let data = Data(base64Encoded: encoded) else { throw Failure(code: "previewUnavailable") }
+        return (data, resource.remainingMilliseconds)
+    }
     public func downloadAttachment(roomID: String, messageID: String, mediaID: String) async throws {
         _ = try await run(.init(operation: .openResource, messageID: messageID, mediaID: mediaID, roomID: roomID))
         _ = try await run(.init(operation: .downloadResource))

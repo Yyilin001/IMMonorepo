@@ -113,6 +113,12 @@ private actor MobileHost: ImHost {
     func transferAction(id: String, action: String) async throws {
         try await ordered { try await self.client.transferAction(id: id, action: action) }
     }
+    func previewAttachment(roomId: String, messageId: String, mediaId: String) async throws -> AttachmentPreview {
+        try await ordered {
+            let preview = try await self.client.previewAttachment(roomID: roomId, messageID: messageId, mediaID: mediaId)
+            return AttachmentPreview(bytes: FlutterStandardTypedData(bytes: preview.data), remainingMilliseconds: preview.remainingMilliseconds)
+        }
+    }
     func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws {
         try await ordered { try await self.client.downloadAttachment(roomID: roomId, messageID: messageId, mediaID: mediaId) }
     }

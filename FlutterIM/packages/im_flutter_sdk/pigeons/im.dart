@@ -53,6 +53,12 @@ class Transfer {
   List<String> actions;
 }
 
+class AttachmentPreview {
+  AttachmentPreview({required this.bytes, required this.remainingMilliseconds});
+  Uint8List bytes;
+  int remainingMilliseconds;
+}
+
 class Attachment {
   Attachment({
     required this.id,
@@ -213,6 +219,12 @@ abstract class ImHost {
   List<Transfer> transfers();
   @async
   void transferAction(String id, String action);
+  @async
+  AttachmentPreview previewAttachment(
+    String roomId,
+    String messageId,
+    String mediaId,
+  );
   @async
   void downloadAttachment(String roomId, String messageId, String mediaId);
   @async

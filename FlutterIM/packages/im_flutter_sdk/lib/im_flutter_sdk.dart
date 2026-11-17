@@ -414,6 +414,21 @@ final class ImClient {
   Future<void> transferAction(String id, String action) =>
       _ordered(() => _host.transferAction(id, action));
 
+  Future<({Uint8List bytes, Duration remaining})> previewAttachment(
+    String roomId,
+    String messageId,
+    String mediaId,
+  ) => _ordered(() async {
+    final elapsed = Stopwatch()..start();
+    final view = await _host.previewAttachment(roomId, messageId, mediaId);
+    final remaining =
+        Duration(milliseconds: view.remainingMilliseconds) - elapsed.elapsed;
+    if (remaining <= Duration.zero || view.bytes.isEmpty) {
+      throw PlatformException(code: 'previewUnavailable');
+    }
+    return (bytes: view.bytes, remaining: remaining);
+  });
+
   Future<void> downloadAttachment(
     String roomId,
     String messageId,

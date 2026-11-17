@@ -335,6 +335,7 @@ String _errorText(Object error) {
     'authenticationRequired' => '登录失败，请检查账号和密码',
     'networkUnavailable' => '无法连接服务器，请检查网络后重试',
     'identityUnavailable' => '未找到该公开账号',
+    'previewUnavailable' => '图片预览已失效，请重新查看',
     'storageUnavailable' => '本地存储暂不可用',
     'busy' => '当前会话正忙，请重试',
     _ =>

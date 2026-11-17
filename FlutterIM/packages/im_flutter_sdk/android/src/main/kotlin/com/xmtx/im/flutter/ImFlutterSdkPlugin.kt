@@ -143,6 +143,15 @@ private class MobileHost(private val context: Context) : ImHost {
         val command = SharedTransferAction.entries.firstOrNull { it.wire == action } ?: throw FlutterError("invalidInput")
         mutations.withLock { sdk { client.transferAction(id, command) } }
     }
+    override suspend fun previewAttachment(roomId: String, messageId: String, mediaId: String): AttachmentPreview = mutations.withLock { sdk {
+        client.openResource(roomId, messageId, mediaId)
+        val resource = client.previewResource().resource ?: throw FlutterError("previewUnavailable")
+        val encoded = resource.image
+        val remaining = resource.expiresAtElapsed - android.os.SystemClock.elapsedRealtime()
+        if (encoded == null || remaining <= 0 || resource.roomID != roomId ||
+            resource.messageID != messageId || resource.selected?.id != mediaId) throw FlutterError("previewUnavailable")
+        AttachmentPreview(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT), remaining)
+    } }
     override suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String) {
         mutations.withLock { sdk {
             client.openResource(roomId, messageId, mediaId)

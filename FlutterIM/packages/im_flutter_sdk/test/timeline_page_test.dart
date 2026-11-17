@@ -19,6 +19,7 @@ void main() {
       'nextUpdate',
       'changeWindowPage',
       'downloadAttachment',
+      'previewAttachment',
       'sendAttachment',
       'closeWindow',
       'close',
@@ -39,6 +40,15 @@ void main() {
             final result = await update.future;
             update = Completer<Object?>();
             return result;
+          case 'previewAttachment':
+            final location = args as List;
+            expect(location.take(2), ['room', 'message']);
+            return [
+              wire.AttachmentPreview(
+                bytes: Uint8List.fromList([1, 2, 3]),
+                remainingMilliseconds: location.last == 'expired' ? 0 : 30000,
+              ),
+            ];
           case 'downloadAttachment':
             expect(args, ['room', 'message', 'media']);
           case 'sendAttachment':
@@ -109,6 +119,18 @@ void main() {
     expect(
       (attachment.name, attachment.contentType, attachment.bytes),
       ('note.txt', 'text/plain', 17),
+    );
+    final preview = await client.previewAttachment(
+      'room',
+      message.id,
+      attachment.id,
+    );
+    expect(preview.bytes, [1, 2, 3]);
+    expect(preview.remaining, greaterThan(Duration.zero));
+    expect(preview.remaining, lessThanOrEqualTo(const Duration(seconds: 30)));
+    await expectLater(
+      client.previewAttachment('room', message.id, 'expired'),
+      throwsA(isA<PlatformException>()),
     );
     await client.downloadAttachment('room', message.id, attachment.id);
     await client.sendAttachment(

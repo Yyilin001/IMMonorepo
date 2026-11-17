@@ -382,7 +382,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                           CrossAxisAlignment.start,
                                       children: [
                                         for (final attachment
-                                            in item.attachments)
+                                            in item.attachments) ...[
                                           ListTile(
                                             contentPadding: EdgeInsets.zero,
                                             title: Text(attachment.name),
@@ -409,6 +409,24 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                                           ),
                                                   ),
                                           ),
+                                          if (attachment.contentType.startsWith(
+                                            'image/',
+                                          ))
+                                            AttachmentImagePreview(
+                                              key: ValueKey((
+                                                widget.room.id,
+                                                item.id,
+                                                attachment.id,
+                                              )),
+                                              name: attachment.name,
+                                              load: () =>
+                                                  sdk.client!.previewAttachment(
+                                                    widget.room.id,
+                                                    item.id,
+                                                    attachment.id,
+                                                  ),
+                                            ),
+                                        ],
                                       ],
                                     ),
                               onEdit:
@@ -553,6 +571,111 @@ class _EditTextDialogState extends State<_EditTextDialog> {
             ? null
             : submit,
         child: const Text('保存'),
+      ),
+    ],
+  );
+}
+
+class AttachmentImagePreview extends StatefulWidget {
+  const AttachmentImagePreview({
+    super.key,
+    required this.name,
+    required this.load,
+  });
+  final String name;
+  final Future<({Uint8List bytes, Duration remaining})> Function() load;
+
+  @override
+  State<AttachmentImagePreview> createState() => _AttachmentImagePreviewState();
+}
+
+class _AttachmentImagePreviewState extends State<AttachmentImagePreview>
+    with WidgetsBindingObserver {
+  MemoryImage? image;
+  Timer? expiry;
+  int generation = 0;
+  bool loading = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  void release() {
+    generation++;
+    expiry?.cancel();
+    final current = image;
+    image = null;
+    if (current != null) unawaited(current.evict());
+    loading = false;
+    error = null;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (ModalRoute.isCurrentOf(context) == false) release();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) setState(release);
+  }
+
+  Future<void> show() async {
+    if (loading) return;
+    final request = ++generation;
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final result = await widget.load();
+      if (!mounted || generation != request) return;
+      image = MemoryImage(result.bytes);
+      expiry = Timer(result.remaining, () => setState(release));
+    } catch (failure) {
+      if (mounted && generation == request) error = _errorText(failure);
+    } finally {
+      if (mounted && generation == request) setState(() => loading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    release();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      if (image case final preview?)
+        Image(
+          image: preview,
+          height: 180,
+          fit: BoxFit.contain,
+          semanticLabel: widget.name,
+          errorBuilder: (_, _, _) => const Text('无法显示图片'),
+        ),
+      if (error != null) Text(error!),
+      TextButton(
+        onPressed: loading
+            ? null
+            : image == null
+            ? show
+            : () => setState(release),
+        child: Text(
+          loading
+              ? '正在读取预览…'
+              : image == null
+              ? '查看图片'
+              : '收起图片',
+        ),
       ),
     ],
   );

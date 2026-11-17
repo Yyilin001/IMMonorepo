@@ -297,6 +297,56 @@ class Transfer {
   }
 }
 
+class AttachmentPreview {
+  AttachmentPreview({
+    required this.bytes,
+    required this.remainingMilliseconds,
+  });
+
+  Uint8List bytes;
+
+  int remainingMilliseconds;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      bytes,
+      remainingMilliseconds,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static AttachmentPreview decode(Object result) {
+    result as List<Object?>;
+    return AttachmentPreview(
+      bytes: result[0]! as Uint8List,
+      remainingMilliseconds: result[1]! as int,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! AttachmentPreview || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(bytes, other.bytes) && _deepEquals(remainingMilliseconds, other.remainingMilliseconds);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'AttachmentPreview(bytes: $bytes, remainingMilliseconds: $remainingMilliseconds)';
+  }
+}
+
 class Attachment {
   Attachment({
     required this.id,
@@ -769,26 +819,29 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is Transfer) {
       buffer.putUint8(131);
       writeValue(buffer, value.encode());
-    }    else if (value is Attachment) {
+    }    else if (value is AttachmentPreview) {
       buffer.putUint8(132);
       writeValue(buffer, value.encode());
-    }    else if (value is ImMessage) {
+    }    else if (value is Attachment) {
       buffer.putUint8(133);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryEntry) {
+    }    else if (value is ImMessage) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryPage) {
+    }    else if (value is DirectoryEntry) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupMember) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(138);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(139);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -805,18 +858,20 @@ class _PigeonCodec extends StandardMessageCodec {
       case 131:
         return Transfer.decode(readValue(buffer)!);
       case 132:
-        return Attachment.decode(readValue(buffer)!);
+        return AttachmentPreview.decode(readValue(buffer)!);
       case 133:
-        return ImMessage.decode(readValue(buffer)!);
+        return Attachment.decode(readValue(buffer)!);
       case 134:
-        return DirectoryEntry.decode(readValue(buffer)!);
+        return ImMessage.decode(readValue(buffer)!);
       case 135:
-        return DirectoryPage.decode(readValue(buffer)!);
+        return DirectoryEntry.decode(readValue(buffer)!);
       case 136:
-        return GroupMember.decode(readValue(buffer)!);
+        return DirectoryPage.decode(readValue(buffer)!);
       case 137:
-        return GroupPage.decode(readValue(buffer)!);
+        return GroupMember.decode(readValue(buffer)!);
       case 138:
+        return GroupPage.decode(readValue(buffer)!);
+      case 139:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1223,6 +1278,24 @@ class ImHost {
         isNullValid: true,
     )
     ;
+  }
+
+  Future<AttachmentPreview> previewAttachment(String roomId, String messageId, String mediaId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.previewAttachment$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, messageId, mediaId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as AttachmentPreview;
   }
 
   Future<void> downloadAttachment(String roomId, String messageId, String mediaId) async {

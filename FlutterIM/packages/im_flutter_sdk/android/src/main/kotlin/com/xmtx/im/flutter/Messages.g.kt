@@ -362,6 +362,47 @@ data class Transfer (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class AttachmentPreview (
+  val bytes: ByteArray,
+  val remainingMilliseconds: Long
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): AttachmentPreview {
+      val bytes = pigeonVar_list[0] as ByteArray
+      val remainingMilliseconds = pigeonVar_list[1] as Long
+      return AttachmentPreview(bytes, remainingMilliseconds)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      bytes,
+      remainingMilliseconds,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as AttachmentPreview
+    return MessagesPigeonUtils.deepEquals(this.bytes, other.bytes) && MessagesPigeonUtils.deepEquals(this.remainingMilliseconds, other.remainingMilliseconds)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.bytes)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.remainingMilliseconds)
+    return result
+  }
+  override fun toString(): String {
+    return "AttachmentPreview(bytes=${bytes.contentToString()}, remainingMilliseconds=$remainingMilliseconds)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class Attachment (
   val id: String,
   val name: String,
@@ -751,35 +792,40 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       132.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          Attachment.fromList(it)
+          AttachmentPreview.fromList(it)
         }
       }
       133.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImMessage.fromList(it)
+          Attachment.fromList(it)
         }
       }
       134.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryEntry.fromList(it)
+          ImMessage.fromList(it)
         }
       }
       135.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryPage.fromList(it)
+          DirectoryEntry.fromList(it)
         }
       }
       136.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupMember.fromList(it)
+          DirectoryPage.fromList(it)
         }
       }
       137.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          GroupMember.fromList(it)
         }
       }
       138.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          GroupPage.fromList(it)
+        }
+      }
+      139.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -801,32 +847,36 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(131)
         writeValue(stream, value.toList())
       }
-      is Attachment -> {
+      is AttachmentPreview -> {
         stream.write(132)
         writeValue(stream, value.toList())
       }
-      is ImMessage -> {
+      is Attachment -> {
         stream.write(133)
         writeValue(stream, value.toList())
       }
-      is DirectoryEntry -> {
+      is ImMessage -> {
         stream.write(134)
         writeValue(stream, value.toList())
       }
-      is DirectoryPage -> {
+      is DirectoryEntry -> {
         stream.write(135)
         writeValue(stream, value.toList())
       }
-      is GroupMember -> {
+      is DirectoryPage -> {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is GroupMember -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is GroupPage -> {
         stream.write(138)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(139)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -859,6 +909,7 @@ interface ImHost {
   suspend fun sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String)
   suspend fun transfers(): List<Transfer>
   suspend fun transferAction(id: String, action: String)
+  suspend fun previewAttachment(roomId: String, messageId: String, mediaId: String): AttachmentPreview
   suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String)
   suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String)
   suspend fun withdrawMessage(roomId: String, messageId: String, revision: Long)
@@ -1305,6 +1356,27 @@ interface ImHost {
               val wrapped: List<Any?> = try {
                 api.transferAction(idArg, actionArg)
                 listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.previewAttachment$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val messageIdArg = args[1] as String
+            val mediaIdArg = args[2] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.previewAttachment(roomIdArg, messageIdArg, mediaIdArg))
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

@@ -355,6 +355,46 @@ struct Transfer: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct AttachmentPreview: Hashable, CustomStringConvertible {
+  var bytes: FlutterStandardTypedData
+  var remainingMilliseconds: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> AttachmentPreview? {
+    let bytes = pigeonVar_list[0] as! FlutterStandardTypedData
+    let remainingMilliseconds = pigeonVar_list[1] as! Int64
+
+    return AttachmentPreview(
+      bytes: bytes,
+      remainingMilliseconds: remainingMilliseconds
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      bytes,
+      remainingMilliseconds,
+    ]
+  }
+  static func == (lhs: AttachmentPreview, rhs: AttachmentPreview) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.bytes, rhs.bytes) && MessagesPigeonInternal.deepEquals(lhs.remainingMilliseconds, rhs.remainingMilliseconds)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("AttachmentPreview")
+    MessagesPigeonInternal.deepHash(value: bytes, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: remainingMilliseconds, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "AttachmentPreview(bytes: \(String(describing: bytes)), remainingMilliseconds: \(String(describing: remainingMilliseconds)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct Attachment: Hashable, CustomStringConvertible {
   var id: String
   var name: String
@@ -749,18 +789,20 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 131:
       return Transfer.fromList(self.readValue() as! [Any?])
     case 132:
-      return Attachment.fromList(self.readValue() as! [Any?])
+      return AttachmentPreview.fromList(self.readValue() as! [Any?])
     case 133:
-      return ImMessage.fromList(self.readValue() as! [Any?])
+      return Attachment.fromList(self.readValue() as! [Any?])
     case 134:
-      return DirectoryEntry.fromList(self.readValue() as! [Any?])
+      return ImMessage.fromList(self.readValue() as! [Any?])
     case 135:
-      return DirectoryPage.fromList(self.readValue() as! [Any?])
+      return DirectoryEntry.fromList(self.readValue() as! [Any?])
     case 136:
-      return GroupMember.fromList(self.readValue() as! [Any?])
+      return DirectoryPage.fromList(self.readValue() as! [Any?])
     case 137:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return GroupMember.fromList(self.readValue() as! [Any?])
     case 138:
+      return GroupPage.fromList(self.readValue() as! [Any?])
+    case 139:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -779,26 +821,29 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? Transfer {
       super.writeByte(131)
       super.writeValue(value.toList())
-    } else if let value = value as? Attachment {
+    } else if let value = value as? AttachmentPreview {
       super.writeByte(132)
       super.writeValue(value.toList())
-    } else if let value = value as? ImMessage {
+    } else if let value = value as? Attachment {
       super.writeByte(133)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryEntry {
+    } else if let value = value as? ImMessage {
       super.writeByte(134)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryPage {
+    } else if let value = value as? DirectoryEntry {
       super.writeByte(135)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupMember {
+    } else if let value = value as? DirectoryPage {
       super.writeByte(136)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? GroupMember {
       super.writeByte(137)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? GroupPage {
       super.writeByte(138)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(139)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -845,6 +890,7 @@ protocol ImHost {
   func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws
   func transfers() async throws -> [Transfer]
   func transferAction(id: String, action: String) async throws
+  func previewAttachment(roomId: String, messageId: String, mediaId: String) async throws -> AttachmentPreview
   func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws
   func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
   func withdrawMessage(roomId: String, messageId: String, revision: Int64) async throws
@@ -1242,6 +1288,25 @@ class ImHostSetup {
       }
     } else {
       transferActionChannel.setMessageHandler(nil)
+    }
+    let previewAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.previewAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      previewAttachmentChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let mediaIdArg = args[2] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.previewAttachment(roomId: roomIdArg, messageId: messageIdArg, mediaId: mediaIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      previewAttachmentChannel.setMessageHandler(nil)
     }
     let downloadAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.downloadAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
