@@ -307,6 +307,9 @@ data class ImMessage (
   val text: String,
   val withdrawn: Boolean,
   val hasMedia: Boolean,
+  val readByPeer: Boolean,
+  val isForwarded: Boolean,
+  val replyPreview: String? = null,
   val pendingStatus: String? = null,
   val createdAt: Long? = null
 )
@@ -318,9 +321,12 @@ data class ImMessage (
       val text = pigeonVar_list[2] as String
       val withdrawn = pigeonVar_list[3] as Boolean
       val hasMedia = pigeonVar_list[4] as Boolean
-      val pendingStatus = pigeonVar_list[5] as String?
-      val createdAt = pigeonVar_list[6] as Long?
-      return ImMessage(id, senderId, text, withdrawn, hasMedia, pendingStatus, createdAt)
+      val readByPeer = pigeonVar_list[5] as Boolean
+      val isForwarded = pigeonVar_list[6] as Boolean
+      val replyPreview = pigeonVar_list[7] as String?
+      val pendingStatus = pigeonVar_list[8] as String?
+      val createdAt = pigeonVar_list[9] as Long?
+      return ImMessage(id, senderId, text, withdrawn, hasMedia, readByPeer, isForwarded, replyPreview, pendingStatus, createdAt)
     }
   }
   fun toList(): List<Any?> {
@@ -330,6 +336,9 @@ data class ImMessage (
       text,
       withdrawn,
       hasMedia,
+      readByPeer,
+      isForwarded,
+      replyPreview,
       pendingStatus,
       createdAt,
     )
@@ -342,7 +351,7 @@ data class ImMessage (
       return true
     }
     val other = other as ImMessage
-    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt)
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt)
   }
 
   override fun hashCode(): Int {
@@ -352,12 +361,15 @@ data class ImMessage (
     result = 31 * result + MessagesPigeonUtils.deepHash(this.text)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.withdrawn)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.hasMedia)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.readByPeer)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.isForwarded)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.replyPreview)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.pendingStatus)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.createdAt)
     return result
   }
   override fun toString(): String {
-    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, pendingStatus=$pendingStatus, createdAt=$createdAt)"
+    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, readByPeer=$readByPeer, isForwarded=$isForwarded, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt)"
   }
 }
 
@@ -517,7 +529,7 @@ interface ImHost {
   suspend fun nextUpdate(windowId: String): WindowView
   suspend fun directory(): List<DirectoryEntry>
   suspend fun closeWindow(windowId: String)
-  suspend fun sendText(roomId: String, text: String)
+  suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
   suspend fun signOut()
   suspend fun close()
 
@@ -723,9 +735,10 @@ interface ImHost {
             val args = message as List<Any?>
             val roomIdArg = args[0] as String
             val textArg = args[1] as String
+            val replyToMessageIdArg = args[2] as String?
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
-                api.sendText(roomIdArg, textArg)
+                api.sendText(roomIdArg, textArg, replyToMessageIdArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

@@ -41,6 +41,9 @@ class ImMessage {
     required this.text,
     required this.withdrawn,
     required this.hasMedia,
+    required this.readByPeer,
+    required this.isForwarded,
+    this.replyPreview,
     this.pendingStatus,
     this.createdAt,
   });
@@ -49,6 +52,9 @@ class ImMessage {
   String text;
   bool withdrawn;
   bool hasMedia;
+  bool readByPeer;
+  bool isForwarded;
+  String? replyPreview;
   String? pendingStatus;
   int? createdAt;
 }
@@ -93,7 +99,7 @@ abstract class ImHost {
   @async
   void closeWindow(String windowId);
   @async
-  void sendText(String roomId, String text);
+  void sendText(String roomId, String text, String? replyToMessageId);
   @async
   void signOut();
   @async

@@ -1539,9 +1539,14 @@ class _MessageBubble extends ConsumerWidget {
     required this.conversation,
     this.sdkSender,
     this.sdkStatus,
+    this.replyPreview,
+    this.onReply,
+    this.isForwarded = false,
     this.showTime = true,
   });
-  final String? sdkSender, sdkStatus;
+  final String? sdkSender, sdkStatus, replyPreview;
+  final bool isForwarded;
+  final VoidCallback? onReply;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1640,6 +1645,12 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
+                      if (onReply != null)
+                        IconButton(
+                          tooltip: '回复消息',
+                          onPressed: onReply,
+                          icon: const Icon(Icons.reply, size: 18),
+                        ),
                       const SizedBox(width: 8),
                       if (showTime)
                         Text(
@@ -1652,6 +1663,13 @@ class _MessageBubble extends ConsumerWidget {
                     ],
                   ),
                 ),
+                if (isForwarded) const Text('转发的消息'),
+                if (replyPreview case final preview?)
+                  Text(
+                    '回复 · $preview',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 if (sdkSender == null)
                   _MessageActionsRegion(message: message, child: content)
                 else

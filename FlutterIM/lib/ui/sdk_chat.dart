@@ -13,6 +13,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   final scroll = ScrollController();
   late final int id;
   late final Stream<List<ImMessage>> messages;
+  ImMessage? replyTarget;
   bool initialized = false, sending = false;
 
   @override
@@ -31,8 +32,11 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     final text = input.text;
     if (sending || text.trim().isEmpty) return;
     setState(() => sending = true);
+    final reply = replyTarget;
     try {
-      await _SdkScope.of(context)!.client!.sendText(widget.room.id, text);
+      await _SdkScope.of(context)!.client!
+          .sendText(widget.room.id, text, replyToMessageId: reply?.id);
+      if (mounted && replyTarget == reply) replyTarget = null;
       if (mounted && input.text == text) {
         input.clear();
         ref.read(draftProvider(id).notifier).save('');
@@ -146,7 +150,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                         ? '[附件]'
                         : item.text;
                     final caption = switch (item.pendingStatus) {
-                      null => '已发送',
+                      null => item.readByPeer ? '已读' : '已发送',
                       ImSendStatus.rejected ||
                       ImSendStatus.expiredUnsubmitted ||
                       ImSendStatus.needsAttention => '发送未完成',
@@ -168,6 +172,17 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                             ? item.senderId
                             : name,
                         sdkStatus: caption,
+                        onReply:
+                            !sending &&
+                                item.pendingStatus == null &&
+                                !item.withdrawn
+                            ? () {
+                                setState(() => replyTarget = item);
+                                focus.requestFocus();
+                              }
+                            : null,
+                        replyPreview: item.replyPreview,
+                        isForwarded: item.isForwarded,
                         showTime: item.createdAt != null,
                         message: ChatMessage(
                           id: item.id,
@@ -189,6 +204,22 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
             ),
           ),
         ),
+        if (replyTarget case final target?)
+          ListTile(
+            leading: const Icon(Icons.reply),
+            title: Text(
+              target.text.isEmpty ? '[附件]' : target.text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: IconButton(
+              tooltip: '取消回复',
+              icon: const Icon(Icons.close),
+              onPressed: sending
+                  ? null
+                  : () => setState(() => replyTarget = null),
+            ),
+          ),
         _MobileComposer(
           id: id,
           input: input,

@@ -22,6 +22,9 @@ public final class V2MobileClient: Sendable {
         public let text: String
         public let withdrawn: Bool
         public let hasMedia: Bool
+        public let readByPeer: Bool
+        public let replyPreview: String?
+        public let isForwarded: Bool
         public let pendingStatus: String?
         public let createdAt: Int64?
     }
@@ -69,11 +72,11 @@ public final class V2MobileClient: Sendable {
     public func nextUpdate(windowID: String) async throws -> Window {
         let value = try await run(.init(operation: .watchWindow, windowID: windowID))
         let messages = (value.chat?.messages ?? []).map {
-            Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, pendingStatus: nil, createdAt: $0.createdAt)
+            Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, readByPeer: $0.readByPeer, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, pendingStatus: nil, createdAt: $0.createdAt)
         }
         return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID) },
                       messages: messages + (value.chat?.pending ?? []).map {
-                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, pendingStatus: $0.status, createdAt: nil)
+                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, readByPeer: false, replyPreview: nil, isForwarded: false, pendingStatus: $0.status, createdAt: nil)
                       })
     }
     public struct DirectoryEntry: Sendable {
@@ -89,9 +92,9 @@ public final class V2MobileClient: Sendable {
             + directory.groups.map { DirectoryEntry(id: $0.id, title: $0.title, isGroup: true) }
     }
     public func closeWindow(_ id: String) async throws { _ = try await run(.init(operation: .closeWindow, windowID: id)) }
-    public func sendText(roomID: String, text: String) async throws {
+    public func sendText(roomID: String, text: String, replyToMessageID: String? = nil) async throws {
         _ = try await run(.init(operation: .openConversation, roomID: roomID))
-        _ = try await run(.init(operation: .sendText, roomID: roomID, text: text))
+        _ = try await run(.init(operation: .sendText, replyToMessageID: replyToMessageID, roomID: roomID, text: text))
     }
     public func close() async throws {
         _ = try await run(.init(operation: .close))

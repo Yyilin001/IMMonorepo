@@ -45,6 +45,9 @@ typedef ImMessage = ({
   String text,
   bool withdrawn,
   bool hasMedia,
+  bool readByPeer,
+  bool isForwarded,
+  String? replyPreview,
   ImSendStatus? pendingStatus,
   int? createdAt,
 });
@@ -61,6 +64,9 @@ extension on wire.ImMessage {
     text: text,
     withdrawn: withdrawn,
     hasMedia: hasMedia,
+    readByPeer: readByPeer,
+    isForwarded: isForwarded,
+    replyPreview: replyPreview,
     createdAt: createdAt,
     pendingStatus: pendingStatus == null
         ? null
@@ -261,8 +267,11 @@ final class ImClient {
     return stream.stream;
   }
 
-  Future<void> sendText(String roomId, String text) =>
-      _ordered(() => _host.sendText(roomId, text));
+  Future<void> sendText(
+    String roomId,
+    String text, {
+    String? replyToMessageId,
+  }) => _ordered(() => _host.sendText(roomId, text, replyToMessageId));
   Future<void> _stopWindows() async {
     await Future.wait(_windows.toList().map((stop) => stop()));
   }

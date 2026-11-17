@@ -64,11 +64,11 @@ private class MobileHost(private val context: Context) : ImHost {
         val window = windows[windowId] ?: throw FlutterError("closed")
         val value = window.states().first()
         val messages = value.chat?.messages.orEmpty().map {
-            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, createdAt = it.createdAt)
+            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.readByPeer, it.forwardedFromID != null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt)
         }
         WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
             messages + value.chat?.pending.orEmpty().map {
-                ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, it.status.name.wire())
+                ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, false, false, pendingStatus = it.status.name.wire())
             })
     }
     override suspend fun directory(): List<DirectoryEntry> = sdk {
@@ -77,8 +77,8 @@ private class MobileHost(private val context: Context) : ImHost {
             directory.groups.map { DirectoryEntry(it.id, it.title, true) }
     }
     override suspend fun closeWindow(windowId: String) { sdk { windows.remove(windowId)?.close() } }
-    override suspend fun sendText(roomId: String, text: String) { mutations.withLock {
-        sdk { client.openConversation(roomId); client.sendText(roomId, text) }
+    override suspend fun sendText(roomId: String, text: String, replyToMessageId: String?) { mutations.withLock {
+        sdk { client.openConversation(roomId); client.sendText(roomId, text, replyToMessageId) }
     } }
     override suspend fun signOut() { mutations.withLock {
         sdk { client.signOut() }
