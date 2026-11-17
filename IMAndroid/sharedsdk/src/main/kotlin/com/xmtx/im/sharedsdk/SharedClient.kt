@@ -147,6 +147,7 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun sendText(roomID: String, text: String, replyToMessageID: String? = null): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "sendText").put("roomID", roomID).put("text", text).put("replyToMessageID", replyToMessageID))
     }
+    suspend fun resendUnsent(intentID: String): SharedSnapshot = directoryCall("resendUnsent", "intentID" to intentID)
     suspend fun retrySend(intentID: String): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "retrySend").put("intentID", intentID))
     }

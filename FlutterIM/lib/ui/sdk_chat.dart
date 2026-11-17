@@ -315,6 +315,21 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     }
   }
 
+  Future<void> recoverSend(String id, {required bool resend}) async {
+    if (!activeMutations.add(id)) return;
+    setState(() {});
+    try {
+      await _SdkScope.of(context)!.client!.recoverSend(id, resend: resend);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(_errorText(error))));
+      }
+    } finally {
+      if (mounted) setState(() => activeMutations.remove(id));
+    }
+  }
+
   Future<void> mutate(ImMessage item, {required bool editing}) async {
     final revision = item.mutableRevision;
     if (revision == null || !activeMutations.add(item.id)) return;
@@ -475,9 +490,15 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                               : item.text;
                           final caption = switch (item.pendingStatus) {
                             null => item.readByPeer ? '已读' : '已发送',
-                            ImSendStatus.rejected ||
-                            ImSendStatus.expiredUnsubmitted ||
-                            ImSendStatus.needsAttention => '发送未完成',
+                            ImSendStatus.rejected => '消息未能发送',
+                            ImSendStatus.expiredUnsubmitted => '未提交，已超过发送期限',
+                            ImSendStatus.closed => '已确认未发送',
+                            ImSendStatus.needsAttention => '发送结果未知，确认已暂停',
+                            ImSendStatus.confirmingOutcome => '正在确认发送结果',
+                            ImSendStatus.acceptedAwaitingProjection =>
+                              '服务器已受理，等待同步',
+                            ImSendStatus.waitingForAuthentication => '等待登录恢复',
+                            ImSendStatus.preparing => '正在准备发送',
                             ImSendStatus.waitingForNetwork => '等待网络',
                             _ => '发送中',
                           };
@@ -562,6 +583,23 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                         ],
                                       ],
                                     ),
+                              recovery: activeMutations.contains(item.id)
+                                  ? null
+                                  : switch (item.pendingStatus) {
+                                      ImSendStatus.needsAttention => (
+                                        label: '继续确认',
+                                        action: () =>
+                                            recoverSend(item.id, resend: false),
+                                      ),
+                                      ImSendStatus.expiredUnsubmitted ||
+                                      ImSendStatus.closed ||
+                                      ImSendStatus.rejected => (
+                                        label: '重新发送',
+                                        action: () =>
+                                            recoverSend(item.id, resend: true),
+                                      ),
+                                      _ => null,
+                                    },
                               onForward:
                                   !item.withdrawn &&
                                       item.revision != null &&

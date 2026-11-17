@@ -1549,6 +1549,7 @@ class _MessageBubble extends ConsumerWidget {
     this.replyPreview,
     this.onReply,
     this.onForward,
+    this.recovery,
     this.onEdit,
     this.onWithdraw,
     this.isForwarded = false,
@@ -1557,6 +1558,7 @@ class _MessageBubble extends ConsumerWidget {
   final String? sdkSender, sdkStatus, replyPreview;
   final bool isForwarded;
   final Widget? attachmentList;
+  final ({String label, VoidCallback action})? recovery;
   final VoidCallback? onReply, onForward, onEdit, onWithdraw;
   final bool showTime;
   final ChatMessage message;
@@ -1656,13 +1658,20 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      if (onReply != null || onForward != null ||
+                      if (recovery != null ||
+                          onReply != null ||
+                          onForward != null ||
                           onEdit != null ||
                           onWithdraw != null)
                         PopupMenuButton<VoidCallback>(
                           tooltip: '消息操作',
                           onSelected: (action) => action(),
                           itemBuilder: (_) => [
+                            if (recovery case final recovery?)
+                              PopupMenuItem(
+                                value: recovery.action,
+                                child: Text(recovery.label),
+                              ),
                             if (onReply != null)
                               PopupMenuItem(
                                 value: onReply,

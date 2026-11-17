@@ -208,6 +208,8 @@ abstract class ImHost {
   @async
   void closeWindow(String windowId);
   @async
+  void recoverSend(String intentId, bool resend);
+  @async
   void sendText(String roomId, String text, String? replyToMessageId);
   @async
   void sendAttachment(

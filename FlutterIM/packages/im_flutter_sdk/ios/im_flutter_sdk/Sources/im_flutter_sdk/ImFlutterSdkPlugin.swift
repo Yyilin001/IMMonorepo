@@ -103,6 +103,9 @@ private actor MobileHost: ImHost {
         try await ordered { try await self.client.changeWindowPage(windowId, latest: latest) }
     }
     func closeWindow(windowId: String) async throws { try await ordered { try await self.client.closeWindow(windowId) } }
+    func recoverSend(intentId: String, resend: Bool) async throws {
+        try await ordered { try await self.client.recoverSend(intentID: intentId, resend: resend) }
+    }
     func sendText(roomId: String, text: String, replyToMessageId: String?) async throws { try await ordered { try await self.client.sendText(roomID: roomId, text: text, replyToMessageID: replyToMessageId) } }
     func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws {
         try await ordered { try await self.client.sendAttachment(roomID: roomId, file: URL(fileURLWithPath: path), name: name, contentType: contentType, text: text) }

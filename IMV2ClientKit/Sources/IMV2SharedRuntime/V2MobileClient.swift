@@ -161,6 +161,9 @@ public final class V2MobileClient: Sendable {
         _ = try await run(.init(operation: latest ? .resetWindow : .nextWindowPage, windowID: id))
     }
     public func closeWindow(_ id: String) async throws { _ = try await run(.init(operation: .closeWindow, windowID: id)) }
+    public func recoverSend(intentID: String, resend: Bool) async throws {
+        _ = try await run(.init(operation: resend ? .resendUnsent : .retrySend, intentID: intentID))
+    }
     public func sendText(roomID: String, text: String, replyToMessageID: String? = nil) async throws {
         _ = try await run(.init(operation: .openConversation, roomID: roomID))
         _ = try await run(.init(operation: .sendText, replyToMessageID: replyToMessageID, roomID: roomID, text: text))

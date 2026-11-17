@@ -474,6 +474,9 @@ final class ImClient {
   Future<void> withdrawMessage(String roomId, String messageId, int revision) =>
       _ordered(() => _host.withdrawMessage(roomId, messageId, revision));
 
+  Future<void> recoverSend(String intentId, {required bool resend}) =>
+      _ordered(() => _host.recoverSend(intentId, resend));
+
   Future<void> sendText(
     String roomId,
     String text, {

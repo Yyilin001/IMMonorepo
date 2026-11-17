@@ -95,6 +95,9 @@ public actor V2MessageService {
         }
     }
 
+    public func resendUnsent(_ id: UUID) async throws {
+        _ = try await run { [store] in try await store.replaceProvenUnsentSendIntent(id) }
+    }
     public func retrySend(_ id: UUID) async throws { try await run { [sends] in try await sends.resumeConfirmation(intentID: id) } }
     public func retryMutation(_ id: UUID) async throws { try await run { [mutations] in try await mutations.resumeConfirmation(workID: id) } }
     public func retryForward(_ id: UUID) async throws { try await run { [forwards] in try await forwards.resumeConfirmation(workID: id) } }

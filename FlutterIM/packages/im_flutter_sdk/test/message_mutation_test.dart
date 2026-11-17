@@ -12,6 +12,7 @@ void main() {
     final calls = <Object?>[];
     for (final method in [
       'open',
+      'recoverSend',
       'forwardMessage',
       'editMessage',
       'withdrawMessage',
@@ -38,6 +39,8 @@ void main() {
       'second',
       'first',
     ]);
+    await client.recoverSend('unknown', resend: false);
+    await client.recoverSend('unsent', resend: true);
     await client.editMessage('room', 'message', 4, 'updated');
     await client.withdrawMessage('room', 'message', 5);
     await client.close();
@@ -50,6 +53,14 @@ void main() {
           3,
           ['second', 'first'],
         ],
+      ],
+      [
+        'recoverSend',
+        ['unknown', false],
+      ],
+      [
+        'recoverSend',
+        ['unsent', true],
       ],
       [
         'editMessage',
