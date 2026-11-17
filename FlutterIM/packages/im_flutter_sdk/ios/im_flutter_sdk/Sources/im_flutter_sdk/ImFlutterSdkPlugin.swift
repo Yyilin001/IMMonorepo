@@ -61,7 +61,7 @@ private actor MobileHost: ImHost {
         do {
             let view = try await client.nextUpdate(windowID: windowId)
             return WindowView(conversations: view.conversations.map { .init(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, isGroup: $0.isGroup, updatedAt: $0.updatedAt, peerId: $0.peerID) },
-                              messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map { Attachment(id: $0.id, name: $0.name, contentType: $0.contentType, bytes: $0.bytes) }, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
+                              messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map { Attachment(id: $0.id, name: $0.name, contentType: $0.contentType, bytes: $0.bytes) }, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, revision: $0.revision, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
         } catch let failure as V2MobileClient.Failure {
             throw PigeonError(code: failure.code, message: nil, details: nil)
         }
@@ -124,6 +124,10 @@ private actor MobileHost: ImHost {
     }
     func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws {
         try await ordered { try await self.client.downloadAttachment(roomID: roomId, messageID: messageId, mediaID: mediaId) }
+    }
+    func forwardMessage(roomId: String, messageId: String, revision: Int64, targetRoomId: String) async throws {
+        guard let version = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered { try await self.client.forwardMessage(roomID: roomId, messageID: messageId, revision: version, targetRoomID: targetRoomId) }
     }
     func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws {
         guard let version = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }

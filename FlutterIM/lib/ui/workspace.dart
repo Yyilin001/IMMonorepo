@@ -1548,6 +1548,7 @@ class _MessageBubble extends ConsumerWidget {
     this.attachmentList,
     this.replyPreview,
     this.onReply,
+    this.onForward,
     this.onEdit,
     this.onWithdraw,
     this.isForwarded = false,
@@ -1556,7 +1557,7 @@ class _MessageBubble extends ConsumerWidget {
   final String? sdkSender, sdkStatus, replyPreview;
   final bool isForwarded;
   final Widget? attachmentList;
-  final VoidCallback? onReply, onEdit, onWithdraw;
+  final VoidCallback? onReply, onForward, onEdit, onWithdraw;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1655,7 +1656,7 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      if (onReply != null ||
+                      if (onReply != null || onForward != null ||
                           onEdit != null ||
                           onWithdraw != null)
                         PopupMenuButton<VoidCallback>(
@@ -1666,6 +1667,11 @@ class _MessageBubble extends ConsumerWidget {
                               PopupMenuItem(
                                 value: onReply,
                                 child: const Text('回复'),
+                              ),
+                            if (onForward != null)
+                              PopupMenuItem(
+                                value: onForward,
+                                child: const Text('转发'),
                               ),
                             if (onEdit != null)
                               PopupMenuItem(

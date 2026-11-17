@@ -76,6 +76,7 @@ typedef ImMessage = ({
   bool hasMedia,
   List<ImAttachment> attachments,
   bool readByPeer,
+  int? revision,
   int? mutableRevision,
   bool isForwarded,
   String? replyPreview,
@@ -106,6 +107,7 @@ extension on wire.ImMessage {
       ),
     ),
     readByPeer: readByPeer,
+    revision: revision,
     mutableRevision: mutableRevision,
     isForwarded: isForwarded,
     replyPreview: replyPreview,
@@ -444,6 +446,14 @@ final class ImClient {
     String mediaId,
   ) => _ordered(() => _host.downloadAttachment(roomId, messageId, mediaId));
 
+  Future<void> forwardMessage(
+    String roomId,
+    String messageId,
+    int revision,
+    String targetRoomId,
+  ) => _ordered(
+    () => _host.forwardMessage(roomId, messageId, revision, targetRoomId),
+  );
   Future<void> editMessage(
     String roomId,
     String messageId,

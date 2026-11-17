@@ -64,7 +64,7 @@ private class MobileHost(private val context: Context) : ImHost {
         val window = windows[windowId] ?: throw FlutterError("closed")
         val value = window.states().first()
         val messages = value.chat?.messages.orEmpty().map {
-            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt)
+            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, it.revision, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt)
         }
         WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
             messages + value.chat?.pending.orEmpty().map {
@@ -174,6 +174,9 @@ private class MobileHost(private val context: Context) : ImHost {
             client.openResource(roomId, messageId, mediaId)
             client.downloadResource()
         } }
+    }
+    override suspend fun forwardMessage(roomId: String, messageId: String, revision: Long, targetRoomId: String) {
+        mutations.withLock { sdk { client.forwardMessage(roomId, messageId, revision, targetRoomId) } }
     }
     override suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String) {
         mutations.withLock { sdk { client.editMessage(roomId, messageId, revision, text) } }

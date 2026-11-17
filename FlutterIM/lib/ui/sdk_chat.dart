@@ -240,6 +240,50 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     }
   }
 
+  Future<void> forwardMessage(ImMessage item, int revision) async {
+    if (!activeMutations.add(item.id)) return;
+    setState(() {});
+    final sdk = _SdkScope.of(context)!;
+    final targets = sdk.rooms.where((r) => r.id != widget.room.id).toList();
+    try {
+      final target = await showModalBottomSheet<String>(
+        context: context,
+        builder: (sheet) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const ListTile(title: Text('转发到')),
+              if (targets.isEmpty) const ListTile(title: Text('暂无其他会话')),
+              for (final room in targets)
+                ListTile(
+                  title: Text(room.title.isEmpty ? room.id : room.title),
+                  onTap: () => Navigator.pop(sheet, room.id),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (target == null || !mounted) return;
+      await sdk.client!.forwardMessage(
+        widget.room.id,
+        item.id,
+        revision,
+        target,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已提交转发')));
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(_errorText(error))));
+      }
+    } finally {
+      if (mounted) setState(() => activeMutations.remove(item.id));
+    }
+  }
+
   Future<void> mutate(ImMessage item, {required bool editing}) async {
     final revision = item.mutableRevision;
     if (revision == null || !activeMutations.add(item.id)) return;
@@ -487,6 +531,12 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                         ],
                                       ],
                                     ),
+                              onForward:
+                                  !item.withdrawn &&
+                                      item.revision != null &&
+                                      !activeMutations.contains(item.id)
+                                  ? () => forwardMessage(item, item.revision!)
+                                  : null,
                               onEdit:
                                   item.mutableRevision != null &&
                                       !activeMutations.contains(item.id)

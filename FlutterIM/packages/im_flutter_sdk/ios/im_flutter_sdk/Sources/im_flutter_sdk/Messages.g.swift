@@ -454,6 +454,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
   var attachments: [Attachment]
   var readByPeer: Bool
   var isForwarded: Bool
+  var revision: Int64? = nil
   var mutableRevision: Int64? = nil
   var replyPreview: String? = nil
   var pendingStatus: String? = nil
@@ -470,10 +471,11 @@ struct ImMessage: Hashable, CustomStringConvertible {
     let attachments = pigeonVar_list[5] as! [Attachment]
     let readByPeer = pigeonVar_list[6] as! Bool
     let isForwarded = pigeonVar_list[7] as! Bool
-    let mutableRevision: Int64? = nilOrValue(pigeonVar_list[8])
-    let replyPreview: String? = nilOrValue(pigeonVar_list[9])
-    let pendingStatus: String? = nilOrValue(pigeonVar_list[10])
-    let createdAt: Int64? = nilOrValue(pigeonVar_list[11])
+    let revision: Int64? = nilOrValue(pigeonVar_list[8])
+    let mutableRevision: Int64? = nilOrValue(pigeonVar_list[9])
+    let replyPreview: String? = nilOrValue(pigeonVar_list[10])
+    let pendingStatus: String? = nilOrValue(pigeonVar_list[11])
+    let createdAt: Int64? = nilOrValue(pigeonVar_list[12])
 
     return ImMessage(
       id: id,
@@ -484,6 +486,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
       attachments: attachments,
       readByPeer: readByPeer,
       isForwarded: isForwarded,
+      revision: revision,
       mutableRevision: mutableRevision,
       replyPreview: replyPreview,
       pendingStatus: pendingStatus,
@@ -500,6 +503,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
       attachments,
       readByPeer,
       isForwarded,
+      revision,
       mutableRevision,
       replyPreview,
       pendingStatus,
@@ -510,7 +514,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -523,6 +527,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: attachments, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: readByPeer, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: isForwarded, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: revision, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: mutableRevision, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: replyPreview, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: pendingStatus, hasher: &hasher)
@@ -530,7 +535,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
   }
 
   public var description: String {
-    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)))"
+    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)))"
   }
 }
 
@@ -893,6 +898,7 @@ protocol ImHost {
   func exportAttachment(roomId: String, messageId: String, mediaId: String, destination: String) async throws
   func previewAttachment(roomId: String, messageId: String, mediaId: String) async throws -> AttachmentPreview
   func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws
+  func forwardMessage(roomId: String, messageId: String, revision: Int64, targetRoomId: String) async throws
   func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
   func withdrawMessage(roomId: String, messageId: String, revision: Int64) async throws
   func signOut() async throws
@@ -1347,6 +1353,26 @@ class ImHostSetup {
       }
     } else {
       downloadAttachmentChannel.setMessageHandler(nil)
+    }
+    let forwardMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.forwardMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      forwardMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let revisionArg = args[2] as! Int64
+        let targetRoomIdArg = args[3] as! String
+        Task { @MainActor in
+          do {
+            try await api.forwardMessage(roomId: roomIdArg, messageId: messageIdArg, revision: revisionArg, targetRoomId: targetRoomIdArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      forwardMessageChannel.setMessageHandler(nil)
     }
     let editMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.editMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

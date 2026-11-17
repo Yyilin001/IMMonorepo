@@ -82,6 +82,7 @@ class ImMessage {
     required this.attachments,
     required this.readByPeer,
     required this.isForwarded,
+    this.revision,
     this.mutableRevision,
     this.replyPreview,
     this.pendingStatus,
@@ -95,6 +96,7 @@ class ImMessage {
   List<Attachment> attachments;
   bool readByPeer;
   bool isForwarded;
+  int? revision;
   int? mutableRevision;
   String? replyPreview;
   String? pendingStatus;
@@ -234,6 +236,13 @@ abstract class ImHost {
   );
   @async
   void downloadAttachment(String roomId, String messageId, String mediaId);
+  @async
+  void forwardMessage(
+    String roomId,
+    String messageId,
+    int revision,
+    String targetRoomId,
+  );
   @async
   void editMessage(String roomId, String messageId, int revision, String text);
   @async
