@@ -297,3 +297,227 @@ String _accountSecurityError(Object failure) {
     _ => '结果尚未确认。若修改的是密码，请先用新密码尝试登录；不要重复提交恢复码。',
   };
 }
+
+class _DeviceSessionsPage extends StatefulWidget {
+  const _DeviceSessionsPage();
+
+  @override
+  State<_DeviceSessionsPage> createState() => _DeviceSessionsPageState();
+}
+
+class _DeviceSessionsPageState extends State<_DeviceSessionsPage> {
+  final sessions = <ImDeviceSession>[];
+  String? nextCursor, error;
+  bool loading = true, more = false, revoking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(load());
+    });
+  }
+
+  Future<void> load({bool next = false}) async {
+    if (loading || more || revoking) return;
+    setState(() {
+      if (next) {
+        more = true;
+      } else {
+        loading = true;
+      }
+      error = null;
+    });
+    try {
+      final page = await _SdkScope.of(
+        context,
+      )!.client!.deviceSessions(cursor: next ? nextCursor : null);
+      if (!mounted) return;
+      setState(() {
+        if (!next) sessions.clear();
+        sessions.addAll(page.sessions);
+        nextCursor = page.nextCursor;
+        loading = false;
+        more = false;
+      });
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        loading = false;
+        more = false;
+      });
+    }
+  }
+
+  Future<void> revoke(ImDeviceSession session) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('退出此设备？'),
+        content: Text('${session.deviceName} 将立即退出登录。之后登录的设备不会被加入这次请求。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('退出设备'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _revoke(deviceId: session.deviceId, all: false);
+  }
+
+  Future<void> revokeOthers() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('退出其他所有设备？'),
+        content: const Text('只退出当前已观察到的其他设备，后来登录的设备不会被加入这次请求。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('退出其他设备'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _revoke(deviceId: null, all: true);
+  }
+
+  Future<void> _revoke({String? deviceId, required bool all}) async {
+    setState(() => revoking = true);
+    try {
+      await _SdkScope.of(context)!.client!.revokeDevice(
+        deviceId: deviceId,
+        all: all,
+      );
+      if (!mounted) return;
+      setState(() => revoking = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('退出请求已确认')));
+      await load();
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => revoking = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '退出结果尚未确认，请刷新设备列表后再试：${_errorText(failure)}',
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => _ProfileScaffold(
+    title: '登录设备',
+    actions: [
+      IconButton(
+        tooltip: '刷新',
+        onPressed: loading || more || revoking ? null : load,
+        icon: const Icon(Icons.refresh_rounded),
+      ),
+    ],
+    children: [
+      if (error != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Text(
+            error!,
+            style: const TextStyle(color: Color(0xFFB3261E)),
+          ),
+        ),
+      if (loading)
+        const Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      for (final session in sessions)
+        ListTile(
+          key: ValueKey('device-${session.deviceId}'),
+          leading: Icon(
+            session.platform.toLowerCase().contains('ipad')
+                ? Icons.tablet_mac_outlined
+                : session.platform.toLowerCase().contains('android')
+                ? Icons.phone_android_outlined
+                : Icons.phone_iphone_outlined,
+            color: green,
+          ),
+          title: Row(
+            children: [
+              Flexible(
+                child: Text(
+                  session.deviceName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (session.isCurrentDevice) ...[
+                const SizedBox(width: 8),
+                const Text(
+                  '此设备',
+                  style: TextStyle(fontSize: 12, color: green),
+                ),
+              ],
+            ],
+          ),
+          subtitle: Text(
+            '${session.platform} · 最近活跃 ${_relativeSessionTime(session.lastActiveAt)}',
+          ),
+          trailing: session.isCurrentDevice
+              ? null
+              : TextButton(
+                  onPressed: loading || more || revoking ? null : () => revoke(session),
+                  child: const Text('退出此设备'),
+                ),
+        ),
+      if (!loading && sessions.isEmpty)
+        const Padding(
+          padding: EdgeInsets.all(20),
+          child: Text('没有其他登录设备', style: TextStyle(color: muted)),
+        ),
+      if (sessions.any((session) => !session.isCurrentDevice))
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: OutlinedButton(
+            key: const Key('revoke-other-devices'),
+            onPressed: loading || more || revoking ? null : revokeOthers,
+            child: const Text('退出其他所有设备'),
+          ),
+        ),
+      if (more && nextCursor != null)
+        TextButton(
+          onPressed: () => load(next: true),
+          child: const Text('加载更多设备'),
+        ),
+      const Padding(
+        padding: EdgeInsets.fromLTRB(20, 16, 20, 24),
+        child: Text(
+          '设备列表来自账号服务。退出请求只包含当前已观察到的设备，结果未知时请刷新列表核对。',
+          style: TextStyle(fontSize: 12, color: muted, height: 1.5),
+        ),
+      ),
+    ],
+  );
+}
+
+String _relativeSessionTime(int milliseconds) {
+  final value = DateTime.fromMillisecondsSinceEpoch(milliseconds);
+  final delta = DateTime.now().difference(value);
+  if (delta.inMinutes < 1) return '刚刚';
+  if (delta.inHours < 1) return '${delta.inMinutes} 分钟前';
+  if (delta.inDays < 1) return '${delta.inHours} 小时前';
+  return '${delta.inDays} 天前';
+}

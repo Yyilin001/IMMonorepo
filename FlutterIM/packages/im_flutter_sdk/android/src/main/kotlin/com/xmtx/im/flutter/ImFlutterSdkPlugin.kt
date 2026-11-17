@@ -49,6 +49,15 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun register(account: String, password: String, publicHandle: String, displayName: String) =
         sdk { client.register(account, password, publicHandle, displayName).session() }
     override suspend fun status() = sdk { client.snapshot().session() }
+    override suspend fun deviceSessions(cursor: String?): ImDeviceSessions = sdk {
+        val page = client.deviceSessions(cursor).deviceSessions ?: throw FlutterError("operationFailed")
+        ImDeviceSessions(page.sessions.map {
+            ImDeviceSession(it.deviceID, it.deviceName, it.platform, it.createdAt, it.lastActiveAt, it.isCurrentDevice)
+        }, page.nextCursor)
+    }
+    override suspend fun revokeDevice(deviceId: String?, all: Boolean) {
+        mutations.withLock { sdk { client.revokeDevice(deviceId, all) } }
+    }
     override suspend fun passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) {
         mutations.withLock { sdk { client.passwordLifecycle(account, action, currentPassword, newPassword, recoveryCode) } }
     }

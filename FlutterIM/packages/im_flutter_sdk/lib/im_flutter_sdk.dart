@@ -71,6 +71,18 @@ typedef ImConversation = ({
   int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImDeviceSession = ({
+  String deviceId,
+  String deviceName,
+  String platform,
+  int createdAt,
+  int lastActiveAt,
+  bool isCurrentDevice,
+});
+typedef ImDeviceSessions = ({
+  List<ImDeviceSession> sessions,
+  String? nextCursor,
+});
 typedef ImGroupNickname = ({String roomId, String? name, int? revision});
 typedef ImInvite = ({
   String id,
@@ -264,6 +276,29 @@ final class ImClient {
     _publish((await _host.register(account, password, publicHandle, displayName)).value);
     _schedule(Duration.zero);
   });
+
+  Future<ImDeviceSessions> deviceSessions({String? cursor}) =>
+      _ordered(() async {
+        final value = await _host.deviceSessions(cursor);
+        return (
+          sessions: value.sessions
+              .map(
+                (session) => (
+                  deviceId: session.deviceId,
+                  deviceName: session.deviceName,
+                  platform: session.platform,
+                  createdAt: session.createdAt,
+                  lastActiveAt: session.lastActiveAt,
+                  isCurrentDevice: session.isCurrentDevice,
+                ),
+              )
+              .toList(growable: false),
+          nextCursor: value.nextCursor,
+        );
+      });
+
+  Future<void> revokeDevice({String? deviceId, bool all = false}) =>
+      _ordered(() => _host.revokeDevice(deviceId, all));
 
   Future<void> passwordLifecycle({
     required String account,

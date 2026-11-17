@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -99,6 +99,11 @@ struct SharedChat: Encodable, Sendable {
     let focusMessageID: String?
     let hasOlder: Bool; let isLatest: Bool; let hasMorePending: Bool; let pendingPage: Int
 }
+struct SharedDeviceSession: Encodable, Sendable {
+    let deviceID: String; let deviceName: String; let platform: String
+    let createdAt: Int64; let lastActiveAt: Int64; let isCurrentDevice: Bool
+}
+struct SharedDeviceSessions: Encodable, Sendable { let sessions: [SharedDeviceSession]; let nextCursor: String? }
 package struct SharedSnapshot: Encodable, Sendable {
     let state: String
     let userID: String?
@@ -115,6 +120,7 @@ package struct SharedSnapshot: Encodable, Sendable {
     let resource: SharedResourceView?
     let messaging: SharedMessagingView?
     var windowID: String? = nil
+    var deviceSessions: SharedDeviceSessions? = nil
 }
 package enum SharedFailure: String, Error { case invalidConfiguration, invalidInput, busy, closed, authenticationRequired, networkUnavailable, storageUnavailable, operationFailed, cancelled, accountExists, publicHandleTaken, invalidPublicHandle, invalidDisplayName, invalidPassword, invalidRecoveryCode, rateLimited }
 package func sharedFailure(_ error: any Error) -> SharedFailure {
@@ -173,6 +179,9 @@ package actor SharedRuntime {
     var messageBusiness: V2MessageService?
     private var sender: V2MessageSendOperationService?
     private var personalPreferences: V2PersonalPreferenceService?
+    private var accountHTTP: V2SessionHTTPAuthorization?
+    private var deviceSessionsClient: V2HTTPDeviceSessionClient?
+    private var deviceSessions: SharedDeviceSessions?
     private var dispatcher: Task<Void, Never>?
     private var roomRecovery: V2RoomRecoveryRunner?
     private var selectedRoom: RoomID?
@@ -253,6 +262,42 @@ package actor SharedRuntime {
             userID = try await auth.localAccountIdentity().userID.rawValue
             state = "ready"
             try await configureConnection()
+        case .deviceSessions:
+            guard let client = deviceSessionsClient else { throw SharedFailure.authenticationRequired }
+            let page = try await client.list(cursor: request.intentID, pageSize: 50)
+            deviceSessions = SharedDeviceSessions(sessions: page.sessions.map {
+                SharedDeviceSession(deviceID: $0.deviceID.rawValue, deviceName: $0.deviceName, platform: $0.platform,
+                    createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000),
+                    lastActiveAt: Int64($0.lastActiveAt.timeIntervalSince1970 * 1000),
+                    isCurrentDevice: $0.isCurrentDevice)
+            }, nextCursor: page.nextCursor)
+        case .revokeDevice:
+            guard let accountHTTP else { throw SharedFailure.authenticationRequired }
+            let identity = try await auth.localAccountIdentity()
+            let client = try V2HTTPRemoteDeviceRevocationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)
+            let baseline = try await client.baseline()
+            guard baseline.actorUserID == identity.userID, baseline.currentDeviceID == identity.deviceID else {
+                throw SharedFailure.invalidInput
+            }
+            let selection: V2RemoteDeviceRevocationCommand.Selection
+            if request.action == "all" {
+                selection = .allObservedOthers
+            } else {
+                guard let raw = request.targetUserID, let target = try? DeviceID(raw),
+                      baseline.targetDeviceIDs.contains(target) else { throw SharedFailure.invalidInput }
+                selection = .device(target)
+            }
+            let now = UInt64(Date().timeIntervalSince1970 * 1000)
+            let deadline = min(now + 120_000, baseline.expiresAtMilliseconds)
+            let command = try V2RemoteDeviceRevocationCommand(operationID: UUID(), baseline: baseline,
+                selection: selection, firstSubmissionDeadlineMilliseconds: deadline)
+            switch try await client.submit(command) {
+            case .receipt(let receipt):
+                guard case .revoked = receipt.outcome else { throw SharedFailure.operationFailed }
+                deviceSessions = nil
+            case .unresolved, .fingerprintConflict:
+                throw SharedFailure.operationFailed
+            }
         case .passwordLifecycle:
             guard let account = request.account, let action = request.action else { throw SharedFailure.invalidInput }
             let lifecycle: V2PasswordLifecycleAction
@@ -415,6 +460,7 @@ package actor SharedRuntime {
         await runtime?.stop()
         await dispatcher?.value
         dispatcher = nil; sender = nil; roomRecovery = nil; personalPreferences = nil
+        accountHTTP = nil; deviceSessionsClient = nil; deviceSessions = nil
     }
     private func signOut() async throws {
         // Intent survives cancellation/crash between revocation handoff and local deletion.
@@ -455,6 +501,9 @@ package actor SharedRuntime {
                 realtime: V2ProtobufMessageSendOperationClient(transport: transport, connection: wire)))
         self.sender = sender
         let accountHTTP = V2SessionHTTPAuthorization(session: auth, epoch: await auth.currentEpoch(), transport: http)
+        self.accountHTTP = accountHTTP
+        deviceSessionsClient = try V2HTTPDeviceSessionClient(endpoint: base.appendingPathComponent("v2/devices"),
+            credentials: accountHTTP, transport: accountHTTP)
         let business = try await session.messages(for: store, accountID: identity.userID, sends: sender,
             mutations: .init(accountID: identity.userID, store: store, client: try V2HTTPMessageMutationOperationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)),
             forwards: .init(accountID: identity.userID, store: store, client: try V2HTTPForwardPlanOperationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)))
@@ -613,6 +662,6 @@ package actor SharedRuntime {
         return .init(state: currentState, userID: userID, allowsStrangerMessages: preference?.allowsStrangerMessages, appliedSequence: cursor?.appliedSequence ?? 0,
             acknowledgedSequence: cursor?.serverAcknowledgedSequence ?? 0, connections: connections,
             conversations: rows, failure: failure?.rawValue,
-            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot())
+            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions)
     }
 }

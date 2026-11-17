@@ -55,6 +55,18 @@ private actor MobileHost: ImHost {
         try await ordered { try await self.client.register(account: account, password: password,
             publicHandle: publicHandle, displayName: displayName).wire }
     }
+    func deviceSessions(cursor: String?) async throws -> ImDeviceSessions {
+        try await ordered {
+            let page = try await self.client.deviceSessions(cursor: cursor)
+            return ImDeviceSessions(sessions: page.sessions.map {
+                ImDeviceSession(deviceId: $0.deviceID, deviceName: $0.deviceName, platform: $0.platform,
+                                createdAt: $0.createdAt, lastActiveAt: $0.lastActiveAt, isCurrentDevice: $0.isCurrentDevice)
+            }, nextCursor: page.nextCursor)
+        }
+    }
+    func revokeDevice(deviceId: String?, all: Bool) async throws {
+        try await ordered { try await self.client.revokeDevice(deviceID: deviceId, all: all) }
+    }
     func passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) async throws {
         try await ordered {
             try await self.client.passwordLifecycle(account: account, action: action, currentPassword: currentPassword,

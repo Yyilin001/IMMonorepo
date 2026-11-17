@@ -41,8 +41,10 @@ enum class SharedSendStatus { Preparing, Pending, WaitingForNetwork, WaitingForA
 data class SharedPendingMessage(val id: String, val text: String, val status: SharedSendStatus, val preparationStatus: String? = null, val createdAt: Long? = null,
                               val preparedAttachments: Long? = null, val totalAttachments: Long? = null)
 data class SharedChat(val roomID: String, val messages: PersistentList<SharedMessage>, val pending: PersistentList<SharedPendingMessage>, val hasOlder: Boolean, val isLatest: Boolean, val hasMorePending: Boolean, val pendingPage: Int, val focusMessageID: String?)
+data class SharedDeviceSession(val deviceID: String, val deviceName: String, val platform: String, val createdAt: Long, val lastActiveAt: Long, val isCurrentDevice: Boolean)
+data class SharedDeviceSessions(val sessions: PersistentList<SharedDeviceSession>, val nextCursor: String?)
 data class SharedSnapshot(val state: SharedSessionState, val userID: String?, val allowsStrangerMessages: Boolean?, val appliedSequence: Long,
-    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null)
+    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null)
 
 internal object NativeSharedSDK {
     init { System.loadLibrary("IMV2SharedSDK") }
@@ -129,6 +131,14 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun restore(): SharedSnapshot = mutate("restore")
     suspend fun login(account: String, password: String): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "login").put("account", account).put("password", password))
+    }
+    suspend fun deviceSessions(cursor: String? = null): SharedSnapshot = execute(JSONObject().put("operation", "deviceSessions").apply {
+        if (cursor != null) put("intentID", cursor)
+    })
+    suspend fun revokeDevice(deviceID: String?, all: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "revokeDevice").put("action", if (all) "all" else "device").apply {
+            if (deviceID != null) put("targetUserID", deviceID)
+        })
     }
     suspend fun passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "passwordLifecycle").put("account", account).put("action", action).apply {
@@ -360,6 +370,13 @@ class SharedClient private constructor(private val handle: Long) {
                         it.optString("preparationStatus").takeIf(String::isNotEmpty), it.optionalLong("createdAt"),
                         it.optionalLong("preparedAttachments"), it.optionalLong("totalAttachments"))
                 } }.toPersistentList(), chat.getBoolean("hasOlder"), chat.getBoolean("isLatest"), chat.getBoolean("hasMorePending"), chat.getInt("pendingPage"), chat.optString("focusMessageID").takeIf { it.isNotEmpty() })
-            }, value.optJSONObject("directory")?.let { decodeDirectory(it, startedAt) }, value.optJSONObject("resource")?.let { decodeResources(it, startedAt) }, value.optJSONObject("messaging")?.let { decodeMessaging(it, startedAt) }, value.optString("windowID").takeIf { it.isNotEmpty() })
+            }, value.optJSONObject("directory")?.let { decodeDirectory(it, startedAt) }, value.optJSONObject("resource")?.let { decodeResources(it, startedAt) }, value.optJSONObject("messaging")?.let { decodeMessaging(it, startedAt) }, value.optString("windowID").takeIf { it.isNotEmpty() },
+            value.optJSONObject("deviceSessions")?.let { sessions ->
+                val rows = sessions.getJSONArray("sessions")
+                SharedDeviceSessions((0 until rows.length()).map { index -> rows.getJSONObject(index).let {
+                    SharedDeviceSession(it.getString("deviceID"), it.getString("deviceName"), it.getString("platform"),
+                        it.getLong("createdAt"), it.getLong("lastActiveAt"), it.getBoolean("isCurrentDevice"))
+                } }.toPersistentList(), sessions.optString("nextCursor").takeIf(String::isNotEmpty))
+            })
     }
 }

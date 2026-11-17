@@ -980,6 +980,106 @@ struct GroupMember: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct ImDeviceSession: Hashable, CustomStringConvertible {
+  var deviceId: String
+  var deviceName: String
+  var platform: String
+  var createdAt: Int64
+  var lastActiveAt: Int64
+  var isCurrentDevice: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImDeviceSession? {
+    let deviceId = pigeonVar_list[0] as! String
+    let deviceName = pigeonVar_list[1] as! String
+    let platform = pigeonVar_list[2] as! String
+    let createdAt = pigeonVar_list[3] as! Int64
+    let lastActiveAt = pigeonVar_list[4] as! Int64
+    let isCurrentDevice = pigeonVar_list[5] as! Bool
+
+    return ImDeviceSession(
+      deviceId: deviceId,
+      deviceName: deviceName,
+      platform: platform,
+      createdAt: createdAt,
+      lastActiveAt: lastActiveAt,
+      isCurrentDevice: isCurrentDevice
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      deviceId,
+      deviceName,
+      platform,
+      createdAt,
+      lastActiveAt,
+      isCurrentDevice,
+    ]
+  }
+  static func == (lhs: ImDeviceSession, rhs: ImDeviceSession) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.deviceId, rhs.deviceId) && MessagesPigeonInternal.deepEquals(lhs.deviceName, rhs.deviceName) && MessagesPigeonInternal.deepEquals(lhs.platform, rhs.platform) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.lastActiveAt, rhs.lastActiveAt) && MessagesPigeonInternal.deepEquals(lhs.isCurrentDevice, rhs.isCurrentDevice)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImDeviceSession")
+    MessagesPigeonInternal.deepHash(value: deviceId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: deviceName, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: platform, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: createdAt, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: lastActiveAt, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isCurrentDevice, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImDeviceSession(deviceId: \(String(describing: deviceId)), deviceName: \(String(describing: deviceName)), platform: \(String(describing: platform)), createdAt: \(String(describing: createdAt)), lastActiveAt: \(String(describing: lastActiveAt)), isCurrentDevice: \(String(describing: isCurrentDevice)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImDeviceSessions: Hashable, CustomStringConvertible {
+  var sessions: [ImDeviceSession]
+  var nextCursor: String? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImDeviceSessions? {
+    let sessions = pigeonVar_list[0] as! [ImDeviceSession]
+    let nextCursor: String? = nilOrValue(pigeonVar_list[1])
+
+    return ImDeviceSessions(
+      sessions: sessions,
+      nextCursor: nextCursor
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      sessions,
+      nextCursor,
+    ]
+  }
+  static func == (lhs: ImDeviceSessions, rhs: ImDeviceSessions) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.sessions, rhs.sessions) && MessagesPigeonInternal.deepEquals(lhs.nextCursor, rhs.nextCursor)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImDeviceSessions")
+    MessagesPigeonInternal.deepHash(value: sessions, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: nextCursor, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImDeviceSessions(sessions: \(String(describing: sessions)), nextCursor: \(String(describing: nextCursor)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct ImGroupNickname: Hashable, CustomStringConvertible {
   var roomId: String
   var name: String? = nil
@@ -1511,22 +1611,26 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 142:
       return GroupMember.fromList(self.readValue() as! [Any?])
     case 143:
-      return ImGroupNickname.fromList(self.readValue() as! [Any?])
+      return ImDeviceSession.fromList(self.readValue() as! [Any?])
     case 144:
-      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
+      return ImDeviceSessions.fromList(self.readValue() as! [Any?])
     case 145:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return ImGroupNickname.fromList(self.readValue() as! [Any?])
     case 146:
-      return ImInvite.fromList(self.readValue() as! [Any?])
+      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
     case 147:
-      return ImJoinRequest.fromList(self.readValue() as! [Any?])
+      return GroupPage.fromList(self.readValue() as! [Any?])
     case 148:
-      return ImInvitePreview.fromList(self.readValue() as! [Any?])
+      return ImInvite.fromList(self.readValue() as! [Any?])
     case 149:
-      return ImCommunity.fromList(self.readValue() as! [Any?])
+      return ImJoinRequest.fromList(self.readValue() as! [Any?])
     case 150:
-      return ImReaders.fromList(self.readValue() as! [Any?])
+      return ImInvitePreview.fromList(self.readValue() as! [Any?])
     case 151:
+      return ImCommunity.fromList(self.readValue() as! [Any?])
+    case 152:
+      return ImReaders.fromList(self.readValue() as! [Any?])
+    case 153:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -1578,32 +1682,38 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? GroupMember {
       super.writeByte(142)
       super.writeValue(value.toList())
-    } else if let value = value as? ImGroupNickname {
+    } else if let value = value as? ImDeviceSession {
       super.writeByte(143)
       super.writeValue(value.toList())
-    } else if let value = value as? ImGroupPolicy {
+    } else if let value = value as? ImDeviceSessions {
       super.writeByte(144)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? ImGroupNickname {
       super.writeByte(145)
       super.writeValue(value.toList())
-    } else if let value = value as? ImInvite {
+    } else if let value = value as? ImGroupPolicy {
       super.writeByte(146)
       super.writeValue(value.toList())
-    } else if let value = value as? ImJoinRequest {
+    } else if let value = value as? GroupPage {
       super.writeByte(147)
       super.writeValue(value.toList())
-    } else if let value = value as? ImInvitePreview {
+    } else if let value = value as? ImInvite {
       super.writeByte(148)
       super.writeValue(value.toList())
-    } else if let value = value as? ImCommunity {
+    } else if let value = value as? ImJoinRequest {
       super.writeByte(149)
       super.writeValue(value.toList())
-    } else if let value = value as? ImReaders {
+    } else if let value = value as? ImInvitePreview {
       super.writeByte(150)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? ImCommunity {
       super.writeByte(151)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImReaders {
+      super.writeByte(152)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(153)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -1632,6 +1742,8 @@ protocol ImHost {
   func restore() async throws -> ImSession
   func signIn(account: String, password: String) async throws -> ImSession
   func register(account: String, password: String, publicHandle: String, displayName: String) async throws -> ImSession
+  func deviceSessions(cursor: String?) async throws -> ImDeviceSessions
+  func revokeDevice(deviceId: String?, all: Bool) async throws
   func passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) async throws
   func connect() async throws -> ImSession
   func status() async throws -> ImSession
@@ -1765,6 +1877,41 @@ class ImHostSetup {
       }
     } else {
       registerChannel.setMessageHandler(nil)
+    }
+    let deviceSessionsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.deviceSessions\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      deviceSessionsChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let cursorArg: String? = nilOrValue(args[0])
+        Task { @MainActor in
+          do {
+            let result = try await api.deviceSessions(cursor: cursorArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      deviceSessionsChannel.setMessageHandler(nil)
+    }
+    let revokeDeviceChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.revokeDevice\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      revokeDeviceChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let deviceIdArg: String? = nilOrValue(args[0])
+        let allArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.revokeDevice(deviceId: deviceIdArg, all: allArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      revokeDeviceChannel.setMessageHandler(nil)
     }
     let passwordLifecycleChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.passwordLifecycle\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

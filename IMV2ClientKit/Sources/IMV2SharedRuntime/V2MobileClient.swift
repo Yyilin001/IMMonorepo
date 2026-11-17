@@ -116,6 +116,17 @@ public final class V2MobileClient: Sendable {
         try await session(.init(operation: .register, displayName: displayName, account: account,
                                 password: password, publicHandle: publicHandle))
     }
+    public func deviceSessions(cursor: String?) async throws -> DeviceSessions {
+        let value = try await run(.init(operation: .deviceSessions, intentID: cursor))
+        guard let page = value.deviceSessions else { throw Failure(code: "operationFailed") }
+        return DeviceSessions(sessions: page.sessions.map {
+            DeviceSession(deviceID: $0.deviceID, deviceName: $0.deviceName, platform: $0.platform,
+                          createdAt: $0.createdAt, lastActiveAt: $0.lastActiveAt, isCurrentDevice: $0.isCurrentDevice)
+        }, nextCursor: page.nextCursor)
+    }
+    public func revokeDevice(deviceID: String?, all: Bool) async throws {
+        _ = try await run(.init(operation: .revokeDevice, targetUserID: deviceID, action: all ? "all" : "device"))
+    }
     public func passwordLifecycle(account: String, action: String, currentPassword: String?,
                                   newPassword: String?, recoveryCode: String?) async throws {
         _ = try await run(.init(operation: .passwordLifecycle, account: account, password: currentPassword,
@@ -312,6 +323,18 @@ public final class V2MobileClient: Sendable {
             preview: community.preview.map { InvitePreview(roomID: $0.roomID, title: $0.title, requestID: $0.requestID,
                 state: $0.state, member: $0.member, canSubmit: $0.canSubmit, canCancel: $0.canCancel) },
             failure: community.failure)
+    }
+    public struct DeviceSession: Sendable {
+        public let deviceID: String
+        public let deviceName: String
+        public let platform: String
+        public let createdAt: Int64
+        public let lastActiveAt: Int64
+        public let isCurrentDevice: Bool
+    }
+    public struct DeviceSessions: Sendable {
+        public let sessions: [DeviceSession]
+        public let nextCursor: String?
     }
     public struct GroupNickname: Sendable {
         public let roomID: String

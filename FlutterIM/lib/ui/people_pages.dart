@@ -693,6 +693,19 @@ class PersonalPane extends ConsumerWidget {
                   if (sdk?.userId != null) const _TransfersLink(),
                   if (sdk?.userId != null)
                     ListTile(
+                      key: const Key('device-sessions'),
+                      leading: const Icon(Icons.devices_outlined, color: green),
+                      title: const Text('登录设备'),
+                      subtitle: const Text('查看当前账号的登录设备'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const _DeviceSessionsPage(),
+                        ),
+                      ),
+                    ),
+                  if (sdk?.userId != null)
+                    ListTile(
                       key: const Key('account-security'),
                       leading: const Icon(Icons.shield_outlined, color: green),
                       title: const Text('账号安全'),

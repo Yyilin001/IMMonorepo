@@ -961,6 +961,104 @@ data class GroupMember (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class ImDeviceSession (
+  val deviceId: String,
+  val deviceName: String,
+  val platform: String,
+  val createdAt: Long,
+  val lastActiveAt: Long,
+  val isCurrentDevice: Boolean
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImDeviceSession {
+      val deviceId = pigeonVar_list[0] as String
+      val deviceName = pigeonVar_list[1] as String
+      val platform = pigeonVar_list[2] as String
+      val createdAt = pigeonVar_list[3] as Long
+      val lastActiveAt = pigeonVar_list[4] as Long
+      val isCurrentDevice = pigeonVar_list[5] as Boolean
+      return ImDeviceSession(deviceId, deviceName, platform, createdAt, lastActiveAt, isCurrentDevice)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      deviceId,
+      deviceName,
+      platform,
+      createdAt,
+      lastActiveAt,
+      isCurrentDevice,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImDeviceSession
+    return MessagesPigeonUtils.deepEquals(this.deviceId, other.deviceId) && MessagesPigeonUtils.deepEquals(this.deviceName, other.deviceName) && MessagesPigeonUtils.deepEquals(this.platform, other.platform) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.lastActiveAt, other.lastActiveAt) && MessagesPigeonUtils.deepEquals(this.isCurrentDevice, other.isCurrentDevice)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.deviceId)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.deviceName)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.platform)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.createdAt)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.lastActiveAt)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.isCurrentDevice)
+    return result
+  }
+  override fun toString(): String {
+    return "ImDeviceSession(deviceId=$deviceId, deviceName=$deviceName, platform=$platform, createdAt=$createdAt, lastActiveAt=$lastActiveAt, isCurrentDevice=$isCurrentDevice)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
+data class ImDeviceSessions (
+  val sessions: List<ImDeviceSession>,
+  val nextCursor: String? = null
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImDeviceSessions {
+      val sessions = pigeonVar_list[0] as List<ImDeviceSession>
+      val nextCursor = pigeonVar_list[1] as String?
+      return ImDeviceSessions(sessions, nextCursor)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      sessions,
+      nextCursor,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImDeviceSessions
+    return MessagesPigeonUtils.deepEquals(this.sessions, other.sessions) && MessagesPigeonUtils.deepEquals(this.nextCursor, other.nextCursor)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.sessions)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.nextCursor)
+    return result
+  }
+  override fun toString(): String {
+    return "ImDeviceSessions(sessions=$sessions, nextCursor=$nextCursor)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class ImGroupNickname (
   val roomId: String,
   val name: String? = null,
@@ -1515,45 +1613,55 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       143.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImGroupNickname.fromList(it)
+          ImDeviceSession.fromList(it)
         }
       }
       144.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImGroupPolicy.fromList(it)
+          ImDeviceSessions.fromList(it)
         }
       }
       145.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          ImGroupNickname.fromList(it)
         }
       }
       146.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImInvite.fromList(it)
+          ImGroupPolicy.fromList(it)
         }
       }
       147.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImJoinRequest.fromList(it)
+          GroupPage.fromList(it)
         }
       }
       148.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImInvitePreview.fromList(it)
+          ImInvite.fromList(it)
         }
       }
       149.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImCommunity.fromList(it)
+          ImJoinRequest.fromList(it)
         }
       }
       150.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImReaders.fromList(it)
+          ImInvitePreview.fromList(it)
         }
       }
       151.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          ImCommunity.fromList(it)
+        }
+      }
+      152.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          ImReaders.fromList(it)
+        }
+      }
+      153.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -1619,40 +1727,48 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(142)
         writeValue(stream, value.toList())
       }
-      is ImGroupNickname -> {
+      is ImDeviceSession -> {
         stream.write(143)
         writeValue(stream, value.toList())
       }
-      is ImGroupPolicy -> {
+      is ImDeviceSessions -> {
         stream.write(144)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is ImGroupNickname -> {
         stream.write(145)
         writeValue(stream, value.toList())
       }
-      is ImInvite -> {
+      is ImGroupPolicy -> {
         stream.write(146)
         writeValue(stream, value.toList())
       }
-      is ImJoinRequest -> {
+      is GroupPage -> {
         stream.write(147)
         writeValue(stream, value.toList())
       }
-      is ImInvitePreview -> {
+      is ImInvite -> {
         stream.write(148)
         writeValue(stream, value.toList())
       }
-      is ImCommunity -> {
+      is ImJoinRequest -> {
         stream.write(149)
         writeValue(stream, value.toList())
       }
-      is ImReaders -> {
+      is ImInvitePreview -> {
         stream.write(150)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is ImCommunity -> {
         stream.write(151)
+        writeValue(stream, value.toList())
+      }
+      is ImReaders -> {
+        stream.write(152)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(153)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -1667,6 +1783,8 @@ interface ImHost {
   suspend fun restore(): ImSession
   suspend fun signIn(account: String, password: String): ImSession
   suspend fun register(account: String, password: String, publicHandle: String, displayName: String): ImSession
+  suspend fun deviceSessions(cursor: String?): ImDeviceSessions
+  suspend fun revokeDevice(deviceId: String?, all: Boolean)
   suspend fun passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?)
   suspend fun connect(): ImSession
   suspend fun status(): ImSession
@@ -1802,6 +1920,46 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 listOf(api.register(accountArg, passwordArg, publicHandleArg, displayNameArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.deviceSessions$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val cursorArg = args[0] as String?
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.deviceSessions(cursorArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.revokeDevice$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val deviceIdArg = args[0] as String?
+            val allArg = args[1] as Boolean
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.revokeDevice(deviceIdArg, allArg)
+                listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

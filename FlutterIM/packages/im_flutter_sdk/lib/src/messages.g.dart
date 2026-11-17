@@ -1032,6 +1032,126 @@ class GroupMember {
   }
 }
 
+class ImDeviceSession {
+  ImDeviceSession({
+    required this.deviceId,
+    required this.deviceName,
+    required this.platform,
+    required this.createdAt,
+    required this.lastActiveAt,
+    required this.isCurrentDevice,
+  });
+
+  String deviceId;
+
+  String deviceName;
+
+  String platform;
+
+  int createdAt;
+
+  int lastActiveAt;
+
+  bool isCurrentDevice;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      deviceId,
+      deviceName,
+      platform,
+      createdAt,
+      lastActiveAt,
+      isCurrentDevice,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImDeviceSession decode(Object result) {
+    result as List<Object?>;
+    return ImDeviceSession(
+      deviceId: result[0]! as String,
+      deviceName: result[1]! as String,
+      platform: result[2]! as String,
+      createdAt: result[3]! as int,
+      lastActiveAt: result[4]! as int,
+      isCurrentDevice: result[5]! as bool,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImDeviceSession || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(deviceId, other.deviceId) && _deepEquals(deviceName, other.deviceName) && _deepEquals(platform, other.platform) && _deepEquals(createdAt, other.createdAt) && _deepEquals(lastActiveAt, other.lastActiveAt) && _deepEquals(isCurrentDevice, other.isCurrentDevice);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImDeviceSession(deviceId: $deviceId, deviceName: $deviceName, platform: $platform, createdAt: $createdAt, lastActiveAt: $lastActiveAt, isCurrentDevice: $isCurrentDevice)';
+  }
+}
+
+class ImDeviceSessions {
+  ImDeviceSessions({
+    required this.sessions,
+    this.nextCursor,
+  });
+
+  List<ImDeviceSession> sessions;
+
+  String? nextCursor;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      sessions,
+      nextCursor,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImDeviceSessions decode(Object result) {
+    result as List<Object?>;
+    return ImDeviceSessions(
+      sessions: (result[0]! as List<Object?>).cast<ImDeviceSession>(),
+      nextCursor: result[1] as String?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImDeviceSessions || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(sessions, other.sessions) && _deepEquals(nextCursor, other.nextCursor);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImDeviceSessions(sessions: $sessions, nextCursor: $nextCursor)';
+  }
+}
+
 class ImGroupNickname {
   ImGroupNickname({
     required this.roomId,
@@ -1672,32 +1792,38 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is GroupMember) {
       buffer.putUint8(142);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupNickname) {
+    }    else if (value is ImDeviceSession) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupPolicy) {
+    }    else if (value is ImDeviceSessions) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is ImGroupNickname) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvite) {
+    }    else if (value is ImGroupPolicy) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    }    else if (value is ImJoinRequest) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(147);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvitePreview) {
+    }    else if (value is ImInvite) {
       buffer.putUint8(148);
       writeValue(buffer, value.encode());
-    }    else if (value is ImCommunity) {
+    }    else if (value is ImJoinRequest) {
       buffer.putUint8(149);
       writeValue(buffer, value.encode());
-    }    else if (value is ImReaders) {
+    }    else if (value is ImInvitePreview) {
       buffer.putUint8(150);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is ImCommunity) {
       buffer.putUint8(151);
+      writeValue(buffer, value.encode());
+    }    else if (value is ImReaders) {
+      buffer.putUint8(152);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(153);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1736,22 +1862,26 @@ class _PigeonCodec extends StandardMessageCodec {
       case 142:
         return GroupMember.decode(readValue(buffer)!);
       case 143:
-        return ImGroupNickname.decode(readValue(buffer)!);
+        return ImDeviceSession.decode(readValue(buffer)!);
       case 144:
-        return ImGroupPolicy.decode(readValue(buffer)!);
+        return ImDeviceSessions.decode(readValue(buffer)!);
       case 145:
-        return GroupPage.decode(readValue(buffer)!);
+        return ImGroupNickname.decode(readValue(buffer)!);
       case 146:
-        return ImInvite.decode(readValue(buffer)!);
+        return ImGroupPolicy.decode(readValue(buffer)!);
       case 147:
-        return ImJoinRequest.decode(readValue(buffer)!);
+        return GroupPage.decode(readValue(buffer)!);
       case 148:
-        return ImInvitePreview.decode(readValue(buffer)!);
+        return ImInvite.decode(readValue(buffer)!);
       case 149:
-        return ImCommunity.decode(readValue(buffer)!);
+        return ImJoinRequest.decode(readValue(buffer)!);
       case 150:
-        return ImReaders.decode(readValue(buffer)!);
+        return ImInvitePreview.decode(readValue(buffer)!);
       case 151:
+        return ImCommunity.decode(readValue(buffer)!);
+      case 152:
+        return ImReaders.decode(readValue(buffer)!);
+      case 153:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1845,6 +1975,41 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as ImSession;
+  }
+
+  Future<ImDeviceSessions> deviceSessions(String? cursor) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.deviceSessions$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[cursor]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as ImDeviceSessions;
+  }
+
+  Future<void> revokeDevice(String? deviceId, bool all) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.revokeDevice$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[deviceId, all]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   Future<void> passwordLifecycle(String account, String action, String? currentPassword, String? newPassword, String? recoveryCode) async {

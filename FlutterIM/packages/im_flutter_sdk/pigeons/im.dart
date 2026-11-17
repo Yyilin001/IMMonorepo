@@ -209,6 +209,29 @@ class GroupMember {
   String role;
 }
 
+class ImDeviceSession {
+  ImDeviceSession({
+    required this.deviceId,
+    required this.deviceName,
+    required this.platform,
+    required this.createdAt,
+    required this.lastActiveAt,
+    required this.isCurrentDevice,
+  });
+  String deviceId;
+  String deviceName;
+  String platform;
+  int createdAt;
+  int lastActiveAt;
+  bool isCurrentDevice;
+}
+
+class ImDeviceSessions {
+  ImDeviceSessions({required this.sessions, this.nextCursor});
+  List<ImDeviceSession> sessions;
+  String? nextCursor;
+}
+
 class ImGroupNickname {
   ImGroupNickname({required this.roomId, this.name, this.revision});
   String roomId;
@@ -357,6 +380,10 @@ abstract class ImHost {
     String publicHandle,
     String displayName,
   );
+  @async
+  ImDeviceSessions deviceSessions(String? cursor);
+  @async
+  void revokeDevice(String? deviceId, bool all);
   @async
   void passwordLifecycle(
     String account,

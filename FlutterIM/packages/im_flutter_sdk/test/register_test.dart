@@ -11,7 +11,8 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     final calls = <Object?>[];
     final lifecycle = <Object?>[];
-    for (final method in ['open', 'register', 'passwordLifecycle', 'close']) {
+    final devices = <Object?>[];
+    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'close']) {
       final channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.im_flutter_sdk.ImHost.$method',
         wire.ImHost.pigeonChannelCodec,
@@ -23,6 +24,25 @@ void main() {
             return [wire.ImSession(state: 'ready', userId: 'user')];
           case 'passwordLifecycle':
             lifecycle.add(args);
+          case 'revokeDevice':
+            devices.add(args);
+          case 'deviceSessions':
+            devices.add(args);
+            return [
+              wire.ImDeviceSessions(
+                sessions: [
+                  wire.ImDeviceSession(
+                    deviceId: 'device',
+                    deviceName: 'iPhone',
+                    platform: 'iOS',
+                    createdAt: 1000,
+                    lastActiveAt: 2000,
+                    isCurrentDevice: true,
+                  ),
+                ],
+                nextCursor: 'next',
+              ),
+            ];
         }
         return [null];
       });
@@ -49,6 +69,15 @@ void main() {
       'new-password',
       null,
     ]);
+    final page = await client.deviceSessions();
+    expect(page.sessions.single.deviceName, 'iPhone');
+    expect(page.sessions.single.isCurrentDevice, true);
+    expect(page.nextCursor, 'next');
+    expect(devices.first, [null]);
+    await client.revokeDevice(deviceId: 'device');
+    expect(devices.last, ['device', false]);
+    await client.revokeDevice(all: true);
+    expect(devices.last, [null, true]);
     await client.close();
   });
 }
