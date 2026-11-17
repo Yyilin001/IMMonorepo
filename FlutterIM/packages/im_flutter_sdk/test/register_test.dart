@@ -12,7 +12,7 @@ void main() {
     final calls = <Object?>[];
     final lifecycle = <Object?>[];
     final devices = <Object?>[];
-    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'close']) {
+    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'sendText', 'close']) {
       final channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.im_flutter_sdk.ImHost.$method',
         wire.ImHost.pigeonChannelCodec,
@@ -41,6 +41,8 @@ void main() {
               ),
             ];
           case 'setFavorite':
+            devices.add(args);
+          case 'sendText':
             devices.add(args);
           case 'privacy':
           case 'setPrivacy':
@@ -124,6 +126,18 @@ void main() {
     expect(favorites.hasMore, true);
     await client.setFavorite('room', 'message', favorited: true);
     expect(devices.last, ['room', 'message', true]);
+
+    await client.sendText(
+      'room',
+      '@alice 看一下',
+      mentions: ['@alice', '@all'],
+    );
+    expect(devices.last, [
+      'room',
+      '@alice 看一下',
+      null,
+      ['@alice', '@all'],
+    ]);
     await client.close();
   });
 }

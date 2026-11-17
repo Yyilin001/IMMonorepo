@@ -48,6 +48,7 @@ package struct SharedRequest: Decodable, Sendable {
     var role: String?
     var members: [String]?
     var permissions: [String]?
+    var mentions: [String]?
 }
 struct SharedConversation: Encodable, Sendable {
     let id: String; let title: String; let preview: String
@@ -79,6 +80,7 @@ struct SharedMessage: Encodable, Sendable {
     let revision: UInt64; let canMutate: Bool; let readByPeer: Bool
     let replyToID: String?; let replyPreview: String?; let forwardedFromID: String?
     var isFavorited = false
+    let mentionSummary: String?
 }
 struct SharedPendingMessage: Encodable, Sendable {
     let id: String
@@ -513,7 +515,8 @@ package actor SharedRuntime {
             guard let business = messageBusiness, let room = selectedRoom, request.roomID == room.rawValue,
                   let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw SharedFailure.invalidInput }
             let reply = try request.replyToMessageID.map { V2MessageReplyReference(messageID: try MessageID($0)) }
-            _ = try await business.send(in: room, text: text, replyTo: reply)
+            let mentions = try await socialGroups?.resolveMentions(request.mentions ?? []) ?? []
+            _ = try await business.send(in: room, text: text, mentions: mentions, replyTo: reply)
             messageCursor = nil; focusMessage = nil; pendingPage = 0
         case .resendUnsent:
             guard let business = messageBusiness, let id = request.intentID.flatMap(UUID.init(uuidString:)) else { throw SharedFailure.invalidInput }
@@ -735,10 +738,20 @@ package actor SharedRuntime {
                     replyToID: message.isWithdrawn ? nil : message.replyTo?.messageID.rawValue,
                     replyPreview: message.isWithdrawn ? nil : message.replyTo.flatMap { replyPreviews[$0.messageID] },
                     forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue,
-                    isFavorited: favorites.contains(message.messageID))
+                    isFavorited: favorites.contains(message.messageID),
+                    mentionSummary: Self.mentionSummary(message.mentions))
             }, pending: (pending?.preparing ?? []).map(SharedPendingMessage.preparing)
                 + (pending?.submitted ?? []).map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status), createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000)) },
                 focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest, hasMorePending: pending?.hasNext ?? false, pendingPage: pendingPage)
+    }
+
+    private static func mentionSummary(_ mentions: [V2MentionTarget]) -> String? {
+        guard !mentions.isEmpty else { return nil }
+        let everyone = mentions.contains(.everyone)
+        let users = mentions.filter { if case .user = $0 { return true }; return false }.count
+        if everyone && users > 0 { return "提及所有人及 \(users) 位成员" }
+        if everyone { return "提及所有人" }
+        return "提及 \(users) 位成员"
     }
 
     private func snapshot(resourceChunk: String? = nil) async throws -> SharedSnapshot {

@@ -102,7 +102,7 @@ private class MobileHost(private val context: Context) : ImHost {
     private fun SharedSnapshot.toWindowView(): WindowView {
         val value = this
         val messages = value.chat?.messages.orEmpty().map {
-            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, it.revision, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt, replyToId = it.replyToID)
+            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, it.revision, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt, replyToId = it.replyToID, mentionSummary = it.mentionSummary)
         }
         return WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.isPinned, it.isArchived, it.updatedAt, it.peerID, it.muteUntil) },
             messages + value.chat?.pending.orEmpty().map {
@@ -252,8 +252,8 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun recoverSend(intentId: String, resend: Boolean) {
         mutations.withLock { sdk { if (resend) client.resendUnsent(intentId) else client.retrySend(intentId) } }
     }
-    override suspend fun sendText(roomId: String, text: String, replyToMessageId: String?) { mutations.withLock {
-        sdk { client.openConversation(roomId); client.sendText(roomId, text, replyToMessageId) }
+    override suspend fun sendText(roomId: String, text: String, replyToMessageId: String?, mentions: List<String>?) { mutations.withLock {
+        sdk { client.openConversation(roomId); client.sendText(roomId, text, replyToMessageId, mentions) }
     } }
     override suspend fun sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) {
         mutations.withLock { sdk {

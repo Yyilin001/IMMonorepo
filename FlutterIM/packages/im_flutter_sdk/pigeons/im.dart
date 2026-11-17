@@ -96,6 +96,7 @@ class ImMessage {
     this.preparedAttachments,
     this.totalAttachments,
     this.replyToId,
+    this.mentionSummary,
   });
   String id;
   String senderId;
@@ -113,6 +114,7 @@ class ImMessage {
   int? preparedAttachments;
   int? totalAttachments;
   String? replyToId;
+  String? mentionSummary;
 }
 
 class ImProfile {
@@ -567,7 +569,12 @@ abstract class ImHost {
   @async
   void recoverSend(String intentId, bool resend);
   @async
-  void sendText(String roomId, String text, String? replyToMessageId);
+  void sendText(
+    String roomId,
+    String text,
+    String? replyToMessageId,
+    List<String>? mentions,
+  );
   @async
   void sendAttachment(
     String roomId,

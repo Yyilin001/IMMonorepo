@@ -118,6 +118,24 @@ actor SharedSocialGroups {
             }
         } } catch is CancellationError {} catch { failure = sharedFailure(error) } }]
     }
+    func resolveMentions(_ handles: [String]) async throws -> [V2MentionTarget] {
+        guard handles.count <= V2MessageCommandLimits.maxMentions else { throw SharedFailure.invalidInput }
+        var targets: [V2MentionTarget] = []
+        var seen = Set<String>()
+        for raw in handles {
+            let handle = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !handle.isEmpty else { continue }
+            if handle.lowercased() == "@all" {
+                if seen.insert("everyone").inserted { targets.append(.everyone) }
+                continue
+            }
+            let lookup = try await directory.resolveForPresentation(handle: handle)
+            guard lookup.isValid() else { throw SharedFailure.invalidInput }
+            let id = lookup.identity.userID
+            if seen.insert(id.rawValue).inserted { targets.append(.user(id)) }
+        }
+        return targets
+    }
     func execute(_ request: SharedRequest) async throws {
         switch request.operation {
         case .openAvatarEditor:

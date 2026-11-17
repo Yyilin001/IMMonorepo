@@ -145,7 +145,7 @@ private actor MobileHost: ImHost {
     }
     private func windowView(_ view: V2MobileClient.Window) -> WindowView {
         return WindowView(conversations: view.conversations.map { .init(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, isGroup: $0.isGroup, isPinned: $0.isPinned, isArchived: $0.isArchived, updatedAt: $0.updatedAt, peerId: $0.peerID, muteUntil: $0.muteUntil) },
-                              messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map { Attachment(id: $0.id, name: $0.name, contentType: $0.contentType, bytes: $0.bytes) }, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, revision: $0.revision, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, replyToId: $0.replyToID) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
+                              messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map { Attachment(id: $0.id, name: $0.name, contentType: $0.contentType, bytes: $0.bytes) }, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, revision: $0.revision, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, replyToId: $0.replyToID, mentionSummary: $0.mentionSummary) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
     }
     func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage {
         try await ordered {
@@ -301,7 +301,10 @@ private actor MobileHost: ImHost {
     func recoverSend(intentId: String, resend: Bool) async throws {
         try await ordered { try await self.client.recoverSend(intentID: intentId, resend: resend) }
     }
-    func sendText(roomId: String, text: String, replyToMessageId: String?) async throws { try await ordered { try await self.client.sendText(roomID: roomId, text: text, replyToMessageID: replyToMessageId) } }
+    func sendText(roomId: String, text: String, replyToMessageId: String?, mentions: [String]?) async throws {
+        try await ordered { try await self.client.sendText(roomID: roomId, text: text,
+            replyToMessageID: replyToMessageId, mentions: mentions ?? []) }
+    }
     func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws {
         try await ordered { try await self.client.sendAttachment(roomID: roomId, file: URL(fileURLWithPath: path), name: name, contentType: contentType, text: text) }
     }

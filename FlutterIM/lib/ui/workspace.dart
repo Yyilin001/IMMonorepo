@@ -1627,6 +1627,7 @@ class _MessageBubble extends ConsumerWidget {
     this.onReaders,
     this.onFavorite,
     this.onEnterSelection,
+    this.mentionSummary,
     this.selecting = false,
     this.selected = false,
     this.onToggleSelect,
@@ -1641,6 +1642,7 @@ class _MessageBubble extends ConsumerWidget {
   final VoidCallback? onReply, onForward, onEdit, onWithdraw, onReaders;
   final VoidCallback? onFavorite, onEnterSelection, onToggleSelect;
   final bool selecting, selected;
+  final String? mentionSummary;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1823,6 +1825,14 @@ class _MessageBubble extends ConsumerWidget {
                   ),
                 ),
                 if (isForwarded) const Text('转发的消息'),
+                if (mentionSummary case final summary?)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      summary,
+                      style: const TextStyle(fontSize: 11, color: muted),
+                    ),
+                  ),
                 if (replyPreview case final preview?)
                   InkWell(
                     onTap: onOpenReply,

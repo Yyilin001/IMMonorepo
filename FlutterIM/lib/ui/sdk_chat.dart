@@ -21,6 +21,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   final Map<String, ImProfile> senderProfiles = {};
   final Set<String> _senderProfilesRequested = {};
   final Set<String> selected = {};
+  final List<String> mentions = [];
   bool initialized = false, sending = false, selecting = false, forwarding = false;
 
   void enterSelection(ImMessage item) {
@@ -97,6 +98,48 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
         ),
       ),
     );
+  }
+
+  Future<void> pickMentions() async {
+    final controller = TextEditingController(text: mentions.join(', '));
+    final text = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('提及成员'),
+        content: TextField(
+          key: const Key('mentions-input'),
+          controller: controller,
+          autofocus: true,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            hintText: '@all 或 @handle，逗号分隔，最多 20 个',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, controller.text),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (text == null || !mounted) return;
+    final values = <String>[];
+    for (final part in text.split(RegExp(r'[,，\s]+'))) {
+      final handle = part.trim();
+      if (handle.isEmpty || values.contains(handle)) continue;
+      values.add(handle);
+      if (values.length == 20) break;
+    }
+    setState(() {
+      mentions
+        ..clear()
+        ..addAll(values);
+    });
   }
 
   Future<void> forwardSelected() async {
@@ -227,9 +270,14 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     setState(() => sending = true);
     final reply = replyTarget;
     try {
-      await _SdkScope.of(context)!.client!
-          .sendText(widget.room.id, text, replyToMessageId: reply?.id);
+      await _SdkScope.of(context)!.client!.sendText(
+        widget.room.id,
+        text,
+        replyToMessageId: reply?.id,
+        mentions: List<String>.of(mentions),
+      );
       if (mounted && replyTarget == reply) replyTarget = null;
+      if (mounted) setState(() => mentions.clear());
       if (mounted && input.text == text) {
         input.clear();
         ref.read(draftProvider(id).notifier).save('');
@@ -873,6 +921,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                               selecting: selecting,
                               selected: selected.contains(item.id),
                               onToggleSelect: () => toggleSelection(item),
+                              mentionSummary: item.mentionSummary,
                               onFavorite:
                                   !item.withdrawn &&
                                       item.pendingStatus == null
@@ -977,6 +1026,37 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
             ),
           ),
         ),
+        if (widget.room.isGroup)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+            child: Row(
+              children: [
+                TextButton.icon(
+                  key: const Key('add-mentions'),
+                  onPressed: sending ? null : pickMentions,
+                  icon: const Icon(Icons.alternate_email, size: 18),
+                  label: const Text('提及'),
+                ),
+                if (mentions.isNotEmpty)
+                  Expanded(
+                    child: Text(
+                      mentions.join(' '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12, color: muted),
+                    ),
+                  ),
+                if (mentions.isNotEmpty)
+                  IconButton(
+                    tooltip: '清除提及',
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: sending
+                        ? null
+                        : () => setState(() => mentions.clear()),
+                  ),
+              ],
+            ),
+          ),
         if (replyTarget case final target?)
           ListTile(
             leading: const Icon(Icons.reply),

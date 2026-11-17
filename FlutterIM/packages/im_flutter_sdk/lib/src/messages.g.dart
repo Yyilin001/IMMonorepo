@@ -440,6 +440,7 @@ class ImMessage {
     this.preparedAttachments,
     this.totalAttachments,
     this.replyToId,
+    this.mentionSummary,
   });
 
   String id;
@@ -474,6 +475,8 @@ class ImMessage {
 
   String? replyToId;
 
+  String? mentionSummary;
+
   List<Object?> _toList() {
     return <Object?>[
       id,
@@ -492,6 +495,7 @@ class ImMessage {
       preparedAttachments,
       totalAttachments,
       replyToId,
+      mentionSummary,
     ];
   }
 
@@ -517,6 +521,7 @@ class ImMessage {
       preparedAttachments: result[13] as int?,
       totalAttachments: result[14] as int?,
       replyToId: result[15] as String?,
+      mentionSummary: result[16] as String?,
     );
   }
 
@@ -529,7 +534,7 @@ class ImMessage {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(revision, other.revision) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt) && _deepEquals(preparedAttachments, other.preparedAttachments) && _deepEquals(totalAttachments, other.totalAttachments) && _deepEquals(replyToId, other.replyToId);
+    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(revision, other.revision) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt) && _deepEquals(preparedAttachments, other.preparedAttachments) && _deepEquals(totalAttachments, other.totalAttachments) && _deepEquals(replyToId, other.replyToId) && _deepEquals(mentionSummary, other.mentionSummary);
   }
 
   @override
@@ -538,7 +543,7 @@ class ImMessage {
 
   @override
   String toString() {
-    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, revision: $revision, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt, preparedAttachments: $preparedAttachments, totalAttachments: $totalAttachments, replyToId: $replyToId)';
+    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, revision: $revision, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt, preparedAttachments: $preparedAttachments, totalAttachments: $totalAttachments, replyToId: $replyToId, mentionSummary: $mentionSummary)';
   }
 }
 
@@ -3031,14 +3036,14 @@ class ImHost {
     ;
   }
 
-  Future<void> sendText(String roomId, String text, String? replyToMessageId) async {
+  Future<void> sendText(String roomId, String text, String? replyToMessageId, List<String>? mentions) async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.sendText$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
       pigeonChannelCodec,
       binaryMessenger: pigeonVar_binaryMessenger,
     );
-    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, text, replyToMessageId]);
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, text, replyToMessageId, mentions]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     _extractReplyValueOrThrow(
         pigeonVar_replyList,

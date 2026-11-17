@@ -191,6 +191,7 @@ typedef ImMessage = ({
   int? createdAt,
   int? preparedAttachments,
   int? totalAttachments,
+  String? mentionSummary,
 });
 
 extension on wire.ImSession {
@@ -224,6 +225,7 @@ extension on wire.ImMessage {
     createdAt: createdAt,
     preparedAttachments: preparedAttachments,
     totalAttachments: totalAttachments,
+    mentionSummary: mentionSummary,
     pendingStatus: pendingStatus == null
         ? null
         : ImSendStatus.values.firstWhere(
@@ -950,7 +952,15 @@ final class ImClient {
     String roomId,
     String text, {
     String? replyToMessageId,
-  }) => _ordered(() => _host.sendText(roomId, text, replyToMessageId));
+    List<String> mentions = const [],
+  }) => _ordered(
+    () => _host.sendText(
+      roomId,
+      text,
+      replyToMessageId,
+      mentions.isEmpty ? null : mentions,
+    ),
+  );
   ImProfile _profile(wire.ImProfile value) => (
     page: value.page,
     userId: value.userId,

@@ -477,6 +477,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
   var preparedAttachments: Int64? = nil
   var totalAttachments: Int64? = nil
   var replyToId: String? = nil
+  var mentionSummary: String? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -497,6 +498,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
     let preparedAttachments: Int64? = nilOrValue(pigeonVar_list[13])
     let totalAttachments: Int64? = nilOrValue(pigeonVar_list[14])
     let replyToId: String? = nilOrValue(pigeonVar_list[15])
+    let mentionSummary: String? = nilOrValue(pigeonVar_list[16])
 
     return ImMessage(
       id: id,
@@ -514,7 +516,8 @@ struct ImMessage: Hashable, CustomStringConvertible {
       createdAt: createdAt,
       preparedAttachments: preparedAttachments,
       totalAttachments: totalAttachments,
-      replyToId: replyToId
+      replyToId: replyToId,
+      mentionSummary: mentionSummary
     )
   }
   func toList() -> [Any?] {
@@ -535,13 +538,14 @@ struct ImMessage: Hashable, CustomStringConvertible {
       preparedAttachments,
       totalAttachments,
       replyToId,
+      mentionSummary,
     ]
   }
   static func == (lhs: ImMessage, rhs: ImMessage) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.preparedAttachments, rhs.preparedAttachments) && MessagesPigeonInternal.deepEquals(lhs.totalAttachments, rhs.totalAttachments) && MessagesPigeonInternal.deepEquals(lhs.replyToId, rhs.replyToId)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.preparedAttachments, rhs.preparedAttachments) && MessagesPigeonInternal.deepEquals(lhs.totalAttachments, rhs.totalAttachments) && MessagesPigeonInternal.deepEquals(lhs.replyToId, rhs.replyToId) && MessagesPigeonInternal.deepEquals(lhs.mentionSummary, rhs.mentionSummary)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -562,10 +566,11 @@ struct ImMessage: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: preparedAttachments, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: totalAttachments, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: replyToId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: mentionSummary, hasher: &hasher)
   }
 
   public var description: String {
-    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)), preparedAttachments: \(String(describing: preparedAttachments)), totalAttachments: \(String(describing: totalAttachments)), replyToId: \(String(describing: replyToId)))"
+    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)), preparedAttachments: \(String(describing: preparedAttachments)), totalAttachments: \(String(describing: totalAttachments)), replyToId: \(String(describing: replyToId)), mentionSummary: \(String(describing: mentionSummary)))"
   }
 }
 
@@ -1975,7 +1980,7 @@ protocol ImHost {
   func setFavorite(roomId: String, messageId: String, favorited: Bool) async throws
   func clearMessageSearch() async throws
   func recoverSend(intentId: String, resend: Bool) async throws
-  func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
+  func sendText(roomId: String, text: String, replyToMessageId: String?, mentions: [String]?) async throws
   func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws
   func transfers() async throws -> [Transfer]
   func transferAction(id: String, action: String) async throws
@@ -2937,9 +2942,10 @@ class ImHostSetup {
         let roomIdArg = args[0] as! String
         let textArg = args[1] as! String
         let replyToMessageIdArg: String? = nilOrValue(args[2])
+        let mentionsArg: [String]? = nilOrValue(args[3])
         Task { @MainActor in
           do {
-            try await api.sendText(roomId: roomIdArg, text: textArg, replyToMessageId: replyToMessageIdArg)
+            try await api.sendText(roomId: roomIdArg, text: textArg, replyToMessageId: replyToMessageIdArg, mentions: mentionsArg)
             reply(wrapResult(nil))
           } catch {
             reply(wrapError(error))

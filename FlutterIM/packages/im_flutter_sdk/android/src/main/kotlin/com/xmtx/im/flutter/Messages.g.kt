@@ -480,7 +480,8 @@ data class ImMessage (
   val createdAt: Long? = null,
   val preparedAttachments: Long? = null,
   val totalAttachments: Long? = null,
-  val replyToId: String? = null
+  val replyToId: String? = null,
+  val mentionSummary: String? = null
 )
  {
   companion object {
@@ -501,7 +502,8 @@ data class ImMessage (
       val preparedAttachments = pigeonVar_list[13] as Long?
       val totalAttachments = pigeonVar_list[14] as Long?
       val replyToId = pigeonVar_list[15] as String?
-      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, revision, mutableRevision, replyPreview, pendingStatus, createdAt, preparedAttachments, totalAttachments, replyToId)
+      val mentionSummary = pigeonVar_list[16] as String?
+      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, revision, mutableRevision, replyPreview, pendingStatus, createdAt, preparedAttachments, totalAttachments, replyToId, mentionSummary)
     }
   }
   fun toList(): List<Any?> {
@@ -522,6 +524,7 @@ data class ImMessage (
       preparedAttachments,
       totalAttachments,
       replyToId,
+      mentionSummary,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -532,7 +535,7 @@ data class ImMessage (
       return true
     }
     val other = other as ImMessage
-    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.preparedAttachments, other.preparedAttachments) && MessagesPigeonUtils.deepEquals(this.totalAttachments, other.totalAttachments) && MessagesPigeonUtils.deepEquals(this.replyToId, other.replyToId)
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.preparedAttachments, other.preparedAttachments) && MessagesPigeonUtils.deepEquals(this.totalAttachments, other.totalAttachments) && MessagesPigeonUtils.deepEquals(this.replyToId, other.replyToId) && MessagesPigeonUtils.deepEquals(this.mentionSummary, other.mentionSummary)
   }
 
   override fun hashCode(): Int {
@@ -553,10 +556,11 @@ data class ImMessage (
     result = 31 * result + MessagesPigeonUtils.deepHash(this.preparedAttachments)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.totalAttachments)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.replyToId)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.mentionSummary)
     return result
   }
   override fun toString(): String {
-    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, revision=$revision, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt, preparedAttachments=$preparedAttachments, totalAttachments=$totalAttachments, replyToId=$replyToId)"
+    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, revision=$revision, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt, preparedAttachments=$preparedAttachments, totalAttachments=$totalAttachments, replyToId=$replyToId, mentionSummary=$mentionSummary)"
   }
 }
 
@@ -2021,7 +2025,7 @@ interface ImHost {
   suspend fun setFavorite(roomId: String, messageId: String, favorited: Boolean)
   suspend fun clearMessageSearch()
   suspend fun recoverSend(intentId: String, resend: Boolean)
-  suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
+  suspend fun sendText(roomId: String, text: String, replyToMessageId: String?, mentions: List<String>?)
   suspend fun sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String)
   suspend fun transfers(): List<Transfer>
   suspend fun transferAction(id: String, action: String)
@@ -3116,9 +3120,10 @@ interface ImHost {
             val roomIdArg = args[0] as String
             val textArg = args[1] as String
             val replyToMessageIdArg = args[2] as String?
+            val mentionsArg = args[3] as List<String>?
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
-                api.sendText(roomIdArg, textArg, replyToMessageIdArg)
+                api.sendText(roomIdArg, textArg, replyToMessageIdArg, mentionsArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
