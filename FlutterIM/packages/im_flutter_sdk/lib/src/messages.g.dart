@@ -422,6 +422,8 @@ class ImMessage {
     this.replyPreview,
     this.pendingStatus,
     this.createdAt,
+    this.preparedAttachments,
+    this.totalAttachments,
   });
 
   String id;
@@ -450,6 +452,10 @@ class ImMessage {
 
   int? createdAt;
 
+  int? preparedAttachments;
+
+  int? totalAttachments;
+
   List<Object?> _toList() {
     return <Object?>[
       id,
@@ -465,6 +471,8 @@ class ImMessage {
       replyPreview,
       pendingStatus,
       createdAt,
+      preparedAttachments,
+      totalAttachments,
     ];
   }
 
@@ -487,6 +495,8 @@ class ImMessage {
       replyPreview: result[10] as String?,
       pendingStatus: result[11] as String?,
       createdAt: result[12] as int?,
+      preparedAttachments: result[13] as int?,
+      totalAttachments: result[14] as int?,
     );
   }
 
@@ -499,7 +509,7 @@ class ImMessage {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(revision, other.revision) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt);
+    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(revision, other.revision) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt) && _deepEquals(preparedAttachments, other.preparedAttachments) && _deepEquals(totalAttachments, other.totalAttachments);
   }
 
   @override
@@ -508,7 +518,7 @@ class ImMessage {
 
   @override
   String toString() {
-    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, revision: $revision, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt)';
+    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, revision: $revision, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt, preparedAttachments: $preparedAttachments, totalAttachments: $totalAttachments)';
   }
 }
 

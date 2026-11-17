@@ -38,6 +38,8 @@ public final class V2MobileClient: Sendable {
         public let isForwarded: Bool
         public let revision: Int64?
         public let mutableRevision: Int64?
+        public let preparedAttachments: Int64?
+        public let totalAttachments: Int64?
         public let pendingStatus: String?
         public let createdAt: Int64?
     }
@@ -87,11 +89,11 @@ public final class V2MobileClient: Sendable {
     public func nextUpdate(windowID: String) async throws -> Window {
         let value = try await run(.init(operation: .watchWindow, windowID: windowID))
         let messages = (value.chat?.messages ?? []).map {
-            Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map(Attachment.init), readByPeer: $0.readByPeer, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, revision: Int64(exactly: $0.revision), mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, pendingStatus: nil, createdAt: $0.createdAt)
+            Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map(Attachment.init), readByPeer: $0.readByPeer, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, revision: Int64(exactly: $0.revision), mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, preparedAttachments: nil, totalAttachments: nil, pendingStatus: nil, createdAt: $0.createdAt)
         }
         return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID) },
                       messages: messages + (value.chat?.pending ?? []).map {
-                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, pendingStatus: $0.preparationStatus ?? $0.status, createdAt: $0.createdAt)
+                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, pendingStatus: $0.preparationStatus ?? $0.status, createdAt: $0.createdAt)
                       }, hasOlder: value.chat?.hasOlder ?? false, isLatest: value.chat?.isLatest ?? true)
     }
     public struct DirectoryEntry: Sendable {

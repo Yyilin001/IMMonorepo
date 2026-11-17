@@ -65,6 +65,8 @@ struct SharedPendingMessage: Encodable, Sendable {
     let id: String
     let text: String
     let status: String
+    var preparedAttachments: Int64?
+    var totalAttachments: Int64?
     var preparationStatus: String?
     let createdAt: Int64
 
@@ -77,6 +79,7 @@ struct SharedPendingMessage: Encodable, Sendable {
         else if intent.isProcessing { detail = "preparationProcessing" }
         else { detail = intent.total == 0 ? "preparationWaiting" : "preparing" }
         return .init(id: intent.id.uuidString, text: intent.text, status: intent.isExpired ? "expiredUnsubmitted" : "preparing",
+                     preparedAttachments: Int64(intent.completed), totalAttachments: Int64(intent.total),
                      preparationStatus: detail, createdAt: Int64(intent.createdAt.timeIntervalSince1970 * 1000))
     }
 }

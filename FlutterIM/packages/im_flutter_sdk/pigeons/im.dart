@@ -87,6 +87,8 @@ class ImMessage {
     this.replyPreview,
     this.pendingStatus,
     this.createdAt,
+    this.preparedAttachments,
+    this.totalAttachments,
   });
   String id;
   String senderId;
@@ -101,6 +103,8 @@ class ImMessage {
   String? replyPreview;
   String? pendingStatus;
   int? createdAt;
+  int? preparedAttachments;
+  int? totalAttachments;
 }
 
 class DirectoryEntry {

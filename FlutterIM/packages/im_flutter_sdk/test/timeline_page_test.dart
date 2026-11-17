@@ -134,6 +134,8 @@ void main() {
               isForwarded: false,
               pendingStatus: status,
               createdAt: 12345,
+              preparedAttachments: 1,
+              totalAttachments: 3,
             ),
         ],
         hasOlder: true,
@@ -156,6 +158,9 @@ void main() {
         (ImSendStatus.preparationWaiting, 12345),
       ],
     );
+    expect(iterator.current.messages.last.preparedAttachments, 1);
+    expect(iterator.current.messages.last.totalAttachments, 3);
+    expect(message.totalAttachments, isNull);
     final attachment = message.attachments.single;
     expect(
       (attachment.name, attachment.contentType, attachment.bytes),

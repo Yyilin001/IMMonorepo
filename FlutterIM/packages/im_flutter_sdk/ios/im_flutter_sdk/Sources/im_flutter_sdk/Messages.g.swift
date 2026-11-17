@@ -459,6 +459,8 @@ struct ImMessage: Hashable, CustomStringConvertible {
   var replyPreview: String? = nil
   var pendingStatus: String? = nil
   var createdAt: Int64? = nil
+  var preparedAttachments: Int64? = nil
+  var totalAttachments: Int64? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -476,6 +478,8 @@ struct ImMessage: Hashable, CustomStringConvertible {
     let replyPreview: String? = nilOrValue(pigeonVar_list[10])
     let pendingStatus: String? = nilOrValue(pigeonVar_list[11])
     let createdAt: Int64? = nilOrValue(pigeonVar_list[12])
+    let preparedAttachments: Int64? = nilOrValue(pigeonVar_list[13])
+    let totalAttachments: Int64? = nilOrValue(pigeonVar_list[14])
 
     return ImMessage(
       id: id,
@@ -490,7 +494,9 @@ struct ImMessage: Hashable, CustomStringConvertible {
       mutableRevision: mutableRevision,
       replyPreview: replyPreview,
       pendingStatus: pendingStatus,
-      createdAt: createdAt
+      createdAt: createdAt,
+      preparedAttachments: preparedAttachments,
+      totalAttachments: totalAttachments
     )
   }
   func toList() -> [Any?] {
@@ -508,13 +514,15 @@ struct ImMessage: Hashable, CustomStringConvertible {
       replyPreview,
       pendingStatus,
       createdAt,
+      preparedAttachments,
+      totalAttachments,
     ]
   }
   static func == (lhs: ImMessage, rhs: ImMessage) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.preparedAttachments, rhs.preparedAttachments) && MessagesPigeonInternal.deepEquals(lhs.totalAttachments, rhs.totalAttachments)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -532,10 +540,12 @@ struct ImMessage: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: replyPreview, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: pendingStatus, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: createdAt, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: preparedAttachments, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: totalAttachments, hasher: &hasher)
   }
 
   public var description: String {
-    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)))"
+    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)), preparedAttachments: \(String(describing: preparedAttachments)), totalAttachments: \(String(describing: totalAttachments)))"
   }
 }
 

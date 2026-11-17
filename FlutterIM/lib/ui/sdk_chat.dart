@@ -525,7 +525,15 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                   : room.isGroup
                                   ? item.senderId
                                   : name,
-                              sdkStatus: caption,
+                              sdkStatus: switch ((
+                                item.preparedAttachments,
+                                item.totalAttachments,
+                              )) {
+                                (final int ready, final int total)
+                                    when total > 0 =>
+                                  '$caption · 附件 $ready/$total',
+                                _ => caption,
+                              },
                               attachmentList:
                                   item.withdrawn || item.attachments.isEmpty
                                   ? null

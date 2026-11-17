@@ -88,6 +88,8 @@ typedef ImMessage = ({
   String? replyPreview,
   ImSendStatus? pendingStatus,
   int? createdAt,
+  int? preparedAttachments,
+  int? totalAttachments,
 });
 
 extension on wire.ImSession {
@@ -118,6 +120,8 @@ extension on wire.ImMessage {
     isForwarded: isForwarded,
     replyPreview: replyPreview,
     createdAt: createdAt,
+    preparedAttachments: preparedAttachments,
+    totalAttachments: totalAttachments,
     pendingStatus: pendingStatus == null
         ? null
         : ImSendStatus.values.firstWhere(
