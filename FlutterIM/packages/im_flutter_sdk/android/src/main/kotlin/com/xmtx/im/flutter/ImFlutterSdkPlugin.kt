@@ -64,7 +64,7 @@ private class MobileHost(private val context: Context) : ImHost {
         val window = windows[windowId] ?: throw FlutterError("closed")
         val value = window.states().first()
         val messages = value.chat?.messages.orEmpty().map {
-            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.readByPeer, it.forwardedFromID != null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt)
+            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.readByPeer, it.forwardedFromID != null, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt)
         }
         WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
             messages + value.chat?.pending.orEmpty().map {
@@ -80,6 +80,12 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun sendText(roomId: String, text: String, replyToMessageId: String?) { mutations.withLock {
         sdk { client.openConversation(roomId); client.sendText(roomId, text, replyToMessageId) }
     } }
+    override suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String) {
+        mutations.withLock { sdk { client.editMessage(roomId, messageId, revision, text) } }
+    }
+    override suspend fun withdrawMessage(roomId: String, messageId: String, revision: Long) {
+        mutations.withLock { sdk { client.withdrawMessage(roomId, messageId, revision) } }
+    }
     override suspend fun signOut() { mutations.withLock {
         sdk { client.signOut() }
         windows.clear()

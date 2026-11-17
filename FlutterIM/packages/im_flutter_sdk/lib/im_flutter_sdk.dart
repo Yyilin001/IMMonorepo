@@ -46,6 +46,7 @@ typedef ImMessage = ({
   bool withdrawn,
   bool hasMedia,
   bool readByPeer,
+  int? mutableRevision,
   bool isForwarded,
   String? replyPreview,
   ImSendStatus? pendingStatus,
@@ -65,6 +66,7 @@ extension on wire.ImMessage {
     withdrawn: withdrawn,
     hasMedia: hasMedia,
     readByPeer: readByPeer,
+    mutableRevision: mutableRevision,
     isForwarded: isForwarded,
     replyPreview: replyPreview,
     createdAt: createdAt,
@@ -266,6 +268,15 @@ final class ImClient {
     );
     return stream.stream;
   }
+
+  Future<void> editMessage(
+    String roomId,
+    String messageId,
+    int revision,
+    String text,
+  ) => _ordered(() => _host.editMessage(roomId, messageId, revision, text));
+  Future<void> withdrawMessage(String roomId, String messageId, int revision) =>
+      _ordered(() => _host.withdrawMessage(roomId, messageId, revision));
 
   Future<void> sendText(
     String roomId,

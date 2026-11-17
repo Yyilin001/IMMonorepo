@@ -1541,12 +1541,14 @@ class _MessageBubble extends ConsumerWidget {
     this.sdkStatus,
     this.replyPreview,
     this.onReply,
+    this.onEdit,
+    this.onWithdraw,
     this.isForwarded = false,
     this.showTime = true,
   });
   final String? sdkSender, sdkStatus, replyPreview;
   final bool isForwarded;
-  final VoidCallback? onReply;
+  final VoidCallback? onReply, onEdit, onWithdraw;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1645,11 +1647,29 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      if (onReply != null)
-                        IconButton(
-                          tooltip: '回复消息',
-                          onPressed: onReply,
-                          icon: const Icon(Icons.reply, size: 18),
+                      if (onReply != null ||
+                          onEdit != null ||
+                          onWithdraw != null)
+                        PopupMenuButton<VoidCallback>(
+                          tooltip: '消息操作',
+                          onSelected: (action) => action(),
+                          itemBuilder: (_) => [
+                            if (onReply != null)
+                              PopupMenuItem(
+                                value: onReply,
+                                child: const Text('回复'),
+                              ),
+                            if (onEdit != null)
+                              PopupMenuItem(
+                                value: onEdit,
+                                child: const Text('编辑'),
+                              ),
+                            if (onWithdraw != null)
+                              PopupMenuItem(
+                                value: onWithdraw,
+                                child: const Text('撤回'),
+                              ),
+                          ],
                         ),
                       const SizedBox(width: 8),
                       if (showTime)

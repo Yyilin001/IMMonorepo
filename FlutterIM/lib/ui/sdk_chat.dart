@@ -14,6 +14,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   late final int id;
   late final Stream<List<ImMessage>> messages;
   ImMessage? replyTarget;
+  final activeMutations = <String>{};
   bool initialized = false, sending = false;
 
   @override
@@ -49,6 +50,35 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       }
     } finally {
       if (mounted) setState(() => sending = false);
+    }
+  }
+
+  Future<void> mutate(ImMessage item, {required bool editing}) async {
+    final revision = item.mutableRevision;
+    if (revision == null || !activeMutations.add(item.id)) return;
+    setState(() {});
+    final client = _SdkScope.of(context)!.client!;
+    try {
+      if (editing) {
+        await showDialog<void>(
+          context: context,
+          builder: (_) => _EditMessageDialog(
+            original: item.text,
+            save: (text) =>
+                client.editMessage(widget.room.id, item.id, revision, text),
+          ),
+        );
+      } else {
+        await client.withdrawMessage(widget.room.id, item.id, revision);
+        if (mounted && replyTarget?.id == item.id) replyTarget = null;
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(_errorText(error))));
+      }
+    } finally {
+      if (mounted) setState(() => activeMutations.remove(item.id));
     }
   }
 
@@ -172,6 +202,16 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                             ? item.senderId
                             : name,
                         sdkStatus: caption,
+                        onEdit:
+                            item.mutableRevision != null &&
+                                !activeMutations.contains(item.id)
+                            ? () => mutate(item, editing: true)
+                            : null,
+                        onWithdraw:
+                            item.mutableRevision != null &&
+                                !activeMutations.contains(item.id)
+                            ? () => mutate(item, editing: false)
+                            : null,
                         onReply:
                             !sending &&
                                 item.pendingStatus == null &&
@@ -235,4 +275,63 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       ],
     );
   }
+}
+
+class _EditMessageDialog extends StatefulWidget {
+  const _EditMessageDialog({required this.original, required this.save});
+  final String original;
+  final Future<void> Function(String) save;
+
+  @override
+  State<_EditMessageDialog> createState() => _EditMessageDialogState();
+}
+
+class _EditMessageDialogState extends State<_EditMessageDialog> {
+  late String text = widget.original;
+  bool busy = false;
+  String? error;
+
+  Future<void> submit() async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await widget.save(text);
+      if (mounted) Navigator.pop(context);
+    } catch (failure) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          error = _errorText(failure);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('编辑消息'),
+    content: TextFormField(
+      initialValue: widget.original,
+      autofocus: true,
+      enabled: !busy,
+      maxLines: null,
+      decoration: InputDecoration(errorText: error),
+      onChanged: (value) => setState(() => text = value),
+    ),
+    actions: [
+      TextButton(
+        onPressed: busy ? null : () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      FilledButton(
+        onPressed: busy || text.trim().isEmpty || text == widget.original
+            ? null
+            : submit,
+        child: const Text('保存'),
+      ),
+    ],
+  );
 }

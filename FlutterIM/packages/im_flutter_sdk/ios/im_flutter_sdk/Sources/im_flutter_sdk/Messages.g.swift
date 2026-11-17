@@ -298,6 +298,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
   var hasMedia: Bool
   var readByPeer: Bool
   var isForwarded: Bool
+  var mutableRevision: Int64? = nil
   var replyPreview: String? = nil
   var pendingStatus: String? = nil
   var createdAt: Int64? = nil
@@ -312,9 +313,10 @@ struct ImMessage: Hashable, CustomStringConvertible {
     let hasMedia = pigeonVar_list[4] as! Bool
     let readByPeer = pigeonVar_list[5] as! Bool
     let isForwarded = pigeonVar_list[6] as! Bool
-    let replyPreview: String? = nilOrValue(pigeonVar_list[7])
-    let pendingStatus: String? = nilOrValue(pigeonVar_list[8])
-    let createdAt: Int64? = nilOrValue(pigeonVar_list[9])
+    let mutableRevision: Int64? = nilOrValue(pigeonVar_list[7])
+    let replyPreview: String? = nilOrValue(pigeonVar_list[8])
+    let pendingStatus: String? = nilOrValue(pigeonVar_list[9])
+    let createdAt: Int64? = nilOrValue(pigeonVar_list[10])
 
     return ImMessage(
       id: id,
@@ -324,6 +326,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
       hasMedia: hasMedia,
       readByPeer: readByPeer,
       isForwarded: isForwarded,
+      mutableRevision: mutableRevision,
       replyPreview: replyPreview,
       pendingStatus: pendingStatus,
       createdAt: createdAt
@@ -338,6 +341,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
       hasMedia,
       readByPeer,
       isForwarded,
+      mutableRevision,
       replyPreview,
       pendingStatus,
       createdAt,
@@ -347,7 +351,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -359,13 +363,14 @@ struct ImMessage: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: hasMedia, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: readByPeer, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: isForwarded, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: mutableRevision, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: replyPreview, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: pendingStatus, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: createdAt, hasher: &hasher)
   }
 
   public var description: String {
-    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)))"
+    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)))"
   }
 }
 
@@ -524,6 +529,8 @@ protocol ImHost {
   func directory() async throws -> [DirectoryEntry]
   func closeWindow(windowId: String) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
+  func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
+  func withdrawMessage(roomId: String, messageId: String, revision: Int64) async throws
   func signOut() async throws
   func close() async throws
 }
@@ -715,6 +722,45 @@ class ImHostSetup {
       }
     } else {
       sendTextChannel.setMessageHandler(nil)
+    }
+    let editMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.editMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      editMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let revisionArg = args[2] as! Int64
+        let textArg = args[3] as! String
+        Task { @MainActor in
+          do {
+            try await api.editMessage(roomId: roomIdArg, messageId: messageIdArg, revision: revisionArg, text: textArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      editMessageChannel.setMessageHandler(nil)
+    }
+    let withdrawMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.withdrawMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      withdrawMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let revisionArg = args[2] as! Int64
+        Task { @MainActor in
+          do {
+            try await api.withdrawMessage(roomId: roomIdArg, messageId: messageIdArg, revision: revisionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      withdrawMessageChannel.setMessageHandler(nil)
     }
     let signOutChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.signOut\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
