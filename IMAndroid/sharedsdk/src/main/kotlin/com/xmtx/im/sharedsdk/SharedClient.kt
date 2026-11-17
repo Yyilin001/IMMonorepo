@@ -38,7 +38,7 @@ private fun JSONObject.conversation() = SharedConversation(
     optBoolean("isPinned"), optBoolean("isArchived"), optionalLong("muteUntil")
 )
 data class SharedEntity(val kind: String, val offset: Int, val length: Int, val url: String?)
-data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?, val createdAt: Long? = null, val mentionSummary: String? = null, val entities: PersistentList<SharedEntity> = persistentListOf())
+data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?, val createdAt: Long? = null, val mentionSummary: String? = null, val entities: PersistentList<SharedEntity> = persistentListOf(), val roomSequence: Long = 0, val isPinned: Boolean = false)
 enum class SharedSendStatus { Preparing, Pending, WaitingForNetwork, WaitingForAuthentication, AcceptedAwaitingProjection, ConfirmingOutcome, NeedsAttention, ExpiredUnsubmitted, Closed, Rejected }
 data class SharedPendingMessage(val id: String, val text: String, val status: SharedSendStatus, val preparationStatus: String? = null, val createdAt: Long? = null,
                               val preparedAttachments: Long? = null, val totalAttachments: Long? = null)
@@ -143,6 +143,10 @@ class SharedClient private constructor(private val handle: Long) {
     })
     suspend fun favorites(next: Boolean = false): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "favorites").put("action", if (next) "next" else "first"))
+    }
+    suspend fun pinMessage(roomID: String, messageID: String, roomSequence: Long, isPinned: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "pinMessage").put("roomID", roomID).put("messageID", messageID)
+            .put("offset", roomSequence).put("flag1", isPinned))
     }
     suspend fun setFavorite(roomID: String, messageID: String, favorited: Boolean): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "setFavorite").put("roomID", roomID).put("messageID", messageID).put("flag1", favorited))
@@ -391,7 +395,7 @@ class SharedClient private constructor(private val handle: Long) {
                             val entity = it.getJSONArray("entities").getJSONObject(index)
                             SharedEntity(entity.getString("kind"), entity.getInt("offset"), entity.getInt("length"),
                                 entity.optString("url").takeIf(String::isNotEmpty))
-                        }.toPersistentList())
+                        }.toPersistentList(), it.getLong("roomSequence"), it.getBoolean("isPinned"))
                 } }.toPersistentList(), (0 until pending.length()).map { index -> pending.getJSONObject(index).let {
                     SharedPendingMessage(it.getString("id"), it.getString("text"), SharedSendStatus.entries.first { status -> status.name.equals(it.getString("status"), true) },
                         it.optString("preparationStatus").takeIf(String::isNotEmpty), it.optionalLong("createdAt"),

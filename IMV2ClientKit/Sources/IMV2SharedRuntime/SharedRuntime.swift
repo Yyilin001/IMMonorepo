@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, pinMessage, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -83,6 +83,8 @@ struct SharedMessage: Encodable, Sendable {
     var isFavorited = false
     let mentionSummary: String?
     let entities: [SharedEntity]
+    var roomSequence: UInt64 = 0
+    var isPinned = false
 }
 struct SharedPendingMessage: Encodable, Sendable {
     let id: String
@@ -331,6 +333,10 @@ package actor SharedRuntime {
                     attachmentNames: message.mediaPresentations.map { $0.resourceDescriptor?.displayName.value ?? "附件" }))
             }
             favorites = SharedFavorites(messages: rows, hasMore: page.nextCursor != nil)
+        case .pinMessage:
+            guard let socialGroups, let roomID = request.roomID, let messageID = request.messageID,
+                  let sequence = request.offset, let pinned = request.flag1 else { throw SharedFailure.invalidInput }
+            try await socialGroups.pinMessage(roomID: roomID, messageID: messageID, roomSequence: UInt64(sequence), isPinned: pinned)
         case .setFavorite:
             guard let preferences = personalPreferences, let roomID = request.roomID,
                   let messageID = request.messageID, let favorited = request.flag1 else { throw SharedFailure.invalidInput }
@@ -526,7 +532,7 @@ package actor SharedRuntime {
         case .retrySend:
             guard let business = messageBusiness, let raw = request.intentID, let id = UUID(uuidString: raw) else { throw SharedFailure.invalidInput }
             try await business.retrySend(id)
-        case .openAvatarEditor, .changeAvatar, .avatarAction, .contacts, .contactsNext, .groupsFirst, .groupsNext, .lookupIdentity, .clearDiscovery, .socialAction, .openDirect, .createGroup, .openGroup, .groupMembersNext, .groupAction, .retryDirectoryWork, .discardDirectoryDraft, .profiles, .clearProfiles, .avatar, .groupNickname, .saveGroupNickname, .moderateMemberRemoval, .openProfile, .saveAlias, .invitations, .invitationsNext, .previewInvite, .refreshInvite, .inviteAction, .muteMember:
+        case .openAvatarEditor, .changeAvatar, .avatarAction, .contacts, .contactsNext, .groupsFirst, .groupsNext, .lookupIdentity, .clearDiscovery, .socialAction, .openDirect, .createGroup, .openGroup, .groupMembersNext, .groupAction, .retryDirectoryWork, .discardDirectoryDraft, .profiles, .clearProfiles, .avatar, .groupNickname, .saveGroupNickname, .moderateMemberRemoval, .pinMessage, .openProfile, .saveAlias, .invitations, .invitationsNext, .previewInvite, .refreshInvite, .inviteAction, .muteMember:
             guard let socialGroups else { throw SharedFailure.authenticationRequired }
             if request.operation == .clearDiscovery { await media?.clear(); await messaging?.clearTransient() }
             try await socialGroups.execute(request)
@@ -726,29 +732,47 @@ package actor SharedRuntime {
     private func renderChat(timeline: V2ClientConversationTimelinePage, pending: V2PendingResourceSendSnapshot?,
         room: RoomID, isLatest: Bool, focused: MessageID? = nil, pendingPage: Int = 0) async -> SharedChat {
             let favorites = (try? await store?.favoritedMessageIDs(in: room)) ?? []
+            let pinned = (try? await store?.pinnedMessageIDs(roomID: room)) ?? []
             var replyPreviews: [MessageID: String] = [:]
             for id in Set(timeline.messages.filter { !$0.isWithdrawn }.compactMap { $0.replyTo?.messageID }) {
                 if let original = try? await messaging?.message(room: room, id: id) {
                     replyPreviews[id] = original.text.isEmpty ? "[附件]" : String(original.text.prefix(160))
                 }
             }
-            return .init(roomID: room.rawValue, messages: timeline.messages.map { message in
-                .init(id: message.messageID.rawValue, senderID: message.senderUserID.rawValue, text: message.isWithdrawn ? "" : message.text,
-                    sequence: message.timelineSequence, createdAt: Int64(message.createdAt.timeIntervalSince1970 * 1000), withdrawn: message.isWithdrawn, hasMedia: !message.media.isEmpty, attachments: message.isWithdrawn ? [] : message.mediaPresentations.map(SharedAttachment.init),
-                    revision: message.messageRevision, canMutate: message.senderUserID.rawValue == userID && !message.isWithdrawn && message.messageRevision > 0,
-                    readByPeer: message.senderUserID.rawValue == userID && timeline.directReadReceipt?.isVisible == true && timeline.directReadReceipt?.readerUserID.rawValue != userID && (timeline.directReadReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
-                    replyToID: message.isWithdrawn ? nil : message.replyTo?.messageID.rawValue,
-                    replyPreview: message.isWithdrawn ? nil : message.replyTo.flatMap { replyPreviews[$0.messageID] },
+            let messages = timeline.messages.map { message -> SharedMessage in
+                let attachments: [SharedAttachment] = message.isWithdrawn ? [] : message.mediaPresentations.map(SharedAttachment.init)
+                let entities: [SharedEntity] = message.isWithdrawn ? [] : message.entities.map {
+                    SharedEntity(kind: $0.kind.rawValue, offset: $0.offsetUTF16, length: $0.lengthUTF16,
+                                 url: $0.linkURL?.absoluteString)
+                }
+                let reply: MessageID? = message.isWithdrawn ? nil : message.replyTo?.messageID
+                let recipientRead: Bool = timeline.directReadReceipt?.isVisible == true
+                    && timeline.directReadReceipt?.readerUserID.rawValue != userID
+                    && (timeline.directReadReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence
+                return SharedMessage(id: message.messageID.rawValue, senderID: message.senderUserID.rawValue,
+                    text: message.isWithdrawn ? "" : message.text, sequence: message.timelineSequence,
+                    createdAt: Int64(message.createdAt.timeIntervalSince1970 * 1000), withdrawn: message.isWithdrawn,
+                    hasMedia: !message.media.isEmpty, attachments: attachments,
+                    revision: message.messageRevision,
+                    canMutate: message.senderUserID.rawValue == userID && !message.isWithdrawn && message.messageRevision > 0,
+                    readByPeer: message.senderUserID.rawValue == userID && recipientRead,
+                    replyToID: reply?.rawValue,
+                    replyPreview: reply.flatMap { replyPreviews[$0] },
                     forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue,
                     isFavorited: favorites.contains(message.messageID),
                     mentionSummary: Self.mentionSummary(message.mentions),
-                    entities: message.isWithdrawn ? [] : message.entities.map {
-                        SharedEntity(kind: $0.kind.rawValue, offset: $0.offsetUTF16, length: $0.lengthUTF16,
-                                     url: $0.linkURL?.absoluteString)
-                    })
-            }, pending: (pending?.preparing ?? []).map(SharedPendingMessage.preparing)
-                + (pending?.submitted ?? []).map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status), createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000)) },
-                focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest, hasMorePending: pending?.hasNext ?? false, pendingPage: pendingPage)
+                    entities: entities,
+                    roomSequence: message.roomSequence,
+                    isPinned: pinned.contains(message.messageID))
+            }
+            let pendingMessages: [SharedPendingMessage] = (pending?.preparing ?? []).map(SharedPendingMessage.preparing)
+                + (pending?.submitted ?? []).map {
+                    .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status),
+                          createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000))
+                }
+            return SharedChat(roomID: room.rawValue, messages: messages, pending: pendingMessages,
+                focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest,
+                hasMorePending: pending?.hasNext ?? false, pendingPage: pendingPage)
     }
 
     private static func mentionSummary(_ mentions: [V2MentionTarget]) -> String? {

@@ -146,7 +146,8 @@ private actor MobileHost: ImHost {
     private func windowView(_ view: V2MobileClient.Window) -> WindowView {
         return WindowView(conversations: view.conversations.map { .init(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, isGroup: $0.isGroup, isPinned: $0.isPinned, isArchived: $0.isArchived, updatedAt: $0.updatedAt, peerId: $0.peerID, muteUntil: $0.muteUntil) },
                               messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map { Attachment(id: $0.id, name: $0.name, contentType: $0.contentType, bytes: $0.bytes) }, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, revision: $0.revision, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, replyToId: $0.replyToID, mentionSummary: $0.mentionSummary,
-                    entities: $0.entities.map { ImEntity(kind: $0.kind, offset: Int64($0.offset), length: Int64($0.length), url: $0.url) }) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
+                    entities: $0.entities.map { ImEntity(kind: $0.kind, offset: Int64($0.offset), length: Int64($0.length), url: $0.url) },
+                    roomSequence: $0.roomSequence, isPinned: $0.isPinned) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
     }
     func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage {
         try await ordered {
@@ -288,6 +289,10 @@ private actor MobileHost: ImHost {
                                   text: $0.text, createdAt: $0.createdAt, attachmentNames: $0.attachmentNames)
             }, hasMore: page.hasMore)
         }
+    }
+    func pinMessage(roomId: String, messageId: String, roomSequence: Int64, isPinned: Bool) async throws {
+        guard let sequence = UInt64(exactly: roomSequence) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered { try await self.client.pinMessage(roomID: roomId, messageID: messageId, roomSequence: sequence, isPinned: isPinned) }
     }
     func setFavorite(roomId: String, messageId: String, favorited: Bool) async throws {
         try await ordered { try await self.client.setFavorite(roomID: roomId, messageID: messageId, favorited: favorited) }

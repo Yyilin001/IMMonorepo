@@ -1630,6 +1630,8 @@ class _MessageBubble extends ConsumerWidget {
     this.onEnterSelection,
     this.mentionSummary,
     this.entities = const [],
+    this.isPinned = false,
+    this.onPin,
     this.selecting = false,
     this.selected = false,
     this.onToggleSelect,
@@ -1646,6 +1648,8 @@ class _MessageBubble extends ConsumerWidget {
   final bool selecting, selected;
   final String? mentionSummary;
   final List<ImEntity> entities;
+  final bool isPinned;
+  final VoidCallback? onPin;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1776,7 +1780,8 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      if (onEnterSelection != null ||
+                      if (onPin != null ||
+                          onEnterSelection != null ||
                           onCancelSend != null ||
                           recovery != null ||
                           onReply != null ||
@@ -1817,6 +1822,11 @@ class _MessageBubble extends ConsumerWidget {
                                 value: onFavorite,
                                 child: const Text('收藏'),
                               ),
+                            if (onPin != null)
+                              PopupMenuItem(
+                                value: onPin,
+                                child: Text(isPinned ? '取消置顶' : '置顶消息'),
+                              ),
                             if (onEnterSelection != null)
                               PopupMenuItem(
                                 value: onEnterSelection,
@@ -1847,6 +1857,11 @@ class _MessageBubble extends ConsumerWidget {
                   ),
                 ),
                 if (isForwarded) const Text('转发的消息'),
+                if (isPinned)
+                  const Text(
+                    '已置顶',
+                    style: TextStyle(fontSize: 11, color: Color(0xFFD79A2B)),
+                  ),
                 for (final link in {
                   for (final entity in entities)
                     if (entity.kind == 'link' && entity.url != null) entity.url!,

@@ -199,6 +199,8 @@ typedef ImMessage = ({
   int? totalAttachments,
   String? mentionSummary,
   List<ImEntity> entities,
+  int? roomSequence,
+  bool? isPinned,
 });
 
 extension on wire.ImSession {
@@ -238,6 +240,8 @@ extension on wire.ImMessage {
         (e) => (kind: e.kind, offset: e.offset, length: e.length, url: e.url),
       ),
     ),
+    roomSequence: roomSequence,
+    isPinned: isPinned ?? false,
     pendingStatus: pendingStatus == null
         ? null
         : ImSendStatus.values.firstWhere(
@@ -940,6 +944,15 @@ final class ImClient {
     required bool favorited,
   }) => _ordered(
     () => _host.setFavorite(roomId, messageId, favorited),
+  );
+
+  Future<void> pinMessage(
+    String roomId,
+    String messageId, {
+    required int roomSequence,
+    required bool isPinned,
+  }) => _ordered(
+    () => _host.pinMessage(roomId, messageId, roomSequence, isPinned),
   );
 
   Future<ImReaders> messageReaders(

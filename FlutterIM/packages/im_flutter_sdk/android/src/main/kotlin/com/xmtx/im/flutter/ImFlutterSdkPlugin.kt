@@ -57,6 +57,9 @@ private class MobileHost(private val context: Context) : ImHost {
             ImFavoriteMessage(it.id, it.roomID, it.roomTitle, it.senderID, it.text, it.createdAt, it.attachmentNames)
         }, page.hasMore)
     } }
+    override suspend fun pinMessage(roomId: String, messageId: String, roomSequence: Long, isPinned: Boolean) {
+        mutations.withLock { sdk { client.pinMessage(roomId, messageId, roomSequence, isPinned) } }
+    }
     override suspend fun setFavorite(roomId: String, messageId: String, favorited: Boolean) {
         mutations.withLock { sdk { client.setFavorite(roomId, messageId, favorited) } }
     }
@@ -103,7 +106,8 @@ private class MobileHost(private val context: Context) : ImHost {
         val value = this
         val messages = value.chat?.messages.orEmpty().map {
             ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, it.revision, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt, replyToId = it.replyToID, mentionSummary = it.mentionSummary,
-                entities = it.entities.map { entity -> ImEntity(entity.kind, entity.offset.toLong(), entity.length.toLong(), entity.url) })
+                entities = it.entities.map { entity -> ImEntity(entity.kind, entity.offset.toLong(), entity.length.toLong(), entity.url) },
+                roomSequence = it.roomSequence, isPinned = it.isPinned)
         }
         return WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.isPinned, it.isArchived, it.updatedAt, it.peerID, it.muteUntil) },
             messages + value.chat?.pending.orEmpty().map {

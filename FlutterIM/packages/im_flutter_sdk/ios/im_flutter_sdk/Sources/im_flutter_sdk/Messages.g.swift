@@ -529,6 +529,8 @@ struct ImMessage: Hashable, CustomStringConvertible {
   var replyToId: String? = nil
   var mentionSummary: String? = nil
   var entities: [ImEntity]? = nil
+  var roomSequence: Int64? = nil
+  var isPinned: Bool? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -551,6 +553,8 @@ struct ImMessage: Hashable, CustomStringConvertible {
     let replyToId: String? = nilOrValue(pigeonVar_list[15])
     let mentionSummary: String? = nilOrValue(pigeonVar_list[16])
     let entities: [ImEntity]? = nilOrValue(pigeonVar_list[17])
+    let roomSequence: Int64? = nilOrValue(pigeonVar_list[18])
+    let isPinned: Bool? = nilOrValue(pigeonVar_list[19])
 
     return ImMessage(
       id: id,
@@ -570,7 +574,9 @@ struct ImMessage: Hashable, CustomStringConvertible {
       totalAttachments: totalAttachments,
       replyToId: replyToId,
       mentionSummary: mentionSummary,
-      entities: entities
+      entities: entities,
+      roomSequence: roomSequence,
+      isPinned: isPinned
     )
   }
   func toList() -> [Any?] {
@@ -593,13 +599,15 @@ struct ImMessage: Hashable, CustomStringConvertible {
       replyToId,
       mentionSummary,
       entities,
+      roomSequence,
+      isPinned,
     ]
   }
   static func == (lhs: ImMessage, rhs: ImMessage) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.preparedAttachments, rhs.preparedAttachments) && MessagesPigeonInternal.deepEquals(lhs.totalAttachments, rhs.totalAttachments) && MessagesPigeonInternal.deepEquals(lhs.replyToId, rhs.replyToId) && MessagesPigeonInternal.deepEquals(lhs.mentionSummary, rhs.mentionSummary) && MessagesPigeonInternal.deepEquals(lhs.entities, rhs.entities)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.preparedAttachments, rhs.preparedAttachments) && MessagesPigeonInternal.deepEquals(lhs.totalAttachments, rhs.totalAttachments) && MessagesPigeonInternal.deepEquals(lhs.replyToId, rhs.replyToId) && MessagesPigeonInternal.deepEquals(lhs.mentionSummary, rhs.mentionSummary) && MessagesPigeonInternal.deepEquals(lhs.entities, rhs.entities) && MessagesPigeonInternal.deepEquals(lhs.roomSequence, rhs.roomSequence) && MessagesPigeonInternal.deepEquals(lhs.isPinned, rhs.isPinned)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -622,10 +630,12 @@ struct ImMessage: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: replyToId, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: mentionSummary, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: entities, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: roomSequence, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isPinned, hasher: &hasher)
   }
 
   public var description: String {
-    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)), preparedAttachments: \(String(describing: preparedAttachments)), totalAttachments: \(String(describing: totalAttachments)), replyToId: \(String(describing: replyToId)), mentionSummary: \(String(describing: mentionSummary)), entities: \(String(describing: entities)))"
+    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)), preparedAttachments: \(String(describing: preparedAttachments)), totalAttachments: \(String(describing: totalAttachments)), replyToId: \(String(describing: replyToId)), mentionSummary: \(String(describing: mentionSummary)), entities: \(String(describing: entities)), roomSequence: \(String(describing: roomSequence)), isPinned: \(String(describing: isPinned)))"
   }
 }
 
@@ -2038,6 +2048,7 @@ protocol ImHost {
   func messageReaders(roomId: String, messageId: String, next: Bool) async throws -> ImReaders
   func favorites(next: Bool) async throws -> ImFavorites
   func setFavorite(roomId: String, messageId: String, favorited: Bool) async throws
+  func pinMessage(roomId: String, messageId: String, roomSequence: Int64, isPinned: Bool) async throws
   func clearMessageSearch() async throws
   func recoverSend(intentId: String, resend: Bool) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?, mentions: [String]?) async throws
@@ -2961,6 +2972,26 @@ class ImHostSetup {
       }
     } else {
       setFavoriteChannel.setMessageHandler(nil)
+    }
+    let pinMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.pinMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      pinMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let roomSequenceArg = args[2] as! Int64
+        let isPinnedArg = args[3] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.pinMessage(roomId: roomIdArg, messageId: messageIdArg, roomSequence: roomSequenceArg, isPinned: isPinnedArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      pinMessageChannel.setMessageHandler(nil)
     }
     let clearMessageSearchChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.clearMessageSearch\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

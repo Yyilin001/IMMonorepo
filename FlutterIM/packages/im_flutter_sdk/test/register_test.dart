@@ -12,7 +12,7 @@ void main() {
     final calls = <Object?>[];
     final lifecycle = <Object?>[];
     final devices = <Object?>[];
-    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'sendText', 'close']) {
+    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'sendText', 'pinMessage', 'close']) {
       final channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.im_flutter_sdk.ImHost.$method',
         wire.ImHost.pigeonChannelCodec,
@@ -43,6 +43,8 @@ void main() {
           case 'setFavorite':
             devices.add(args);
           case 'sendText':
+            devices.add(args);
+          case 'pinMessage':
             devices.add(args);
           case 'privacy':
           case 'setPrivacy':
@@ -138,6 +140,13 @@ void main() {
       null,
       ['@alice', '@all'],
     ]);
+    await client.pinMessage(
+      'room',
+      'message',
+      roomSequence: 12,
+      isPinned: true,
+    );
+    expect(devices.last, ['room', 'message', 12, true]);
     await client.close();
   });
 }

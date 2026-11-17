@@ -48,6 +48,8 @@ public final class V2MobileClient: Sendable {
         public let createdAt: Int64?
         public let mentionSummary: String?
         public let entities: [Entity]
+        public let roomSequence: Int64
+        public let isPinned: Bool
     }
     public struct Entity: Sendable {
         public let kind: String
@@ -194,11 +196,12 @@ public final class V2MobileClient: Sendable {
     private func window(from value: SharedSnapshot) -> Window {
         let messages = (value.chat?.messages ?? []).map {
             Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map(Attachment.init), readByPeer: $0.readByPeer, replyToID: $0.replyToID, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, revision: Int64(exactly: $0.revision), mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, preparedAttachments: nil, totalAttachments: nil, pendingStatus: nil, createdAt: $0.createdAt, mentionSummary: $0.mentionSummary,
-                                     entities: $0.entities.map { Entity(kind: $0.kind, offset: $0.offset, length: $0.length, url: $0.url) })
+                                     entities: $0.entities.map { Entity(kind: $0.kind, offset: $0.offset, length: $0.length, url: $0.url) },
+                                     roomSequence: Int64(clamping: $0.roomSequence), isPinned: $0.isPinned)
         }
         return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID, isPinned: $0.isPinned, isArchived: $0.isArchived, muteUntil: $0.muteUntil) },
                       messages: messages + (value.chat?.pending ?? []).map {
-                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyToID: nil, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, pendingStatus: $0.preparationStatus ?? $0.status, createdAt: $0.createdAt, mentionSummary: nil, entities: [])
+                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyToID: nil, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, pendingStatus: $0.preparationStatus ?? $0.status, createdAt: $0.createdAt, mentionSummary: nil, entities: [], roomSequence: 0, isPinned: false)
                       }, hasOlder: value.chat?.hasOlder ?? false, isLatest: value.chat?.isLatest ?? true)
     }
     public struct DirectoryEntry: Sendable {
@@ -222,6 +225,11 @@ public final class V2MobileClient: Sendable {
             FavoriteMessage(id: $0.id, roomID: $0.roomID, roomTitle: $0.roomTitle, senderID: $0.senderID,
                             text: $0.text, createdAt: $0.createdAt, attachmentNames: $0.attachmentNames)
         }, hasMore: page.hasMore)
+    }
+    public func pinMessage(roomID: String, messageID: String, roomSequence: UInt64, isPinned: Bool) async throws {
+        guard let sequence = Int64(exactly: roomSequence) else { throw Failure(code: "invalidInput") }
+        _ = try await run(.init(operation: .pinMessage, offset: sequence, messageID: messageID,
+                                flag1: isPinned, roomID: roomID))
     }
     public func setFavorite(roomID: String, messageID: String, favorited: Bool) async throws {
         _ = try await run(.init(operation: .setFavorite, messageID: messageID, flag1: favorited, roomID: roomID))

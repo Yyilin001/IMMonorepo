@@ -111,6 +111,8 @@ class ImMessage {
     this.replyToId,
     this.mentionSummary,
     this.entities,
+    this.roomSequence,
+    this.isPinned,
   });
   String id;
   String senderId;
@@ -130,6 +132,8 @@ class ImMessage {
   String? replyToId;
   String? mentionSummary;
   List<ImEntity>? entities;
+  int? roomSequence;
+  bool? isPinned;
 }
 
 class ImProfile {
@@ -579,6 +583,13 @@ abstract class ImHost {
   ImFavorites favorites(bool next);
   @async
   void setFavorite(String roomId, String messageId, bool favorited);
+  @async
+  void pinMessage(
+    String roomId,
+    String messageId,
+    int roomSequence,
+    bool isPinned,
+  );
   @async
   void clearMessageSearch();
   @async

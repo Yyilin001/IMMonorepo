@@ -118,6 +118,12 @@ actor SharedSocialGroups {
             }
         } } catch is CancellationError {} catch { failure = sharedFailure(error) } }]
     }
+    func pinMessage(roomID: String, messageID: String, roomSequence: UInt64, isPinned: Bool) async throws {
+        let room = try RoomID(roomID), message = try MessageID(messageID)
+        guard try await store.roomAllowsLocalRead(roomID: room) else { throw SharedFailure.invalidInput }
+        let action = V2GroupCapabilityAction.pin(messageID: message, isPinned: isPinned, expectedRoomSequence: roomSequence)
+        _ = try await capability.enqueue(confirmation: capability.confirmationWindow(roomID: room, action: action))
+    }
     func resolveMentions(_ handles: [String]) async throws -> [V2MentionTarget] {
         guard handles.count <= V2MessageCommandLimits.maxMentions else { throw SharedFailure.invalidInput }
         var targets: [V2MentionTarget] = []

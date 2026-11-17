@@ -502,6 +502,8 @@ class ImMessage {
     this.replyToId,
     this.mentionSummary,
     this.entities,
+    this.roomSequence,
+    this.isPinned,
   });
 
   String id;
@@ -540,6 +542,10 @@ class ImMessage {
 
   List<ImEntity>? entities;
 
+  int? roomSequence;
+
+  bool? isPinned;
+
   List<Object?> _toList() {
     return <Object?>[
       id,
@@ -560,6 +566,8 @@ class ImMessage {
       replyToId,
       mentionSummary,
       entities,
+      roomSequence,
+      isPinned,
     ];
   }
 
@@ -587,6 +595,8 @@ class ImMessage {
       replyToId: result[15] as String?,
       mentionSummary: result[16] as String?,
       entities: (result[17] as List<Object?>?)?.cast<ImEntity>(),
+      roomSequence: result[18] as int?,
+      isPinned: result[19] as bool?,
     );
   }
 
@@ -599,7 +609,7 @@ class ImMessage {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(revision, other.revision) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt) && _deepEquals(preparedAttachments, other.preparedAttachments) && _deepEquals(totalAttachments, other.totalAttachments) && _deepEquals(replyToId, other.replyToId) && _deepEquals(mentionSummary, other.mentionSummary) && _deepEquals(entities, other.entities);
+    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(revision, other.revision) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt) && _deepEquals(preparedAttachments, other.preparedAttachments) && _deepEquals(totalAttachments, other.totalAttachments) && _deepEquals(replyToId, other.replyToId) && _deepEquals(mentionSummary, other.mentionSummary) && _deepEquals(entities, other.entities) && _deepEquals(roomSequence, other.roomSequence) && _deepEquals(isPinned, other.isPinned);
   }
 
   @override
@@ -608,7 +618,7 @@ class ImMessage {
 
   @override
   String toString() {
-    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, revision: $revision, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt, preparedAttachments: $preparedAttachments, totalAttachments: $totalAttachments, replyToId: $replyToId, mentionSummary: $mentionSummary, entities: $entities)';
+    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, revision: $revision, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt, preparedAttachments: $preparedAttachments, totalAttachments: $totalAttachments, replyToId: $replyToId, mentionSummary: $mentionSummary, entities: $entities, roomSequence: $roomSequence, isPinned: $isPinned)';
   }
 }
 
@@ -3063,6 +3073,23 @@ class ImHost {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, messageId, favorited]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> pinMessage(String roomId, String messageId, int roomSequence, bool isPinned) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.pinMessage$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, messageId, roomSequence, isPinned]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     _extractReplyValueOrThrow(
         pigeonVar_replyList,

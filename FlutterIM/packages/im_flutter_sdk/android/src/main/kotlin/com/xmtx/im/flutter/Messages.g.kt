@@ -531,7 +531,9 @@ data class ImMessage (
   val totalAttachments: Long? = null,
   val replyToId: String? = null,
   val mentionSummary: String? = null,
-  val entities: List<ImEntity>? = null
+  val entities: List<ImEntity>? = null,
+  val roomSequence: Long? = null,
+  val isPinned: Boolean? = null
 )
  {
   companion object {
@@ -554,7 +556,9 @@ data class ImMessage (
       val replyToId = pigeonVar_list[15] as String?
       val mentionSummary = pigeonVar_list[16] as String?
       val entities = pigeonVar_list[17] as List<ImEntity>?
-      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, revision, mutableRevision, replyPreview, pendingStatus, createdAt, preparedAttachments, totalAttachments, replyToId, mentionSummary, entities)
+      val roomSequence = pigeonVar_list[18] as Long?
+      val isPinned = pigeonVar_list[19] as Boolean?
+      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, revision, mutableRevision, replyPreview, pendingStatus, createdAt, preparedAttachments, totalAttachments, replyToId, mentionSummary, entities, roomSequence, isPinned)
     }
   }
   fun toList(): List<Any?> {
@@ -577,6 +581,8 @@ data class ImMessage (
       replyToId,
       mentionSummary,
       entities,
+      roomSequence,
+      isPinned,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -587,7 +593,7 @@ data class ImMessage (
       return true
     }
     val other = other as ImMessage
-    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.preparedAttachments, other.preparedAttachments) && MessagesPigeonUtils.deepEquals(this.totalAttachments, other.totalAttachments) && MessagesPigeonUtils.deepEquals(this.replyToId, other.replyToId) && MessagesPigeonUtils.deepEquals(this.mentionSummary, other.mentionSummary) && MessagesPigeonUtils.deepEquals(this.entities, other.entities)
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.preparedAttachments, other.preparedAttachments) && MessagesPigeonUtils.deepEquals(this.totalAttachments, other.totalAttachments) && MessagesPigeonUtils.deepEquals(this.replyToId, other.replyToId) && MessagesPigeonUtils.deepEquals(this.mentionSummary, other.mentionSummary) && MessagesPigeonUtils.deepEquals(this.entities, other.entities) && MessagesPigeonUtils.deepEquals(this.roomSequence, other.roomSequence) && MessagesPigeonUtils.deepEquals(this.isPinned, other.isPinned)
   }
 
   override fun hashCode(): Int {
@@ -610,10 +616,12 @@ data class ImMessage (
     result = 31 * result + MessagesPigeonUtils.deepHash(this.replyToId)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.mentionSummary)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.entities)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.roomSequence)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.isPinned)
     return result
   }
   override fun toString(): String {
-    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, revision=$revision, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt, preparedAttachments=$preparedAttachments, totalAttachments=$totalAttachments, replyToId=$replyToId, mentionSummary=$mentionSummary, entities=$entities)"
+    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, revision=$revision, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt, preparedAttachments=$preparedAttachments, totalAttachments=$totalAttachments, replyToId=$replyToId, mentionSummary=$mentionSummary, entities=$entities, roomSequence=$roomSequence, isPinned=$isPinned)"
   }
 }
 
@@ -2085,6 +2093,7 @@ interface ImHost {
   suspend fun messageReaders(roomId: String, messageId: String, next: Boolean): ImReaders
   suspend fun favorites(next: Boolean): ImFavorites
   suspend fun setFavorite(roomId: String, messageId: String, favorited: Boolean)
+  suspend fun pinMessage(roomId: String, messageId: String, roomSequence: Long, isPinned: Boolean)
   suspend fun clearMessageSearch()
   suspend fun recoverSend(intentId: String, resend: Boolean)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?, mentions: List<String>?)
@@ -3124,6 +3133,29 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 api.setFavorite(roomIdArg, messageIdArg, favoritedArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.pinMessage$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val messageIdArg = args[1] as String
+            val roomSequenceArg = args[2] as Long
+            val isPinnedArg = args[3] as Boolean
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.pinMessage(roomIdArg, messageIdArg, roomSequenceArg, isPinnedArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

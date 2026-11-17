@@ -923,6 +923,47 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                               onToggleSelect: () => toggleSelection(item),
                               mentionSummary: item.mentionSummary,
                               entities: item.entities,
+                              isPinned: item.isPinned ?? false,
+                              onPin:
+                                  room.isGroup &&
+                                      !item.withdrawn &&
+                                      item.roomSequence != null
+                                  ? () async {
+                                      try {
+                                        await sdk.client!.pinMessage(
+                                          room.id,
+                                          item.id,
+                                          roomSequence: item.roomSequence!,
+                                          isPinned: !(item.isPinned ?? false),
+                                        );
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            const SnackBar(
+                                              content: Text('已提交置顶变更'),
+                                            ),
+                                          );
+                                        }
+                                        final page = currentPage;
+                                        if (page != null) {
+                                          await changePage(page, latest: true);
+                                        }
+                                      } catch (failure) {
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                _errorText(failure),
+                                              ),
+                                            ),
+                                          );
+                                        }
+                                      }
+                                    }
+                                  : null,
                               onFavorite:
                                   !item.withdrawn &&
                                       item.pendingStatus == null

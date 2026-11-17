@@ -114,6 +114,8 @@ void main() {
             ],
             readByPeer: false,
             isForwarded: false,
+            roomSequence: 12,
+            isPinned: true,
             entities: [
               wire.ImEntity(kind: 'bold', offset: 0, length: 2),
               wire.ImEntity(
@@ -172,6 +174,8 @@ void main() {
     expect(message.totalAttachments, isNull);
     expect(message.entities.map((entity) => entity.kind), ['bold', 'link']);
     expect(message.entities.last.url, 'https://example.test');
+    expect(message.roomSequence, 12);
+    expect(message.isPinned, true);
     final attachment = message.attachments.single;
     expect(
       (attachment.name, attachment.contentType, attachment.bytes),
