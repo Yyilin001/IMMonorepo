@@ -165,8 +165,18 @@ class _MobileWorkspaceState extends ConsumerState<_MobileWorkspace> {
         builder: (context) => _ProfileScaffold(
           title: '群聊资料',
           children: [
-            _ProfileHeader(id: id, name: title, handle: entry.id, group: true),
-            _GroupDetailsButton(roomId: entry.id),
+            _ProfileHeader(
+              id: id,
+              name: title,
+              handle: entry.id,
+              group: true,
+              avatarWidget: SdkGroupAvatar(
+                roomId: entry.id,
+                name: title,
+                size: 80,
+              ),
+            ),
+            _GroupDetailsButton(roomId: entry.id, name: title),
             if (room != null)
               FilledButton(
                 child: const Text('发消息'),

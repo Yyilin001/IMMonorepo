@@ -501,3 +501,222 @@ class _CommunityHeading extends StatelessWidget {
     ),
   );
 }
+
+class _GroupAvatarPage extends StatefulWidget {
+  const _GroupAvatarPage({required this.roomId, required this.name});
+  final String roomId, name;
+
+  @override
+  State<_GroupAvatarPage> createState() => _GroupAvatarPageState();
+}
+
+class _GroupAvatarPageState extends State<_GroupAvatarPage> {
+  ImAvatarEditor? editor;
+  bool loading = true, saving = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(load());
+    });
+  }
+
+  Future<void> load() async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final value = await _SdkScope.of(
+        context,
+      )!.client!.openAvatarEditor(roomId: widget.roomId);
+      if (!mounted) return;
+      setState(() {
+        editor = value;
+        loading = false;
+      });
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        loading = false;
+      });
+    }
+  }
+
+  Future<void> change() async {
+    final value = editor;
+    if (value == null || !value.canManage || saving) return;
+    final jpeg = await pickSquareAvatar(context);
+    if (jpeg == null || !mounted) return;
+    setState(() => saving = true);
+    try {
+      await _SdkScope.of(context)!.client!.changeAvatar(
+        roomId: widget.roomId,
+        revision: value.revision,
+        jpeg: jpeg,
+        width: 512,
+        height: 512,
+      );
+      if (!mounted) return;
+      setState(() {
+        editor = (
+          roomId: value.roomId,
+          revision: value.revision,
+          canManage: value.canManage,
+          remainingMilliseconds: value.remainingMilliseconds,
+          hasAvatar: true,
+          name: value.name,
+          handle: value.handle,
+          image: jpeg,
+        );
+        saving = false;
+      });
+      _SdkGroupAvatarCache.invalidate(widget.roomId);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('群头像已提交，正在同步')),
+      );
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  Future<void> remove() async {
+    final value = editor;
+    if (value == null || !value.canManage || !value.hasAvatar || saving) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('移除群头像？'),
+        content: const Text('移除后，群成员将看到默认群头像。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('移除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => saving = true);
+    try {
+      await _SdkScope.of(context)!.client!.changeAvatar(
+        roomId: widget.roomId,
+        revision: value.revision,
+        action: 'remove',
+      );
+      if (!mounted) return;
+      _SdkGroupAvatarCache.invalidate(widget.roomId);
+      setState(() {
+        editor = (
+          roomId: value.roomId,
+          revision: value.revision,
+          canManage: value.canManage,
+          remainingMilliseconds: value.remainingMilliseconds,
+          hasAvatar: false,
+          name: value.name,
+          handle: value.handle,
+          image: null,
+        );
+        saving = false;
+      });
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = editor;
+    return _ProfileScaffold(
+      title: '群头像',
+      actions: [
+        IconButton(
+          tooltip: '刷新',
+          onPressed: loading || saving ? null : load,
+          icon: const Icon(Icons.refresh_rounded),
+        ),
+      ],
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 28),
+          child: Column(
+            children: [
+              ChatAvatar(
+                id: widget.roomId.hashCode & 0x7fffffff,
+                name: widget.name,
+                group: true,
+                size: 96,
+                avatar: value?.image,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                widget.name,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  color: ink,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (error != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Text(
+              error!,
+              style: const TextStyle(color: Color(0xFFB3261E)),
+            ),
+          ),
+        if (loading && value == null)
+          const Padding(
+            padding: EdgeInsets.all(12),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        if (value != null && value.canManage) ...[
+          FilledButton.icon(
+            key: const Key('change-group-avatar'),
+            onPressed: saving ? null : change,
+            icon: const Icon(Icons.photo_camera_outlined),
+            label: const Text('更换群头像'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: saving || !value.hasAvatar ? null : remove,
+            icon: const Icon(Icons.hide_image_outlined),
+            label: const Text('移除群头像'),
+          ),
+        ] else if (value != null)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 8, 20, 0),
+            child: Text(
+              '只有群主可以更改群头像。',
+              style: TextStyle(fontSize: 13, color: muted),
+            ),
+          ),
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 18, 20, 24),
+          child: Text(
+            '群头像会同步到所有成员的会话列表和聊天页。上传后仍需服务器校验，失败时保留原头像。',
+            style: TextStyle(fontSize: 12, color: muted, height: 1.5),
+          ),
+        ),
+      ],
+    );
+  }
+}

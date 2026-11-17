@@ -458,7 +458,9 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               group: room.isGroup,
               mobile: true,
               subtitle: room.isGroup ? '群聊' : '会话',
-              avatar: !room.isGroup && room.peerId != null
+              avatar: room.isGroup
+                  ? SdkGroupAvatar(roomId: room.id, name: name, size: 32)
+                  : room.peerId != null
                   ? SdkAvatar(
                       userId: room.peerId!,
                       name: name,
@@ -1376,7 +1378,7 @@ void _openSdkConversationProfile(
           ),
         ),
         const _TransfersLink(),
-        if (room.isGroup) _GroupDetailsButton(roomId: room.id),
+        if (room.isGroup) _GroupDetailsButton(roomId: room.id, name: room.title),
       ],
     ),
   ),

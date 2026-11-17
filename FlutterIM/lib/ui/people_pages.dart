@@ -795,23 +795,26 @@ class _ProfileHeader extends StatelessWidget {
     required this.handle,
     this.group = false,
     this.avatar,
+    this.avatarWidget,
   });
   final int id;
   final String name, handle;
   final bool group;
   final Uint8List? avatar;
+  final Widget? avatarWidget;
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 28),
     child: Column(
       children: [
-        ChatAvatar(
-          id: id,
-          name: name,
-          group: group,
-          size: 80,
-          avatar: avatar,
-        ),
+        avatarWidget ??
+            ChatAvatar(
+              id: id,
+              name: name,
+              group: group,
+              size: 80,
+              avatar: avatar,
+            ),
         const SizedBox(height: 16),
         Text(
           name,
@@ -1457,6 +1460,13 @@ class _RequestContactDialogState extends State<_RequestContactDialog> {
 
 Widget _contactListAvatar(BuildContext context, ContactSummary contact) {
   final sdk = _SdkScope.of(context);
+  if (sdk != null && contact.isGroup && contact.accountId != null) {
+    return SdkGroupAvatar(
+      roomId: contact.accountId!,
+      name: contact.name,
+      size: 48,
+    );
+  }
   if (sdk != null && !contact.isGroup && contact.accountId != null) {
     return SdkAvatar(
       userId: contact.accountId!,

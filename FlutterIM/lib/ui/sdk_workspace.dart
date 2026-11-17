@@ -205,6 +205,7 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
       profiles.clear();
       _profilesRequested.clear();
       _SdkAvatarCache.clear();
+      _SdkGroupAvatarCache.clear();
       moreContacts = moreGroups = false;
       directory = ContactDirectory.fromEntries([]);
       directoryError = null;
@@ -913,43 +914,8 @@ class _SdkMyProfilePageState extends State<_SdkMyProfilePage> {
   Future<void> changeAvatar() async {
     final value = editor;
     if (value == null || saving) return;
-    final source = await showModalBottomSheet<ImageSource>(
-      context: context,
-      builder: (sheet) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.photo_library_outlined),
-              title: const Text('从相册选择'),
-              onTap: () => Navigator.pop(sheet, ImageSource.gallery),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_camera_outlined),
-              title: const Text('拍照'),
-              onTap: () => Navigator.pop(sheet, ImageSource.camera),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (source == null || !mounted) return;
-    final picked = await ImagePicker().pickImage(
-      source: source,
-      maxWidth: 2048,
-      maxHeight: 2048,
-    );
-    if (picked == null || !mounted) return;
-    final bytes = await picked.readAsBytes();
-    final jpeg = await compute(_squareAvatarJpeg, bytes);
-    if (jpeg == null || !mounted) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('无法读取这张图片')));
-      }
-      return;
-    }
+    final jpeg = await pickSquareAvatar(context);
+    if (jpeg == null || !mounted) return;
     final client = _SdkScope.of(context)!.client!;
     setState(() => saving = true);
     try {

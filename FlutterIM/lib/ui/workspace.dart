@@ -654,7 +654,13 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
             item: item,
             selected: false,
             mobile: true,
-            avatar: !row.isGroup && row.peerId != null
+            avatar: row.isGroup
+                ? SdkGroupAvatar(
+                    roomId: row.id,
+                    name: item.displayName,
+                    size: 50,
+                  )
+                : row.peerId != null
                 ? SdkAvatar(
                     userId: row.peerId!,
                     name: item.displayName,

@@ -131,8 +131,8 @@ class _CreateGroupPageState extends State<_CreateGroupPage> {
 }
 
 class _GroupDetailsButton extends StatelessWidget {
-  const _GroupDetailsButton({required this.roomId});
-  final String roomId;
+  const _GroupDetailsButton({required this.roomId, this.name = ''});
+  final String roomId, name;
 
   @override
   Widget build(BuildContext context) => ListTile(
@@ -141,15 +141,15 @@ class _GroupDetailsButton extends StatelessWidget {
     onTap: () => Navigator.push(
       context,
       MaterialPageRoute<void>(
-        builder: (_) => _GroupDetailsPage(roomId: roomId),
+        builder: (_) => _GroupDetailsPage(roomId: roomId, name: name),
       ),
     ),
   );
 }
 
 class _GroupDetailsPage extends StatefulWidget {
-  const _GroupDetailsPage({required this.roomId});
-  final String roomId;
+  const _GroupDetailsPage({required this.roomId, this.name = ''});
+  final String roomId, name;
   @override
   State<_GroupDetailsPage> createState() => _GroupDetailsPageState();
 }
@@ -362,6 +362,28 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
       ),
     ],
     children: [
+      ListTile(
+        key: const Key('group-avatar'),
+        leading: SdkGroupAvatar(
+          roomId: widget.roomId,
+          name: widget.name.isEmpty ? '群聊' : widget.name,
+          size: 40,
+        ),
+        title: const Text('群头像'),
+        subtitle: const Text('查看或更换群头像'),
+        trailing: const Icon(Icons.chevron_right_rounded, color: muted),
+        onTap: () async {
+          await Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => _GroupAvatarPage(
+                roomId: widget.roomId,
+                name: widget.name.isEmpty ? '群聊' : widget.name,
+              ),
+            ),
+          );
+          if (mounted) await load();
+        },
+      ),
       if (announcement.isNotEmpty || editableAnnouncementRevision != null)
         ListTile(
           title: const Text('群公告'),
