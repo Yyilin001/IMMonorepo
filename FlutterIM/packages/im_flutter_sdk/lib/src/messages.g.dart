@@ -154,8 +154,11 @@ class ImConversation {
     required this.preview,
     required this.unread,
     required this.isGroup,
+    required this.isPinned,
+    required this.isArchived,
     this.updatedAt,
     this.peerId,
+    this.muteUntil,
   });
 
   String id;
@@ -168,9 +171,15 @@ class ImConversation {
 
   bool isGroup;
 
+  bool isPinned;
+
+  bool isArchived;
+
   int? updatedAt;
 
   String? peerId;
+
+  int? muteUntil;
 
   List<Object?> _toList() {
     return <Object?>[
@@ -179,8 +188,11 @@ class ImConversation {
       preview,
       unread,
       isGroup,
+      isPinned,
+      isArchived,
       updatedAt,
       peerId,
+      muteUntil,
     ];
   }
 
@@ -195,8 +207,11 @@ class ImConversation {
       preview: result[2]! as String,
       unread: result[3]! as int,
       isGroup: result[4]! as bool,
-      updatedAt: result[5] as int?,
-      peerId: result[6] as String?,
+      isPinned: result[5]! as bool,
+      isArchived: result[6]! as bool,
+      updatedAt: result[7] as int?,
+      peerId: result[8] as String?,
+      muteUntil: result[9] as int?,
     );
   }
 
@@ -209,7 +224,7 @@ class ImConversation {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(id, other.id) && _deepEquals(title, other.title) && _deepEquals(preview, other.preview) && _deepEquals(unread, other.unread) && _deepEquals(isGroup, other.isGroup) && _deepEquals(updatedAt, other.updatedAt) && _deepEquals(peerId, other.peerId);
+    return _deepEquals(id, other.id) && _deepEquals(title, other.title) && _deepEquals(preview, other.preview) && _deepEquals(unread, other.unread) && _deepEquals(isGroup, other.isGroup) && _deepEquals(isPinned, other.isPinned) && _deepEquals(isArchived, other.isArchived) && _deepEquals(updatedAt, other.updatedAt) && _deepEquals(peerId, other.peerId) && _deepEquals(muteUntil, other.muteUntil);
   }
 
   @override
@@ -218,7 +233,7 @@ class ImConversation {
 
   @override
   String toString() {
-    return 'ImConversation(id: $id, title: $title, preview: $preview, unread: $unread, isGroup: $isGroup, updatedAt: $updatedAt, peerId: $peerId)';
+    return 'ImConversation(id: $id, title: $title, preview: $preview, unread: $unread, isGroup: $isGroup, isPinned: $isPinned, isArchived: $isArchived, updatedAt: $updatedAt, peerId: $peerId, muteUntil: $muteUntil)';
   }
 }
 
@@ -1142,14 +1157,14 @@ class ImHost {
     ;
   }
 
-  Future<String> openWindow(String? roomId) async {
+  Future<String> openWindow(String? roomId, bool archived) async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.openWindow$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
       pigeonChannelCodec,
       binaryMessenger: pigeonVar_binaryMessenger,
     );
-    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId]);
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, archived]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
         pigeonVar_replyList,
@@ -1158,6 +1173,23 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as String;
+  }
+
+  Future<void> setConversationState(String roomId, bool? isPinned, bool? isArchived, int? muteUntil) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.setConversationState$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, isPinned, isArchived, muteUntil]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   Future<WindowView> nextUpdate(String windowId) async {

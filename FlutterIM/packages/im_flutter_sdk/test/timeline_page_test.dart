@@ -34,7 +34,7 @@ void main() {
           case 'restore':
             return [wire.ImSession(state: 'ready', userId: 'user')];
           case 'openWindow':
-            expect(args, ['room']);
+            expect(args, ['room', false]);
             return ['timeline'];
           case 'nextUpdate':
             expect(args, ['timeline']);

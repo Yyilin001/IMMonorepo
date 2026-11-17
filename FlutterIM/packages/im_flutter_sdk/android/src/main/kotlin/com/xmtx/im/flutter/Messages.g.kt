@@ -246,8 +246,11 @@ data class ImConversation (
   val preview: String,
   val unread: Long,
   val isGroup: Boolean,
+  val isPinned: Boolean,
+  val isArchived: Boolean,
   val updatedAt: Long? = null,
-  val peerId: String? = null
+  val peerId: String? = null,
+  val muteUntil: Long? = null
 )
  {
   companion object {
@@ -257,9 +260,12 @@ data class ImConversation (
       val preview = pigeonVar_list[2] as String
       val unread = pigeonVar_list[3] as Long
       val isGroup = pigeonVar_list[4] as Boolean
-      val updatedAt = pigeonVar_list[5] as Long?
-      val peerId = pigeonVar_list[6] as String?
-      return ImConversation(id, title, preview, unread, isGroup, updatedAt, peerId)
+      val isPinned = pigeonVar_list[5] as Boolean
+      val isArchived = pigeonVar_list[6] as Boolean
+      val updatedAt = pigeonVar_list[7] as Long?
+      val peerId = pigeonVar_list[8] as String?
+      val muteUntil = pigeonVar_list[9] as Long?
+      return ImConversation(id, title, preview, unread, isGroup, isPinned, isArchived, updatedAt, peerId, muteUntil)
     }
   }
   fun toList(): List<Any?> {
@@ -269,8 +275,11 @@ data class ImConversation (
       preview,
       unread,
       isGroup,
+      isPinned,
+      isArchived,
       updatedAt,
       peerId,
+      muteUntil,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -281,7 +290,7 @@ data class ImConversation (
       return true
     }
     val other = other as ImConversation
-    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.title, other.title) && MessagesPigeonUtils.deepEquals(this.preview, other.preview) && MessagesPigeonUtils.deepEquals(this.unread, other.unread) && MessagesPigeonUtils.deepEquals(this.isGroup, other.isGroup) && MessagesPigeonUtils.deepEquals(this.updatedAt, other.updatedAt) && MessagesPigeonUtils.deepEquals(this.peerId, other.peerId)
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.title, other.title) && MessagesPigeonUtils.deepEquals(this.preview, other.preview) && MessagesPigeonUtils.deepEquals(this.unread, other.unread) && MessagesPigeonUtils.deepEquals(this.isGroup, other.isGroup) && MessagesPigeonUtils.deepEquals(this.isPinned, other.isPinned) && MessagesPigeonUtils.deepEquals(this.isArchived, other.isArchived) && MessagesPigeonUtils.deepEquals(this.updatedAt, other.updatedAt) && MessagesPigeonUtils.deepEquals(this.peerId, other.peerId) && MessagesPigeonUtils.deepEquals(this.muteUntil, other.muteUntil)
   }
 
   override fun hashCode(): Int {
@@ -291,12 +300,15 @@ data class ImConversation (
     result = 31 * result + MessagesPigeonUtils.deepHash(this.preview)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.unread)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.isGroup)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.isPinned)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.isArchived)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.updatedAt)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.peerId)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.muteUntil)
     return result
   }
   override fun toString(): String {
-    return "ImConversation(id=$id, title=$title, preview=$preview, unread=$unread, isGroup=$isGroup, updatedAt=$updatedAt, peerId=$peerId)"
+    return "ImConversation(id=$id, title=$title, preview=$preview, unread=$unread, isGroup=$isGroup, isPinned=$isPinned, isArchived=$isArchived, updatedAt=$updatedAt, peerId=$peerId, muteUntil=$muteUntil)"
   }
 }
 
@@ -1017,7 +1029,8 @@ interface ImHost {
   suspend fun connect(): ImSession
   suspend fun status(): ImSession
   suspend fun disconnect()
-  suspend fun openWindow(roomId: String?): String
+  suspend fun openWindow(roomId: String?, archived: Boolean): String
+  suspend fun setConversationState(roomId: String, isPinned: Boolean?, isArchived: Boolean?, muteUntil: Long?)
   suspend fun nextUpdate(windowId: String): WindowView
   suspend fun directory(nextGroups: Boolean?, scope: String): DirectoryPage
   suspend fun resolveUserId(handle: String): String
@@ -1173,9 +1186,33 @@ interface ImHost {
           channel.setMessageHandler { message, reply ->
             val args = message as List<Any?>
             val roomIdArg = args[0] as String?
+            val archivedArg = args[1] as Boolean
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
-                listOf(api.openWindow(roomIdArg))
+                listOf(api.openWindow(roomIdArg, archivedArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.setConversationState$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val isPinnedArg = args[1] as Boolean?
+            val isArchivedArg = args[2] as Boolean?
+            val muteUntilArg = args[3] as Long?
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.setConversationState(roomIdArg, isPinnedArg, isArchivedArg, muteUntilArg)
+                listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

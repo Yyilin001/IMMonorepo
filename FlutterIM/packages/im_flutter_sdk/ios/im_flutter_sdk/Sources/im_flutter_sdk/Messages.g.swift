@@ -231,8 +231,11 @@ struct ImConversation: Hashable, CustomStringConvertible {
   var preview: String
   var unread: Int64
   var isGroup: Bool
+  var isPinned: Bool
+  var isArchived: Bool
   var updatedAt: Int64? = nil
   var peerId: String? = nil
+  var muteUntil: Int64? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -242,8 +245,11 @@ struct ImConversation: Hashable, CustomStringConvertible {
     let preview = pigeonVar_list[2] as! String
     let unread = pigeonVar_list[3] as! Int64
     let isGroup = pigeonVar_list[4] as! Bool
-    let updatedAt: Int64? = nilOrValue(pigeonVar_list[5])
-    let peerId: String? = nilOrValue(pigeonVar_list[6])
+    let isPinned = pigeonVar_list[5] as! Bool
+    let isArchived = pigeonVar_list[6] as! Bool
+    let updatedAt: Int64? = nilOrValue(pigeonVar_list[7])
+    let peerId: String? = nilOrValue(pigeonVar_list[8])
+    let muteUntil: Int64? = nilOrValue(pigeonVar_list[9])
 
     return ImConversation(
       id: id,
@@ -251,8 +257,11 @@ struct ImConversation: Hashable, CustomStringConvertible {
       preview: preview,
       unread: unread,
       isGroup: isGroup,
+      isPinned: isPinned,
+      isArchived: isArchived,
       updatedAt: updatedAt,
-      peerId: peerId
+      peerId: peerId,
+      muteUntil: muteUntil
     )
   }
   func toList() -> [Any?] {
@@ -262,15 +271,18 @@ struct ImConversation: Hashable, CustomStringConvertible {
       preview,
       unread,
       isGroup,
+      isPinned,
+      isArchived,
       updatedAt,
       peerId,
+      muteUntil,
     ]
   }
   static func == (lhs: ImConversation, rhs: ImConversation) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.title, rhs.title) && MessagesPigeonInternal.deepEquals(lhs.preview, rhs.preview) && MessagesPigeonInternal.deepEquals(lhs.unread, rhs.unread) && MessagesPigeonInternal.deepEquals(lhs.isGroup, rhs.isGroup) && MessagesPigeonInternal.deepEquals(lhs.updatedAt, rhs.updatedAt) && MessagesPigeonInternal.deepEquals(lhs.peerId, rhs.peerId)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.title, rhs.title) && MessagesPigeonInternal.deepEquals(lhs.preview, rhs.preview) && MessagesPigeonInternal.deepEquals(lhs.unread, rhs.unread) && MessagesPigeonInternal.deepEquals(lhs.isGroup, rhs.isGroup) && MessagesPigeonInternal.deepEquals(lhs.isPinned, rhs.isPinned) && MessagesPigeonInternal.deepEquals(lhs.isArchived, rhs.isArchived) && MessagesPigeonInternal.deepEquals(lhs.updatedAt, rhs.updatedAt) && MessagesPigeonInternal.deepEquals(lhs.peerId, rhs.peerId) && MessagesPigeonInternal.deepEquals(lhs.muteUntil, rhs.muteUntil)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -280,12 +292,15 @@ struct ImConversation: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: preview, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: unread, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: isGroup, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isPinned, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isArchived, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: updatedAt, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: peerId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: muteUntil, hasher: &hasher)
   }
 
   public var description: String {
-    return "ImConversation(id: \(String(describing: id)), title: \(String(describing: title)), preview: \(String(describing: preview)), unread: \(String(describing: unread)), isGroup: \(String(describing: isGroup)), updatedAt: \(String(describing: updatedAt)), peerId: \(String(describing: peerId)))"
+    return "ImConversation(id: \(String(describing: id)), title: \(String(describing: title)), preview: \(String(describing: preview)), unread: \(String(describing: unread)), isGroup: \(String(describing: isGroup)), isPinned: \(String(describing: isPinned)), isArchived: \(String(describing: isArchived)), updatedAt: \(String(describing: updatedAt)), peerId: \(String(describing: peerId)), muteUntil: \(String(describing: muteUntil)))"
   }
 }
 
@@ -994,7 +1009,8 @@ protocol ImHost {
   func connect() async throws -> ImSession
   func status() async throws -> ImSession
   func disconnect() async throws
-  func openWindow(roomId: String?) async throws -> String
+  func openWindow(roomId: String?, archived: Bool) async throws -> String
+  func setConversationState(roomId: String, isPinned: Bool?, isArchived: Bool?, muteUntil: Int64?) async throws
   func nextUpdate(windowId: String) async throws -> WindowView
   func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage
   func resolveUserId(handle: String) async throws -> String
@@ -1133,9 +1149,10 @@ class ImHostSetup {
       openWindowChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
         let roomIdArg: String? = nilOrValue(args[0])
+        let archivedArg = args[1] as! Bool
         Task { @MainActor in
           do {
-            let result = try await api.openWindow(roomId: roomIdArg)
+            let result = try await api.openWindow(roomId: roomIdArg, archived: archivedArg)
             reply(wrapResult(result))
           } catch {
             reply(wrapError(error))
@@ -1144,6 +1161,26 @@ class ImHostSetup {
       }
     } else {
       openWindowChannel.setMessageHandler(nil)
+    }
+    let setConversationStateChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setConversationState\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setConversationStateChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let isPinnedArg: Bool? = nilOrValue(args[1])
+        let isArchivedArg: Bool? = nilOrValue(args[2])
+        let muteUntilArg: Int64? = nilOrValue(args[3])
+        Task { @MainActor in
+          do {
+            try await api.setConversationState(roomId: roomIdArg, isPinned: isPinnedArg, isArchived: isArchivedArg, muteUntil: muteUntilArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setConversationStateChannel.setMessageHandler(nil)
     }
     let nextUpdateChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.nextUpdate\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

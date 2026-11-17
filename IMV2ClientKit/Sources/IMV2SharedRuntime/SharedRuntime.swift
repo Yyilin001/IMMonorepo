@@ -10,11 +10,13 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
     var archived: Bool?
+    var isPinned: Bool?
+    var muteUntil: Int64?
     var data: String?
     var offset: Int64?
     var displayName: String?
@@ -47,12 +49,17 @@ struct SharedConversation: Encodable, Sendable {
     var updatedAt: Int64?
     var isGroup = false
     var peerID: String?
+    var isPinned = false
+    var isArchived = false
+    var muteUntil: Int64?
 
     static func row(_ entry: V2ClientConversationListEntry, list: V2ConversationListSnapshot) -> Self {
         .init(id: entry.roomID.rawValue, title: list.titles[entry.roomID] ?? "会话",
               preview: entry.latestVisible?.latest?.preview ?? entry.lastMessage.map { $0.isWithdrawn ? "消息已撤回" : String($0.text.prefix(160)) } ?? "",
               unread: Int64(clamping: list.unread[entry.roomID] ?? 0), updatedAt: Int64(entry.lastActivity.timeIntervalSince1970 * 1000),
-              isGroup: entry.roomProfile != nil && entry.directIdentity == nil, peerID: entry.directIdentity?.publicIdentity.userID.rawValue)
+              isGroup: entry.roomProfile != nil && entry.directIdentity == nil, peerID: entry.directIdentity?.publicIdentity.userID.rawValue,
+              isPinned: entry.isPinned, isArchived: entry.isArchived,
+              muteUntil: entry.muteUntil.map { Int64($0.timeIntervalSince1970 * 1000) })
     }
 }
 struct SharedMessage: Encodable, Sendable {
@@ -161,6 +168,7 @@ package actor SharedRuntime {
     var receiptBusiness: V2ReadReceiptService?
     var messageBusiness: V2MessageService?
     private var sender: V2MessageSendOperationService?
+    private var personalPreferences: V2PersonalPreferenceService?
     private var dispatcher: Task<Void, Never>?
     private var roomRecovery: V2RoomRecoveryRunner?
     private var selectedRoom: RoomID?
@@ -249,6 +257,16 @@ package actor SharedRuntime {
             _ = try await sync.synchronizeIncludingResets()
         case .signOut:
             try await signOut()
+        case .conversationState:
+            guard let store, let preferences = personalPreferences, let rawRoom = request.roomID else { throw SharedFailure.invalidInput }
+            let room = try RoomID(rawRoom)
+            guard try await store.roomAllowsLocalRead(roomID: room) else { throw SharedFailure.invalidInput }
+            let current = try await store.conversationState(roomID: room)
+            let pinned = request.isPinned ?? current?.isPinned ?? false
+            let archived = request.archived ?? current?.isArchived ?? false
+            let mute = request.muteUntil.map { $0 > 0 ? Date(timeIntervalSince1970: Double($0) / 1000) : nil } ?? current?.muteUntil
+            try await preferences.enqueue(.conversation(roomID: room, isPinned: pinned, isArchived: archived, muteUntil: mute))
+            try? await preferences.runPreparation()
         case .locateMessage:
             guard let business = conversationBusiness, let rawRoom = request.roomID, let rawID = request.messageID else { throw SharedFailure.invalidInput }
             let room = try RoomID(rawRoom), id = try MessageID(rawID)
@@ -360,7 +378,7 @@ package actor SharedRuntime {
         socialGroups = nil
         await runtime?.stop()
         await dispatcher?.value
-        dispatcher = nil; sender = nil; roomRecovery = nil
+        dispatcher = nil; sender = nil; roomRecovery = nil; personalPreferences = nil
     }
     private func signOut() async throws {
         // Intent survives cancellation/crash between revocation handoff and local deletion.
@@ -426,6 +444,11 @@ package actor SharedRuntime {
             didPersistProgress: { room, cursor in try await transport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: cursor) }),
             source: wire, personalSync: sync)
         roomRecovery = recovery
+        let personalPreferences = V2PersonalPreferenceService(accountID: identity.userID, store: store, transport: transport,
+            recovery: try V2HTTPPersonalPreferenceRecoveryClient(roomsEndpoint: base.appendingPathComponent("v2/rooms"),
+                credentials: accountHTTP, transport: accountHTTP))
+        self.personalPreferences = personalPreferences
+        try? await personalPreferences.runPreparation()
         conversationBusiness = try await session.conversations(for: store, accountID: identity.userID,
             requestLatestVisible: { try await recovery.requestLatestVisible(roomIDs: $0) })
         runtime = V2ClientRuntime(connection: coordinator, activity: V2DefaultClientRuntimeActivity(syncEngine: sync,
@@ -439,7 +462,10 @@ package actor SharedRuntime {
                     await wire.messageSendSession()?.accountID == identity.userID
                 }.run() }
             ]))
-        let worker = V2OperationWorkDispatcher(store: store, handlers: (await business.handlers()) + (await socialGroups.handlers()) + (await messaging.handlers()))
+        let worker = V2OperationWorkDispatcher(store: store, handlers: (await business.handlers()) + (await socialGroups.handlers()) + (await messaging.handlers()) + [
+            .init(kind: .conversationPreference) { try await personalPreferences.execute($0) },
+            .init(kind: .messageFavorite) { try await personalPreferences.execute($0) },
+        ])
         dispatcher = Task {
             do {
                 // Text-only intents interrupted after freeze retain their original identities.

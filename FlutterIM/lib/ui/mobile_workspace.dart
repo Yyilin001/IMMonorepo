@@ -166,8 +166,11 @@ class _MobileWorkspaceState extends ConsumerState<_MobileWorkspace> {
                           preview: '',
                           unread: 0,
                           isGroup: true,
+                          isPinned: false,
+                          isArchived: false,
                           updatedAt: null,
                           peerId: null,
+                          muteUntil: null,
                         ),
                   );
                 },

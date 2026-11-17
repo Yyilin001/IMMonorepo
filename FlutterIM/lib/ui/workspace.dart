@@ -602,6 +602,7 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
     final rows = sdk.rooms
         .where(
           (row) =>
+              !row.isArchived &&
               (!unreadOnly || row.unread > 0) &&
               (row.title.toLowerCase().contains(query) ||
                   row.id.toLowerCase().contains(query)),
@@ -632,6 +633,10 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
           preview: row.preview,
           unread: row.unread,
           isGroup: row.isGroup,
+          pinned: row.isPinned,
+          muted:
+              row.muteUntil != null &&
+              row.muteUntil! > DateTime.now().millisecondsSinceEpoch,
           updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt ?? 0),
         );
         return InkWell(
@@ -640,6 +645,7 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
             _rememberSearch();
             widget.onSdkOpen?.call(row);
           },
+          onLongPress: () => _showSdkConversationMenu(context, ref, row),
           child: _ConversationRow(item: item, selected: false, mobile: true),
         );
       },
@@ -768,6 +774,17 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
                   },
                 ),
                 const Spacer(),
+                if (sdk?.client != null && sdk!.userId != null)
+                  IconButton(
+                    key: const Key('open-archived-conversations'),
+                    tooltip: '隐藏的聊天',
+                    icon: const Icon(Icons.visibility_off_outlined),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const _ArchivedConversationsPage(),
+                      ),
+                    ),
+                  ),
                 if (sdk?.client != null && sdk!.userId != null)
                   IconButton(
                     tooltip: '搜索全部聊天记录',

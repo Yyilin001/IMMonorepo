@@ -22,16 +22,22 @@ class ImConversation {
     required this.preview,
     required this.unread,
     required this.isGroup,
+    required this.isPinned,
+    required this.isArchived,
     this.updatedAt,
     this.peerId,
+    this.muteUntil,
   });
   String id;
   String title;
   String preview;
   int unread;
   bool isGroup;
+  bool isPinned;
+  bool isArchived;
   int? updatedAt;
   String? peerId;
+  int? muteUntil;
 }
 
 class Transfer {
@@ -198,7 +204,14 @@ abstract class ImHost {
   @async
   void disconnect();
   @async
-  String openWindow(String? roomId);
+  String openWindow(String? roomId, bool archived);
+  @async
+  void setConversationState(
+    String roomId,
+    bool? isPinned,
+    bool? isArchived,
+    int? muteUntil,
+  );
   @async
   WindowView nextUpdate(String windowId);
   @async

@@ -174,7 +174,7 @@ void main() {
             bubble(name),
             'attachment and filename arrived at receiver',
           );
-          final timeline = await mediaHost.openWindow(room);
+          final timeline = await mediaHost.openWindow(room, false);
           late final wire.ImMessage message;
           try {
             final view = await mediaHost.nextUpdate(timeline);
@@ -253,7 +253,7 @@ void main() {
             String.fromEnvironment('IM_IOS_FORWARD_SECOND'),
           ];
     // Select the newest confirmed message, then verify each server projection.
-    final timeline = await mediaHost.openWindow(room);
+    final timeline = await mediaHost.openWindow(room, false);
     late final wire.ImMessage source;
     try {
       source = (await mediaHost.nextUpdate(timeline)).messages

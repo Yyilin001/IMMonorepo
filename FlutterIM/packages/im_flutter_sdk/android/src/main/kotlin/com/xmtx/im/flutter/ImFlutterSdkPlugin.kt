@@ -50,15 +50,18 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun connect() = sdk { client.connect().session() }
     override suspend fun disconnect() { sdk { client.disconnect() } }
 
-    override suspend fun openWindow(roomId: String?) = mutations.withLock {
+    override suspend fun openWindow(roomId: String?, archived: Boolean) = mutations.withLock {
         sdk {
-            val window = if (roomId == null) client.openConversationList() else {
+            val window = if (roomId == null) client.openConversationList(isArchived = archived) else {
                 client.openConversation(roomId)
                 client.openMessageTimeline(roomId)
             }
             windows[window.id] = window
             window.id
         }
+    }
+    override suspend fun setConversationState(roomId: String, isPinned: Boolean?, isArchived: Boolean?, muteUntil: Long?) {
+        mutations.withLock { sdk { client.setConversationState(roomId, isPinned, isArchived, muteUntil) } }
     }
     override suspend fun nextUpdate(windowId: String): WindowView = sdk {
         val window = windows[windowId] ?: throw FlutterError("closed")
@@ -72,7 +75,7 @@ private class MobileHost(private val context: Context) : ImHost {
         val messages = value.chat?.messages.orEmpty().map {
             ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, it.revision, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt, replyToId = it.replyToID)
         }
-        return WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
+        return WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.isPinned, it.isArchived, it.updatedAt, it.peerID, it.muteUntil) },
             messages + value.chat?.pending.orEmpty().map {
                 ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, emptyList(), false, false, pendingStatus = it.preparationStatus ?: it.status.name.wire(), createdAt = it.createdAt,
                     preparedAttachments = it.preparedAttachments, totalAttachments = it.totalAttachments)

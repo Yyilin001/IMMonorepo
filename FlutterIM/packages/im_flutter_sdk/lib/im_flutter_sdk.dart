@@ -57,8 +57,11 @@ typedef ImConversation = ({
   String preview,
   int unread,
   bool isGroup,
+  bool isPinned,
+  bool isArchived,
   int? updatedAt,
   String? peerId,
+  int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
 typedef ImTransfer = ({
@@ -239,21 +242,36 @@ final class ImClient {
     }
   });
 
-  Stream<List<ImConversation>> watchConversations() => _watch(
-    null,
-    (_, value) => List<ImConversation>.unmodifiable(
-      value.conversations.map(
-        (c) => (
-          id: c.id,
-          title: c.title,
-          preview: c.preview,
-          unread: c.unread,
-          isGroup: c.isGroup,
-          updatedAt: c.updatedAt,
-          peerId: c.peerId,
+  Stream<List<ImConversation>> watchConversations({bool archived = false}) =>
+      _watch(
+        null,
+        (_, value) => List<ImConversation>.unmodifiable(
+          value.conversations.map(
+            (c) => (
+              id: c.id,
+              title: c.title,
+              preview: c.preview,
+              unread: c.unread,
+              isGroup: c.isGroup,
+              isPinned: c.isPinned,
+              isArchived: c.isArchived,
+              updatedAt: c.updatedAt,
+              peerId: c.peerId,
+              muteUntil: c.muteUntil,
+            ),
+          ),
         ),
-      ),
-    ),
+        archived: archived,
+      );
+
+  /// 更新会话置顶、归档（隐藏聊天）和免打扰截止时间；空值表示保留当前字段。
+  Future<void> setConversationState(
+    String roomId, {
+    bool? isPinned,
+    bool? isArchived,
+    int? muteUntil,
+  }) => _ordered(
+    () => _host.setConversationState(roomId, isPinned, isArchived, muteUntil),
   );
   Future<List<ImDirectoryEntry>> directory() async =>
       (await directoryPage()).entries;
@@ -341,8 +359,9 @@ final class ImClient {
 
   Stream<T> _watch<T>(
     String? room,
-    T Function(String, wire.WindowView) select,
-  ) {
+    T Function(String, wire.WindowView) select, {
+    bool archived = false,
+  }) {
     late final StreamController<T> stream;
     Future<String>? opening;
     Future<void>? stopping;
@@ -350,7 +369,7 @@ final class ImClient {
     late Future<void> Function() stop;
     Future<void> read() async {
       try {
-        final id = await (opening = _host.openWindow(room));
+        final id = await (opening = _host.openWindow(room, archived));
         while (!stopped) {
           final view = await _host.nextUpdate(id);
           if (!stopped) stream.add(select(id, view));

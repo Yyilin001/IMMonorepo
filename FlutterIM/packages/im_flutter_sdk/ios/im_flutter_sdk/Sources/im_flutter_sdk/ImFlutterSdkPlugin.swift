@@ -54,8 +54,14 @@ private actor MobileHost: ImHost {
     func connect() async throws -> ImSession { try await ordered { try await self.client.connect().wire } }
     func status() async throws -> ImSession { try await ordered { try await self.client.status().wire } }
     func disconnect() async throws { try await ordered { try await self.client.disconnect() } }
-    func openWindow(roomId: String?) async throws -> String {
-        try await ordered { try await self.client.openWindow(roomID: roomId) }
+    func openWindow(roomId: String?, archived: Bool) async throws -> String {
+        try await ordered { try await self.client.openWindow(roomID: roomId, archived: archived) }
+    }
+    func setConversationState(roomId: String, isPinned: Bool?, isArchived: Bool?, muteUntil: Int64?) async throws {
+        try await ordered {
+            try await self.client.setConversationState(roomID: roomId, isPinned: isPinned,
+                                                       isArchived: isArchived, muteUntil: muteUntil)
+        }
     }
     func nextUpdate(windowId: String) async throws -> WindowView {
         do {
@@ -69,7 +75,7 @@ private actor MobileHost: ImHost {
         try await ordered { self.windowView(try await self.client.locateMessage(roomID: roomId, messageID: messageId)) }
     }
     private func windowView(_ view: V2MobileClient.Window) -> WindowView {
-        return WindowView(conversations: view.conversations.map { .init(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, isGroup: $0.isGroup, updatedAt: $0.updatedAt, peerId: $0.peerID) },
+        return WindowView(conversations: view.conversations.map { .init(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, isGroup: $0.isGroup, isPinned: $0.isPinned, isArchived: $0.isArchived, updatedAt: $0.updatedAt, peerId: $0.peerID, muteUntil: $0.muteUntil) },
                               messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map { Attachment(id: $0.id, name: $0.name, contentType: $0.contentType, bytes: $0.bytes) }, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, revision: $0.revision, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, replyToId: $0.replyToID) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
     }
     func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage {

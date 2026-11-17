@@ -200,6 +200,70 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
     });
   }
 
+  /// Patches the visible row before the server projection arrives, then restores
+  /// the previous list if the shared runtime rejects the command.
+  Future<bool> applyConversationState(
+    ImConversation room, {
+    bool? pinned,
+    bool? archived,
+    int? muteUntil,
+  }) async {
+    if (client == null) return false;
+    final previous = rooms;
+    void patch(List<ImConversation> rows) => setState(() {
+      rooms = rows;
+      listError = null;
+    });
+    patch(_patchConversation(previous, room, pinned, archived, muteUntil));
+    try {
+      await client!.setConversationState(
+        room.id,
+        isPinned: pinned,
+        isArchived: archived,
+        muteUntil: muteUntil,
+      );
+      return true;
+    } catch (e) {
+      if (mounted) {
+        patch(previous);
+        setState(() => listError = _errorText(e));
+      }
+      return false;
+    }
+  }
+
+  static List<ImConversation> _patchConversation(
+    List<ImConversation> rows,
+    ImConversation room,
+    bool? pinned,
+    bool? archived,
+    int? muteUntil,
+  ) {
+    final patched = [
+      for (final row in rows)
+        if (row.id != room.id)
+          row
+        else
+          (
+            id: row.id,
+            title: row.title,
+            preview: row.preview,
+            unread: row.unread,
+            isGroup: row.isGroup,
+            isPinned: pinned ?? row.isPinned,
+            isArchived: archived ?? row.isArchived,
+            updatedAt: row.updatedAt,
+            peerId: row.peerId,
+            muteUntil: muteUntil ?? row.muteUntil,
+          ),
+    ];
+    patched.sort((a, b) {
+      if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
+      return (b.updatedAt ?? 0).compareTo(a.updatedAt ?? 0);
+    });
+    return patched;
+  }
+
   void signOut() {
     if (!busy) unawaited(_run(client!.signOut));
   }
@@ -345,4 +409,104 @@ String _errorText(Object error) {
           ? '无法连接服务器，应用的连接配置有误'
           : '操作失败，请重试${code.isEmpty ? '' : '（$code）'}',
   };
+}
+
+/// Mirrors the native “隐藏的聊天” list: a second, independent conversation
+/// window so archived rows update without disturbing the main list.
+class _ArchivedConversationsPage extends ConsumerStatefulWidget {
+  const _ArchivedConversationsPage();
+
+  @override
+  ConsumerState<_ArchivedConversationsPage> createState() =>
+      _ArchivedConversationsPageState();
+}
+
+class _ArchivedConversationsPageState
+    extends ConsumerState<_ArchivedConversationsPage> {
+  Stream<List<ImConversation>>? stream;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    stream ??= _SdkScope.of(context)!.client!.watchConversations(
+      archived: true,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sdk = _SdkScope.of(context)!;
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        title: const Text(
+          '隐藏的聊天',
+          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+        ),
+        centerTitle: true,
+      ),
+      body: SafeArea(
+        top: false,
+        child: StreamBuilder<List<ImConversation>>(
+          stream: stream,
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return Center(child: Text(_errorText(snapshot.error!)));
+            }
+            final rows = snapshot.data;
+            if (rows == null) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (rows.isEmpty) {
+              return const Center(
+                child: Text('暂无隐藏的聊天', style: TextStyle(color: muted)),
+              );
+            }
+            return ListView.builder(
+              key: const Key('archived-conversation-list'),
+              itemCount: rows.length,
+              itemExtent: 82,
+              itemBuilder: (_, index) {
+                final row = rows[index];
+                final item = Conversation(
+                  id: sdk.keyFor(row.id),
+                  name: row.title.isEmpty ? '会话' : row.title,
+                  preview: row.preview,
+                  unread: row.unread,
+                  isGroup: row.isGroup,
+                  pinned: row.isPinned,
+                  muted:
+                      row.muteUntil != null &&
+                      row.muteUntil! >
+                          DateTime.now().millisecondsSinceEpoch,
+                  updatedAt: DateTime.fromMillisecondsSinceEpoch(
+                    row.updatedAt ?? 0,
+                  ),
+                );
+                return InkWell(
+                  key: ValueKey(row.id),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => Scaffold(
+                        backgroundColor: Colors.white,
+                        body: SafeArea(child: _SdkChat(room: row)),
+                      ),
+                    ),
+                  ),
+                  onLongPress: () =>
+                      _showSdkConversationMenu(context, ref, row),
+                  child: _ConversationRow(
+                    item: item,
+                    selected: false,
+                    mobile: true,
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      ),
+    );
+  }
+
 }

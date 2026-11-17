@@ -15,6 +15,9 @@ public final class V2MobileClient: Sendable {
         public let updatedAt: Int64?
         public let isGroup: Bool
         public let peerID: String?
+        public let isPinned: Bool
+        public let isArchived: Bool
+        public let muteUntil: Int64?
     }
     public struct Attachment: Sendable {
         public let id: String
@@ -81,11 +84,16 @@ public final class V2MobileClient: Sendable {
     public func disconnect() async throws { _ = try await run(.init(operation: .disconnect)) }
     public func signOut() async throws { _ = try await run(.init(operation: .signOut)) }
 
-    public func openWindow(roomID: String?) async throws -> String {
+    public func openWindow(roomID: String?, archived: Bool? = nil) async throws -> String {
         if let roomID { _ = try await run(.init(operation: .openConversation, roomID: roomID)) }
-        let value = try await run(.init(operation: roomID == nil ? .openListWindow : .openTimelineWindow, roomID: roomID))
+        let value = try await run(.init(operation: roomID == nil ? .openListWindow : .openTimelineWindow,
+                                        archived: roomID == nil ? archived : nil, roomID: roomID))
         guard let id = value.windowID else { throw Failure(code: "operationFailed") }
         return id
+    }
+    public func setConversationState(roomID: String, isPinned: Bool?, isArchived: Bool?, muteUntil: Int64?) async throws {
+        _ = try await run(.init(operation: .conversationState, archived: isArchived,
+                                isPinned: isPinned, muteUntil: muteUntil, roomID: roomID))
     }
     public func nextUpdate(windowID: String) async throws -> Window {
         try await window(from: run(.init(operation: .watchWindow, windowID: windowID)))
@@ -97,7 +105,7 @@ public final class V2MobileClient: Sendable {
         let messages = (value.chat?.messages ?? []).map {
             Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map(Attachment.init), readByPeer: $0.readByPeer, replyToID: $0.replyToID, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, revision: Int64(exactly: $0.revision), mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, preparedAttachments: nil, totalAttachments: nil, pendingStatus: nil, createdAt: $0.createdAt)
         }
-        return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID) },
+        return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID, isPinned: $0.isPinned, isArchived: $0.isArchived, muteUntil: $0.muteUntil) },
                       messages: messages + (value.chat?.pending ?? []).map {
                           Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyToID: nil, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, preparedAttachments: $0.preparedAttachments, totalAttachments: $0.totalAttachments, pendingStatus: $0.preparationStatus ?? $0.status, createdAt: $0.createdAt)
                       }, hasOlder: value.chat?.hasOlder ?? false, isLatest: value.chat?.isLatest ?? true)

@@ -385,33 +385,19 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       isGroup: room.isGroup,
       updatedAt: DateTime.fromMillisecondsSinceEpoch(room.updatedAt ?? 0),
     );
-    void profile() => Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _ProfileScaffold(
-          title: '会话资料',
-          children: [
-            _ProfileHeader(
-              id: id,
-              name: name,
-              handle: room.peerId ?? room.id,
-              group: room.isGroup,
-            ),
-            ListTile(
-              leading: const Icon(Icons.search),
-              title: const Text('搜索聊天记录'),
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) =>
-                      _MessageSearchPage(client: sdk.client!, room: room),
-                ),
-              ),
-            ),
-            const _TransfersLink(),
-            if (room.isGroup) _GroupDetailsButton(roomId: room.id),
-          ],
-        ),
-      ),
-    );
+    void profile() => _openSdkConversationProfile(context, sdk, room, id, name);
+    void history() {
+      final page = currentPage;
+      if (page != null && page.hasOlder) {
+        unawaited(changePage(page, latest: false));
+      } else if (scroll.hasClients) {
+        scroll.animateTo(
+          scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOut,
+        );
+      }
+    }
     return Column(
       children: [
         SizedBox(
@@ -428,21 +414,18 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               mobile: true,
               subtitle: room.isGroup ? '群聊' : '会话',
               onProfile: profile,
-              onHistory: () {
-                final page = currentPage;
-                if (page != null && page.hasOlder) {
-                  unawaited(changePage(page, latest: false));
-                } else if (scroll.hasClients) {
-                  scroll.animateTo(
-                    scroll.position.maxScrollExtent,
-                    duration: const Duration(milliseconds: 240),
-                    curve: Curves.easeOut,
-                  );
-                }
-              },
+              onHistory: history,
               onSettings: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) => const _AppearanceSettingsPage(),
+                  builder: (_) => _SdkChatSettings(
+                    room: room,
+                    avatarId: id,
+                    onHistory: () {
+                      Navigator.of(context).maybePop();
+                      history();
+                    },
+                    onProfile: profile,
+                  ),
                 ),
               ),
             ),
@@ -1129,3 +1112,218 @@ class _LocatedMessagePageState extends State<_LocatedMessagePage> {
     ),
   );
 }
+
+/// The reference chat settings layout, backed by the shared conversation
+/// state instead of the local demo stores.
+class _SdkChatSettings extends ConsumerWidget {
+  const _SdkChatSettings({
+    required this.room,
+    required this.avatarId,
+    required this.onHistory,
+    required this.onProfile,
+  });
+  final ImConversation room;
+  final int avatarId;
+  final VoidCallback onHistory;
+  final VoidCallback onProfile;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final sdk = _SdkScope.of(context)!;
+    final live = sdk.rooms.where((r) => r.id == room.id).firstOrNull ?? room;
+    final name = live.title.isEmpty ? '会话' : live.title;
+    final isMuted = _sdkMuted(live.muteUntil);
+    final background = ref.watch(chatBackgroundProvider(avatarId));
+    return _ProfileScaffold(
+      title: '聊天设置',
+      children: [
+        const SizedBox(height: 20),
+        _InfoCard(
+          children: [
+            ListTile(
+              key: const Key('sdk-settings-profile'),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 8,
+              ),
+              leading: ChatAvatar(
+                id: avatarId,
+                name: name,
+                group: live.isGroup,
+                size: 48,
+              ),
+              title: Text(
+                name,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Text(live.isGroup ? '查看群聊资料' : '查看个人资料'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: onProfile,
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _InfoCard(
+          children: [
+            SwitchListTile.adaptive(
+              key: const Key('sdk-settings-pin'),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 8,
+              ),
+              title: const Text('置顶聊天'),
+              subtitle: const Text('在会话列表顶部显示'),
+              value: live.isPinned,
+              onChanged: (value) =>
+                  sdk.applyConversationState(live, pinned: value),
+            ),
+            const Divider(height: 1, indent: 18, endIndent: 18),
+            SwitchListTile.adaptive(
+              key: const Key('sdk-settings-mute'),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 8,
+              ),
+              title: const Text('消息免打扰'),
+              subtitle: const Text('消息照常接收，未读标记使用灰色'),
+              value: isMuted,
+              onChanged: (value) => sdk.applyConversationState(
+                live,
+                muteUntil: value
+                    ? DateTime.now()
+                          .add(_sdkMuteHorizon)
+                          .millisecondsSinceEpoch
+                    : 0,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _InfoCard(
+          children: [
+            ListTile(
+              key: const Key('sdk-settings-archive'),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 8,
+              ),
+              leading: Icon(
+                live.isArchived
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+                color: green,
+              ),
+              title: Text(live.isArchived ? '取消隐藏聊天' : '隐藏聊天'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () async {
+                final value = !live.isArchived;
+                final applied = await sdk.applyConversationState(
+                  live,
+                  archived: value,
+                );
+                if (value && applied && context.mounted) {
+                  Navigator.of(context).popUntil((route) => route.isFirst);
+                }
+              },
+            ),
+            const Divider(height: 1, indent: 18, endIndent: 18),
+            ListTile(
+              key: const Key('sdk-settings-history'),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 8,
+              ),
+              leading: const Icon(Icons.history_rounded, color: green),
+              title: const Text('查看聊天记录'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: onHistory,
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _InfoCard(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(18),
+              child: SizedBox(
+                width: double.infinity,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '聊天背景',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: ink,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final choice in ChatBackground.values)
+                          ChoiceChip(
+                            key: ValueKey('sdk-chat-background-${choice.name}'),
+                            label: Text(choice.label),
+                            avatar: CircleAvatar(
+                              backgroundColor: choice.color,
+                              radius: 10,
+                            ),
+                            selected: background == choice,
+                            onSelected: (_) => ref
+                                .read(chatBackgroundProvider(avatarId).notifier)
+                                .select(choice),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        const Text(
+          '置顶、免打扰与隐藏会同步到账号内的其他设备。',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 12, color: muted),
+        ),
+      ],
+    );
+  }
+}
+
+void _openSdkConversationProfile(
+  BuildContext context,
+  _SdkWorkspaceState sdk,
+  ImConversation room,
+  int id,
+  String name,
+) => Navigator.of(context).push(
+  MaterialPageRoute<void>(
+    builder: (_) => _ProfileScaffold(
+      title: '会话资料',
+      children: [
+        _ProfileHeader(
+          id: id,
+          name: name,
+          handle: room.peerId ?? room.id,
+          group: room.isGroup,
+        ),
+        ListTile(
+          leading: const Icon(Icons.search),
+          title: const Text('搜索聊天记录'),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => _MessageSearchPage(client: sdk.client!, room: room),
+            ),
+          ),
+        ),
+        const _TransfersLink(),
+        if (room.isGroup) _GroupDetailsButton(roomId: room.id),
+      ],
+    ),
+  ),
+);

@@ -27,12 +27,14 @@ enum class SharedError { InvalidConfiguration, InvalidInput, Busy, Closed, Authe
 class SharedSdkException(val reason: SharedError) : Exception(reason.name)
 data class SharedConversation(
     val id: String, val title: String, val preview: String,
-    val unread: Long = 0, val isGroup: Boolean = false, val updatedAt: Long? = null, val peerID: String? = null
+    val unread: Long = 0, val isGroup: Boolean = false, val updatedAt: Long? = null, val peerID: String? = null,
+    val isPinned: Boolean = false, val isArchived: Boolean = false, val muteUntil: Long? = null
 )
 private fun JSONObject.optionalLong(key: String): Long? = if (isNull(key)) null else getLong(key)
 private fun JSONObject.conversation() = SharedConversation(
     getString("id"), getString("title"), getString("preview"), optLong("unread"),
-    optBoolean("isGroup"), optionalLong("updatedAt"), optString("peerID").takeIf(String::isNotEmpty)
+    optBoolean("isGroup"), optionalLong("updatedAt"), optString("peerID").takeIf(String::isNotEmpty),
+    optBoolean("isPinned"), optBoolean("isArchived"), optionalLong("muteUntil")
 )
 data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?, val createdAt: Long? = null)
 enum class SharedSendStatus { Preparing, Pending, WaitingForNetwork, WaitingForAuthentication, AcceptedAwaitingProjection, ConfirmingOutcome, NeedsAttention, ExpiredUnsubmitted, Closed, Rejected }
@@ -92,6 +94,16 @@ class SharedClient private constructor(private val handle: Long) {
         openWindow(JSONObject().put("operation", "openListWindow").put("archived", isArchived).put("limit", pageSize))
     suspend fun openMessageTimeline(roomID: String, pageSize: Int = 50): SharedConversationWindow =
         openWindow(JSONObject().put("operation", "openTimelineWindow").put("roomID", roomID).put("limit", pageSize))
+
+    /** Null keeps the current field; muteUntil uses epoch milliseconds and 0 clears the mute. */
+    suspend fun setConversationState(roomID: String, isPinned: Boolean? = null, isArchived: Boolean? = null,
+                                     muteUntil: Long? = null): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "conversationState").put("roomID", roomID).apply {
+            if (isPinned != null) put("isPinned", isPinned)
+            if (isArchived != null) put("archived", isArchived)
+            if (muteUntil != null) put("muteUntil", muteUntil)
+        })
+    }
 
     private suspend fun openWindow(request: JSONObject): SharedConversationWindow {
         var completedID: String? = null
