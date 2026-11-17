@@ -6,7 +6,7 @@ import 'package:im_flutter_sdk/src/messages.g.dart' as wire;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/widgets.dart';
-import 'package:material_ui/material_ui.dart' show FilledButton;
+import 'package:material_ui/material_ui.dart' show FilledButton, ListTile;
 import 'package:integration_test/integration_test.dart';
 import 'package:local_im/main.dart' as app;
 
@@ -116,9 +116,27 @@ void main() {
       await send(ack);
     } else {
       await until(bubble(hello), 'received from Android');
+      await tester.tap(find.byTooltip('消息操作').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('回复'));
+      await tester.pumpAndSettle();
       await send(reply);
       await until(bubble(ack), 'Android confirmed receipt of reply');
     }
+    final quote = bubble('回复 · $hello');
+    await until(quote, 'reply preview contains original message');
+    await tester.tap(quote);
+    await tester.pumpAndSettle();
+    await until(find.text('消息上下文'), 'opened quoted message context');
+    final selectedQuote = find.descendant(
+      of: find.byWidgetPredicate(
+        (widget) => widget is ListTile && widget.selected,
+      ),
+      matching: find.text(hello),
+    );
+    await until(selectedQuote, 'quoted original is highlighted');
+    await tester.pageBack();
+    await tester.pumpAndSettle();
     // Exercise the real platform binding and shared transfer services using an
     // app-owned fixture in place of the external document picker.
     final mediaHost = wire.ImHost();

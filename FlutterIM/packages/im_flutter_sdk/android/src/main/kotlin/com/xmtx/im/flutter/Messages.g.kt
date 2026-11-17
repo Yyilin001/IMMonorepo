@@ -467,7 +467,8 @@ data class ImMessage (
   val pendingStatus: String? = null,
   val createdAt: Long? = null,
   val preparedAttachments: Long? = null,
-  val totalAttachments: Long? = null
+  val totalAttachments: Long? = null,
+  val replyToId: String? = null
 )
  {
   companion object {
@@ -487,7 +488,8 @@ data class ImMessage (
       val createdAt = pigeonVar_list[12] as Long?
       val preparedAttachments = pigeonVar_list[13] as Long?
       val totalAttachments = pigeonVar_list[14] as Long?
-      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, revision, mutableRevision, replyPreview, pendingStatus, createdAt, preparedAttachments, totalAttachments)
+      val replyToId = pigeonVar_list[15] as String?
+      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, revision, mutableRevision, replyPreview, pendingStatus, createdAt, preparedAttachments, totalAttachments, replyToId)
     }
   }
   fun toList(): List<Any?> {
@@ -507,6 +509,7 @@ data class ImMessage (
       createdAt,
       preparedAttachments,
       totalAttachments,
+      replyToId,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -517,7 +520,7 @@ data class ImMessage (
       return true
     }
     val other = other as ImMessage
-    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.preparedAttachments, other.preparedAttachments) && MessagesPigeonUtils.deepEquals(this.totalAttachments, other.totalAttachments)
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.revision, other.revision) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.preparedAttachments, other.preparedAttachments) && MessagesPigeonUtils.deepEquals(this.totalAttachments, other.totalAttachments) && MessagesPigeonUtils.deepEquals(this.replyToId, other.replyToId)
   }
 
   override fun hashCode(): Int {
@@ -537,10 +540,11 @@ data class ImMessage (
     result = 31 * result + MessagesPigeonUtils.deepHash(this.createdAt)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.preparedAttachments)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.totalAttachments)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.replyToId)
     return result
   }
   override fun toString(): String {
-    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, revision=$revision, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt, preparedAttachments=$preparedAttachments, totalAttachments=$totalAttachments)"
+    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, revision=$revision, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt, preparedAttachments=$preparedAttachments, totalAttachments=$totalAttachments, replyToId=$replyToId)"
   }
 }
 

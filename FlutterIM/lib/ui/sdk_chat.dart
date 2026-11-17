@@ -692,6 +692,17 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                     }
                                   : null,
                               replyPreview: item.replyPreview,
+                              onOpenReply: item.replyToId == null
+                                  ? null
+                                  : () => Navigator.of(context).push(
+                                      MaterialPageRoute<void>(
+                                        builder: (_) => _LocatedMessagePage(
+                                          client: sdk.client!,
+                                          roomId: widget.room.id,
+                                          messageId: item.replyToId!,
+                                        ),
+                                      ),
+                                    ),
                               isForwarded: item.isForwarded,
                               showTime: item.createdAt != null,
                               message: ChatMessage(
@@ -1025,8 +1036,11 @@ class _MessageSearchPageState extends State<_MessageSearchPage> {
                   title: Text(hit.text),
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
-                      builder: (_) =>
-                          _LocatedMessagePage(client: widget.client, hit: hit),
+                      builder: (_) => _LocatedMessagePage(
+                        client: widget.client,
+                        roomId: hit.roomId,
+                        messageId: hit.id,
+                      ),
                     ),
                   ),
                   subtitle: widget.room == null
@@ -1047,23 +1061,27 @@ class _MessageSearchPageState extends State<_MessageSearchPage> {
 }
 
 class _LocatedMessagePage extends StatefulWidget {
-  const _LocatedMessagePage({required this.client, required this.hit});
+  const _LocatedMessagePage({
+    required this.client,
+    required this.roomId,
+    required this.messageId,
+  });
   final ImClient client;
-  final ImSearchHit hit;
+  final String roomId, messageId;
   @override
   State<_LocatedMessagePage> createState() => _LocatedMessagePageState();
 }
 
 class _LocatedMessagePageState extends State<_LocatedMessagePage> {
   late final messages = widget.client.locateMessage(
-    widget.hit.roomId,
-    widget.hit.id,
+    widget.roomId,
+    widget.messageId,
   );
   final center = GlobalKey();
 
   Widget row(ImMessage item) => ListTile(
     key: ValueKey(item.id),
-    selected: item.id == widget.hit.id,
+    selected: item.id == widget.messageId,
     selectedTileColor: Theme.of(context).colorScheme.secondaryContainer,
     title: Text(item.senderId),
     subtitle: SelectableText(
@@ -1090,7 +1108,7 @@ class _LocatedMessagePageState extends State<_LocatedMessagePage> {
         if (items == null) {
           return const Center(child: CircularProgressIndicator());
         }
-        final index = items.indexWhere((item) => item.id == widget.hit.id);
+        final index = items.indexWhere((item) => item.id == widget.messageId);
         if (index < 0) return const Center(child: Text('原消息已不可用'));
         return CustomScrollView(
           center: center,

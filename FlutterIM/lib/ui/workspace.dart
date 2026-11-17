@@ -1558,6 +1558,7 @@ class _MessageBubble extends ConsumerWidget {
     this.sdkStatus,
     this.attachmentList,
     this.replyPreview,
+    this.onOpenReply,
     this.onReply,
     this.onForward,
     this.recovery,
@@ -1571,7 +1572,7 @@ class _MessageBubble extends ConsumerWidget {
   final bool isForwarded;
   final Widget? attachmentList;
   final ({String label, VoidCallback action})? recovery;
-  final VoidCallback? onCancelSend;
+  final VoidCallback? onCancelSend, onOpenReply;
   final VoidCallback? onReply, onForward, onEdit, onWithdraw;
   final bool showTime;
   final ChatMessage message;
@@ -1727,10 +1728,12 @@ class _MessageBubble extends ConsumerWidget {
                 ),
                 if (isForwarded) const Text('转发的消息'),
                 if (replyPreview case final preview?)
-                  Text(
-                    '回复 · $preview',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+                  InkWell(
+                    onTap: onOpenReply,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text('回复 · $preview', maxLines: 2, overflow: TextOverflow.ellipsis),
+                    ),
                   ),
                 if (sdkSender == null)
                   _MessageActionsRegion(message: message, child: content)
