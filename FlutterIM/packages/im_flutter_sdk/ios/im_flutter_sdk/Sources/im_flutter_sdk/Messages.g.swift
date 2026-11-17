@@ -1050,6 +1050,56 @@ struct GroupMember: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct ImActivity: Hashable, CustomStringConvertible {
+  var roomId: String
+  var isGroup: Bool
+  var isOnline: Bool? = nil
+  var typingUserIds: [String]
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImActivity? {
+    let roomId = pigeonVar_list[0] as! String
+    let isGroup = pigeonVar_list[1] as! Bool
+    let isOnline: Bool? = nilOrValue(pigeonVar_list[2])
+    let typingUserIds = pigeonVar_list[3] as! [String]
+
+    return ImActivity(
+      roomId: roomId,
+      isGroup: isGroup,
+      isOnline: isOnline,
+      typingUserIds: typingUserIds
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      roomId,
+      isGroup,
+      isOnline,
+      typingUserIds,
+    ]
+  }
+  static func == (lhs: ImActivity, rhs: ImActivity) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.isGroup, rhs.isGroup) && MessagesPigeonInternal.deepEquals(lhs.isOnline, rhs.isOnline) && MessagesPigeonInternal.deepEquals(lhs.typingUserIds, rhs.typingUserIds)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImActivity")
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isGroup, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isOnline, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: typingUserIds, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImActivity(roomId: \(String(describing: roomId)), isGroup: \(String(describing: isGroup)), isOnline: \(String(describing: isOnline)), typingUserIds: \(String(describing: typingUserIds)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct ImPrivacy: Hashable, CustomStringConvertible {
   var allowsStrangerMessages: Bool? = nil
   var allowsUserAdd: Bool? = nil
@@ -1853,32 +1903,34 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 143:
       return GroupMember.fromList(self.readValue() as! [Any?])
     case 144:
-      return ImPrivacy.fromList(self.readValue() as! [Any?])
+      return ImActivity.fromList(self.readValue() as! [Any?])
     case 145:
-      return ImDeviceSession.fromList(self.readValue() as! [Any?])
+      return ImPrivacy.fromList(self.readValue() as! [Any?])
     case 146:
-      return ImDeviceSessions.fromList(self.readValue() as! [Any?])
+      return ImDeviceSession.fromList(self.readValue() as! [Any?])
     case 147:
-      return ImGroupNickname.fromList(self.readValue() as! [Any?])
+      return ImDeviceSessions.fromList(self.readValue() as! [Any?])
     case 148:
-      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
+      return ImGroupNickname.fromList(self.readValue() as! [Any?])
     case 149:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
     case 150:
-      return ImInvite.fromList(self.readValue() as! [Any?])
+      return GroupPage.fromList(self.readValue() as! [Any?])
     case 151:
-      return ImJoinRequest.fromList(self.readValue() as! [Any?])
+      return ImInvite.fromList(self.readValue() as! [Any?])
     case 152:
-      return ImInvitePreview.fromList(self.readValue() as! [Any?])
+      return ImJoinRequest.fromList(self.readValue() as! [Any?])
     case 153:
-      return ImCommunity.fromList(self.readValue() as! [Any?])
+      return ImInvitePreview.fromList(self.readValue() as! [Any?])
     case 154:
-      return ImFavoriteMessage.fromList(self.readValue() as! [Any?])
+      return ImCommunity.fromList(self.readValue() as! [Any?])
     case 155:
-      return ImFavorites.fromList(self.readValue() as! [Any?])
+      return ImFavoriteMessage.fromList(self.readValue() as! [Any?])
     case 156:
-      return ImReaders.fromList(self.readValue() as! [Any?])
+      return ImFavorites.fromList(self.readValue() as! [Any?])
     case 157:
+      return ImReaders.fromList(self.readValue() as! [Any?])
+    case 158:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -1933,47 +1985,50 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? GroupMember {
       super.writeByte(143)
       super.writeValue(value.toList())
-    } else if let value = value as? ImPrivacy {
+    } else if let value = value as? ImActivity {
       super.writeByte(144)
       super.writeValue(value.toList())
-    } else if let value = value as? ImDeviceSession {
+    } else if let value = value as? ImPrivacy {
       super.writeByte(145)
       super.writeValue(value.toList())
-    } else if let value = value as? ImDeviceSessions {
+    } else if let value = value as? ImDeviceSession {
       super.writeByte(146)
       super.writeValue(value.toList())
-    } else if let value = value as? ImGroupNickname {
+    } else if let value = value as? ImDeviceSessions {
       super.writeByte(147)
       super.writeValue(value.toList())
-    } else if let value = value as? ImGroupPolicy {
+    } else if let value = value as? ImGroupNickname {
       super.writeByte(148)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? ImGroupPolicy {
       super.writeByte(149)
       super.writeValue(value.toList())
-    } else if let value = value as? ImInvite {
+    } else if let value = value as? GroupPage {
       super.writeByte(150)
       super.writeValue(value.toList())
-    } else if let value = value as? ImJoinRequest {
+    } else if let value = value as? ImInvite {
       super.writeByte(151)
       super.writeValue(value.toList())
-    } else if let value = value as? ImInvitePreview {
+    } else if let value = value as? ImJoinRequest {
       super.writeByte(152)
       super.writeValue(value.toList())
-    } else if let value = value as? ImCommunity {
+    } else if let value = value as? ImInvitePreview {
       super.writeByte(153)
       super.writeValue(value.toList())
-    } else if let value = value as? ImFavoriteMessage {
+    } else if let value = value as? ImCommunity {
       super.writeByte(154)
       super.writeValue(value.toList())
-    } else if let value = value as? ImFavorites {
+    } else if let value = value as? ImFavoriteMessage {
       super.writeByte(155)
       super.writeValue(value.toList())
-    } else if let value = value as? ImReaders {
+    } else if let value = value as? ImFavorites {
       super.writeByte(156)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? ImReaders {
       super.writeByte(157)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(158)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -2009,6 +2064,9 @@ protocol ImHost {
   func passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) async throws
   func connect() async throws -> ImSession
   func synchronize() async throws
+  func activity(roomId: String) async throws -> ImActivity?
+  func setTyping(roomId: String, typing: Bool) async throws
+  func closeActivity() async throws
   func status() async throws -> ImSession
   func disconnect() async throws
   func openWindow(roomId: String?, archived: Bool) async throws -> String
@@ -2264,6 +2322,56 @@ class ImHostSetup {
       }
     } else {
       synchronizeChannel.setMessageHandler(nil)
+    }
+    let activityChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.activity\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      activityChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.activity(roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      activityChannel.setMessageHandler(nil)
+    }
+    let setTypingChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setTyping\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setTypingChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let typingArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.setTyping(roomId: roomIdArg, typing: typingArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setTypingChannel.setMessageHandler(nil)
+    }
+    let closeActivityChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.closeActivity\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      closeActivityChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.closeActivity()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      closeActivityChannel.setMessageHandler(nil)
     }
     let statusChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.status\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

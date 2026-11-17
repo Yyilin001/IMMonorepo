@@ -97,6 +97,19 @@ private actor MobileHost: ImHost {
     }
     func connect() async throws -> ImSession { try await ordered { try await self.client.connect().wire } }
     func synchronize() async throws { try await ordered { try await self.client.synchronize() } }
+    func activity(roomId: String) async throws -> ImActivity? {
+        try await ordered {
+            guard let value = try await self.client.activity(roomID: roomId) else { return nil }
+            return ImActivity(roomId: value.roomID, isGroup: value.isGroup, isOnline: value.isOnline,
+                              typingUserIds: value.typingUserIDs)
+        }
+    }
+    func setTyping(roomId: String, typing: Bool) async throws {
+        try await ordered { try await self.client.setTyping(roomID: roomId, typing: typing) }
+    }
+    func closeActivity() async throws {
+        try await ordered { try await self.client.closeActivity() }
+    }
     func status() async throws -> ImSession { try await ordered { try await self.client.status().wire } }
     func disconnect() async throws { try await ordered { try await self.client.disconnect() } }
     func openWindow(roomId: String?, archived: Bool) async throws -> String {

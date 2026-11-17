@@ -84,6 +84,15 @@ private class MobileHost(private val context: Context) : ImHost {
     }
     override suspend fun connect() = sdk { client.connect().session() }
     override suspend fun synchronize() { mutations.withLock { sdk { client.synchronize() } } }
+    override suspend fun activity(roomId: String): ImActivity? = mutations.withLock { sdk {
+        client.activity(roomId).activity?.let { ImActivity(it.roomID, it.isGroup, it.isOnline, it.typingUserIDs) }
+    } }
+    override suspend fun setTyping(roomId: String, typing: Boolean) {
+        mutations.withLock { sdk { client.setTyping(roomId, typing) } }
+    }
+    override suspend fun closeActivity() {
+        mutations.withLock { sdk { client.closeActivity() } }
+    }
     override suspend fun disconnect() { sdk { client.disconnect() } }
 
     override suspend fun openWindow(roomId: String?, archived: Boolean) = mutations.withLock {

@@ -230,6 +230,19 @@ class GroupMember {
   String role;
 }
 
+class ImActivity {
+  ImActivity({
+    required this.roomId,
+    required this.isGroup,
+    this.isOnline,
+    required this.typingUserIds,
+  });
+  String roomId;
+  bool isGroup;
+  bool? isOnline;
+  List<String> typingUserIds;
+}
+
 class ImPrivacy {
   ImPrivacy({
     this.allowsStrangerMessages,
@@ -465,6 +478,12 @@ abstract class ImHost {
   ImSession connect();
   @async
   void synchronize();
+  @async
+  ImActivity? activity(String roomId);
+  @async
+  void setTyping(String roomId, bool typing);
+  @async
+  void closeActivity();
   @async
   ImSession status();
   @async

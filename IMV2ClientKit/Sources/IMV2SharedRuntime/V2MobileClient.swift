@@ -227,6 +227,18 @@ public final class V2MobileClient: Sendable {
                             text: $0.text, createdAt: $0.createdAt, attachmentNames: $0.attachmentNames)
         }, hasMore: page.hasMore)
     }
+    public func activity(roomID: String) async throws -> Activity? {
+        let value = try await run(.init(operation: .activity, roomID: roomID))
+        guard let activity = value.activity else { return nil }
+        return Activity(roomID: activity.roomID, isGroup: activity.isGroup,
+                        isOnline: activity.isOnline, typingUserIDs: activity.typingUserIDs)
+    }
+    public func setTyping(roomID: String, typing: Bool) async throws {
+        _ = try await run(.init(operation: .setTyping, flag1: typing, roomID: roomID))
+    }
+    public func closeActivity() async throws {
+        _ = try await run(.init(operation: .closeActivity))
+    }
     public func moderateMessage(roomID: String, messageID: String) async throws {
         _ = try await run(.init(operation: .moderateMessage, messageID: messageID, roomID: roomID))
     }
@@ -405,6 +417,12 @@ public final class V2MobileClient: Sendable {
         public let allowsOnlinePresence: Bool?
         public let allowsTypingIndicators: Bool?
         public let blockedUsers: [String]
+    }
+    public struct Activity: Sendable {
+        public let roomID: String
+        public let isGroup: Bool
+        public let isOnline: Bool?
+        public let typingUserIDs: [String]
     }
     public struct GroupNickname: Sendable {
         public let roomID: String

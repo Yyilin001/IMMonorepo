@@ -22,7 +22,54 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   final Set<String> _senderProfilesRequested = {};
   final Set<String> selected = {};
   final List<String> mentions = [];
+  ImActivity? activity;
+  Timer? activityTimer, typingTimer;
+  bool typingSent = false;
   bool initialized = false, sending = false, selecting = false, forwarding = false;
+
+  Future<void> refreshActivity() async {
+    final client = _SdkScope.of(context)?.client;
+    if (client == null) return;
+    try {
+      final value = await client.activity(widget.room.id);
+      if (mounted) setState(() => activity = value);
+    } catch (_) {
+      // Presence and typing are best-effort.
+    }
+  }
+
+  void startActivity() {
+    activityTimer?.cancel();
+    activityTimer = Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => refreshActivity(),
+    );
+    unawaited(refreshActivity());
+  }
+
+  Future<void> sendTyping(bool typing) async {
+    if (typingSent == typing) return;
+    typingSent = typing;
+    try {
+      await _SdkScope.of(
+        context,
+      )?.client?.setTyping(widget.room.id, typing: typing);
+    } catch (_) {}
+  }
+
+  void onInputChanged() {
+    final shouldType = input.text.trim().isNotEmpty;
+    if (shouldType && typingTimer == null) {
+      unawaited(sendTyping(true));
+      typingTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+        unawaited(sendTyping(true));
+      });
+    } else if (!shouldType && typingTimer != null) {
+      typingTimer?.cancel();
+      typingTimer = null;
+      unawaited(sendTyping(false));
+    }
+  }
 
   void enterSelection(ImMessage item) {
     setState(() {
@@ -345,6 +392,8 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       initialized = true;
       id = sdk.keyFor(widget.room.id);
       input.text = ref.read(draftProvider(id));
+      input.addListener(onInputChanged);
+      startActivity();
       messages = sdk.client!.watchTimeline(widget.room.id).map((page) {
         currentPage = page;
         final ids = <String>{
@@ -723,6 +772,15 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
 
   @override
   void dispose() {
+    activityTimer?.cancel();
+    typingTimer?.cancel();
+    final client = _SdkScope.of(context)?.client;
+    if (client != null) {
+      unawaited(
+        client.setTyping(widget.room.id, typing: false).catchError((_) {}),
+      );
+      unawaited(client.closeActivity().catchError((_) {}));
+    }
     input.dispose();
     focus.dispose();
     scroll.dispose();
@@ -748,6 +806,20 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       isGroup: room.isGroup,
       updatedAt: DateTime.fromMillisecondsSinceEpoch(room.updatedAt ?? 0),
     );
+    final typingUsers = activity?.typingUserIds ?? const <String>[];
+    final activitySubtitle = room.isGroup
+        ? typingUsers.isEmpty
+              ? '群聊'
+              : typingUsers.length > 1
+              ? '${typingUsers.length} 位成员正在输入…'
+              : '有人正在输入…'
+        : typingUsers.isNotEmpty
+        ? '对方正在输入…'
+        : activity?.isOnline == true
+        ? '在线'
+        : activity?.isOnline == false
+        ? '离线'
+        : '会话';
     void profile() => _openSdkConversationProfile(context, sdk, room, id, name);
     void history() {
       final page = currentPage;
@@ -799,7 +871,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               displayName: name,
               group: room.isGroup,
               mobile: true,
-              subtitle: room.isGroup ? '群聊' : '会话',
+              subtitle: activitySubtitle,
               avatar: room.isGroup
                   ? SdkGroupAvatar(roomId: room.id, name: name, size: 32)
                   : room.peerId != null

@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, pinMessage, moderateMessage, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, pinMessage, moderateMessage, activity, setTyping, closeActivity, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -146,6 +146,7 @@ package struct SharedSnapshot: Encodable, Sendable {
     var deviceSessions: SharedDeviceSessions? = nil
     var privacy: SharedPrivacy? = nil
     var favorites: SharedFavorites? = nil
+    var activity: SharedActivityView? = nil
 }
 package enum SharedFailure: String, Error { case invalidConfiguration, invalidInput, busy, closed, authenticationRequired, networkUnavailable, storageUnavailable, operationFailed, cancelled, accountExists, publicHandleTaken, invalidPublicHandle, invalidDisplayName, invalidPassword, invalidRecoveryCode, rateLimited }
 package func sharedFailure(_ error: any Error) -> SharedFailure {
@@ -213,6 +214,7 @@ package actor SharedRuntime {
     private var accountPreferences: V2AccountPreferenceService?
     private var preferencePreparation: Task<Void, Never>?
     private var messageModeration: V2MessageModerationOperationService?
+    private var conversationActivity: SharedActivity?
     private var dispatcher: Task<Void, Never>?
     private var roomRecovery: V2RoomRecoveryRunner?
     private var selectedRoom: RoomID?
@@ -334,6 +336,17 @@ package actor SharedRuntime {
                     attachmentNames: message.mediaPresentations.map { $0.resourceDescriptor?.displayName.value ?? "附件" }))
             }
             favorites = SharedFavorites(messages: rows, hasMore: page.nextCursor != nil)
+        case .activity:
+            guard let conversationActivity, let store, let roomID = request.roomID else { throw SharedFailure.authenticationRequired }
+            let room = try RoomID(roomID)
+            guard try await store.roomAllowsLocalRead(roomID: room) else { throw SharedFailure.invalidInput }
+            let isGroup = try await store.roomProfile(roomID: room) != nil
+            try await conversationActivity.open(room: room, isGroup: isGroup)
+        case .setTyping:
+            guard let conversationActivity, let typing = request.flag1 else { throw SharedFailure.invalidInput }
+            try await conversationActivity.setTyping(typing)
+        case .closeActivity:
+            await conversationActivity?.close()
         case .moderateMessage:
             guard let service = messageModeration, let roomID = request.roomID,
                   let messageID = request.messageID else { throw SharedFailure.invalidInput }
@@ -574,6 +587,7 @@ package actor SharedRuntime {
         favorites = nil; favoriteCursor = nil
         preferencePreparation?.cancel(); preferencePreparation = nil; accountPreferences = nil; privacy = nil
         messageModeration = nil
+        await conversationActivity?.close(); conversationActivity = nil
     }
     private func signOut() async throws {
         // Intent survives cancellation/crash between revocation handoff and local deletion.
@@ -642,6 +656,12 @@ package actor SharedRuntime {
             didPersistProgress: { room, cursor in try await transport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: cursor) }),
             source: wire, personalSync: sync)
         roomRecovery = recovery
+        let subscriptions = V2RoomSubscriptionCoordinator(subscriptions: transport, activity: transport,
+            groupEvents: wire, activityEvents: wire,
+            isAuthorized: { roomID in try await store.roomAllowsLocalRead(roomID: roomID) },
+            roomCursor: { roomID in try await store.groupEventCursor(roomID: roomID) })
+        let conversationActivity = SharedActivity(accountID: identity.userID, transport: transport, rooms: subscriptions)
+        self.conversationActivity = conversationActivity
         let moderationClient = try V2HTTPMessageModerationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)
         let messageModeration = V2MessageModerationOperationService(accountID: identity.userID,
             activationID: identity.deviceID.uuidValue ?? UUID(), store: store, client: moderationClient)
@@ -822,6 +842,6 @@ package actor SharedRuntime {
         return .init(state: currentState, userID: userID, allowsStrangerMessages: preference?.allowsStrangerMessages, appliedSequence: cursor?.appliedSequence ?? 0,
             acknowledgedSequence: cursor?.serverAcknowledgedSequence ?? 0, connections: connections,
             conversations: rows, failure: failure?.rawValue,
-            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions, privacy: privacy, favorites: favorites)
+            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions, privacy: privacy, favorites: favorites, activity: await conversationActivity?.view())
     }
 }

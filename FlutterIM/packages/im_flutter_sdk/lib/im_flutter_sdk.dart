@@ -84,6 +84,12 @@ typedef ImConversation = ({
   int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImActivity = ({
+  String roomId,
+  bool isGroup,
+  bool? isOnline,
+  List<String> typingUserIds,
+});
 typedef ImPrivacy = ({
   bool? allowsStrangerMessages,
   bool? allowsUserAdd,
@@ -400,6 +406,23 @@ final class ImClient {
   });
 
   Future<void> synchronize() => _ordered(_host.synchronize);
+
+  Future<ImActivity?> activity(String roomId) => _ordered(() async {
+    final value = await _host.activity(roomId);
+    return value == null
+        ? null
+        : (
+            roomId: value.roomId,
+            isGroup: value.isGroup,
+            isOnline: value.isOnline,
+            typingUserIds: List<String>.unmodifiable(value.typingUserIds),
+          );
+  });
+
+  Future<void> setTyping(String roomId, {required bool typing}) =>
+      _ordered(() => _host.setTyping(roomId, typing));
+
+  Future<void> closeActivity() => _ordered(_host.closeActivity);
 
   void _schedule(Duration delay) {
     _timer?.cancel();

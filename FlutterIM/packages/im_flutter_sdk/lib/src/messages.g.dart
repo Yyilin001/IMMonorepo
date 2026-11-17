@@ -1112,6 +1112,66 @@ class GroupMember {
   }
 }
 
+class ImActivity {
+  ImActivity({
+    required this.roomId,
+    required this.isGroup,
+    this.isOnline,
+    required this.typingUserIds,
+  });
+
+  String roomId;
+
+  bool isGroup;
+
+  bool? isOnline;
+
+  List<String> typingUserIds;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      roomId,
+      isGroup,
+      isOnline,
+      typingUserIds,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImActivity decode(Object result) {
+    result as List<Object?>;
+    return ImActivity(
+      roomId: result[0]! as String,
+      isGroup: result[1]! as bool,
+      isOnline: result[2] as bool?,
+      typingUserIds: (result[3]! as List<Object?>).cast<String>(),
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImActivity || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(roomId, other.roomId) && _deepEquals(isGroup, other.isGroup) && _deepEquals(isOnline, other.isOnline) && _deepEquals(typingUserIds, other.typingUserIds);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImActivity(roomId: $roomId, isGroup: $isGroup, isOnline: $isOnline, typingUserIds: $typingUserIds)';
+  }
+}
+
 class ImPrivacy {
   ImPrivacy({
     this.allowsStrangerMessages,
@@ -2075,47 +2135,50 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is GroupMember) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    }    else if (value is ImPrivacy) {
+    }    else if (value is ImActivity) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
-    }    else if (value is ImDeviceSession) {
+    }    else if (value is ImPrivacy) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    }    else if (value is ImDeviceSessions) {
+    }    else if (value is ImDeviceSession) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupNickname) {
+    }    else if (value is ImDeviceSessions) {
       buffer.putUint8(147);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupPolicy) {
+    }    else if (value is ImGroupNickname) {
       buffer.putUint8(148);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is ImGroupPolicy) {
       buffer.putUint8(149);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvite) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(150);
       writeValue(buffer, value.encode());
-    }    else if (value is ImJoinRequest) {
+    }    else if (value is ImInvite) {
       buffer.putUint8(151);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvitePreview) {
+    }    else if (value is ImJoinRequest) {
       buffer.putUint8(152);
       writeValue(buffer, value.encode());
-    }    else if (value is ImCommunity) {
+    }    else if (value is ImInvitePreview) {
       buffer.putUint8(153);
       writeValue(buffer, value.encode());
-    }    else if (value is ImFavoriteMessage) {
+    }    else if (value is ImCommunity) {
       buffer.putUint8(154);
       writeValue(buffer, value.encode());
-    }    else if (value is ImFavorites) {
+    }    else if (value is ImFavoriteMessage) {
       buffer.putUint8(155);
       writeValue(buffer, value.encode());
-    }    else if (value is ImReaders) {
+    }    else if (value is ImFavorites) {
       buffer.putUint8(156);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is ImReaders) {
       buffer.putUint8(157);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(158);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -2156,32 +2219,34 @@ class _PigeonCodec extends StandardMessageCodec {
       case 143:
         return GroupMember.decode(readValue(buffer)!);
       case 144:
-        return ImPrivacy.decode(readValue(buffer)!);
+        return ImActivity.decode(readValue(buffer)!);
       case 145:
-        return ImDeviceSession.decode(readValue(buffer)!);
+        return ImPrivacy.decode(readValue(buffer)!);
       case 146:
-        return ImDeviceSessions.decode(readValue(buffer)!);
+        return ImDeviceSession.decode(readValue(buffer)!);
       case 147:
-        return ImGroupNickname.decode(readValue(buffer)!);
+        return ImDeviceSessions.decode(readValue(buffer)!);
       case 148:
-        return ImGroupPolicy.decode(readValue(buffer)!);
+        return ImGroupNickname.decode(readValue(buffer)!);
       case 149:
-        return GroupPage.decode(readValue(buffer)!);
+        return ImGroupPolicy.decode(readValue(buffer)!);
       case 150:
-        return ImInvite.decode(readValue(buffer)!);
+        return GroupPage.decode(readValue(buffer)!);
       case 151:
-        return ImJoinRequest.decode(readValue(buffer)!);
+        return ImInvite.decode(readValue(buffer)!);
       case 152:
-        return ImInvitePreview.decode(readValue(buffer)!);
+        return ImJoinRequest.decode(readValue(buffer)!);
       case 153:
-        return ImCommunity.decode(readValue(buffer)!);
+        return ImInvitePreview.decode(readValue(buffer)!);
       case 154:
-        return ImFavoriteMessage.decode(readValue(buffer)!);
+        return ImCommunity.decode(readValue(buffer)!);
       case 155:
-        return ImFavorites.decode(readValue(buffer)!);
+        return ImFavoriteMessage.decode(readValue(buffer)!);
       case 156:
-        return ImReaders.decode(readValue(buffer)!);
+        return ImFavorites.decode(readValue(buffer)!);
       case 157:
+        return ImReaders.decode(readValue(buffer)!);
+      case 158:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -2385,6 +2450,58 @@ class ImHost {
 
   Future<void> synchronize() async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.synchronize$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<ImActivity?> activity(String roomId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.activity$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+    return pigeonVar_replyValue as ImActivity?;
+  }
+
+  Future<void> setTyping(String roomId, bool typing) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.setTyping$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, typing]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> closeActivity() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.closeActivity$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
       pigeonChannelCodec,

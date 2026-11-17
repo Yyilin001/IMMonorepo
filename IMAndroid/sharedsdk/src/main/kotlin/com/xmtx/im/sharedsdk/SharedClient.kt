@@ -47,10 +47,11 @@ data class SharedDeviceSession(val deviceID: String, val deviceName: String, val
 data class SharedDeviceSessions(val sessions: PersistentList<SharedDeviceSession>, val nextCursor: String?)
 data class SharedFavoriteMessage(val id: String, val roomID: String, val roomTitle: String, val senderID: String, val text: String, val createdAt: Long?, val attachmentNames: List<String>)
 data class SharedFavorites(val messages: List<SharedFavoriteMessage>, val hasMore: Boolean)
+data class SharedActivity(val roomID: String, val isGroup: Boolean, val isOnline: Boolean?, val typingUserIDs: List<String>)
 data class SharedPrivacy(val allowsStrangerMessages: Boolean?, val allowsUserAdd: Boolean?, val allowsDirectReadReceipts: Boolean?,
     val allowsGroupReadReceipts: Boolean?, val allowsOnlinePresence: Boolean?, val allowsTypingIndicators: Boolean?, val blockedUsers: List<String>)
 data class SharedSnapshot(val state: SharedSessionState, val userID: String?, val allowsStrangerMessages: Boolean?, val appliedSequence: Long,
-    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null, val privacy: SharedPrivacy? = null, val favorites: SharedFavorites? = null)
+    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null, val privacy: SharedPrivacy? = null, val favorites: SharedFavorites? = null, val activity: SharedActivity? = null)
 
 internal object NativeSharedSDK {
     init { System.loadLibrary("IMV2SharedSDK") }
@@ -144,6 +145,13 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun favorites(next: Boolean = false): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "favorites").put("action", if (next) "next" else "first"))
     }
+    suspend fun activity(roomID: String): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "activity").put("roomID", roomID))
+    }
+    suspend fun setTyping(roomID: String, typing: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "setTyping").put("roomID", roomID).put("flag1", typing))
+    }
+    suspend fun closeActivity(): SharedSnapshot = mutate("closeActivity")
     suspend fun moderateMessage(roomID: String, messageID: String): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "moderateMessage").put("roomID", roomID).put("messageID", messageID))
     }
@@ -415,6 +423,11 @@ class SharedClient private constructor(private val handle: Long) {
                     if (privacy.has("allowsOnlinePresence")) privacy.getBoolean("allowsOnlinePresence") else null,
                     if (privacy.has("allowsTypingIndicators")) privacy.getBoolean("allowsTypingIndicators") else null,
                     (0 until blocked.length()).map { blocked.getString(it) })
+            }, activity = value.optJSONObject("activity")?.let { activity ->
+                val typing = activity.getJSONArray("typingUserIDs")
+                SharedActivity(activity.getString("roomID"), activity.getBoolean("isGroup"),
+                    if (activity.has("isOnline")) activity.getBoolean("isOnline") else null,
+                    (0 until typing.length()).map { typing.getString(it) })
             }, favorites = value.optJSONObject("favorites")?.let { favorites ->
                 val rows = favorites.getJSONArray("messages")
                 SharedFavorites((0 until rows.length()).map { index -> rows.getJSONObject(index).let {
