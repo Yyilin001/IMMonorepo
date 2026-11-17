@@ -636,7 +636,6 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
       controller: scroll,
       physics: const AlwaysScrollableScrollPhysics(),
       itemCount: rows.length,
-      itemExtent: 82,
       itemBuilder: (_, index) {
         final row = rows[index];
         final item = Conversation(
@@ -1099,15 +1098,18 @@ class _ConversationRow extends ConsumerWidget {
                   ),
                   const SizedBox(width: 6),
                   if (item.muted) ...[
-                    const Icon(
-                      Icons.notifications_off_outlined,
-                      size: 13,
-                      color: muted,
+                    const ExcludeSemantics(
+                      child: Icon(
+                        Icons.notifications_off_outlined,
+                        size: 13,
+                        color: muted,
+                      ),
                     ),
                     const SizedBox(width: 4),
                   ],
                   if (item.unread > 0)
-                    Container(
+                    ExcludeSemantics(
+                      child: Container(
                       constraints: const BoxConstraints(minWidth: 18),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 5,
@@ -1125,9 +1127,16 @@ class _ConversationRow extends ConsumerWidget {
                           color: Colors.white,
                         ),
                       ),
+                    ),
                     )
                   else if (item.pinned)
-                    const Icon(Icons.push_pin_rounded, size: 12, color: muted),
+                    const ExcludeSemantics(
+                      child: Icon(
+                        Icons.push_pin_rounded,
+                        size: 12,
+                        color: muted,
+                      ),
+                    ),
                 ],
               ),
             ],
@@ -2014,9 +2023,15 @@ class _MessageBubble extends ConsumerWidget {
                 if (mine)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      sdkStatus ?? (mobile ? '已送达' : '已送达 · Mock ✓'),
-                      style: const TextStyle(fontSize: 9, color: muted),
+                    child: Semantics(
+                      liveRegion: true,
+                      label: sdkStatus ?? (mobile ? '已送达' : '已送达 · Mock ✓'),
+                      child: ExcludeSemantics(
+                        child: Text(
+                          sdkStatus ?? (mobile ? '已送达' : '已送达 · Mock ✓'),
+                          style: const TextStyle(fontSize: 9, color: muted),
+                        ),
+                      ),
                     ),
                   ),
               ],
