@@ -196,11 +196,23 @@ final class ImClient {
       ),
     ),
   );
-  Future<List<ImDirectoryEntry>> directory() => _ordered(
-    () async => (await _host.directory())
-        .map((item) => (id: item.id, title: item.title, isGroup: item.isGroup))
-        .toList(growable: false),
-  );
+  Future<List<ImDirectoryEntry>> directory() async =>
+      (await directoryPage()).entries;
+
+  /// A null selector restarts both lists. Otherwise advance only the selected list.
+  Future<({List<ImDirectoryEntry> entries, bool moreContacts, bool moreGroups})>
+  directoryPage({bool? nextGroups}) => _ordered(() async {
+    final page = await _host.directory(nextGroups);
+    return (
+      entries: page.entries
+          .map(
+            (item) => (id: item.id, title: item.title, isGroup: item.isGroup),
+          )
+          .toList(growable: false),
+      moreContacts: page.moreContacts,
+      moreGroups: page.moreGroups,
+    );
+  });
 
   Stream<List<ImMessage>> watchMessages(String roomId) =>
       _watch(roomId, (value) => value.messages.map((m) => m.value));

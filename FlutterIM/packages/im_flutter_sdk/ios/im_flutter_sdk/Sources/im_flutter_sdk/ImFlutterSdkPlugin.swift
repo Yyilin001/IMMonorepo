@@ -66,8 +66,12 @@ private actor MobileHost: ImHost {
             throw PigeonError(code: failure.code, message: nil, details: nil)
         }
     }
-    func directory() async throws -> [DirectoryEntry] {
-        try await ordered { try await self.client.directory().map { DirectoryEntry(id: $0.id, title: $0.title, isGroup: $0.isGroup) } }
+    func directory(nextGroups: Bool?) async throws -> DirectoryPage {
+        try await ordered {
+            let page = try await self.client.directoryPage(nextGroups: nextGroups)
+            return DirectoryPage(entries: page.entries.map { DirectoryEntry(id: $0.id, title: $0.title, isGroup: $0.isGroup) },
+                                 moreContacts: page.moreContacts, moreGroups: page.moreGroups)
+        }
     }
     func closeWindow(windowId: String) async throws { try await ordered { try await self.client.closeWindow(windowId) } }
     func sendText(roomId: String, text: String, replyToMessageId: String?) async throws { try await ordered { try await self.client.sendText(roomID: roomId, text: text, replyToMessageID: replyToMessageId) } }

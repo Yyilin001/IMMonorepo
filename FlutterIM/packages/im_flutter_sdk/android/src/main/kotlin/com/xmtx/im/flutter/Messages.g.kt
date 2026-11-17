@@ -423,6 +423,51 @@ data class DirectoryEntry (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class DirectoryPage (
+  val entries: List<DirectoryEntry>,
+  val moreContacts: Boolean,
+  val moreGroups: Boolean
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): DirectoryPage {
+      val entries = pigeonVar_list[0] as List<DirectoryEntry>
+      val moreContacts = pigeonVar_list[1] as Boolean
+      val moreGroups = pigeonVar_list[2] as Boolean
+      return DirectoryPage(entries, moreContacts, moreGroups)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      entries,
+      moreContacts,
+      moreGroups,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as DirectoryPage
+    return MessagesPigeonUtils.deepEquals(this.entries, other.entries) && MessagesPigeonUtils.deepEquals(this.moreContacts, other.moreContacts) && MessagesPigeonUtils.deepEquals(this.moreGroups, other.moreGroups)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.entries)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.moreContacts)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.moreGroups)
+    return result
+  }
+  override fun toString(): String {
+    return "DirectoryPage(entries=$entries, moreContacts=$moreContacts, moreGroups=$moreGroups)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class WindowView (
   val conversations: List<ImConversation>,
   val messages: List<ImMessage>
@@ -487,6 +532,11 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       133.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
+          DirectoryPage.fromList(it)
+        }
+      }
+      134.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
       }
@@ -511,8 +561,12 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(132)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is DirectoryPage -> {
         stream.write(133)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(134)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -531,7 +585,7 @@ interface ImHost {
   suspend fun disconnect()
   suspend fun openWindow(roomId: String?): String
   suspend fun nextUpdate(windowId: String): WindowView
-  suspend fun directory(): List<DirectoryEntry>
+  suspend fun directory(nextGroups: Boolean?): DirectoryPage
   suspend fun closeWindow(windowId: String)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
   suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String)
@@ -700,10 +754,12 @@ interface ImHost {
       run {
         val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.directory$separatedMessageChannelSuffix", codec)
         if (api != null) {
-          channel.setMessageHandler { _, reply ->
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val nextGroupsArg = args[0] as Boolean?
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
-                listOf(api.directory())
+                listOf(api.directory(nextGroupsArg))
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

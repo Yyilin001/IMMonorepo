@@ -420,6 +420,51 @@ struct DirectoryEntry: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct DirectoryPage: Hashable, CustomStringConvertible {
+  var entries: [DirectoryEntry]
+  var moreContacts: Bool
+  var moreGroups: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> DirectoryPage? {
+    let entries = pigeonVar_list[0] as! [DirectoryEntry]
+    let moreContacts = pigeonVar_list[1] as! Bool
+    let moreGroups = pigeonVar_list[2] as! Bool
+
+    return DirectoryPage(
+      entries: entries,
+      moreContacts: moreContacts,
+      moreGroups: moreGroups
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      entries,
+      moreContacts,
+      moreGroups,
+    ]
+  }
+  static func == (lhs: DirectoryPage, rhs: DirectoryPage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.entries, rhs.entries) && MessagesPigeonInternal.deepEquals(lhs.moreContacts, rhs.moreContacts) && MessagesPigeonInternal.deepEquals(lhs.moreGroups, rhs.moreGroups)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("DirectoryPage")
+    MessagesPigeonInternal.deepHash(value: entries, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: moreContacts, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: moreGroups, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "DirectoryPage(entries: \(String(describing: entries)), moreContacts: \(String(describing: moreContacts)), moreGroups: \(String(describing: moreGroups)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct WindowView: Hashable, CustomStringConvertible {
   var conversations: [ImConversation]
   var messages: [ImMessage]
@@ -471,6 +516,8 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 132:
       return DirectoryEntry.fromList(self.readValue() as! [Any?])
     case 133:
+      return DirectoryPage.fromList(self.readValue() as! [Any?])
+    case 134:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -492,8 +539,11 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? DirectoryEntry {
       super.writeByte(132)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? DirectoryPage {
       super.writeByte(133)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(134)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -526,7 +576,7 @@ protocol ImHost {
   func disconnect() async throws
   func openWindow(roomId: String?) async throws -> String
   func nextUpdate(windowId: String) async throws -> WindowView
-  func directory() async throws -> [DirectoryEntry]
+  func directory(nextGroups: Bool?) async throws -> DirectoryPage
   func closeWindow(windowId: String) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
   func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
@@ -674,10 +724,12 @@ class ImHostSetup {
     }
     let directoryChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.directory\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      directoryChannel.setMessageHandler { _, reply in
+      directoryChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let nextGroupsArg: Bool? = nilOrValue(args[0])
         Task { @MainActor in
           do {
-            let result = try await api.directory()
+            let result = try await api.directory(nextGroups: nextGroupsArg)
             reply(wrapResult(result))
           } catch {
             reply(wrapError(error))

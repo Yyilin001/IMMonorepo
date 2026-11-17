@@ -87,10 +87,25 @@ public final class V2MobileClient: Sendable {
     }
 
     public func directory() async throws -> [DirectoryEntry] {
-        let result = try await run(.init(operation: .contacts, scope: "accepted"))
+        try await directoryPage(nextGroups: nil).entries
+    }
+    public struct DirectoryPage: Sendable {
+        public let entries: [DirectoryEntry]
+        public let moreContacts: Bool
+        public let moreGroups: Bool
+    }
+    public func directoryPage(nextGroups: Bool?) async throws -> DirectoryPage {
+        let result: SharedSnapshot
+        if let nextGroups {
+            result = try await run(.init(operation: nextGroups ? .groupsNext : .contactsNext))
+        } else {
+            _ = try await run(.init(operation: .contacts, scope: "accepted"))
+            result = try await run(.init(operation: .groupsFirst))
+        }
         guard let directory = result.directory else { throw Failure(code: "authenticationRequired") }
-        return directory.contacts.map { DirectoryEntry(id: $0.userID, title: $0.userID, isGroup: false) }
+        let entries = directory.contacts.map { DirectoryEntry(id: $0.userID, title: $0.userID, isGroup: false) }
             + directory.groups.map { DirectoryEntry(id: $0.id, title: $0.title, isGroup: true) }
+        return DirectoryPage(entries: entries, moreContacts: directory.hasMoreContacts, moreGroups: directory.hasMoreGroups)
     }
     public func closeWindow(_ id: String) async throws { _ = try await run(.init(operation: .closeWindow, windowID: id)) }
     public func sendText(roomID: String, text: String, replyToMessageID: String? = nil) async throws {

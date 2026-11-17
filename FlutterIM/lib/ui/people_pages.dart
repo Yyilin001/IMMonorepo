@@ -278,7 +278,8 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                                 ),
                               );
                             }
-                            if (sdk?.loadingDirectory == true) {
+                            if (sdk?.loadingDirectory == true &&
+                                sdk!.entries.isEmpty) {
                               return const Center(
                                 child: CircularProgressIndicator(),
                               );
@@ -292,7 +293,10 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                               );
                             }
                             final index = ref.watch(contactIndexProvider);
-                            if (index.rows.isEmpty) {
+                            final more =
+                                sdk != null &&
+                                (groups ? sdk.moreGroups : sdk.moreContacts);
+                            if (index.rows.isEmpty && !more) {
                               return const Center(
                                 child: Text(
                                   '没有找到联系人',
@@ -311,9 +315,28 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                                         ScrollViewKeyboardDismissBehavior
                                             .onDrag,
                                     itemExtentBuilder: (row, _) =>
-                                        index.rows[row].extent,
-                                    itemCount: index.rows.length,
+                                        row == index.rows.length
+                                        ? 52
+                                        : index.rows[row].extent,
+                                    itemCount:
+                                        index.rows.length + (more ? 1 : 0),
                                     itemBuilder: (_, row) {
+                                      if (row == index.rows.length) {
+                                        return TextButton(
+                                          onPressed: sdk!.loadingDirectory
+                                              ? null
+                                              : () => sdk.refreshDirectory(
+                                                  nextGroups: groups,
+                                                ),
+                                          child: Text(
+                                            sdk.loadingDirectory
+                                                ? '正在加载…'
+                                                : groups
+                                                ? '加载更多群聊'
+                                                : '加载更多好友',
+                                          ),
+                                        );
+                                      }
                                       final entry = index.rows[row];
                                       final c = entry.contact;
                                       if (c == null) {

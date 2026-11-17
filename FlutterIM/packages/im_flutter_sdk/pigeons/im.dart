@@ -72,6 +72,17 @@ class DirectoryEntry {
   bool isGroup;
 }
 
+class DirectoryPage {
+  DirectoryPage({
+    required this.entries,
+    required this.moreContacts,
+    required this.moreGroups,
+  });
+  List<DirectoryEntry> entries;
+  bool moreContacts;
+  bool moreGroups;
+}
+
 class WindowView {
   WindowView({required this.conversations, required this.messages});
   List<ImConversation> conversations;
@@ -97,7 +108,7 @@ abstract class ImHost {
   @async
   WindowView nextUpdate(String windowId);
   @async
-  List<DirectoryEntry> directory();
+  DirectoryPage directory(bool? nextGroups);
   @async
   void closeWindow(String windowId);
   @async

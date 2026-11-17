@@ -30,19 +30,23 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
   String? directoryError;
   bool loadingDirectory = false;
 
-  Future<void> refreshDirectory() async {
-    final user = userId;
-    if (user == null || loadingDirectory) return;
+  bool moreContacts = false, moreGroups = false;
+  Future<void> refreshDirectory({bool? nextGroups}) async {
+    final sessionNavigator = navigator;
+    if (userId == null || loadingDirectory) return;
     setState(() {
       loadingDirectory = true;
       directoryError = null;
     });
     try {
-      final rows = await client!.directory();
-      if (!mounted || userId != user) return;
+      final page = await client!.directoryPage(nextGroups: nextGroups);
+      if (!mounted || navigator != sessionNavigator) return;
       entries = {
-        for (final row in rows) keyFor('${row.isGroup}/${row.id}'): row,
+        if (nextGroups != null) ...entries,
+        for (final row in page.entries) keyFor('${row.isGroup}/${row.id}'): row,
       };
+      moreContacts = page.moreContacts;
+      moreGroups = page.moreGroups;
       final titles = {
         for (final room in rooms)
           if (room.peerId != null) room.peerId!: room.title,
@@ -58,9 +62,13 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
           ),
       ]);
     } catch (e) {
-      if (mounted && userId == user) directoryError = _errorText(e);
+      if (mounted && navigator == sessionNavigator) {
+        directoryError = _errorText(e);
+      }
     } finally {
-      if (mounted && userId == user) setState(() => loadingDirectory = false);
+      if (mounted && navigator == sessionNavigator) {
+        setState(() => loadingDirectory = false);
+      }
     }
   }
 
@@ -117,6 +125,7 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
       navigator = GlobalKey<NavigatorState>();
       _keys.clear();
       entries = {};
+      moreContacts = moreGroups = false;
       directory = ContactDirectory.fromEntries([]);
       directoryError = null;
       loadingDirectory = false;

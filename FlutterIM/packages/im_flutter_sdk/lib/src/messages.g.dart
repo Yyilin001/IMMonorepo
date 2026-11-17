@@ -372,6 +372,61 @@ class DirectoryEntry {
   }
 }
 
+class DirectoryPage {
+  DirectoryPage({
+    required this.entries,
+    required this.moreContacts,
+    required this.moreGroups,
+  });
+
+  List<DirectoryEntry> entries;
+
+  bool moreContacts;
+
+  bool moreGroups;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      entries,
+      moreContacts,
+      moreGroups,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static DirectoryPage decode(Object result) {
+    result as List<Object?>;
+    return DirectoryPage(
+      entries: (result[0]! as List<Object?>).cast<DirectoryEntry>(),
+      moreContacts: result[1]! as bool,
+      moreGroups: result[2]! as bool,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! DirectoryPage || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(entries, other.entries) && _deepEquals(moreContacts, other.moreContacts) && _deepEquals(moreGroups, other.moreGroups);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'DirectoryPage(entries: $entries, moreContacts: $moreContacts, moreGroups: $moreGroups)';
+  }
+}
+
 class WindowView {
   WindowView({
     required this.conversations,
@@ -442,8 +497,11 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is DirectoryEntry) {
       buffer.putUint8(132);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(133);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(134);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -462,6 +520,8 @@ class _PigeonCodec extends StandardMessageCodec {
       case 132:
         return DirectoryEntry.decode(readValue(buffer)!);
       case 133:
+        return DirectoryPage.decode(readValue(buffer)!);
+      case 134:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -628,14 +688,14 @@ class ImHost {
     return pigeonVar_replyValue! as WindowView;
   }
 
-  Future<List<DirectoryEntry>> directory() async {
+  Future<DirectoryPage> directory(bool? nextGroups) async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.directory$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
       pigeonChannelCodec,
       binaryMessenger: pigeonVar_binaryMessenger,
     );
-    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[nextGroups]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
         pigeonVar_replyList,
@@ -643,7 +703,7 @@ class ImHost {
         isNullValid: false,
     )
     ;
-    return (pigeonVar_replyValue! as List<Object?>).cast<DirectoryEntry>();
+    return pigeonVar_replyValue! as DirectoryPage;
   }
 
   Future<void> closeWindow(String windowId) async {

@@ -71,10 +71,18 @@ private class MobileHost(private val context: Context) : ImHost {
                 ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, false, false, pendingStatus = it.status.name.wire())
             })
     }
-    override suspend fun directory(): List<DirectoryEntry> = sdk {
-        val directory = client.contacts(SharedContactScope.Accepted).directory ?: throw FlutterError("authenticationRequired")
-        directory.contacts.map { DirectoryEntry(it.userID, it.userID, false) } +
+    override suspend fun directory(nextGroups: Boolean?): DirectoryPage = sdk {
+        val directory = when (nextGroups) {
+            true -> client.nextGroups()
+            false -> client.nextContacts()
+            null -> {
+                client.contacts(SharedContactScope.Accepted)
+                client.firstGroups()
+            }
+        }.directory ?: throw FlutterError("authenticationRequired")
+        val entries = directory.contacts.map { DirectoryEntry(it.userID, it.userID, false) } +
             directory.groups.map { DirectoryEntry(it.id, it.title, true) }
+        DirectoryPage(entries, directory.hasMoreContacts, directory.hasMoreGroups)
     }
     override suspend fun closeWindow(windowId: String) { sdk { windows.remove(windowId)?.close() } }
     override suspend fun sendText(roomId: String, text: String, replyToMessageId: String?) { mutations.withLock {
