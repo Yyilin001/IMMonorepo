@@ -32,6 +32,8 @@ public final class V2MobileClient: Sendable {
     public struct Window: Sendable {
         public let conversations: [Conversation]
         public let messages: [Message]
+        public let hasOlder: Bool
+        public let isLatest: Bool
     }
     public struct Failure: Error, Sendable { public let code: String }
 
@@ -78,7 +80,7 @@ public final class V2MobileClient: Sendable {
         return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID) },
                       messages: messages + (value.chat?.pending ?? []).map {
                           Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, readByPeer: false, replyPreview: nil, isForwarded: false, mutableRevision: nil, pendingStatus: $0.status, createdAt: nil)
-                      })
+                      }, hasOlder: value.chat?.hasOlder ?? false, isLatest: value.chat?.isLatest ?? true)
     }
     public struct DirectoryEntry: Sendable {
         public let id: String
@@ -106,6 +108,9 @@ public final class V2MobileClient: Sendable {
         let entries = directory.contacts.map { DirectoryEntry(id: $0.userID, title: $0.userID, isGroup: false) }
             + directory.groups.map { DirectoryEntry(id: $0.id, title: $0.title, isGroup: true) }
         return DirectoryPage(entries: entries, moreContacts: directory.hasMoreContacts, moreGroups: directory.hasMoreGroups)
+    }
+    public func changeWindowPage(_ id: String, latest: Bool) async throws {
+        _ = try await run(.init(operation: latest ? .resetWindow : .nextWindowPage, windowID: id))
     }
     public func closeWindow(_ id: String) async throws { _ = try await run(.init(operation: .closeWindow, windowID: id)) }
     public func sendText(roomID: String, text: String, replyToMessageID: String? = nil) async throws {

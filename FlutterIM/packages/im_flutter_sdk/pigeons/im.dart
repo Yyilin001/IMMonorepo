@@ -84,9 +84,16 @@ class DirectoryPage {
 }
 
 class WindowView {
-  WindowView({required this.conversations, required this.messages});
+  WindowView({
+    required this.conversations,
+    required this.messages,
+    required this.hasOlder,
+    required this.isLatest,
+  });
   List<ImConversation> conversations;
   List<ImMessage> messages;
+  bool hasOlder;
+  bool isLatest;
 }
 
 @HostApi()
@@ -109,6 +116,8 @@ abstract class ImHost {
   WindowView nextUpdate(String windowId);
   @async
   DirectoryPage directory(bool? nextGroups);
+  @async
+  void changeWindowPage(String windowId, bool latest);
   @async
   void closeWindow(String windowId);
   @async

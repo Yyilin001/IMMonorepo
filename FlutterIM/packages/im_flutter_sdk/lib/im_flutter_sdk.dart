@@ -28,6 +28,13 @@ enum ImSendStatus {
   unknown,
 }
 
+typedef ImTimelinePage = ({
+  String windowId,
+  List<ImMessage> messages,
+  bool hasOlder,
+  bool isLatest,
+});
+
 typedef ImSession = ({ImSessionState state, String? userId});
 typedef ImConversation = ({
   String id,
@@ -184,15 +191,17 @@ final class ImClient {
 
   Stream<List<ImConversation>> watchConversations() => _watch(
     null,
-    (value) => value.conversations.map(
-      (c) => (
-        id: c.id,
-        title: c.title,
-        preview: c.preview,
-        unread: c.unread,
-        isGroup: c.isGroup,
-        updatedAt: c.updatedAt,
-        peerId: c.peerId,
+    (_, value) => List<ImConversation>.unmodifiable(
+      value.conversations.map(
+        (c) => (
+          id: c.id,
+          title: c.title,
+          preview: c.preview,
+          unread: c.unread,
+          isGroup: c.isGroup,
+          updatedAt: c.updatedAt,
+          peerId: c.peerId,
+        ),
       ),
     ),
   );
@@ -215,13 +224,26 @@ final class ImClient {
   });
 
   Stream<List<ImMessage>> watchMessages(String roomId) =>
-      _watch(roomId, (value) => value.messages.map((m) => m.value));
+      watchTimeline(roomId).map((page) => page.messages);
 
-  Stream<List<T>> _watch<T>(
+  Stream<ImTimelinePage> watchTimeline(String roomId) => _watch(
+    roomId,
+    (id, view) => (
+      windowId: id,
+      messages: List<ImMessage>.unmodifiable(view.messages.map((m) => m.value)),
+      hasOlder: view.hasOlder,
+      isLatest: view.isLatest,
+    ),
+  );
+
+  Future<void> changeWindowPage(String windowId, {required bool latest}) =>
+      _ordered(() => _host.changeWindowPage(windowId, latest));
+
+  Stream<T> _watch<T>(
     String? room,
-    Iterable<T> Function(wire.WindowView) select,
+    T Function(String, wire.WindowView) select,
   ) {
-    late final StreamController<List<T>> stream;
+    late final StreamController<T> stream;
     Future<String>? opening;
     Future<void>? stopping;
     var stopped = false;
@@ -231,7 +253,7 @@ final class ImClient {
         final id = await (opening = _host.openWindow(room));
         while (!stopped) {
           final view = await _host.nextUpdate(id);
-          if (!stopped) stream.add(List.unmodifiable(select(view)));
+          if (!stopped) stream.add(select(id, view));
         }
       } catch (error, stack) {
         if (!stopped) stream.addError(error, stack);
@@ -266,7 +288,7 @@ final class ImClient {
     }
 
     stop = () => stopping ??= startRelease();
-    stream = StreamController<List<T>>(
+    stream = StreamController<T>(
       onListen: () {
         if (_closed || _signingOut || _session.userId == null) {
           stream.addError(StateError('No active IM session'));

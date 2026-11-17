@@ -12,7 +12,9 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   final focus = FocusNode();
   final scroll = ScrollController();
   late final int id;
-  late final Stream<List<ImMessage>> messages;
+  late final Stream<ImTimelinePage> messages;
+  ImTimelinePage? currentPage;
+  bool paging = false;
   ImMessage? replyTarget;
   final activeMutations = <String>{};
   bool initialized = false, sending = false;
@@ -25,7 +27,27 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       initialized = true;
       id = sdk.keyFor(widget.room.id);
       input.text = ref.read(draftProvider(id));
-      messages = sdk.client!.watchMessages(widget.room.id);
+      messages = sdk.client!.watchTimeline(widget.room.id).map((page) {
+        currentPage = page;
+        return page;
+      });
+    }
+  }
+
+  Future<void> changePage(ImTimelinePage page, {required bool latest}) async {
+    if (paging) return;
+    setState(() => paging = true);
+    try {
+      await _SdkScope.of(context)!.client!
+          .changeWindowPage(page.windowId, latest: latest);
+      if (mounted && scroll.hasClients) scroll.jumpTo(0);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(_errorText(error))));
+      }
+    } finally {
+      if (mounted) setState(() => paging = false);
     }
   }
 
@@ -41,7 +63,12 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       if (mounted && input.text == text) {
         input.clear();
         ref.read(draftProvider(id).notifier).save('');
-        if (scroll.hasClients) scroll.jumpTo(0);
+        final page = currentPage;
+        if (page != null && !page.isLatest) {
+          await changePage(page, latest: true);
+        } else if (scroll.hasClients) {
+          scroll.jumpTo(0);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -136,7 +163,10 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               subtitle: room.isGroup ? '群聊' : '会话',
               onProfile: profile,
               onHistory: () {
-                if (scroll.hasClients) {
+                final page = currentPage;
+                if (page != null && page.hasOlder) {
+                  unawaited(changePage(page, latest: false));
+                } else if (scroll.hasClients) {
                   scroll.animateTo(
                     scroll.position.maxScrollExtent,
                     duration: const Duration(milliseconds: 240),
@@ -164,81 +194,108 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                 if (!snapshot.hasData) {
                   return const Center(child: CircularProgressIndicator());
                 }
-                final rows = snapshot.data!;
-                return ListView.builder(
-                  key: const Key('shared-timeline'),
-                  controller: scroll,
-                  reverse: true,
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                  itemCount: rows.length,
-                  itemBuilder: (_, index) {
-                    final item = rows[rows.length - 1 - index];
-                    final mine = item.senderId == sdk.userId;
-                    final text = item.withdrawn
-                        ? '消息已撤回'
-                        : item.hasMedia && item.text.isEmpty
-                        ? '[附件]'
-                        : item.text;
-                    final caption = switch (item.pendingStatus) {
-                      null => item.readByPeer ? '已读' : '已发送',
-                      ImSendStatus.rejected ||
-                      ImSendStatus.expiredUnsubmitted ||
-                      ImSendStatus.needsAttention => '发送未完成',
-                      ImSendStatus.waitingForNetwork => '等待网络',
-                      _ => '发送中',
-                    };
-                    return KeyedSubtree(
-                      key: ValueKey(item.id),
-                      child: _MessageBubble(
-                        key: ValueKey(
-                          item.pendingStatus == null
-                              ? 'projected-message'
-                              : 'pending-message',
-                        ),
-                        conversation: conversation,
-                        sdkSender: mine
-                            ? '我'
-                            : room.isGroup
-                            ? item.senderId
-                            : name,
-                        sdkStatus: caption,
-                        onEdit:
-                            item.mutableRevision != null &&
-                                !activeMutations.contains(item.id)
-                            ? () => mutate(item, editing: true)
-                            : null,
-                        onWithdraw:
-                            item.mutableRevision != null &&
-                                !activeMutations.contains(item.id)
-                            ? () => mutate(item, editing: false)
-                            : null,
-                        onReply:
-                            !sending &&
-                                item.pendingStatus == null &&
-                                !item.withdrawn
-                            ? () {
-                                setState(() => replyTarget = item);
-                                focus.requestFocus();
-                              }
-                            : null,
-                        replyPreview: item.replyPreview,
-                        isForwarded: item.isForwarded,
-                        showTime: item.createdAt != null,
-                        message: ChatMessage(
-                          id: item.id,
-                          conversationId: id,
-                          senderId: room.isGroup
-                              ? sdk.keyFor(item.senderId)
-                              : id,
-                          isMine: mine,
-                          timestamp: DateTime.fromMillisecondsSinceEpoch(
-                            item.createdAt ?? 0,
-                          ),
-                          text: text,
-                        ),
+                final page = snapshot.data!;
+                final rows = page.messages;
+                return Column(
+                  children: [
+                    if (page.hasOlder || !page.isLatest)
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (page.hasOlder)
+                            TextButton(
+                              onPressed: paging
+                                  ? null
+                                  : () => changePage(page, latest: false),
+                              child: const Text('更早消息'),
+                            ),
+                          if (!page.isLatest)
+                            TextButton(
+                              onPressed: paging
+                                  ? null
+                                  : () => changePage(page, latest: true),
+                              child: const Text('返回最新'),
+                            ),
+                        ],
                       ),
-                    );
-                  },
+                    Expanded(
+                      child: ListView.builder(
+                        key: const Key('shared-timeline'),
+                        controller: scroll,
+                        reverse: true,
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                        itemCount: rows.length,
+                        itemBuilder: (_, index) {
+                          final item = rows[rows.length - 1 - index];
+                          final mine = item.senderId == sdk.userId;
+                          final text = item.withdrawn
+                              ? '消息已撤回'
+                              : item.hasMedia && item.text.isEmpty
+                              ? '[附件]'
+                              : item.text;
+                          final caption = switch (item.pendingStatus) {
+                            null => item.readByPeer ? '已读' : '已发送',
+                            ImSendStatus.rejected ||
+                            ImSendStatus.expiredUnsubmitted ||
+                            ImSendStatus.needsAttention => '发送未完成',
+                            ImSendStatus.waitingForNetwork => '等待网络',
+                            _ => '发送中',
+                          };
+                          return KeyedSubtree(
+                            key: ValueKey(item.id),
+                            child: _MessageBubble(
+                              key: ValueKey(
+                                item.pendingStatus == null
+                                    ? 'projected-message'
+                                    : 'pending-message',
+                              ),
+                              conversation: conversation,
+                              sdkSender: mine
+                                  ? '我'
+                                  : room.isGroup
+                                  ? item.senderId
+                                  : name,
+                              sdkStatus: caption,
+                              onEdit:
+                                  item.mutableRevision != null &&
+                                      !activeMutations.contains(item.id)
+                                  ? () => mutate(item, editing: true)
+                                  : null,
+                              onWithdraw:
+                                  item.mutableRevision != null &&
+                                      !activeMutations.contains(item.id)
+                                  ? () => mutate(item, editing: false)
+                                  : null,
+                              onReply:
+                                  !sending &&
+                                      item.pendingStatus == null &&
+                                      !item.withdrawn
+                                  ? () {
+                                      setState(() => replyTarget = item);
+                                      focus.requestFocus();
+                                    }
+                                  : null,
+                              replyPreview: item.replyPreview,
+                              isForwarded: item.isForwarded,
+                              showTime: item.createdAt != null,
+                              message: ChatMessage(
+                                id: item.id,
+                                conversationId: id,
+                                senderId: room.isGroup
+                                    ? sdk.keyFor(item.senderId)
+                                    : id,
+                                isMine: mine,
+                                timestamp: DateTime.fromMillisecondsSinceEpoch(
+                                  item.createdAt ?? 0,
+                                ),
+                                text: text,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 );
               },
             ),

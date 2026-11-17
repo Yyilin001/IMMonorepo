@@ -69,7 +69,7 @@ private class MobileHost(private val context: Context) : ImHost {
         WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
             messages + value.chat?.pending.orEmpty().map {
                 ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, false, false, pendingStatus = it.status.name.wire())
-            })
+            }, value.chat?.hasOlder ?: false, value.chat?.isLatest ?: true)
     }
     override suspend fun directory(nextGroups: Boolean?): DirectoryPage = sdk {
         val directory = when (nextGroups) {
@@ -83,6 +83,12 @@ private class MobileHost(private val context: Context) : ImHost {
         val entries = directory.contacts.map { DirectoryEntry(it.userID, it.userID, false) } +
             directory.groups.map { DirectoryEntry(it.id, it.title, true) }
         DirectoryPage(entries, directory.hasMoreContacts, directory.hasMoreGroups)
+    }
+    override suspend fun changeWindowPage(windowId: String, latest: Boolean) {
+        mutations.withLock { sdk {
+            val window = windows[windowId] ?: throw FlutterError("closed")
+            if (latest) window.reset() else window.nextPage()
+        } }
     }
     override suspend fun closeWindow(windowId: String) { sdk { windows.remove(windowId)?.close() } }
     override suspend fun sendText(roomId: String, text: String, replyToMessageId: String?) { mutations.withLock {

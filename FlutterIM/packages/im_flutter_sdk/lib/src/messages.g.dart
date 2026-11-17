@@ -431,16 +431,24 @@ class WindowView {
   WindowView({
     required this.conversations,
     required this.messages,
+    required this.hasOlder,
+    required this.isLatest,
   });
 
   List<ImConversation> conversations;
 
   List<ImMessage> messages;
 
+  bool hasOlder;
+
+  bool isLatest;
+
   List<Object?> _toList() {
     return <Object?>[
       conversations,
       messages,
+      hasOlder,
+      isLatest,
     ];
   }
 
@@ -452,6 +460,8 @@ class WindowView {
     return WindowView(
       conversations: (result[0]! as List<Object?>).cast<ImConversation>(),
       messages: (result[1]! as List<Object?>).cast<ImMessage>(),
+      hasOlder: result[2]! as bool,
+      isLatest: result[3]! as bool,
     );
   }
 
@@ -464,7 +474,7 @@ class WindowView {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(conversations, other.conversations) && _deepEquals(messages, other.messages);
+    return _deepEquals(conversations, other.conversations) && _deepEquals(messages, other.messages) && _deepEquals(hasOlder, other.hasOlder) && _deepEquals(isLatest, other.isLatest);
   }
 
   @override
@@ -473,7 +483,7 @@ class WindowView {
 
   @override
   String toString() {
-    return 'WindowView(conversations: $conversations, messages: $messages)';
+    return 'WindowView(conversations: $conversations, messages: $messages, hasOlder: $hasOlder, isLatest: $isLatest)';
   }
 }
 
@@ -704,6 +714,23 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as DirectoryPage;
+  }
+
+  Future<void> changeWindowPage(String windowId, bool latest) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.changeWindowPage$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[windowId, latest]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   Future<void> closeWindow(String windowId) async {

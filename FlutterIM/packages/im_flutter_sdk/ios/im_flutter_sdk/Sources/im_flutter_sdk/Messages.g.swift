@@ -468,39 +468,49 @@ struct DirectoryPage: Hashable, CustomStringConvertible {
 struct WindowView: Hashable, CustomStringConvertible {
   var conversations: [ImConversation]
   var messages: [ImMessage]
+  var hasOlder: Bool
+  var isLatest: Bool
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
   static func fromList(_ pigeonVar_list: [Any?]) -> WindowView? {
     let conversations = pigeonVar_list[0] as! [ImConversation]
     let messages = pigeonVar_list[1] as! [ImMessage]
+    let hasOlder = pigeonVar_list[2] as! Bool
+    let isLatest = pigeonVar_list[3] as! Bool
 
     return WindowView(
       conversations: conversations,
-      messages: messages
+      messages: messages,
+      hasOlder: hasOlder,
+      isLatest: isLatest
     )
   }
   func toList() -> [Any?] {
     return [
       conversations,
       messages,
+      hasOlder,
+      isLatest,
     ]
   }
   static func == (lhs: WindowView, rhs: WindowView) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.conversations, rhs.conversations) && MessagesPigeonInternal.deepEquals(lhs.messages, rhs.messages)
+    return MessagesPigeonInternal.deepEquals(lhs.conversations, rhs.conversations) && MessagesPigeonInternal.deepEquals(lhs.messages, rhs.messages) && MessagesPigeonInternal.deepEquals(lhs.hasOlder, rhs.hasOlder) && MessagesPigeonInternal.deepEquals(lhs.isLatest, rhs.isLatest)
   }
 
   func hash(into hasher: inout Hasher) {
     hasher.combine("WindowView")
     MessagesPigeonInternal.deepHash(value: conversations, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: messages, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasOlder, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isLatest, hasher: &hasher)
   }
 
   public var description: String {
-    return "WindowView(conversations: \(String(describing: conversations)), messages: \(String(describing: messages)))"
+    return "WindowView(conversations: \(String(describing: conversations)), messages: \(String(describing: messages)), hasOlder: \(String(describing: hasOlder)), isLatest: \(String(describing: isLatest)))"
   }
 }
 
@@ -577,6 +587,7 @@ protocol ImHost {
   func openWindow(roomId: String?) async throws -> String
   func nextUpdate(windowId: String) async throws -> WindowView
   func directory(nextGroups: Bool?) async throws -> DirectoryPage
+  func changeWindowPage(windowId: String, latest: Bool) async throws
   func closeWindow(windowId: String) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
   func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
@@ -738,6 +749,24 @@ class ImHostSetup {
       }
     } else {
       directoryChannel.setMessageHandler(nil)
+    }
+    let changeWindowPageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeWindowPage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      changeWindowPageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let windowIdArg = args[0] as! String
+        let latestArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.changeWindowPage(windowId: windowIdArg, latest: latestArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      changeWindowPageChannel.setMessageHandler(nil)
     }
     let closeWindowChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.closeWindow\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

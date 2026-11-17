@@ -61,7 +61,7 @@ private actor MobileHost: ImHost {
         do {
             let view = try await client.nextUpdate(windowID: windowId)
             return WindowView(conversations: view.conversations.map { .init(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, isGroup: $0.isGroup, updatedAt: $0.updatedAt, peerId: $0.peerID) },
-                              messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt) })
+                              messages: view.messages.map { .init(id: $0.id, senderId: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, readByPeer: $0.readByPeer, isForwarded: $0.isForwarded, mutableRevision: $0.mutableRevision, replyPreview: $0.replyPreview, pendingStatus: $0.pendingStatus, createdAt: $0.createdAt) }, hasOlder: view.hasOlder, isLatest: view.isLatest)
         } catch let failure as V2MobileClient.Failure {
             throw PigeonError(code: failure.code, message: nil, details: nil)
         }
@@ -72,6 +72,9 @@ private actor MobileHost: ImHost {
             return DirectoryPage(entries: page.entries.map { DirectoryEntry(id: $0.id, title: $0.title, isGroup: $0.isGroup) },
                                  moreContacts: page.moreContacts, moreGroups: page.moreGroups)
         }
+    }
+    func changeWindowPage(windowId: String, latest: Bool) async throws {
+        try await ordered { try await self.client.changeWindowPage(windowId, latest: latest) }
     }
     func closeWindow(windowId: String) async throws { try await ordered { try await self.client.closeWindow(windowId) } }
     func sendText(roomId: String, text: String, replyToMessageId: String?) async throws { try await ordered { try await self.client.sendText(roomID: roomId, text: text, replyToMessageID: replyToMessageId) } }

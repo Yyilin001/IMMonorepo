@@ -470,20 +470,26 @@ data class DirectoryPage (
 /** Generated class from Pigeon that represents data sent in messages. */
 data class WindowView (
   val conversations: List<ImConversation>,
-  val messages: List<ImMessage>
+  val messages: List<ImMessage>,
+  val hasOlder: Boolean,
+  val isLatest: Boolean
 )
  {
   companion object {
     fun fromList(pigeonVar_list: List<Any?>): WindowView {
       val conversations = pigeonVar_list[0] as List<ImConversation>
       val messages = pigeonVar_list[1] as List<ImMessage>
-      return WindowView(conversations, messages)
+      val hasOlder = pigeonVar_list[2] as Boolean
+      val isLatest = pigeonVar_list[3] as Boolean
+      return WindowView(conversations, messages, hasOlder, isLatest)
     }
   }
   fun toList(): List<Any?> {
     return listOf(
       conversations,
       messages,
+      hasOlder,
+      isLatest,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -494,17 +500,19 @@ data class WindowView (
       return true
     }
     val other = other as WindowView
-    return MessagesPigeonUtils.deepEquals(this.conversations, other.conversations) && MessagesPigeonUtils.deepEquals(this.messages, other.messages)
+    return MessagesPigeonUtils.deepEquals(this.conversations, other.conversations) && MessagesPigeonUtils.deepEquals(this.messages, other.messages) && MessagesPigeonUtils.deepEquals(this.hasOlder, other.hasOlder) && MessagesPigeonUtils.deepEquals(this.isLatest, other.isLatest)
   }
 
   override fun hashCode(): Int {
     var result = javaClass.hashCode()
     result = 31 * result + MessagesPigeonUtils.deepHash(this.conversations)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.messages)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.hasOlder)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.isLatest)
     return result
   }
   override fun toString(): String {
-    return "WindowView(conversations=$conversations, messages=$messages)"
+    return "WindowView(conversations=$conversations, messages=$messages, hasOlder=$hasOlder, isLatest=$isLatest)"
   }
 }
 private open class MessagesPigeonCodec : StandardMessageCodec() {
@@ -586,6 +594,7 @@ interface ImHost {
   suspend fun openWindow(roomId: String?): String
   suspend fun nextUpdate(windowId: String): WindowView
   suspend fun directory(nextGroups: Boolean?): DirectoryPage
+  suspend fun changeWindowPage(windowId: String, latest: Boolean)
   suspend fun closeWindow(windowId: String)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
   suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String)
@@ -760,6 +769,27 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 listOf(api.directory(nextGroupsArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeWindowPage$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val windowIdArg = args[0] as String
+            val latestArg = args[1] as Boolean
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.changeWindowPage(windowIdArg, latestArg)
+                listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }
