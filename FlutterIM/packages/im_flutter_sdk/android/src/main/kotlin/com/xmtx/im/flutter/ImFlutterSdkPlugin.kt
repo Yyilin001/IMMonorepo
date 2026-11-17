@@ -94,6 +94,22 @@ private class MobileHost(private val context: Context) : ImHost {
             directory.groups.map { DirectoryEntry(it.id, it.title, true) }
         DirectoryPage(entries, directory.hasMoreContacts, directory.hasMoreGroups)
     }
+    private fun SharedProfile.wire(): ImProfile = ImProfile(page, userID, name, handle, alias, aliasRevision, groupNickname,
+        groupNicknameRevision, (expiresAtElapsed - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0),
+        avatar?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) })
+
+    override suspend fun profiles(page: String, context: String, roomId: String?, userIds: List<String>): List<ImProfile> = mutations.withLock {
+        sdk { client.profiles(page, context, roomId, userIds).directory?.profiles?.map { it.wire() } ?: throw FlutterError("authenticationRequired") }
+    }
+    override suspend fun openProfile(userId: String, context: String, roomId: String?): List<ImProfile> = mutations.withLock {
+        sdk { client.openProfile(userId, context, roomId).directory?.profiles?.map { it.wire() } ?: throw FlutterError("authenticationRequired") }
+    }
+    override suspend fun saveAlias(userId: String, alias: String?, revision: Long?) {
+        mutations.withLock { sdk { client.saveAlias(userId, alias, revision) } }
+    }
+    override suspend fun clearProfiles(page: String) {
+        mutations.withLock { sdk { client.clearProfiles(page) } }
+    }
     private suspend fun userId(handle: String): String =
         client.lookupIdentity(handle).directory?.identity?.userID ?: throw FlutterError("identityUnavailable")
     override suspend fun resolveUserId(handle: String): String = mutations.withLock { sdk { userId(handle) } }

@@ -141,45 +141,39 @@ class _MobileWorkspaceState extends ConsumerState<_MobileWorkspace> {
         .where((r) => entry.isGroup ? r.id == entry.id : r.peerId == entry.id)
         .firstOrNull;
     final title = room?.title ?? entry.title;
+    if (!entry.isGroup) {
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (pageContext) => _SdkContactProfilePage(
+            entry: entry,
+            room: room,
+            fallbackName: title,
+            avatarId: id,
+            onMessage: room == null
+                ? null
+                : () {
+                    Navigator.of(pageContext).pop();
+                    _openSdk(room);
+                  },
+          ),
+        ),
+      );
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (context) => _ProfileScaffold(
-          title: entry.isGroup ? '群聊资料' : '联系人资料',
+          title: '群聊资料',
           children: [
-            _ProfileHeader(
-              id: id,
-              name: title,
-              handle: entry.id,
-              group: entry.isGroup,
-            ),
-            if (entry.isGroup) _GroupDetailsButton(roomId: entry.id),
-            if (room != null || entry.isGroup)
+            _ProfileHeader(id: id, name: title, handle: entry.id, group: true),
+            _GroupDetailsButton(roomId: entry.id),
+            if (room != null)
               FilledButton(
                 child: const Text('发消息'),
                 onPressed: () {
                   Navigator.pop(context);
-                  _openSdk(
-                    room ??
-                        (
-                          id: entry.id,
-                          title: title,
-                          preview: '',
-                          unread: 0,
-                          isGroup: true,
-                          isPinned: false,
-                          isArchived: false,
-                          updatedAt: null,
-                          peerId: null,
-                          muteUntil: null,
-                        ),
-                  );
+                  _openSdk(room);
                 },
-              ),
-            if (!entry.isGroup)
-              _ContactRelationshipActions(
-                userId: entry.id,
-                name: title,
-                scope: sdk.contactScope,
               ),
           ],
         ),

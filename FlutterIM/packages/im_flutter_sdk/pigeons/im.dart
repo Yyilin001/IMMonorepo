@@ -115,6 +115,31 @@ class ImMessage {
   String? replyToId;
 }
 
+class ImProfile {
+  ImProfile({
+    required this.page,
+    required this.userId,
+    required this.name,
+    required this.handle,
+    required this.remainingMilliseconds,
+    this.alias,
+    this.aliasRevision,
+    this.groupNickname,
+    this.groupNicknameRevision,
+    this.avatar,
+  });
+  String page;
+  String userId;
+  String name;
+  String handle;
+  String? alias;
+  int? aliasRevision;
+  String? groupNickname;
+  int? groupNicknameRevision;
+  int remainingMilliseconds;
+  Uint8List? avatar;
+}
+
 class DirectoryEntry {
   DirectoryEntry({
     required this.id,
@@ -216,6 +241,19 @@ abstract class ImHost {
   WindowView nextUpdate(String windowId);
   @async
   DirectoryPage directory(bool? nextGroups, String scope);
+  @async
+  List<ImProfile> profiles(
+    String page,
+    String context,
+    String? roomId,
+    List<String> userIds,
+  );
+  @async
+  List<ImProfile> openProfile(String userId, String context, String? roomId);
+  @async
+  void saveAlias(String userId, String? alias, int? revision);
+  @async
+  void clearProfiles(String page);
   @async
   String resolveUserId(String handle);
   @async

@@ -119,7 +119,7 @@ actor SharedSocialGroups {
     func execute(_ request: SharedRequest) async throws {
         switch request.operation {
         case .openAvatarEditor:
-            contactsVisible = false; await people.clear(); await community.clear()
+            contactsVisible = false; await community.clear()
             try await avatars.open(room: request.roomID.map(RoomID.init))
         case .changeAvatar: try await avatars.change(request)
         case .avatarAction: try await avatars.action(request)
@@ -134,9 +134,9 @@ actor SharedSocialGroups {
             guard let handle = request.text else { throw SharedFailure.invalidInput }
             lookup = try await directory.resolveForPresentation(handle: handle)
         case .clearDiscovery:
-            lookup = nil; contactsVisible = false; await people.clear(); await community.clear(); await avatars.clear()
+            lookup = nil; contactsVisible = false; await people.clearAll(); await community.clear(); await avatars.clear()
         case .socialAction:
-            await people.clear()
+            await people.clearAll()
             guard let raw = request.targetUserID, let action = request.action else { throw SharedFailure.invalidInput }
             let target = try UserID(raw)
             let command: V2SocialOperationAction
@@ -150,14 +150,23 @@ actor SharedSocialGroups {
         case .createGroup:
             guard let title = request.text, let ids = request.members, ids.count <= 100 else { throw SharedFailure.invalidInput }
             _ = try await creation.enqueue(title: title, members: ids.map { try UserID($0) })
+        case .profiles:
+            guard let page = request.page, let ids = request.members else { throw SharedFailure.invalidInput }
+            let context = try profileContext(request.scope ?? "relationship", roomID: request.roomID)
+            try await people.show(page: page, ids: ids, context: context)
+            await people.load(page: page)
+        case .clearProfiles:
+            guard let page = request.page else { throw SharedFailure.invalidInput }
+            await people.clear(page: page)
         case .openProfile:
-            lookup = nil; contactsVisible = false
-            try await people.open(UserID(request.targetUserID ?? ""))
+            lookup = nil
+            let context = try profileContext(request.scope ?? "relationship", roomID: request.roomID)
+            try await people.open(try UserID(request.targetUserID ?? ""), context: context)
         case .saveAlias: try await people.save(request)
         case .invitations, .invitationsNext, .previewInvite, .refreshInvite, .inviteAction, .muteMember:
             try await community.execute(request)
         case .openGroup, .groupMembersNext:
-            contactsVisible = false; await people.clear()
+            contactsVisible = false
             guard let raw = request.roomID else { throw SharedFailure.invalidInput }
             let room = try RoomID(raw)
             guard try await store.roomAllowsLocalRead(roomID: room) else { throw SharedFailure.invalidInput }
@@ -209,6 +218,16 @@ actor SharedSocialGroups {
             case .groupAnnouncement, .groupPermission, .groupRole, .groupOwnership, .groupDissolution: try await capability.resumeConfirmation(id: id)
             default: throw SharedFailure.invalidInput
             }
+        default: throw SharedFailure.invalidInput
+        }
+    }
+    private func profileContext(_ scope: String, roomID: String?) throws -> V2ProfileViewContext {
+        switch scope {
+        case "relationship": return .relationship
+        case "direct": return .directConversation
+        case "room":
+            guard let roomID else { throw SharedFailure.invalidInput }
+            return .room(try RoomID(roomID))
         default: throw SharedFailure.invalidInput
         }
     }

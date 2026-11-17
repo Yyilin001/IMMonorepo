@@ -570,6 +570,86 @@ struct ImMessage: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct ImProfile: Hashable, CustomStringConvertible {
+  var page: String
+  var userId: String
+  var name: String
+  var handle: String
+  var alias: String? = nil
+  var aliasRevision: Int64? = nil
+  var groupNickname: String? = nil
+  var groupNicknameRevision: Int64? = nil
+  var remainingMilliseconds: Int64
+  var avatar: FlutterStandardTypedData? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImProfile? {
+    let page = pigeonVar_list[0] as! String
+    let userId = pigeonVar_list[1] as! String
+    let name = pigeonVar_list[2] as! String
+    let handle = pigeonVar_list[3] as! String
+    let alias: String? = nilOrValue(pigeonVar_list[4])
+    let aliasRevision: Int64? = nilOrValue(pigeonVar_list[5])
+    let groupNickname: String? = nilOrValue(pigeonVar_list[6])
+    let groupNicknameRevision: Int64? = nilOrValue(pigeonVar_list[7])
+    let remainingMilliseconds = pigeonVar_list[8] as! Int64
+    let avatar: FlutterStandardTypedData? = nilOrValue(pigeonVar_list[9])
+
+    return ImProfile(
+      page: page,
+      userId: userId,
+      name: name,
+      handle: handle,
+      alias: alias,
+      aliasRevision: aliasRevision,
+      groupNickname: groupNickname,
+      groupNicknameRevision: groupNicknameRevision,
+      remainingMilliseconds: remainingMilliseconds,
+      avatar: avatar
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      page,
+      userId,
+      name,
+      handle,
+      alias,
+      aliasRevision,
+      groupNickname,
+      groupNicknameRevision,
+      remainingMilliseconds,
+      avatar,
+    ]
+  }
+  static func == (lhs: ImProfile, rhs: ImProfile) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.page, rhs.page) && MessagesPigeonInternal.deepEquals(lhs.userId, rhs.userId) && MessagesPigeonInternal.deepEquals(lhs.name, rhs.name) && MessagesPigeonInternal.deepEquals(lhs.handle, rhs.handle) && MessagesPigeonInternal.deepEquals(lhs.alias, rhs.alias) && MessagesPigeonInternal.deepEquals(lhs.aliasRevision, rhs.aliasRevision) && MessagesPigeonInternal.deepEquals(lhs.groupNickname, rhs.groupNickname) && MessagesPigeonInternal.deepEquals(lhs.groupNicknameRevision, rhs.groupNicknameRevision) && MessagesPigeonInternal.deepEquals(lhs.remainingMilliseconds, rhs.remainingMilliseconds) && MessagesPigeonInternal.deepEquals(lhs.avatar, rhs.avatar)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImProfile")
+    MessagesPigeonInternal.deepHash(value: page, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: userId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: name, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: handle, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: alias, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: aliasRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: groupNickname, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: groupNicknameRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: remainingMilliseconds, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: avatar, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImProfile(page: \(String(describing: page)), userId: \(String(describing: userId)), name: \(String(describing: name)), handle: \(String(describing: handle)), alias: \(String(describing: alias)), aliasRevision: \(String(describing: aliasRevision)), groupNickname: \(String(describing: groupNickname)), groupNicknameRevision: \(String(describing: groupNicknameRevision)), remainingMilliseconds: \(String(describing: remainingMilliseconds)), avatar: \(String(describing: avatar)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct DirectoryEntry: Hashable, CustomStringConvertible {
   var id: String
   var title: String
@@ -920,18 +1000,20 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 134:
       return ImMessage.fromList(self.readValue() as! [Any?])
     case 135:
-      return DirectoryEntry.fromList(self.readValue() as! [Any?])
+      return ImProfile.fromList(self.readValue() as! [Any?])
     case 136:
-      return SearchHit.fromList(self.readValue() as! [Any?])
+      return DirectoryEntry.fromList(self.readValue() as! [Any?])
     case 137:
-      return SearchPage.fromList(self.readValue() as! [Any?])
+      return SearchHit.fromList(self.readValue() as! [Any?])
     case 138:
-      return DirectoryPage.fromList(self.readValue() as! [Any?])
+      return SearchPage.fromList(self.readValue() as! [Any?])
     case 139:
-      return GroupMember.fromList(self.readValue() as! [Any?])
+      return DirectoryPage.fromList(self.readValue() as! [Any?])
     case 140:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return GroupMember.fromList(self.readValue() as! [Any?])
     case 141:
+      return GroupPage.fromList(self.readValue() as! [Any?])
+    case 142:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -959,26 +1041,29 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? ImMessage {
       super.writeByte(134)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryEntry {
+    } else if let value = value as? ImProfile {
       super.writeByte(135)
       super.writeValue(value.toList())
-    } else if let value = value as? SearchHit {
+    } else if let value = value as? DirectoryEntry {
       super.writeByte(136)
       super.writeValue(value.toList())
-    } else if let value = value as? SearchPage {
+    } else if let value = value as? SearchHit {
       super.writeByte(137)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryPage {
+    } else if let value = value as? SearchPage {
       super.writeByte(138)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupMember {
+    } else if let value = value as? DirectoryPage {
       super.writeByte(139)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? GroupMember {
       super.writeByte(140)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? GroupPage {
       super.writeByte(141)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(142)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -1013,6 +1098,10 @@ protocol ImHost {
   func setConversationState(roomId: String, isPinned: Bool?, isArchived: Bool?, muteUntil: Int64?) async throws
   func nextUpdate(windowId: String) async throws -> WindowView
   func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage
+  func profiles(page: String, context: String, roomId: String?, userIds: [String]) async throws -> [ImProfile]
+  func openProfile(userId: String, context: String, roomId: String?) async throws -> [ImProfile]
+  func saveAlias(userId: String, alias: String?, revision: Int64?) async throws
+  func clearProfiles(page: String) async throws
   func resolveUserId(handle: String) async throws -> String
   func changeMembership(roomId: String, revision: Int64, action: String, target: String?, role: String?) async throws
   func updateAnnouncement(roomId: String, revision: Int64, text: String) async throws
@@ -1216,6 +1305,81 @@ class ImHostSetup {
       }
     } else {
       directoryChannel.setMessageHandler(nil)
+    }
+    let profilesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.profiles\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      profilesChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let pageArg = args[0] as! String
+        let contextArg = args[1] as! String
+        let roomIdArg: String? = nilOrValue(args[2])
+        let userIdsArg = args[3] as! [String]
+        Task { @MainActor in
+          do {
+            let result = try await api.profiles(page: pageArg, context: contextArg, roomId: roomIdArg, userIds: userIdsArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      profilesChannel.setMessageHandler(nil)
+    }
+    let openProfileChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.openProfile\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      openProfileChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let userIdArg = args[0] as! String
+        let contextArg = args[1] as! String
+        let roomIdArg: String? = nilOrValue(args[2])
+        Task { @MainActor in
+          do {
+            let result = try await api.openProfile(userId: userIdArg, context: contextArg, roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      openProfileChannel.setMessageHandler(nil)
+    }
+    let saveAliasChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.saveAlias\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      saveAliasChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let userIdArg = args[0] as! String
+        let aliasArg: String? = nilOrValue(args[1])
+        let revisionArg: Int64? = nilOrValue(args[2])
+        Task { @MainActor in
+          do {
+            try await api.saveAlias(userId: userIdArg, alias: aliasArg, revision: revisionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      saveAliasChannel.setMessageHandler(nil)
+    }
+    let clearProfilesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.clearProfiles\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      clearProfilesChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let pageArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            try await api.clearProfiles(page: pageArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      clearProfilesChannel.setMessageHandler(nil)
     }
     let resolveUserIdChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.resolveUserId\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

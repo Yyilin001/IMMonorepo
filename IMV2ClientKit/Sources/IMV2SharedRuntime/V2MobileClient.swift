@@ -53,6 +53,18 @@ public final class V2MobileClient: Sendable {
         public let hasOlder: Bool
         public let isLatest: Bool
     }
+    public struct Profile: Sendable {
+        public let page: String
+        public let userID: String
+        public let name: String
+        public let handle: String
+        public let alias: String?
+        public let aliasRevision: UInt64?
+        public let groupNickname: String?
+        public let groupNicknameRevision: UInt64?
+        public let remainingMilliseconds: Int64
+        public let avatar: Data?
+    }
     public struct Failure: Error, Sendable { public let code: String }
 
     private static let owners = V2Lock(initialState: Set<String>())
@@ -154,6 +166,29 @@ public final class V2MobileClient: Sendable {
     public func requestContact(handle: String) async throws {
         let userID = try await resolveUserID(handle: handle)
         try await socialAction(userID: userID, action: "request")
+    }
+    public func profiles(page: String, context: String, roomID: String?, userIDs: [String]) async throws -> [Profile] {
+        let value = try await run(.init(operation: .profiles, roomID: roomID, scope: context, page: page, members: userIDs))
+        return profileList(value, page: page)
+    }
+    public func openProfile(userID: String, context: String = "relationship", roomID: String? = nil) async throws -> [Profile] {
+        let value = try await run(.init(operation: .openProfile, roomID: roomID, scope: context, targetUserID: userID))
+        return profileList(value, page: "selected")
+    }
+    public func saveAlias(userID: String, text: String?, revision: UInt64?) async throws {
+        _ = try await run(.init(operation: .saveAlias, text: text, targetUserID: userID, revision: revision))
+    }
+    public func clearProfiles(page: String) async throws {
+        _ = try await run(.init(operation: .clearProfiles, page: page))
+    }
+    private func profileList(_ value: SharedSnapshot, page: String) -> [Profile] {
+        (value.directory?.profiles ?? []).filter { $0.page == page }.map {
+            Profile(page: $0.page, userID: $0.userID, name: $0.name, handle: $0.handle, alias: $0.alias,
+                    aliasRevision: $0.aliasRevision, groupNickname: $0.groupNickname,
+                    groupNicknameRevision: $0.groupNicknameRevision,
+                    remainingMilliseconds: $0.remainingMilliseconds,
+                    avatar: $0.avatar.flatMap { Data(base64Encoded: $0) })
+        }
     }
     public struct GroupPage: Sendable {
         public let announcement: String

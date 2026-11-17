@@ -51,3 +51,6 @@ id_ed25519*
 *.bundle
 monorepo-backups/
 dist/
+
+# Flutter build output kept outside the synced workspace
+/FlutterIM/build

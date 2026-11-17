@@ -795,16 +795,24 @@ class _ProfileHeader extends StatelessWidget {
     required this.name,
     required this.handle,
     this.group = false,
+    this.avatar,
   });
   final int id;
   final String name, handle;
   final bool group;
+  final Uint8List? avatar;
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 28),
     child: Column(
       children: [
-        ChatAvatar(id: id, name: name, group: group, size: 80),
+        ChatAvatar(
+          id: id,
+          name: name,
+          group: group,
+          size: 80,
+          avatar: avatar,
+        ),
         const SizedBox(height: 16),
         Text(
           name,

@@ -181,7 +181,11 @@ class SharedClient private constructor(private val handle: Long) {
         text: String? = null, role: SharedRole? = null, permissions: List<SharedPermission>? = null): SharedSnapshot =
         directoryCall("groupAction", "roomID" to roomID, "action" to action.wire, "revision" to revision, "targetUserID" to targetUserID,
             "text" to text, "role" to role?.wire, "permissions" to permissions?.let { org.json.JSONArray(it.map(SharedPermission::wire)) })
-    suspend fun openProfile(userID: String): SharedSnapshot = directoryCall("openProfile", "targetUserID" to userID)
+    suspend fun profiles(page: String, context: String, roomID: String?, userIDs: List<String>): SharedSnapshot =
+        directoryCall("profiles", "page" to page, "scope" to context, "roomID" to roomID, "members" to org.json.JSONArray(userIDs))
+    suspend fun clearProfiles(page: String): SharedSnapshot = directoryCall("clearProfiles", "page" to page)
+    suspend fun openProfile(userID: String, context: String = "relationship", roomID: String? = null): SharedSnapshot =
+        directoryCall("openProfile", "targetUserID" to userID, "scope" to context, "roomID" to roomID)
     suspend fun saveAlias(userID: String, name: String?, revision: Long?): SharedSnapshot = directoryCall("saveAlias", "targetUserID" to userID, "text" to (name ?: ""), "revision" to revision)
     suspend fun invitations(roomID: String): SharedSnapshot = directoryCall("invitations", "roomID" to roomID)
     suspend fun nextInvitations(roomID: String): SharedSnapshot = directoryCall("invitationsNext", "roomID" to roomID)

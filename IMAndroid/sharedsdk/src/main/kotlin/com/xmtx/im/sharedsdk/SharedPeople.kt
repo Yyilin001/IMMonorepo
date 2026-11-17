@@ -5,7 +5,8 @@ import kotlinx.collections.immutable.toPersistentList
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class SharedProfile(val userID: String, val name: String, val handle: String, val alias: String?, val aliasRevision: Long?, val expiresAtElapsed: Long, val avatar: String?) {
+data class SharedProfile(val userID: String, val name: String, val handle: String, val alias: String?, val aliasRevision: Long?, val expiresAtElapsed: Long, val avatar: String?,
+                         val page: String = "", val groupNickname: String? = null, val groupNicknameRevision: Long? = null) {
     override fun toString() = "SharedProfile(<private>)"
 }
 data class SharedInvite(val id: String, val url: String, val expires: Long, val used: Int, val maximum: Int) {
@@ -19,7 +20,8 @@ private fun JSONObject.optional(key: String) = optString(key).takeIf(String::isN
 private fun <T> JSONArray.rows(transform: (JSONObject) -> T) = (0 until length()).map { transform(getJSONObject(it)) }.toPersistentList()
 internal fun decodeProfiles(value: JSONArray, startedAt: Long) = value.rows {
     SharedProfile(it.getString("userID"), it.getString("name"), it.getString("handle"), it.optional("alias"), if (it.has("aliasRevision")) it.getLong("aliasRevision") else null,
-        startedAt + it.getLong("remainingMilliseconds"), it.optional("avatar"))
+        startedAt + it.getLong("remainingMilliseconds"), it.optional("avatar"), it.optString("page"),
+        it.optional("groupNickname"), if (it.has("groupNicknameRevision")) it.getLong("groupNicknameRevision") else null)
 }
 internal fun decodeCommunity(value: JSONObject) = SharedCommunity(value.optional("roomID"), value.getJSONArray("invites").rows {
     SharedInvite(it.getString("id"), it.getString("url"), it.getLong("expires"), it.getInt("used"), it.getInt("maximum"))

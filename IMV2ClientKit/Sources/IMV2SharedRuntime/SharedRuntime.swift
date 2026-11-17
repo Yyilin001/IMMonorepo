@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -36,6 +36,7 @@ package struct SharedRequest: Decodable, Sendable {
     var text: String?
     var intentID: String?
     var scope: String?
+    var page: String?
     var targetUserID: String?
     var action: String?
     var revision: UInt64?
@@ -347,7 +348,7 @@ package actor SharedRuntime {
         case .retrySend:
             guard let business = messageBusiness, let raw = request.intentID, let id = UUID(uuidString: raw) else { throw SharedFailure.invalidInput }
             try await business.retrySend(id)
-        case .openAvatarEditor, .changeAvatar, .avatarAction, .contacts, .contactsNext, .groupsFirst, .groupsNext, .lookupIdentity, .clearDiscovery, .socialAction, .openDirect, .createGroup, .openGroup, .groupMembersNext, .groupAction, .retryDirectoryWork, .discardDirectoryDraft, .openProfile, .saveAlias, .invitations, .invitationsNext, .previewInvite, .refreshInvite, .inviteAction, .muteMember:
+        case .openAvatarEditor, .changeAvatar, .avatarAction, .contacts, .contactsNext, .groupsFirst, .groupsNext, .lookupIdentity, .clearDiscovery, .socialAction, .openDirect, .createGroup, .openGroup, .groupMembersNext, .groupAction, .retryDirectoryWork, .discardDirectoryDraft, .profiles, .clearProfiles, .openProfile, .saveAlias, .invitations, .invitationsNext, .previewInvite, .refreshInvite, .inviteAction, .muteMember:
             guard let socialGroups else { throw SharedFailure.authenticationRequired }
             if request.operation == .clearDiscovery { await media?.clear(); await messaging?.clearTransient() }
             try await socialGroups.execute(request)

@@ -27,8 +27,79 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
   List<ImConversation> rooms = const [];
   ContactDirectory directory = ContactDirectory.fromEntries([]);
   Map<int, ImDirectoryEntry> entries = {};
+  final Map<String, ImProfile> profiles = {};
+  final Set<String> _profilesRequested = {};
   String? directoryError;
   bool loadingDirectory = false;
+
+  void _rebuildDirectory() {
+    if (!mounted) return;
+    final titles = {
+      for (final room in rooms)
+        if (room.peerId != null) room.peerId!: room.title,
+    };
+    directory = ContactDirectory.fromEntries([
+      for (final MapEntry(:key, :value) in entries.entries)
+        ContactSummary(
+          id: key,
+          accountId: value.id,
+          name:
+              profiles[value.id]?.name ??
+              (value.isGroup ? value.title : titles[value.id]) ??
+              value.title,
+          isGroup: value.isGroup,
+        ),
+    ]);
+  }
+
+  /// Loads bounded, authorized profile cards for visible rows. Missing or denied
+  /// rows stay on their conversation title; a failure is retried on the next refresh.
+  Future<void> loadProfiles(
+    String page,
+    Iterable<String> ids, {
+    String context = 'relationship',
+    String? roomId,
+  }) async {
+    if (client == null || userId == null) return;
+    final wanted = <String>{};
+    for (final id in ids) {
+      if (id.isNotEmpty && !_profilesRequested.contains(id) && !profiles.containsKey(id)) {
+        wanted.add(id);
+        if (wanted.length == 50) break;
+      }
+    }
+    if (wanted.isEmpty) return;
+    _profilesRequested.addAll(wanted);
+    try {
+      final rows = await client!.profiles(
+        page: page,
+        context: context,
+        roomId: roomId,
+        userIds: wanted.toList(growable: false),
+      );
+      if (!mounted) return;
+      setState(() {
+        for (final row in rows) {
+          profiles[row.userId] = row;
+        }
+        _rebuildDirectory();
+      });
+    } catch (_) {
+      _profilesRequested.removeAll(wanted);
+    }
+  }
+
+  void forgetProfile(String id) {
+    profiles.remove(id);
+    _profilesRequested.remove(id);
+  }
+
+  void applyProfile(ImProfile value) {
+    setState(() {
+      profiles[value.userId] = value;
+      _rebuildDirectory();
+    });
+  }
 
   ImContactScope contactScope = ImContactScope.accepted;
   bool moreContacts = false, moreGroups = false;
@@ -60,20 +131,12 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
       };
       moreContacts = page.moreContacts;
       moreGroups = page.moreGroups;
-      final titles = {
-        for (final room in rooms)
-          if (room.peerId != null) room.peerId!: room.title,
-      };
-      directory = ContactDirectory.fromEntries([
-        for (final MapEntry(:key, :value) in entries.entries)
-          ContactSummary(
-            id: key,
-            accountId: value.id,
-            name:
-                (value.isGroup ? value.title : titles[value.id]) ?? value.title,
-            isGroup: value.isGroup,
-          ),
-      ]);
+      setState(_rebuildDirectory);
+      final contactIds = [
+        for (final value in page.entries)
+          if (!value.isGroup) value.id,
+      ];
+      unawaited(loadProfiles('contacts-ui', contactIds));
     } catch (e) {
       if (mounted && navigator == sessionNavigator) {
         directoryError = _errorText(e);
@@ -139,6 +202,8 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
       _keys.clear();
       contactScope = ImContactScope.accepted;
       entries = {};
+      profiles.clear();
+      _profilesRequested.clear();
       moreContacts = moreGroups = false;
       directory = ContactDirectory.fromEntries([]);
       directoryError = null;
@@ -157,6 +222,7 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
                 rooms = rows;
                 loadingRooms = false;
                 listError = null;
+                _rebuildDirectory();
               });
             }
           },
@@ -509,4 +575,235 @@ class _ArchivedConversationsPageState
     );
   }
 
+}
+
+/// Authorized contact card. The shared runtime resolves the remark, avatar and
+/// expiry; this page only renders names and sends a revision-bound alias save.
+class _SdkContactProfilePage extends StatefulWidget {
+  const _SdkContactProfilePage({
+    required this.entry,
+    required this.room,
+    required this.fallbackName,
+    required this.avatarId,
+    this.onMessage,
+    this.context = 'relationship',
+    this.roomId,
+  });
+  final ImDirectoryEntry entry;
+  final ImConversation? room;
+  final String fallbackName;
+  final int avatarId;
+  final VoidCallback? onMessage;
+  final String context;
+  final String? roomId;
+
+  @override
+  State<_SdkContactProfilePage> createState() =>
+      _SdkContactProfilePageState();
+}
+
+class _SdkContactProfilePageState extends State<_SdkContactProfilePage> {
+  ImProfile? profile;
+  String? alias;
+  String? error;
+  Timer? expiry;
+  bool initialized = false, loading = true, saving = false;
+
+  @override
+  void dispose() {
+    expiry?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!initialized) {
+      initialized = true;
+      unawaited(load());
+    }
+  }
+
+  Future<void> load() async {
+    final sdk = _SdkScope.of(context);
+    if (sdk?.client == null) return;
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final rows = await sdk!.client!.openProfile(
+        widget.entry.id,
+        context: widget.context,
+        roomId: widget.roomId,
+      );
+      if (!mounted) return;
+      final value = rows.firstOrNull;
+      expiry?.cancel();
+      setState(() {
+        profile = value;
+        alias = value?.alias;
+        loading = false;
+      });
+      if (value != null) {
+        sdk.applyProfile(value);
+        expiry = Timer(
+          Duration(milliseconds: value.remainingMilliseconds),
+          () {
+            if (!mounted) return;
+            setState(() {
+              profile = null;
+              alias = null;
+            });
+            unawaited(load());
+          },
+        );
+      }
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        loading = false;
+      });
+    }
+  }
+
+  Future<void> editAlias() async {
+    if (saving) return;
+    final controller = TextEditingController(text: alias ?? '');
+    final text = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('设置备注'),
+        content: TextField(
+          key: const Key('contact-alias-input'),
+          controller: controller,
+          autofocus: true,
+          maxLength: 24,
+          decoration: const InputDecoration(
+            labelText: '备注名',
+            hintText: '留空使用对方昵称',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, controller.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (text == null || !mounted) return;
+    final sdk = _SdkScope.of(context);
+    final current = profile;
+    if (sdk?.client == null || current == null) return;
+    final clean = text.trim();
+    setState(() => saving = true);
+    try {
+      await sdk!.client!.saveAlias(
+        widget.entry.id,
+        alias: clean.isEmpty ? null : clean,
+        revision: current.aliasRevision,
+      );
+      if (!mounted) return;
+      final revertedName =
+          current.alias != null && current.name == current.alias
+          ? widget.fallbackName
+          : current.name;
+      final updated = (
+        page: current.page,
+        userId: current.userId,
+        name: clean.isEmpty ? revertedName : clean,
+        handle: current.handle,
+        alias: clean.isEmpty ? null : clean,
+        aliasRevision: current.aliasRevision,
+        groupNickname: current.groupNickname,
+        groupNicknameRevision: current.groupNicknameRevision,
+        remainingMilliseconds: current.remainingMilliseconds,
+        avatar: current.avatar,
+      );
+      setState(() {
+        profile = updated;
+        alias = clean.isEmpty ? null : clean;
+        saving = false;
+      });
+      sdk.applyProfile(updated);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('备注已保存，正在同步')),
+      );
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sdk = _SdkScope.of(context);
+    final displayName = alias?.isNotEmpty == true
+        ? alias!
+        : (profile?.name ?? widget.fallbackName);
+    return _ProfileScaffold(
+      title: '联系人资料',
+      actions: [
+        IconButton(
+          tooltip: '刷新资料',
+          onPressed: loading || saving ? null : load,
+          icon: const Icon(Icons.refresh_rounded),
+        ),
+      ],
+      children: [
+        _ProfileHeader(
+          id: widget.avatarId,
+          name: displayName,
+          handle: widget.entry.id,
+          avatar: profile?.avatar,
+        ),
+        if (error != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Text(
+              error!,
+              style: const TextStyle(color: Color(0xFFB3261E)),
+            ),
+          ),
+        if (loading && profile == null)
+          const Padding(
+            padding: EdgeInsets.all(12),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ListTile(
+          key: const Key('contact-alias'),
+          leading: const Icon(Icons.edit_note_rounded, color: green),
+          title: const Text('备注'),
+          subtitle: Text(alias?.isNotEmpty == true ? alias! : '未设置备注'),
+          trailing: saving
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.chevron_right_rounded, color: muted),
+          onTap: loading || saving ? null : editAlias,
+        ),
+        if (widget.onMessage != null)
+          FilledButton(
+            onPressed: widget.onMessage,
+            child: const Text('发消息'),
+          ),
+        if (sdk != null)
+          _ContactRelationshipActions(
+            userId: widget.entry.id,
+            name: displayName,
+            scope: sdk.contactScope,
+          ),
+      ],
+    );
+  }
 }

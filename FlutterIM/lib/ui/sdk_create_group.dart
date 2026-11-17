@@ -156,6 +156,8 @@ class _GroupDetailsPage extends StatefulWidget {
 
 class _GroupDetailsPageState extends State<_GroupDetailsPage> {
   final members = <String, String>{};
+  final Map<String, ImProfile> profiles = {};
+  final Set<String> _profilesRequested = {};
   bool initialized = false, loading = false, more = false;
   String announcement = '';
   int? editableAnnouncementRevision, membershipRevision;
@@ -293,11 +295,60 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
       actorRole = page.actorRole;
       permissions = page.permissions;
       more = page.hasMore;
+      unawaited(loadProfiles());
     } catch (failure) {
       if (mounted) error = _errorText(failure);
     } finally {
       if (mounted) setState(() => loading = false);
     }
+  }
+
+  Future<void> loadProfiles() async {
+    final client = _SdkScope.of(context)!.client!;
+    final wanted = members.keys
+        .where(
+          (id) =>
+              id.isNotEmpty &&
+              !_profilesRequested.contains(id) &&
+              !profiles.containsKey(id),
+        )
+        .take(50)
+        .toList(growable: false);
+    if (wanted.isEmpty) return;
+    _profilesRequested.addAll(wanted);
+    try {
+      final rows = await client.profiles(
+        page: 'members:${widget.roomId}',
+        context: 'room',
+        roomId: widget.roomId,
+        userIds: wanted,
+      );
+      if (!mounted) return;
+      setState(() {
+        for (final row in rows) {
+          profiles[row.userId] = row;
+        }
+      });
+    } catch (_) {
+      _profilesRequested.removeAll(wanted);
+    }
+  }
+
+  void openMemberProfile(String userId) {
+    final sdk = _SdkScope.of(context)!;
+    final name = profiles[userId]?.name ?? userId;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => _SdkContactProfilePage(
+          entry: (id: userId, title: name, isGroup: false),
+          room: null,
+          fallbackName: name,
+          avatarId: sdk.keyFor(userId),
+          context: 'room',
+          roomId: widget.roomId,
+        ),
+      ),
+    );
   }
 
   @override
@@ -357,7 +408,8 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
         ),
       for (final member in members.entries)
         ListTile(
-          title: Text(member.key),
+          onTap: () => openMemberProfile(member.key),
+          title: Text(profiles[member.key]?.name ?? member.key),
           trailing: memberMenu(member.key, member.value),
           subtitle: Text(switch (member.value) {
             'owner' => '群主',

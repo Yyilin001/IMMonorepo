@@ -85,6 +85,36 @@ private actor MobileHost: ImHost {
                                  moreContacts: page.moreContacts, moreGroups: page.moreGroups)
         }
     }
+    func profiles(page: String, context: String, roomId: String?, userIds: [String]) async throws -> [ImProfile] {
+        try await ordered {
+            try await self.client.profiles(page: page, context: context, roomID: roomId, userIDs: userIds)
+                .map(Self.profile)
+        }
+    }
+    func openProfile(userId: String, context: String, roomId: String?) async throws -> [ImProfile] {
+        try await ordered {
+            try await self.client.openProfile(userID: userId, context: context, roomID: roomId)
+                .map(Self.profile)
+        }
+    }
+    func saveAlias(userId: String, alias: String?, revision: Int64?) async throws {
+        let expected = try revision.map { value -> UInt64 in
+            guard let expected = UInt64(exactly: value) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+            return expected
+        }
+        try await ordered { try await self.client.saveAlias(userID: userId, text: alias, revision: expected) }
+    }
+    func clearProfiles(page: String) async throws {
+        try await ordered { try await self.client.clearProfiles(page: page) }
+    }
+    private static func profile(_ value: V2MobileClient.Profile) -> ImProfile {
+        ImProfile(page: value.page, userId: value.userID, name: value.name, handle: value.handle,
+                  alias: value.alias, aliasRevision: value.aliasRevision.map { Int64(clamping: $0) },
+                  groupNickname: value.groupNickname,
+                  groupNicknameRevision: value.groupNicknameRevision.map { Int64(clamping: $0) },
+                  remainingMilliseconds: value.remainingMilliseconds,
+                  avatar: value.avatar.map { FlutterStandardTypedData(bytes: $0) })
+    }
     func resolveUserId(handle: String) async throws -> String {
         try await ordered { try await self.client.resolveUserID(handle: handle) }
     }

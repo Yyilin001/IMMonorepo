@@ -1041,11 +1041,13 @@ class ChatAvatar extends StatelessWidget {
     required this.name,
     this.group = false,
     this.size = 43,
+    this.avatar,
   });
   final int id;
   final String name;
   final bool group;
   final double size;
+  final Uint8List? avatar;
   @override
   Widget build(BuildContext context) {
     const backgrounds = [
@@ -1070,19 +1072,29 @@ class ChatAvatar extends StatelessWidget {
         borderRadius: BorderRadius.circular(size * .3),
       ),
       alignment: Alignment.center,
-      child: group
-          ? Icon(
-              Icons.forum_rounded,
-              size: size * .47,
-              color: foregrounds[id % foregrounds.length],
-            )
-          : Text(
-              name.characters.first,
-              style: TextStyle(
-                fontSize: size * .38,
-                color: foregrounds[id % foregrounds.length],
-                fontWeight: FontWeight.w600,
-              ),
+      clipBehavior: Clip.antiAlias,
+      child: avatar == null
+          ? group
+                ? Icon(
+                    Icons.forum_rounded,
+                    size: size * .47,
+                    color: foregrounds[id % foregrounds.length],
+                  )
+                : Text(
+                    name.characters.first,
+                    style: TextStyle(
+                      fontSize: size * .38,
+                      color: foregrounds[id % foregrounds.length],
+                      fontWeight: FontWeight.w600,
+                    ),
+                  )
+          : Image.memory(
+              avatar!,
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).round(),
+              gaplessPlayback: true,
             ),
     );
   }

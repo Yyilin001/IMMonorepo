@@ -18,7 +18,41 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   ImMessage? replyTarget;
   final downloads = <(String, String)>{};
   final activeMutations = <String>{};
+  final Map<String, ImProfile> senderProfiles = {};
+  final Set<String> _senderProfilesRequested = {};
   bool initialized = false, sending = false;
+
+  Future<void> loadSenderProfiles(Iterable<String> ids) async {
+    final sdk = _SdkScope.of(context);
+    if (sdk?.client == null) return;
+    final wanted = <String>{};
+    for (final id in ids) {
+      if (id.isNotEmpty &&
+          !_senderProfilesRequested.contains(id) &&
+          !senderProfiles.containsKey(id)) {
+        wanted.add(id);
+        if (wanted.length == 50) break;
+      }
+    }
+    if (wanted.isEmpty) return;
+    _senderProfilesRequested.addAll(wanted);
+    try {
+      final rows = await sdk!.client!.profiles(
+        page: 'room:${widget.room.id}',
+        context: widget.room.isGroup ? 'room' : 'direct',
+        roomId: widget.room.isGroup ? widget.room.id : null,
+        userIds: wanted.toList(growable: false),
+      );
+      if (!mounted) return;
+      setState(() {
+        for (final row in rows) {
+          senderProfiles[row.userId] = row;
+        }
+      });
+    } catch (_) {
+      _senderProfilesRequested.removeAll(wanted);
+    }
+  }
 
   @override
   void didChangeDependencies() {
@@ -30,6 +64,12 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       input.text = ref.read(draftProvider(id));
       messages = sdk.client!.watchTimeline(widget.room.id).map((page) {
         currentPage = page;
+        final ids = <String>{
+          for (final message in page.messages)
+            if (message.senderId != sdk.userId) message.senderId,
+          if (widget.room.peerId != null) widget.room.peerId!,
+        };
+        unawaited(loadSenderProfiles(ids));
         return page;
       });
     }
@@ -377,7 +417,12 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     final room =
         sdk.rooms.where((r) => r.id == widget.room.id).firstOrNull ??
         widget.room;
-    final name = room.title.isEmpty ? '会话' : room.title;
+    final peerName = room.peerId == null
+        ? null
+        : senderProfiles[room.peerId!]?.name;
+    final name = room.isGroup
+        ? (room.title.isEmpty ? '群聊' : room.title)
+        : (peerName ?? (room.title.isEmpty ? '会话' : room.title));
     final conversation = Conversation(
       id: id,
       name: name,
@@ -516,7 +561,8 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                               sdkSender: mine
                                   ? '我'
                                   : room.isGroup
-                                  ? item.senderId
+                                  ? (senderProfiles[item.senderId]?.name ??
+                                        item.senderId)
                                   : name,
                               sdkStatus: switch ((
                                 item.preparedAttachments,

@@ -64,6 +64,18 @@ typedef ImConversation = ({
   int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImProfile = ({
+  String page,
+  String userId,
+  String name,
+  String handle,
+  String? alias,
+  int? aliasRevision,
+  String? groupNickname,
+  int? groupNicknameRevision,
+  int remainingMilliseconds,
+  Uint8List? avatar,
+});
 typedef ImTransfer = ({
   String id,
   String name,
@@ -293,6 +305,34 @@ final class ImClient {
       moreGroups: page.moreGroups,
     );
   });
+
+  Future<List<ImProfile>> profiles({
+    required String page,
+    required String context,
+    String? roomId,
+    required List<String> userIds,
+  }) => _ordered(() async {
+    final rows = await _host.profiles(page, context, roomId, userIds);
+    return rows.map(_profile).toList(growable: false);
+  });
+
+  Future<List<ImProfile>> openProfile(
+    String userId, {
+    String context = 'relationship',
+    String? roomId,
+  }) => _ordered(() async {
+    final rows = await _host.openProfile(userId, context, roomId);
+    return rows.map(_profile).toList(growable: false);
+  });
+
+  Future<void> saveAlias(
+    String userId, {
+    String? alias,
+    int? revision,
+  }) => _ordered(() => _host.saveAlias(userId, alias, revision));
+
+  Future<void> clearProfiles(String page) =>
+      _ordered(() => _host.clearProfiles(page));
 
   Future<String> resolveUserId(String handle) =>
       _ordered(() => _host.resolveUserId(handle));
@@ -543,6 +583,19 @@ final class ImClient {
     String text, {
     String? replyToMessageId,
   }) => _ordered(() => _host.sendText(roomId, text, replyToMessageId));
+  ImProfile _profile(wire.ImProfile value) => (
+    page: value.page,
+    userId: value.userId,
+    name: value.name,
+    handle: value.handle,
+    alias: value.alias,
+    aliasRevision: value.aliasRevision,
+    groupNickname: value.groupNickname,
+    groupNicknameRevision: value.groupNicknameRevision,
+    remainingMilliseconds: value.remainingMilliseconds,
+    avatar: value.avatar,
+  );
+
   Future<void> _stopWindows() async {
     await Future.wait(_windows.toList().map((stop) => stop()));
   }

@@ -542,6 +542,96 @@ class ImMessage {
   }
 }
 
+class ImProfile {
+  ImProfile({
+    required this.page,
+    required this.userId,
+    required this.name,
+    required this.handle,
+    this.alias,
+    this.aliasRevision,
+    this.groupNickname,
+    this.groupNicknameRevision,
+    required this.remainingMilliseconds,
+    this.avatar,
+  });
+
+  String page;
+
+  String userId;
+
+  String name;
+
+  String handle;
+
+  String? alias;
+
+  int? aliasRevision;
+
+  String? groupNickname;
+
+  int? groupNicknameRevision;
+
+  int remainingMilliseconds;
+
+  Uint8List? avatar;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      page,
+      userId,
+      name,
+      handle,
+      alias,
+      aliasRevision,
+      groupNickname,
+      groupNicknameRevision,
+      remainingMilliseconds,
+      avatar,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImProfile decode(Object result) {
+    result as List<Object?>;
+    return ImProfile(
+      page: result[0]! as String,
+      userId: result[1]! as String,
+      name: result[2]! as String,
+      handle: result[3]! as String,
+      alias: result[4] as String?,
+      aliasRevision: result[5] as int?,
+      groupNickname: result[6] as String?,
+      groupNicknameRevision: result[7] as int?,
+      remainingMilliseconds: result[8]! as int,
+      avatar: result[9] as Uint8List?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImProfile || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(page, other.page) && _deepEquals(userId, other.userId) && _deepEquals(name, other.name) && _deepEquals(handle, other.handle) && _deepEquals(alias, other.alias) && _deepEquals(aliasRevision, other.aliasRevision) && _deepEquals(groupNickname, other.groupNickname) && _deepEquals(groupNicknameRevision, other.groupNicknameRevision) && _deepEquals(remainingMilliseconds, other.remainingMilliseconds) && _deepEquals(avatar, other.avatar);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImProfile(page: $page, userId: $userId, name: $name, handle: $handle, alias: $alias, aliasRevision: $aliasRevision, groupNickname: $groupNickname, groupNicknameRevision: $groupNicknameRevision, remainingMilliseconds: $remainingMilliseconds, avatar: $avatar)';
+  }
+}
+
 class DirectoryEntry {
   DirectoryEntry({
     required this.id,
@@ -973,26 +1063,29 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is ImMessage) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryEntry) {
+    }    else if (value is ImProfile) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is SearchHit) {
+    }    else if (value is DirectoryEntry) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is SearchPage) {
+    }    else if (value is SearchHit) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryPage) {
+    }    else if (value is SearchPage) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupMember) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(139);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(140);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(141);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(142);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1015,18 +1108,20 @@ class _PigeonCodec extends StandardMessageCodec {
       case 134:
         return ImMessage.decode(readValue(buffer)!);
       case 135:
-        return DirectoryEntry.decode(readValue(buffer)!);
+        return ImProfile.decode(readValue(buffer)!);
       case 136:
-        return SearchHit.decode(readValue(buffer)!);
+        return DirectoryEntry.decode(readValue(buffer)!);
       case 137:
-        return SearchPage.decode(readValue(buffer)!);
+        return SearchHit.decode(readValue(buffer)!);
       case 138:
-        return DirectoryPage.decode(readValue(buffer)!);
+        return SearchPage.decode(readValue(buffer)!);
       case 139:
-        return GroupMember.decode(readValue(buffer)!);
+        return DirectoryPage.decode(readValue(buffer)!);
       case 140:
-        return GroupPage.decode(readValue(buffer)!);
+        return GroupMember.decode(readValue(buffer)!);
       case 141:
+        return GroupPage.decode(readValue(buffer)!);
+      case 142:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1226,6 +1321,76 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as DirectoryPage;
+  }
+
+  Future<List<ImProfile>> profiles(String page, String context, String? roomId, List<String> userIds) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.profiles$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[page, context, roomId, userIds]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return (pigeonVar_replyValue! as List<Object?>).cast<ImProfile>();
+  }
+
+  Future<List<ImProfile>> openProfile(String userId, String context, String? roomId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.openProfile$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[userId, context, roomId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return (pigeonVar_replyValue! as List<Object?>).cast<ImProfile>();
+  }
+
+  Future<void> saveAlias(String userId, String? alias, int? revision) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.saveAlias$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[userId, alias, revision]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> clearProfiles(String page) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.clearProfiles$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[page]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   Future<String> resolveUserId(String handle) async {
