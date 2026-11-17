@@ -48,13 +48,13 @@ await client.sendText(roomId, text);
 
 ## 双端联调
 
-先从仓库根目录启动隔离后端。
+先从仓库根目录启动隔离后端。Android arm64 模拟器需要启用 Wi-Fi 并连接到活动网络，附件传输使用该网络的套接字。
 
 ```sh
-python3 IMV2/scripts/verify_v2_isolated_native_account.py --hold-seconds 900
+python3 IMV2/scripts/verify_v2_isolated_native_account.py --resource-part-uploads --hold-seconds 900
 ```
 
-在另一个终端将输出的配置路径和已有 Android arm64 模拟器序列号交给驱动。驱动在构建测试包时自动注入隔离后端地址，创建两个临时账号和一个私聊，自动创建并清理一个 iOS 模拟器，在两个 Flutter 界面依次登录、收发、重开消息窗口并退出。测试 CA 只加进临时 iOS 模拟器和专用 Android Debug 包的 localhost 信任配置。
+在另一个终端将输出的配置路径和已有 Android arm64 模拟器序列号交给驱动。驱动在构建测试包时自动注入隔离后端地址，创建两个临时账号和一个私聊，自动创建并清理一个 iOS 模拟器，在两个 Flutter 界面依次登录、收发文本、重开消息窗口并退出。附件用例通过真实平台绑定向对方发送 280001 字节的测试文件，接收端检查聊天页文件名、下载后导出并逐字节比对。用例使用应用私有测试文件，跳过系统文件选择器。测试 CA 只加进临时 iOS 模拟器和专用 Android Debug 包的 localhost 信任配置。
 
 ```sh
 cd FlutterIM

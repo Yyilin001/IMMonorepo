@@ -1,4 +1,8 @@
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/services.dart' show PlatformException;
+import 'package:im_flutter_sdk/src/messages.g.dart' as wire;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/widgets.dart';
@@ -115,6 +119,80 @@ void main() {
       await send(reply);
       await until(bubble(ack), 'Android confirmed receipt of reply');
     }
+    // Exercise the real platform binding and shared transfer services using an
+    // app-owned fixture in place of the external document picker.
+    final mediaHost = wire.ImHost();
+    for (final origin in ['android', 'ios']) {
+      final name = 'payload-$origin-$run.bin';
+      final caption = '附件 $origin $run';
+      final verified = '附件字节已校验 $origin $run';
+      final bytes = Uint8List.fromList(
+        List.generate(280001, (i) => (i * 17 + origin.length) & 255),
+      );
+      final directory = await Directory.systemTemp.createTemp(
+        'im-paired-media-',
+      );
+      try {
+        if (origin == Platform.operatingSystem) {
+          final source = File('${directory.path}/$name');
+          await source.writeAsBytes(bytes);
+          await mediaHost.sendAttachment(
+            room,
+            source.path,
+            name,
+            'application/octet-stream',
+            caption,
+          );
+          await until(
+            bubble(name),
+            'uploaded attachment reached the sender timeline',
+          );
+          await until(
+            bubble(verified),
+            'peer verified exported attachment bytes',
+          );
+        } else {
+          await until(
+            bubble(name),
+            'attachment and filename arrived at receiver',
+          );
+          final timeline = await mediaHost.openWindow(room);
+          late final wire.ImMessage message;
+          try {
+            final view = await mediaHost.nextUpdate(timeline);
+            message = view.messages.singleWhere(
+              (m) => m.text == caption && m.hasMedia,
+            );
+          } finally {
+            await mediaHost.closeWindow(timeline);
+          }
+          final media = message.attachments.single;
+          expect(media.name, name);
+          expect(media.bytes, bytes.length);
+          await mediaHost.downloadAttachment(room, message.id, media.id);
+          final output = File('${directory.path}/export.bin');
+          final deadline = DateTime.now().add(const Duration(minutes: 2));
+          while (true) {
+            try {
+              await mediaHost.exportAttachment(
+                room,
+                message.id,
+                media.id,
+                output.path,
+              );
+              break;
+            } on PlatformException {
+              if (DateTime.now().isAfter(deadline)) rethrow;
+              await tester.pump(const Duration(milliseconds: 500));
+            }
+          }
+          expect(await output.readAsBytes(), orderedEquals(bytes));
+          await send(verified);
+        }
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    }
     // Wait for the confirmed text to survive closing and reopening its watch.
     await tester.pumpAndSettle();
     await tester.pageBack();
@@ -122,7 +200,10 @@ void main() {
     await until(tile, 'conversation list survived closing the timeline');
     await tester.tap(tile.hitTestable());
     await tester.pumpAndSettle();
-    await until(bubble(reply), 'reply visible after reopening');
+    await until(
+      bubble('附件字节已校验 ios $run'),
+      'attachment acknowledgement visible after reopening',
+    );
     await tester.pumpAndSettle();
     await tester.pageBack();
     await tester.pumpAndSettle();

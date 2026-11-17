@@ -40,7 +40,7 @@ actor SharedMedia {
         self.account = account; self.store = store; self.resources = resources; self.uploads = uploads
         let resolver = try SharedMediaResolver(base: base, http: http); self.resolver = resolver
         cache = try await resources.downloadCache(using: .init(targetResolver: resolver, byteTransfer: V2URLSessionMediaByteTransfer(transport: rangeTransport)))
-        stagingRoot = await resources.scope.resourceFilesDirectory.resolvingSymlinksInPath().appendingPathComponent("shared-imports")
+        stagingRoot = await resources.scope.resourceFilesDirectory.resolvingSymlinksInPath().appendingPathComponent("shared-imports", isDirectory: true)
         if !FileManager.default.fileExists(atPath: stagingRoot.path) { try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
         let facts = try stagingRoot.resourceValues(forKeys: [.isSymbolicLinkKey,.isDirectoryKey])
         guard facts.isDirectory == true, facts.isSymbolicLink == false, stagingRoot.resolvingSymlinksInPath() == stagingRoot else { throw SharedFailure.storageUnavailable }
