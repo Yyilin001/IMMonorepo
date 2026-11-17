@@ -75,6 +75,10 @@ public final class V2MobileClient: Sendable {
         public let handle: String?
         public let image: Data?
     }
+    public struct AvatarImage: Sendable {
+        public let data: Data
+        public let remainingMilliseconds: Int64
+    }
     public struct Failure: Error, Sendable { public let code: String }
 
     private static let owners = V2Lock(initialState: Set<String>())
@@ -176,6 +180,12 @@ public final class V2MobileClient: Sendable {
     public func requestContact(handle: String) async throws {
         let userID = try await resolveUserID(handle: handle)
         try await socialAction(userID: userID, action: "request")
+    }
+    public func avatar(page: String, userID: String, context: String, roomID: String?) async throws -> AvatarImage? {
+        let value = try await run(.init(operation: .avatar, roomID: roomID, scope: context, page: page, targetUserID: userID))
+        guard let profile = value.directory?.profiles.first(where: { $0.page == page && $0.userID == userID }),
+              let encoded = profile.avatar, let data = Data(base64Encoded: encoded) else { return nil }
+        return AvatarImage(data: data, remainingMilliseconds: profile.remainingMilliseconds)
     }
     public func openAvatarEditor(roomID: String?) async throws -> AvatarEditor? {
         let value = try await run(.init(operation: .openAvatarEditor, roomID: roomID))

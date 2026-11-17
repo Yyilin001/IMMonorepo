@@ -431,11 +431,9 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                                               horizontal: 20,
                                               vertical: 6,
                                             ),
-                                        leading: ChatAvatar(
-                                          id: c.id,
-                                          name: c.name,
-                                          group: c.isGroup,
-                                          size: 48,
+                                        leading: _contactListAvatar(
+                                          context,
+                                          c,
                                         ),
                                         title: Text(
                                           c.name,
@@ -1444,5 +1442,23 @@ class _RequestContactDialogState extends State<_RequestContactDialog> {
         child: const Text('发送申请'),
       ),
     ],
+  );
+}
+
+Widget _contactListAvatar(BuildContext context, ContactSummary contact) {
+  final sdk = _SdkScope.of(context);
+  if (sdk != null && !contact.isGroup && contact.accountId != null) {
+    return SdkAvatar(
+      userId: contact.accountId!,
+      name: contact.name,
+      context: 'relationship',
+      size: 48,
+    );
+  }
+  return ChatAvatar(
+    id: contact.id,
+    name: contact.name,
+    group: contact.isGroup,
+    size: 48,
   );
 }

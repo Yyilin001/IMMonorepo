@@ -699,6 +699,47 @@ data class ImAvatarEditor (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class ImAvatarImage (
+  val bytes: ByteArray,
+  val remainingMilliseconds: Long
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImAvatarImage {
+      val bytes = pigeonVar_list[0] as ByteArray
+      val remainingMilliseconds = pigeonVar_list[1] as Long
+      return ImAvatarImage(bytes, remainingMilliseconds)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      bytes,
+      remainingMilliseconds,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImAvatarImage
+    return MessagesPigeonUtils.deepEquals(this.bytes, other.bytes) && MessagesPigeonUtils.deepEquals(this.remainingMilliseconds, other.remainingMilliseconds)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.bytes)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.remainingMilliseconds)
+    return result
+  }
+  override fun toString(): String {
+    return "ImAvatarImage(bytes=${bytes.contentToString()}, remainingMilliseconds=$remainingMilliseconds)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class DirectoryEntry (
   val id: String,
   val title: String,
@@ -1073,35 +1114,40 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       137.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryEntry.fromList(it)
+          ImAvatarImage.fromList(it)
         }
       }
       138.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchHit.fromList(it)
+          DirectoryEntry.fromList(it)
         }
       }
       139.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          SearchPage.fromList(it)
+          SearchHit.fromList(it)
         }
       }
       140.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryPage.fromList(it)
+          SearchPage.fromList(it)
         }
       }
       141.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupMember.fromList(it)
+          DirectoryPage.fromList(it)
         }
       }
       142.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          GroupMember.fromList(it)
         }
       }
       143.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          GroupPage.fromList(it)
+        }
+      }
+      144.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -1143,32 +1189,36 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is DirectoryEntry -> {
+      is ImAvatarImage -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is SearchHit -> {
+      is DirectoryEntry -> {
         stream.write(138)
         writeValue(stream, value.toList())
       }
-      is SearchPage -> {
+      is SearchHit -> {
         stream.write(139)
         writeValue(stream, value.toList())
       }
-      is DirectoryPage -> {
+      is SearchPage -> {
         stream.write(140)
         writeValue(stream, value.toList())
       }
-      is GroupMember -> {
+      is DirectoryPage -> {
         stream.write(141)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is GroupMember -> {
         stream.write(142)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is GroupPage -> {
         stream.write(143)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(144)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -1193,6 +1243,7 @@ interface ImHost {
   suspend fun openProfile(userId: String, context: String, roomId: String?): List<ImProfile>
   suspend fun saveAlias(userId: String, alias: String?, revision: Long?)
   suspend fun clearProfiles(page: String)
+  suspend fun avatar(page: String, userId: String, context: String, roomId: String?): ImAvatarImage?
   suspend fun openAvatarEditor(roomId: String?): ImAvatarEditor?
   suspend fun changeAvatar(roomId: String?, revision: Long, jpeg: ByteArray?, width: Long?, height: Long?, displayName: String?, action: String?)
   suspend fun resolveUserId(handle: String): String
@@ -1499,6 +1550,28 @@ interface ImHost {
               val wrapped: List<Any?> = try {
                 api.clearProfiles(pageArg)
                 listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.avatar$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val pageArg = args[0] as String
+            val userIdArg = args[1] as String
+            val contextArg = args[2] as String
+            val roomIdArg = args[3] as String?
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.avatar(pageArg, userIdArg, contextArg, roomIdArg))
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

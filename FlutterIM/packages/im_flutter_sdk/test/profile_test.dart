@@ -17,6 +17,7 @@ void main() {
       'openProfile',
       'saveAlias',
       'clearProfiles',
+      'avatar',
       'openAvatarEditor',
       'changeAvatar',
       'close',
@@ -43,6 +44,13 @@ void main() {
                   remainingMilliseconds: 120000,
                 ),
               ],
+            ];
+          case 'avatar':
+            return [
+              wire.ImAvatarImage(
+                bytes: Uint8List.fromList([4, 5, 6]),
+                remainingMilliseconds: 45000,
+              ),
             ];
           case 'openAvatarEditor':
             return [
@@ -111,6 +119,10 @@ void main() {
 
     await client.clearProfiles('contacts');
     expect(calls['clearProfiles'], ['contacts']);
+
+    final avatar = await client.avatar('peer');
+    expect(avatar?.bytes, [4, 5, 6]);
+    expect(avatar?.remaining, const Duration(seconds: 45));
 
     final editor = await client.openAvatarEditor();
     expect(editor?.revision, 8);

@@ -204,6 +204,7 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
       entries = {};
       profiles.clear();
       _profilesRequested.clear();
+      _SdkAvatarCache.clear();
       moreContacts = moreGroups = false;
       directory = ContactDirectory.fromEntries([]);
       directoryError = null;

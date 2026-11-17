@@ -98,6 +98,12 @@ private class MobileHost(private val context: Context) : ImHost {
         groupNicknameRevision, (expiresAtElapsed - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0),
         avatar?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) })
 
+    override suspend fun avatar(page: String, userId: String, context: String, roomId: String?): ImAvatarImage? = sdk {
+        client.avatar(userId, context, roomId).directory?.profiles
+            ?.firstOrNull { it.page == page && it.userID == userId && it.avatar != null }
+            ?.let { profile -> ImAvatarImage(android.util.Base64.decode(profile.avatar, android.util.Base64.DEFAULT),
+                (profile.expiresAtElapsed - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0)) }
+    }
     override suspend fun openAvatarEditor(roomId: String?): ImAvatarEditor? = mutations.withLock { sdk {
         client.openAvatarEditor(roomId).directory?.avatarEditor?.let {
             ImAvatarEditor(it.roomID, it.revision, it.canManage, (it.expiresAtElapsed - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0),

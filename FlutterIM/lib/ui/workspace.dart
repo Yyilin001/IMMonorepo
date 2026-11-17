@@ -27,6 +27,7 @@ import '../mock/group_members.dart';
 
 part 'mobile_workspace.dart';
 part 'sdk_workspace.dart';
+part 'sdk_avatars.dart';
 part 'sdk_chat.dart';
 part 'sdk_transfers.dart';
 part 'sdk_create_group.dart';
@@ -647,7 +648,19 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
             widget.onSdkOpen?.call(row);
           },
           onLongPress: () => _showSdkConversationMenu(context, ref, row),
-          child: _ConversationRow(item: item, selected: false, mobile: true),
+          child: _ConversationRow(
+            item: item,
+            selected: false,
+            mobile: true,
+            avatar: !row.isGroup && row.peerId != null
+                ? SdkAvatar(
+                    userId: row.peerId!,
+                    name: item.displayName,
+                    context: 'direct',
+                    size: 50,
+                  )
+                : null,
+          ),
         );
       },
     );
@@ -916,10 +929,12 @@ class _ConversationRow extends ConsumerWidget {
     this.mobile = false,
     required this.item,
     required this.selected,
+    this.avatar,
   });
   final bool mobile;
   final Conversation item;
   final bool selected;
+  final Widget? avatar;
   @override
   Widget build(BuildContext context, WidgetRef ref) => Container(
     decoration: BoxDecoration(
@@ -937,12 +952,13 @@ class _ConversationRow extends ConsumerWidget {
     padding: EdgeInsets.fromLTRB(mobile ? 20 : 14, 15, 20, 15),
     child: Row(
       children: [
-        ChatAvatar(
-          id: item.id,
-          name: item.displayName,
-          group: item.isGroup,
-          size: mobile ? 50 : 43,
-        ),
+        avatar ??
+            ChatAvatar(
+              id: item.id,
+              name: item.displayName,
+              group: item.isGroup,
+              size: mobile ? 50 : 43,
+            ),
         const SizedBox(width: 12),
         Expanded(
           child: Column(
@@ -1511,11 +1527,13 @@ class _ChatHeading extends StatelessWidget {
     required this.onProfile,
     required this.onHistory,
     required this.onSettings,
+    this.avatar,
   });
   final int id;
   final String displayName, subtitle;
   final bool group, mobile;
   final VoidCallback onProfile, onHistory, onSettings;
+  final Widget? avatar;
   @override
   Widget build(BuildContext context) => Row(
     children: [
@@ -1527,12 +1545,14 @@ class _ChatHeading extends StatelessWidget {
           onTap: onProfile,
           child: Padding(
             padding: const EdgeInsets.all(6),
-            child: ChatAvatar(
-              id: id,
-              name: displayName,
-              group: group,
-              size: mobile ? 32 : 38,
-            ),
+            child:
+                avatar ??
+                ChatAvatar(
+                  id: id,
+                  name: displayName,
+                  group: group,
+                  size: mobile ? 32 : 38,
+                ),
           ),
         ),
       ),

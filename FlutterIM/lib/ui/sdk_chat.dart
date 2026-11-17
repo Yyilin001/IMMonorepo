@@ -458,6 +458,14 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               group: room.isGroup,
               mobile: true,
               subtitle: room.isGroup ? '群聊' : '会话',
+              avatar: !room.isGroup && room.peerId != null
+                  ? SdkAvatar(
+                      userId: room.peerId!,
+                      name: name,
+                      context: 'direct',
+                      size: 32,
+                    )
+                  : null,
               onProfile: profile,
               onHistory: history,
               onSettings: () => Navigator.of(context).push(

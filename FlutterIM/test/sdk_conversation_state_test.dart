@@ -22,6 +22,7 @@ void main() {
       'connect',
       'openWindow',
       'nextUpdate',
+      'avatar',
       'setConversationState',
       'closeWindow',
       'close',

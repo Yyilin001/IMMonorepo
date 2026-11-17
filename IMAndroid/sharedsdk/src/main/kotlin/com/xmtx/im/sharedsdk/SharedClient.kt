@@ -184,6 +184,10 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun profiles(page: String, context: String, roomID: String?, userIDs: List<String>): SharedSnapshot =
         directoryCall("profiles", "page" to page, "scope" to context, "roomID" to roomID, "members" to org.json.JSONArray(userIDs))
     suspend fun clearProfiles(page: String): SharedSnapshot = directoryCall("clearProfiles", "page" to page)
+    /** Display-only read; intentionally bypasses the account mutation mutex. */
+    suspend fun avatar(userID: String, context: String, roomID: String? = null): SharedSnapshot =
+        execute(JSONObject().put("operation", "avatar").put("page", "avatar").put("scope", context)
+            .put("targetUserID", userID).apply { if (roomID != null) put("roomID", roomID) })
     suspend fun openProfile(userID: String, context: String = "relationship", roomID: String? = null): SharedSnapshot =
         directoryCall("openProfile", "targetUserID" to userID, "scope" to context, "roomID" to roomID)
     suspend fun saveAlias(userID: String, name: String?, revision: Long?): SharedSnapshot = directoryCall("saveAlias", "targetUserID" to userID, "text" to (name ?: ""), "revision" to revision)

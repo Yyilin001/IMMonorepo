@@ -316,6 +316,19 @@ final class ImClient {
     );
   });
 
+  Future<({Uint8List bytes, Duration remaining})?> avatar(
+    String userId, {
+    String context = 'relationship',
+    String? roomId,
+  }) async {
+    final value = await _host.avatar('avatar', userId, context, roomId);
+    if (value == null) return null;
+    return (
+      bytes: value.bytes,
+      remaining: Duration(milliseconds: value.remainingMilliseconds),
+    );
+  }
+
   Future<ImAvatarEditor?> openAvatarEditor({String? roomId}) =>
       _ordered(() async {
         final value = await _host.openAvatarEditor(roomId);

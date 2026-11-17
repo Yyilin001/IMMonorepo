@@ -158,6 +158,12 @@ actor SharedSocialGroups {
         case .clearProfiles:
             guard let page = request.page else { throw SharedFailure.invalidInput }
             await people.clear(page: page)
+        case .avatar:
+            guard let id = request.targetUserID else { throw SharedFailure.invalidInput }
+            let context = try profileContext(request.scope ?? "relationship", roomID: request.roomID)
+            try await people.show(page: "avatar", ids: [id], context: context)
+            await people.load(page: "avatar")
+            try await people.loadAvatar(page: "avatar", userID: id)
         case .openProfile:
             lookup = nil
             let context = try profileContext(request.scope ?? "relationship", roomID: request.roomID)

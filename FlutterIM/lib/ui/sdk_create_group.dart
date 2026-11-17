@@ -409,6 +409,13 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
       for (final member in members.entries)
         ListTile(
           onTap: () => openMemberProfile(member.key),
+          leading: SdkAvatar(
+            userId: member.key,
+            name: profiles[member.key]?.name ?? member.key,
+            context: 'room',
+            roomId: widget.roomId,
+            size: 40,
+          ),
           title: Text(profiles[member.key]?.name ?? member.key),
           trailing: memberMenu(member.key, member.value),
           subtitle: Text(switch (member.value) {

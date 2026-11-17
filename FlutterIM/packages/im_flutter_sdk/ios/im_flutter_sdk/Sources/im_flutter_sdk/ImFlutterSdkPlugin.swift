@@ -63,6 +63,13 @@ private actor MobileHost: ImHost {
                                                        isArchived: isArchived, muteUntil: muteUntil)
         }
     }
+    func avatar(page: String, userId: String, context: String, roomId: String?) async throws -> ImAvatarImage? {
+        guard let image = try await client.avatar(page: page, userID: userId, context: context, roomID: roomId) else {
+            return nil
+        }
+        return ImAvatarImage(bytes: FlutterStandardTypedData(bytes: image.data),
+                             remainingMilliseconds: image.remainingMilliseconds)
+    }
     func openAvatarEditor(roomId: String?) async throws -> ImAvatarEditor? {
         try await ordered {
             guard let editor = try await self.client.openAvatarEditor(roomID: roomId) else { return nil }

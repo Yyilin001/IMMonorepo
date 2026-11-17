@@ -107,6 +107,12 @@ actor SharedPeople {
         try? await loadAvatar(key, page: pageID)
     }
     private func fail(_ error: any Error) { failure = sharedFailure(error) }
+    func loadAvatar(page pageID: String, userID: String) async throws {
+        guard let page = pages[pageID], let key = page.keys.first(where: { $0.userID.rawValue == userID }) else {
+            throw SharedFailure.invalidInput
+        }
+        try await loadAvatar(key, page: pageID)
+    }
     private func loadAvatar(_ key: V2ProfileViewLookupKey, page pageID: String) async throws {
         guard let page = pages[pageID] else { return }
         guard let snapshot = await repository.cachedSnapshot(for: key, activation: page.activation),
@@ -146,7 +152,7 @@ actor SharedPeople {
                 guard let identity = value.presentation.view.publicIdentity else { continue }
                 var deadline = value.deadline
                 var avatar: String?
-                if page.selected == key.userID, let image = page.image, image.key == key,
+                if let image = page.image, image.key == key,
                    (try? await image.grant.requireValid()) != nil {
                     deadline = min(deadline, image.grant.deadline); avatar = image.data.base64EncodedString()
                 }

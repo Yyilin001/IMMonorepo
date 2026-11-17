@@ -161,6 +161,12 @@ class ImAvatarEditor {
   Uint8List? image;
 }
 
+class ImAvatarImage {
+  ImAvatarImage({required this.bytes, required this.remainingMilliseconds});
+  Uint8List bytes;
+  int remainingMilliseconds;
+}
+
 class DirectoryEntry {
   DirectoryEntry({
     required this.id,
@@ -275,6 +281,13 @@ abstract class ImHost {
   void saveAlias(String userId, String? alias, int? revision);
   @async
   void clearProfiles(String page);
+  @async
+  ImAvatarImage? avatar(
+    String page,
+    String userId,
+    String context,
+    String? roomId,
+  );
   @async
   ImAvatarEditor? openAvatarEditor(String? roomId);
   @async

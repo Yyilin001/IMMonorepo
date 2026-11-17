@@ -712,6 +712,56 @@ class ImAvatarEditor {
   }
 }
 
+class ImAvatarImage {
+  ImAvatarImage({
+    required this.bytes,
+    required this.remainingMilliseconds,
+  });
+
+  Uint8List bytes;
+
+  int remainingMilliseconds;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      bytes,
+      remainingMilliseconds,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImAvatarImage decode(Object result) {
+    result as List<Object?>;
+    return ImAvatarImage(
+      bytes: result[0]! as Uint8List,
+      remainingMilliseconds: result[1]! as int,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImAvatarImage || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(bytes, other.bytes) && _deepEquals(remainingMilliseconds, other.remainingMilliseconds);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImAvatarImage(bytes: $bytes, remainingMilliseconds: $remainingMilliseconds)';
+  }
+}
+
 class DirectoryEntry {
   DirectoryEntry({
     required this.id,
@@ -1149,26 +1199,29 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is ImAvatarEditor) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryEntry) {
+    }    else if (value is ImAvatarImage) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is SearchHit) {
+    }    else if (value is DirectoryEntry) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    }    else if (value is SearchPage) {
+    }    else if (value is SearchHit) {
       buffer.putUint8(139);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryPage) {
+    }    else if (value is SearchPage) {
       buffer.putUint8(140);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupMember) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(141);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(142);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(143);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(144);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1195,18 +1248,20 @@ class _PigeonCodec extends StandardMessageCodec {
       case 136:
         return ImAvatarEditor.decode(readValue(buffer)!);
       case 137:
-        return DirectoryEntry.decode(readValue(buffer)!);
+        return ImAvatarImage.decode(readValue(buffer)!);
       case 138:
-        return SearchHit.decode(readValue(buffer)!);
+        return DirectoryEntry.decode(readValue(buffer)!);
       case 139:
-        return SearchPage.decode(readValue(buffer)!);
+        return SearchHit.decode(readValue(buffer)!);
       case 140:
-        return DirectoryPage.decode(readValue(buffer)!);
+        return SearchPage.decode(readValue(buffer)!);
       case 141:
-        return GroupMember.decode(readValue(buffer)!);
+        return DirectoryPage.decode(readValue(buffer)!);
       case 142:
-        return GroupPage.decode(readValue(buffer)!);
+        return GroupMember.decode(readValue(buffer)!);
       case 143:
+        return GroupPage.decode(readValue(buffer)!);
+      case 144:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1476,6 +1531,24 @@ class ImHost {
         isNullValid: true,
     )
     ;
+  }
+
+  Future<ImAvatarImage?> avatar(String page, String userId, String context, String? roomId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.avatar$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[page, userId, context, roomId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+    return pigeonVar_replyValue as ImAvatarImage?;
   }
 
   Future<ImAvatarEditor?> openAvatarEditor(String? roomId) async {

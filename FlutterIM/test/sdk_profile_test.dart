@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,6 +13,7 @@ void main() {
   ) async {
     final messenger = tester.binding.defaultBinaryMessenger;
     final profileCalls = <Object?>[];
+    final avatarCalls = <Object?>[];
     final opened = <Object?>[];
     final aliasCalls = <Object?>[];
     final queues = <String, List<Object?>>{};
@@ -24,6 +26,7 @@ void main() {
       'openWindow',
       'nextUpdate',
       'directory',
+      'avatar',
       'profiles',
       'openProfile',
       'saveAlias',
@@ -85,6 +88,16 @@ void main() {
                 moreGroups: false,
               ),
             ];
+          case 'avatar':
+            avatarCalls.add(args);
+            return [
+              wire.ImAvatarImage(
+                bytes: base64Decode(
+                  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+                ),
+                remainingMilliseconds: 60000,
+              ),
+            ];
           case 'profiles':
             profileCalls.add(args);
             return [
@@ -126,6 +139,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('张三'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump();
+    expect(avatarCalls, isNotEmpty);
+    expect(find.byType(Image), findsWidgets);
     expect((profileCalls.single as List)[0], 'contacts-ui');
     expect((profileCalls.single as List)[1], 'relationship');
 
@@ -162,6 +182,7 @@ void main() {
       'openWindow',
       'nextUpdate',
       'directory',
+      'avatar',
       'openAvatarEditor',
       'changeAvatar',
       'closeWindow',
@@ -228,9 +249,6 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
 
-    debugPrint(
-      'texts=${find.byType(Text).evaluate().map((e) => (e.widget as Text).data).toList()}',
-    );
     expect(find.text('我的昵称'), findsWidgets);
     expect(find.text('@me'), findsOneWidget);
 
