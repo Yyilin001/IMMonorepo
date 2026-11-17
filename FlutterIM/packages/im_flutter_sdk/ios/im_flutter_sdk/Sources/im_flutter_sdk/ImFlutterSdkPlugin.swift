@@ -55,6 +55,12 @@ private actor MobileHost: ImHost {
         try await ordered { try await self.client.register(account: account, password: password,
             publicHandle: publicHandle, displayName: displayName).wire }
     }
+    func passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) async throws {
+        try await ordered {
+            try await self.client.passwordLifecycle(account: account, action: action, currentPassword: currentPassword,
+                                                    newPassword: newPassword, recoveryCode: recoveryCode)
+        }
+    }
     func connect() async throws -> ImSession { try await ordered { try await self.client.connect().wire } }
     func status() async throws -> ImSession { try await ordered { try await self.client.status().wire } }
     func disconnect() async throws { try await ordered { try await self.client.disconnect() } }

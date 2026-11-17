@@ -1632,6 +1632,7 @@ protocol ImHost {
   func restore() async throws -> ImSession
   func signIn(account: String, password: String) async throws -> ImSession
   func register(account: String, password: String, publicHandle: String, displayName: String) async throws -> ImSession
+  func passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) async throws
   func connect() async throws -> ImSession
   func status() async throws -> ImSession
   func disconnect() async throws
@@ -1764,6 +1765,27 @@ class ImHostSetup {
       }
     } else {
       registerChannel.setMessageHandler(nil)
+    }
+    let passwordLifecycleChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.passwordLifecycle\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      passwordLifecycleChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let accountArg = args[0] as! String
+        let actionArg = args[1] as! String
+        let currentPasswordArg: String? = nilOrValue(args[2])
+        let newPasswordArg: String? = nilOrValue(args[3])
+        let recoveryCodeArg: String? = nilOrValue(args[4])
+        Task { @MainActor in
+          do {
+            try await api.passwordLifecycle(account: accountArg, action: actionArg, currentPassword: currentPasswordArg, newPassword: newPasswordArg, recoveryCode: recoveryCodeArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      passwordLifecycleChannel.setMessageHandler(nil)
     }
     let connectChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.connect\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

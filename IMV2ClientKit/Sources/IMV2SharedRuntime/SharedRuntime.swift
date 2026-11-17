@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -33,6 +33,8 @@ package struct SharedRequest: Decodable, Sendable {
     var account: String?
     var password: String?
     var publicHandle: String?
+    var newPassword: String?
+    var recoveryCode: String?
     var roomID: String?
     var text: String?
     var intentID: String?
@@ -251,6 +253,19 @@ package actor SharedRuntime {
             userID = try await auth.localAccountIdentity().userID.rawValue
             state = "ready"
             try await configureConnection()
+        case .passwordLifecycle:
+            guard let account = request.account, let action = request.action else { throw SharedFailure.invalidInput }
+            let lifecycle: V2PasswordLifecycleAction
+            switch action {
+            case "change": lifecycle = .change
+            case "recovery-code": lifecycle = .recoveryCode
+            case "recover": lifecycle = .recover
+            default: throw SharedFailure.invalidInput
+            }
+            let client = try V2PasswordLifecycleClient(baseURL: base, transport: http)
+            try await client.perform(lifecycle, accountHandle: account,
+                deviceID: try DeviceID(uuid: UUID()), currentPassword: request.password,
+                newPassword: request.newPassword, recoveryCode: request.recoveryCode)
         case .register:
             guard store == nil, try await credentialStore.load() == nil else { throw SharedFailure.busy }
             guard let account = request.account, let password = request.password,

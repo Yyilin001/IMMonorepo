@@ -358,6 +358,14 @@ abstract class ImHost {
     String displayName,
   );
   @async
+  void passwordLifecycle(
+    String account,
+    String action,
+    String? currentPassword,
+    String? newPassword,
+    String? recoveryCode,
+  );
+  @async
   ImSession connect();
   @async
   ImSession status();

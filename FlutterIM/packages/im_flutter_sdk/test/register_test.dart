@@ -10,7 +10,8 @@ void main() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     final calls = <Object?>[];
-    for (final method in ['open', 'register', 'close']) {
+    final lifecycle = <Object?>[];
+    for (final method in ['open', 'register', 'passwordLifecycle', 'close']) {
       final channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.im_flutter_sdk.ImHost.$method',
         wire.ImHost.pigeonChannelCodec,
@@ -20,6 +21,8 @@ void main() {
           case 'register':
             calls.add(args);
             return [wire.ImSession(state: 'ready', userId: 'user')];
+          case 'passwordLifecycle':
+            lifecycle.add(args);
         }
         return [null];
       });
@@ -33,6 +36,19 @@ void main() {
     await client.register('alice', 'a-long-password', '@alice', 'Alice');
     expect(calls.single, ['alice', 'a-long-password', '@alice', 'Alice']);
     expect(client.session.userId, 'user');
+    await client.passwordLifecycle(
+      account: 'alice',
+      action: 'change',
+      currentPassword: 'old-password',
+      newPassword: 'new-password',
+    );
+    expect(lifecycle.single, [
+      'alice',
+      'change',
+      'old-password',
+      'new-password',
+      null,
+    ]);
     await client.close();
   });
 }

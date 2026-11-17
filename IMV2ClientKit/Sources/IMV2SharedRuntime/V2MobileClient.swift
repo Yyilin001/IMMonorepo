@@ -116,6 +116,11 @@ public final class V2MobileClient: Sendable {
         try await session(.init(operation: .register, displayName: displayName, account: account,
                                 password: password, publicHandle: publicHandle))
     }
+    public func passwordLifecycle(account: String, action: String, currentPassword: String?,
+                                  newPassword: String?, recoveryCode: String?) async throws {
+        _ = try await run(.init(operation: .passwordLifecycle, account: account, password: currentPassword,
+                                newPassword: newPassword, recoveryCode: recoveryCode, action: action))
+    }
     public func connect() async throws -> Session { try await session(.init(operation: .connect)) }
     public func status() async throws -> Session { try await session(.init(operation: .snapshot)) }
     public func disconnect() async throws { _ = try await run(.init(operation: .disconnect)) }

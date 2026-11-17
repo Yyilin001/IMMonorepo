@@ -691,6 +691,19 @@ class PersonalPane extends ConsumerWidget {
               _InfoCard(
                 children: [
                   if (sdk?.userId != null) const _TransfersLink(),
+                  if (sdk?.userId != null)
+                    ListTile(
+                      key: const Key('account-security'),
+                      leading: const Icon(Icons.shield_outlined, color: green),
+                      title: const Text('账号安全'),
+                      subtitle: const Text('修改密码、设置或使用恢复码'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const _AccountSecurityPage(),
+                        ),
+                      ),
+                    ),
                   if (sdk != null)
                     ListTile(
                       key: const Key('account-action'),

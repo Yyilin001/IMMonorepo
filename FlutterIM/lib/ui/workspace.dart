@@ -30,6 +30,7 @@ part 'mobile_workspace.dart';
 part 'sdk_workspace.dart';
 part 'sdk_avatars.dart';
 part 'sdk_community.dart';
+part 'sdk_account.dart';
 part 'sdk_chat.dart';
 part 'sdk_transfers.dart';
 part 'sdk_create_group.dart';

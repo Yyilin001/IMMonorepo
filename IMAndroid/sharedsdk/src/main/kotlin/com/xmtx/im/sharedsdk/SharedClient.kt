@@ -130,6 +130,13 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun login(account: String, password: String): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "login").put("account", account).put("password", password))
     }
+    suspend fun passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "passwordLifecycle").put("account", account).put("action", action).apply {
+            if (currentPassword != null) put("password", currentPassword)
+            if (newPassword != null) put("newPassword", newPassword)
+            if (recoveryCode != null) put("recoveryCode", recoveryCode)
+        })
+    }
     suspend fun register(account: String, password: String, publicHandle: String, displayName: String): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "register").put("account", account).put("password", password)
             .put("publicHandle", publicHandle).put("displayName", displayName))
