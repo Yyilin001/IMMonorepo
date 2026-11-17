@@ -256,7 +256,36 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                           _filter(groups: true);
                         },
                       ),
-                      if (owner?.userId != null)
+                      if (owner?.userId != null && groups)
+                        IconButton(
+                          tooltip: '新建群聊',
+                          icon: const Icon(Icons.group_add_outlined),
+                          onPressed: owner!.loadingDirectory
+                              ? null
+                              : () async {
+                                  if (owner.contactScope !=
+                                      ImContactScope.accepted) {
+                                    await owner.refreshDirectory(
+                                      scope: ImContactScope.accepted,
+                                    );
+                                  }
+                                  if (!context.mounted) return;
+                                  final created = await Navigator.of(context)
+                                      .push<bool>(
+                                        MaterialPageRoute(
+                                          builder: (_) =>
+                                              const _CreateGroupPage(),
+                                        ),
+                                      );
+                                  if (created == true && context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('已提交建群请求')),
+                                    );
+                                    await owner.refreshDirectory();
+                                  }
+                                },
+                        )
+                      else if (owner?.userId != null)
                         IconButton(
                           tooltip: '添加好友',
                           icon: const Icon(Icons.person_add_outlined),

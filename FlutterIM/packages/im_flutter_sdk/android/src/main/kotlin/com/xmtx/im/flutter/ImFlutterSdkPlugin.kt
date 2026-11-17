@@ -84,10 +84,20 @@ private class MobileHost(private val context: Context) : ImHost {
             directory.groups.map { DirectoryEntry(it.id, it.title, true) }
         DirectoryPage(entries, directory.hasMoreContacts, directory.hasMoreGroups)
     }
+    private suspend fun userId(handle: String): String =
+        client.lookupIdentity(handle).directory?.identity?.userID ?: throw FlutterError("identityUnavailable")
+    override suspend fun resolveUserId(handle: String): String = mutations.withLock { sdk { userId(handle) } }
+    override suspend fun groupMembers(roomId: String, next: Boolean): GroupPage = mutations.withLock { sdk {
+        val snapshot = if (next) client.nextGroupMembers(roomId) else client.openGroup(roomId)
+        val group = snapshot.directory?.group?.takeIf { it.roomID == roomId } ?: throw FlutterError("operationFailed")
+        GroupPage(group.announcement, group.members.map { GroupMember(it.userID, it.role.wire) }, group.hasMore)
+    } }
+    override suspend fun createGroup(title: String, members: List<String>) {
+        mutations.withLock { sdk { client.createGroup(title, members) } }
+    }
     override suspend fun requestContact(handle: String) {
         mutations.withLock { sdk {
-            val identity = client.lookupIdentity(handle).directory?.identity ?: throw FlutterError("identityUnavailable")
-            client.socialAction(identity.userID, SharedSocialAction.Request)
+            client.socialAction(userId(handle), SharedSocialAction.Request)
         } }
     }
     override suspend fun socialAction(userId: String, action: String) {

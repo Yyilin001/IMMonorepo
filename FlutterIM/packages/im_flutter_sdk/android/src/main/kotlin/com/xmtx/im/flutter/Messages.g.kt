@@ -468,6 +468,92 @@ data class DirectoryPage (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class GroupMember (
+  val userId: String,
+  val role: String
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): GroupMember {
+      val userId = pigeonVar_list[0] as String
+      val role = pigeonVar_list[1] as String
+      return GroupMember(userId, role)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      userId,
+      role,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as GroupMember
+    return MessagesPigeonUtils.deepEquals(this.userId, other.userId) && MessagesPigeonUtils.deepEquals(this.role, other.role)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.userId)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.role)
+    return result
+  }
+  override fun toString(): String {
+    return "GroupMember(userId=$userId, role=$role)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
+data class GroupPage (
+  val announcement: String,
+  val members: List<GroupMember>,
+  val hasMore: Boolean
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): GroupPage {
+      val announcement = pigeonVar_list[0] as String
+      val members = pigeonVar_list[1] as List<GroupMember>
+      val hasMore = pigeonVar_list[2] as Boolean
+      return GroupPage(announcement, members, hasMore)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      announcement,
+      members,
+      hasMore,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as GroupPage
+    return MessagesPigeonUtils.deepEquals(this.announcement, other.announcement) && MessagesPigeonUtils.deepEquals(this.members, other.members) && MessagesPigeonUtils.deepEquals(this.hasMore, other.hasMore)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.announcement)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.members)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.hasMore)
+    return result
+  }
+  override fun toString(): String {
+    return "GroupPage(announcement=$announcement, members=$members, hasMore=$hasMore)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class WindowView (
   val conversations: List<ImConversation>,
   val messages: List<ImMessage>,
@@ -545,6 +631,16 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       134.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
+          GroupMember.fromList(it)
+        }
+      }
+      135.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          GroupPage.fromList(it)
+        }
+      }
+      136.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
       }
@@ -573,8 +669,16 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(133)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is GroupMember -> {
         stream.write(134)
+        writeValue(stream, value.toList())
+      }
+      is GroupPage -> {
+        stream.write(135)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(136)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -594,6 +698,9 @@ interface ImHost {
   suspend fun openWindow(roomId: String?): String
   suspend fun nextUpdate(windowId: String): WindowView
   suspend fun directory(nextGroups: Boolean?, scope: String): DirectoryPage
+  suspend fun resolveUserId(handle: String): String
+  suspend fun groupMembers(roomId: String, next: Boolean): GroupPage
+  suspend fun createGroup(title: String, members: List<String>)
   suspend fun requestContact(handle: String)
   suspend fun socialAction(userId: String, action: String)
   suspend fun changeWindowPage(windowId: String, latest: Boolean)
@@ -772,6 +879,66 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 listOf(api.directory(nextGroupsArg, scopeArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.resolveUserId$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val handleArg = args[0] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.resolveUserId(handleArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.groupMembers$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val nextArg = args[1] as Boolean
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.groupMembers(roomIdArg, nextArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.createGroup$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val titleArg = args[0] as String
+            val membersArg = args[1] as List<String>
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.createGroup(titleArg, membersArg)
+                listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

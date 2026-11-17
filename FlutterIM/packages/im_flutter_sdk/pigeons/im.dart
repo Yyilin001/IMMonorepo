@@ -83,6 +83,23 @@ class DirectoryPage {
   bool moreGroups;
 }
 
+class GroupMember {
+  GroupMember({required this.userId, required this.role});
+  String userId;
+  String role;
+}
+
+class GroupPage {
+  GroupPage({
+    required this.announcement,
+    required this.members,
+    required this.hasMore,
+  });
+  String announcement;
+  List<GroupMember> members;
+  bool hasMore;
+}
+
 class WindowView {
   WindowView({
     required this.conversations,
@@ -116,6 +133,12 @@ abstract class ImHost {
   WindowView nextUpdate(String windowId);
   @async
   DirectoryPage directory(bool? nextGroups, String scope);
+  @async
+  String resolveUserId(String handle);
+  @async
+  GroupPage groupMembers(String roomId, bool next);
+  @async
+  void createGroup(String title, List<String> members);
   @async
   void requestContact(String handle);
   @async

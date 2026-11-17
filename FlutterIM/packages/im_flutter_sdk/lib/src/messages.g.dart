@@ -427,6 +427,111 @@ class DirectoryPage {
   }
 }
 
+class GroupMember {
+  GroupMember({
+    required this.userId,
+    required this.role,
+  });
+
+  String userId;
+
+  String role;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      userId,
+      role,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static GroupMember decode(Object result) {
+    result as List<Object?>;
+    return GroupMember(
+      userId: result[0]! as String,
+      role: result[1]! as String,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! GroupMember || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(userId, other.userId) && _deepEquals(role, other.role);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'GroupMember(userId: $userId, role: $role)';
+  }
+}
+
+class GroupPage {
+  GroupPage({
+    required this.announcement,
+    required this.members,
+    required this.hasMore,
+  });
+
+  String announcement;
+
+  List<GroupMember> members;
+
+  bool hasMore;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      announcement,
+      members,
+      hasMore,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static GroupPage decode(Object result) {
+    result as List<Object?>;
+    return GroupPage(
+      announcement: result[0]! as String,
+      members: (result[1]! as List<Object?>).cast<GroupMember>(),
+      hasMore: result[2]! as bool,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! GroupPage || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(announcement, other.announcement) && _deepEquals(members, other.members) && _deepEquals(hasMore, other.hasMore);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'GroupPage(announcement: $announcement, members: $members, hasMore: $hasMore)';
+  }
+}
+
 class WindowView {
   WindowView({
     required this.conversations,
@@ -510,8 +615,14 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is DirectoryPage) {
       buffer.putUint8(133);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(134);
+      writeValue(buffer, value.encode());
+    }    else if (value is GroupPage) {
+      buffer.putUint8(135);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(136);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -532,6 +643,10 @@ class _PigeonCodec extends StandardMessageCodec {
       case 133:
         return DirectoryPage.decode(readValue(buffer)!);
       case 134:
+        return GroupMember.decode(readValue(buffer)!);
+      case 135:
+        return GroupPage.decode(readValue(buffer)!);
+      case 136:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -714,6 +829,59 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as DirectoryPage;
+  }
+
+  Future<String> resolveUserId(String handle) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.resolveUserId$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[handle]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as String;
+  }
+
+  Future<GroupPage> groupMembers(String roomId, bool next) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.groupMembers$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, next]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as GroupPage;
+  }
+
+  Future<void> createGroup(String title, List<String> members) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.createGroup$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[title, members]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   Future<void> requestContact(String handle) async {

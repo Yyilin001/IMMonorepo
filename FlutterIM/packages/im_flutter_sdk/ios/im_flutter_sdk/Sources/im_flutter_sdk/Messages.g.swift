@@ -465,6 +465,91 @@ struct DirectoryPage: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct GroupMember: Hashable, CustomStringConvertible {
+  var userId: String
+  var role: String
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> GroupMember? {
+    let userId = pigeonVar_list[0] as! String
+    let role = pigeonVar_list[1] as! String
+
+    return GroupMember(
+      userId: userId,
+      role: role
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      userId,
+      role,
+    ]
+  }
+  static func == (lhs: GroupMember, rhs: GroupMember) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.userId, rhs.userId) && MessagesPigeonInternal.deepEquals(lhs.role, rhs.role)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("GroupMember")
+    MessagesPigeonInternal.deepHash(value: userId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: role, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "GroupMember(userId: \(String(describing: userId)), role: \(String(describing: role)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct GroupPage: Hashable, CustomStringConvertible {
+  var announcement: String
+  var members: [GroupMember]
+  var hasMore: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> GroupPage? {
+    let announcement = pigeonVar_list[0] as! String
+    let members = pigeonVar_list[1] as! [GroupMember]
+    let hasMore = pigeonVar_list[2] as! Bool
+
+    return GroupPage(
+      announcement: announcement,
+      members: members,
+      hasMore: hasMore
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      announcement,
+      members,
+      hasMore,
+    ]
+  }
+  static func == (lhs: GroupPage, rhs: GroupPage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.announcement, rhs.announcement) && MessagesPigeonInternal.deepEquals(lhs.members, rhs.members) && MessagesPigeonInternal.deepEquals(lhs.hasMore, rhs.hasMore)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("GroupPage")
+    MessagesPigeonInternal.deepHash(value: announcement, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: members, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasMore, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "GroupPage(announcement: \(String(describing: announcement)), members: \(String(describing: members)), hasMore: \(String(describing: hasMore)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct WindowView: Hashable, CustomStringConvertible {
   var conversations: [ImConversation]
   var messages: [ImMessage]
@@ -528,6 +613,10 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 133:
       return DirectoryPage.fromList(self.readValue() as! [Any?])
     case 134:
+      return GroupMember.fromList(self.readValue() as! [Any?])
+    case 135:
+      return GroupPage.fromList(self.readValue() as! [Any?])
+    case 136:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -552,8 +641,14 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? DirectoryPage {
       super.writeByte(133)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? GroupMember {
       super.writeByte(134)
+      super.writeValue(value.toList())
+    } else if let value = value as? GroupPage {
+      super.writeByte(135)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(136)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -587,6 +682,9 @@ protocol ImHost {
   func openWindow(roomId: String?) async throws -> String
   func nextUpdate(windowId: String) async throws -> WindowView
   func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage
+  func resolveUserId(handle: String) async throws -> String
+  func groupMembers(roomId: String, next: Bool) async throws -> GroupPage
+  func createGroup(title: String, members: [String]) async throws
   func requestContact(handle: String) async throws
   func socialAction(userId: String, action: String) async throws
   func changeWindowPage(windowId: String, latest: Bool) async throws
@@ -752,6 +850,59 @@ class ImHostSetup {
       }
     } else {
       directoryChannel.setMessageHandler(nil)
+    }
+    let resolveUserIdChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.resolveUserId\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      resolveUserIdChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let handleArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.resolveUserId(handle: handleArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      resolveUserIdChannel.setMessageHandler(nil)
+    }
+    let groupMembersChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.groupMembers\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      groupMembersChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let nextArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            let result = try await api.groupMembers(roomId: roomIdArg, next: nextArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      groupMembersChannel.setMessageHandler(nil)
+    }
+    let createGroupChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.createGroup\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      createGroupChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let titleArg = args[0] as! String
+        let membersArg = args[1] as! [String]
+        Task { @MainActor in
+          do {
+            try await api.createGroup(title: titleArg, members: membersArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      createGroupChannel.setMessageHandler(nil)
     }
     let requestContactChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.requestContact\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

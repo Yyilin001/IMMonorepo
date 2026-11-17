@@ -230,6 +230,20 @@ final class ImClient {
     );
   });
 
+  Future<String> resolveUserId(String handle) =>
+      _ordered(() => _host.resolveUserId(handle));
+  Future<({String announcement, Map<String, String> members, bool hasMore})>
+  groupMembers(String roomId, {bool next = false}) => _ordered(() async {
+    final page = await _host.groupMembers(roomId, next);
+    return (
+      announcement: page.announcement,
+      members: {for (final member in page.members) member.userId: member.role},
+      hasMore: page.hasMore,
+    );
+  });
+  Future<void> createGroup(String title, List<String> members) =>
+      _ordered(() => _host.createGroup(title, members));
+
   Future<void> requestContact(String handle) =>
       _ordered(() => _host.requestContact(handle));
 

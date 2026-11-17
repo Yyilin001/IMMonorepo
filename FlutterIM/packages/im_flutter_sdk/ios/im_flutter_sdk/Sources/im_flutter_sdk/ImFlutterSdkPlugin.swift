@@ -73,6 +73,18 @@ private actor MobileHost: ImHost {
                                  moreContacts: page.moreContacts, moreGroups: page.moreGroups)
         }
     }
+    func resolveUserId(handle: String) async throws -> String {
+        try await ordered { try await self.client.resolveUserID(handle: handle) }
+    }
+    func groupMembers(roomId: String, next: Bool) async throws -> GroupPage {
+        try await ordered {
+            let page = try await self.client.groupMembers(roomID: roomId, next: next)
+            return GroupPage(announcement: page.announcement, members: page.members.map { GroupMember(userId: $0.userID, role: $0.role) }, hasMore: page.hasMore)
+        }
+    }
+    func createGroup(title: String, members: [String]) async throws {
+        try await ordered { try await self.client.createGroup(title: title, members: members) }
+    }
     func requestContact(handle: String) async throws {
         try await ordered { try await self.client.requestContact(handle: handle) }
     }

@@ -152,6 +152,7 @@ class _MobileWorkspaceState extends ConsumerState<_MobileWorkspace> {
               handle: entry.id,
               group: entry.isGroup,
             ),
+            if (entry.isGroup) _GroupDetailsButton(roomId: entry.id),
             if (room != null || entry.isGroup)
               FilledButton(
                 child: const Text('发消息'),

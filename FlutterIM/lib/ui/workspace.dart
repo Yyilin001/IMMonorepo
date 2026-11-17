@@ -23,6 +23,7 @@ import '../mock/group_members.dart';
 part 'mobile_workspace.dart';
 part 'sdk_workspace.dart';
 part 'sdk_chat.dart';
+part 'sdk_create_group.dart';
 part 'reading_viewport.dart';
 part 'directory_search.dart';
 part 'people_pages.dart';

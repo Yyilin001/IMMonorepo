@@ -109,10 +109,27 @@ public final class V2MobileClient: Sendable {
             + directory.groups.map { DirectoryEntry(id: $0.id, title: $0.title, isGroup: true) }
         return DirectoryPage(entries: entries, moreContacts: directory.hasMoreContacts, moreGroups: directory.hasMoreGroups)
     }
-    public func requestContact(handle: String) async throws {
+    public func resolveUserID(handle: String) async throws -> String {
         let result = try await run(.init(operation: .lookupIdentity, text: handle))
         guard let identity = result.directory?.identity else { throw Failure(code: "identityUnavailable") }
-        try await socialAction(userID: identity.userID, action: "request")
+        return identity.userID
+    }
+    public func requestContact(handle: String) async throws {
+        let userID = try await resolveUserID(handle: handle)
+        try await socialAction(userID: userID, action: "request")
+    }
+    public struct GroupPage: Sendable {
+        public let announcement: String
+        public let members: [(userID: String, role: String)]
+        public let hasMore: Bool
+    }
+    public func groupMembers(roomID: String, next: Bool) async throws -> GroupPage {
+        let result = try await run(.init(operation: next ? .groupMembersNext : .openGroup, roomID: roomID))
+        guard let group = result.directory?.group, group.roomID == roomID else { throw Failure(code: "operationFailed") }
+        return GroupPage(announcement: group.announcement, members: group.members.map { ($0.userID, $0.role) }, hasMore: group.hasMore)
+    }
+    public func createGroup(title: String, members: [String]) async throws {
+        _ = try await run(.init(operation: .createGroup, text: title, members: members))
     }
     public func socialAction(userID: String, action: String) async throws {
         _ = try await run(.init(operation: .socialAction, targetUserID: userID, action: action))
