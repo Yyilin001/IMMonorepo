@@ -988,6 +988,36 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                                     attachment.id,
                                                   ),
                                             ),
+                                          if (attachment.contentType.startsWith(
+                                                'video/',
+                                              ) ||
+                                              attachment.contentType.startsWith(
+                                                'audio/',
+                                              ))
+                                            _AttachmentPlayback(
+                                              key: ValueKey((
+                                                'play',
+                                                item.id,
+                                                attachment.id,
+                                              )),
+                                              client: sdk.client!,
+                                              roomId: widget.room.id,
+                                              messageId: item.id,
+                                              attachment: attachment,
+                                            )
+                                          else if (!attachment.contentType
+                                              .startsWith('image/'))
+                                            _AttachmentFilePreview(
+                                              key: ValueKey((
+                                                'preview',
+                                                item.id,
+                                                attachment.id,
+                                              )),
+                                              client: sdk.client!,
+                                              roomId: widget.room.id,
+                                              messageId: item.id,
+                                              attachment: attachment,
+                                            ),
                                         ],
                                       ],
                                     ),
@@ -1969,3 +1999,218 @@ void _openSdkConversationProfile(
     ),
   ),
 );
+
+class _AttachmentPlayback extends StatefulWidget {
+  const _AttachmentPlayback({
+    super.key,
+    required this.client,
+    required this.roomId,
+    required this.messageId,
+    required this.attachment,
+  });
+  final ImClient client;
+  final String roomId, messageId;
+  final ImAttachment attachment;
+
+  @override
+  State<_AttachmentPlayback> createState() => _AttachmentPlaybackState();
+}
+
+class _AttachmentPlaybackState extends State<_AttachmentPlayback>
+    with WidgetsBindingObserver {
+  VideoPlayerController? controller;
+  Directory? directory;
+  bool loading = false;
+  String? error;
+
+  bool get audio => widget.attachment.contentType.startsWith('audio/');
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) controller?.pause();
+  }
+
+  Future<void> toggle() async {
+    if (loading) return;
+    if (controller != null) {
+      await stop();
+      return;
+    }
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final dir = await Directory.systemTemp.createTemp('im-media-');
+      directory = dir;
+      final safe = widget.attachment.name.replaceAll(RegExp(r'[/\\]'), '_');
+      final path = '${dir.path}/$safe';
+      await widget.client.exportAttachment(
+        widget.roomId,
+        widget.messageId,
+        widget.attachment.id,
+        path,
+      );
+      final value = VideoPlayerController.file(File(path));
+      await value.initialize();
+      await value.setLooping(false);
+      await value.play();
+      if (!mounted) {
+        await value.dispose();
+        return;
+      }
+      setState(() {
+        controller = value;
+        loading = false;
+      });
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        loading = false;
+      });
+    }
+  }
+
+  Future<void> stop() async {
+    final value = controller;
+    controller = null;
+    await value?.pause();
+    await value?.dispose();
+    final dir = directory;
+    directory = null;
+    if (dir != null) {
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    }
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(stop());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = controller;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (error != null) Text(error!),
+        if (value == null)
+          TextButton.icon(
+            key: ValueKey('play-${widget.attachment.id}'),
+            onPressed: loading ? null : toggle,
+            icon: Icon(audio ? Icons.headphones : Icons.play_circle_outline),
+            label: Text(
+              loading
+                  ? '正在准备…'
+                  : audio
+                  ? '播放音频'
+                  : '播放视频',
+            ),
+          )
+        else ...[
+          if (!audio)
+            AspectRatio(
+              aspectRatio: value.value.aspectRatio,
+              child: VideoPlayer(value),
+            ),
+          Row(
+            children: [
+              IconButton(
+                onPressed: () => setState(() {
+                  value.value.isPlaying ? value.pause() : value.play();
+                }),
+                icon: Icon(
+                  value.value.isPlaying
+                      ? Icons.pause_circle_outline
+                      : Icons.play_circle_outline,
+                ),
+              ),
+              Expanded(
+                child: VideoProgressIndicator(
+                  value,
+                  allowScrubbing: true,
+                ),
+              ),
+              TextButton(
+                onPressed: stop,
+                child: const Text('收起'),
+              ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _AttachmentFilePreview extends StatefulWidget {
+  const _AttachmentFilePreview({
+    super.key,
+    required this.client,
+    required this.roomId,
+    required this.messageId,
+    required this.attachment,
+  });
+  final ImClient client;
+  final String roomId, messageId;
+  final ImAttachment attachment;
+
+  @override
+  State<_AttachmentFilePreview> createState() =>
+      _AttachmentFilePreviewState();
+}
+
+class _AttachmentFilePreviewState extends State<_AttachmentFilePreview> {
+  bool loading = false;
+
+  Future<void> open() async {
+    if (loading) return;
+    setState(() => loading = true);
+    try {
+      final dir = await Directory.systemTemp.createTemp('im-preview-');
+      final safe = widget.attachment.name.replaceAll(RegExp(r'[/\\]'), '_');
+      final path = '${dir.path}/$safe';
+      await widget.client.exportAttachment(
+        widget.roomId,
+        widget.messageId,
+        widget.attachment.id,
+        path,
+      );
+      final result = await OpenFilex.open(path);
+      if (!mounted) return;
+      if (result.type != ResultType.done) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('无法打开文件：${result.message}')),
+        );
+      }
+    } catch (failure) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => TextButton.icon(
+    key: ValueKey('preview-${widget.attachment.id}'),
+    onPressed: loading ? null : open,
+    icon: const Icon(Icons.description_outlined),
+    label: Text(loading ? '正在准备…' : '预览文件'),
+  );
+}

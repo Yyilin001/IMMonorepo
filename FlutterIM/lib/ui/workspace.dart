@@ -16,6 +16,8 @@ import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 import 'package:material_ui/material_ui.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
+import 'package:open_filex/open_filex.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
