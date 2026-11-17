@@ -242,7 +242,10 @@ public final class V2MobileClient: Sendable {
         _ = try await run(.init(operation: .downloadResource))
     }
     public func forwardMessage(roomID: String, messageID: String, revision: UInt64, targetRoomID: String) async throws {
-        _ = try await run(.init(operation: .forwardMessage, messageID: messageID, targetRoomID: targetRoomID,
+        try await forwardMessage(roomID: roomID, messageID: messageID, revision: revision, targetRoomIDs: [targetRoomID])
+    }
+    public func forwardMessage(roomID: String, messageID: String, revision: UInt64, targetRoomIDs: [String]) async throws {
+        _ = try await run(.init(operation: .forwardMessage, messageID: messageID, targetRoomIDs: targetRoomIDs,
                                 roomID: roomID, revision: revision))
     }
     public func editMessage(roomID: String, messageID: String, revision: UInt64, text: String) async throws {

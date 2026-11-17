@@ -898,7 +898,7 @@ protocol ImHost {
   func exportAttachment(roomId: String, messageId: String, mediaId: String, destination: String) async throws
   func previewAttachment(roomId: String, messageId: String, mediaId: String) async throws -> AttachmentPreview
   func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws
-  func forwardMessage(roomId: String, messageId: String, revision: Int64, targetRoomId: String) async throws
+  func forwardMessage(roomId: String, messageId: String, revision: Int64, targetRoomIds: [String]) async throws
   func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
   func withdrawMessage(roomId: String, messageId: String, revision: Int64) async throws
   func signOut() async throws
@@ -1361,10 +1361,10 @@ class ImHostSetup {
         let roomIdArg = args[0] as! String
         let messageIdArg = args[1] as! String
         let revisionArg = args[2] as! Int64
-        let targetRoomIdArg = args[3] as! String
+        let targetRoomIdsArg = args[3] as! [String]
         Task { @MainActor in
           do {
-            try await api.forwardMessage(roomId: roomIdArg, messageId: messageIdArg, revision: revisionArg, targetRoomId: targetRoomIdArg)
+            try await api.forwardMessage(roomId: roomIdArg, messageId: messageIdArg, revision: revisionArg, targetRoomIds: targetRoomIdsArg)
             reply(wrapResult(nil))
           } catch {
             reply(wrapError(error))

@@ -241,7 +241,7 @@ abstract class ImHost {
     String roomId,
     String messageId,
     int revision,
-    String targetRoomId,
+    List<String> targetRoomIds,
   );
   @async
   void editMessage(String roomId, String messageId, int revision, String text);

@@ -175,8 +175,8 @@ private class MobileHost(private val context: Context) : ImHost {
             client.downloadResource()
         } }
     }
-    override suspend fun forwardMessage(roomId: String, messageId: String, revision: Long, targetRoomId: String) {
-        mutations.withLock { sdk { client.forwardMessage(roomId, messageId, revision, targetRoomId) } }
+    override suspend fun forwardMessage(roomId: String, messageId: String, revision: Long, targetRoomIds: List<String>) {
+        mutations.withLock { sdk { client.forwardMessage(roomId, messageId, revision, targetRoomIds) } }
     }
     override suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String) {
         mutations.withLock { sdk { client.editMessage(roomId, messageId, revision, text) } }

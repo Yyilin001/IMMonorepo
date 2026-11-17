@@ -34,14 +34,22 @@ void main() {
       gatewayHost: 'example.test',
       gatewayPort: 7443,
     );
-    await client.forwardMessage('room', 'incoming', 3, 'target');
+    await client.forwardMessageToRooms('room', 'incoming', 3, [
+      'second',
+      'first',
+    ]);
     await client.editMessage('room', 'message', 4, 'updated');
     await client.withdrawMessage('room', 'message', 5);
     await client.close();
     expect(calls, [
       [
         'forwardMessage',
-        ['room', 'incoming', 3, 'target'],
+        [
+          'room',
+          'incoming',
+          3,
+          ['second', 'first'],
+        ],
       ],
       [
         'editMessage',

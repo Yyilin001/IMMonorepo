@@ -22,6 +22,7 @@ package struct SharedRequest: Decodable, Sendable {
     var messageID: String?
     var replyToMessageID: String?
     var targetRoomID: String?
+    var targetRoomIDs: [String]?
     var mediaID: String?
     var messageIDs: [String]?
     var image: String?

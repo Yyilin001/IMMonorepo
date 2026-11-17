@@ -1337,14 +1337,14 @@ class ImHost {
     ;
   }
 
-  Future<void> forwardMessage(String roomId, String messageId, int revision, String targetRoomId) async {
+  Future<void> forwardMessage(String roomId, String messageId, int revision, List<String> targetRoomIds) async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.forwardMessage$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
       pigeonChannelCodec,
       binaryMessenger: pigeonVar_binaryMessenger,
     );
-    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, messageId, revision, targetRoomId]);
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, messageId, revision, targetRoomIds]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     _extractReplyValueOrThrow(
         pigeonVar_replyList,

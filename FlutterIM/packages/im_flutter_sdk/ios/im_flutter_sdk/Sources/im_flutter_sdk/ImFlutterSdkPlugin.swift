@@ -125,9 +125,9 @@ private actor MobileHost: ImHost {
     func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws {
         try await ordered { try await self.client.downloadAttachment(roomID: roomId, messageID: messageId, mediaID: mediaId) }
     }
-    func forwardMessage(roomId: String, messageId: String, revision: Int64, targetRoomId: String) async throws {
+    func forwardMessage(roomId: String, messageId: String, revision: Int64, targetRoomIds: [String]) async throws {
         guard let version = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
-        try await ordered { try await self.client.forwardMessage(roomID: roomId, messageID: messageId, revision: version, targetRoomID: targetRoomId) }
+        try await ordered { try await self.client.forwardMessage(roomID: roomId, messageID: messageId, revision: version, targetRoomIDs: targetRoomIds) }
     }
     func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws {
         guard let version = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }

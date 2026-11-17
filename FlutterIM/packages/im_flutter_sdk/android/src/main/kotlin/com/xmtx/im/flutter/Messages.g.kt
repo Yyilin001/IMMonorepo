@@ -916,7 +916,7 @@ interface ImHost {
   suspend fun exportAttachment(roomId: String, messageId: String, mediaId: String, destination: String)
   suspend fun previewAttachment(roomId: String, messageId: String, mediaId: String): AttachmentPreview
   suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String)
-  suspend fun forwardMessage(roomId: String, messageId: String, revision: Long, targetRoomId: String)
+  suspend fun forwardMessage(roomId: String, messageId: String, revision: Long, targetRoomIds: List<String>)
   suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String)
   suspend fun withdrawMessage(roomId: String, messageId: String, revision: Long)
   suspend fun signOut()
@@ -1446,10 +1446,10 @@ interface ImHost {
             val roomIdArg = args[0] as String
             val messageIdArg = args[1] as String
             val revisionArg = args[2] as Long
-            val targetRoomIdArg = args[3] as String
+            val targetRoomIdsArg = args[3] as List<String>
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
-                api.forwardMessage(roomIdArg, messageIdArg, revisionArg, targetRoomIdArg)
+                api.forwardMessage(roomIdArg, messageIdArg, revisionArg, targetRoomIdsArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

@@ -37,10 +37,12 @@ actor SharedInteractions {
         observation = nil; forwardRows = []; room = nil
     }
     func forward(_ request: SharedRequest, message: V2ClientMessageProjection) async throws {
-        guard let revision = request.revision, revision == message.messageRevision, let raw = request.targetRoomID else { throw SharedFailure.invalidInput }
-        let target = try RoomID(raw)
-        guard try await store.roomAllowsLocalRead(roomID: target) else { throw SharedFailure.invalidInput }
-        _ = try await messages.forward(sources: [.init(roomID: message.roomID, messageID: message.messageID, revision: .init(revision))], to: [target])
+        guard let revision = request.revision, revision == message.messageRevision else { throw SharedFailure.invalidInput }
+        let ids = request.targetRoomIDs ?? request.targetRoomID.map { [$0] } ?? []
+        guard !ids.isEmpty, ids.count <= V2ForwardMessagesCommand.maximumTargetRooms,
+              Set(ids).count == ids.count else { throw SharedFailure.invalidInput }
+        let targets = try ids.map { try RoomID($0) }
+        _ = try await messages.forward(sources: [.init(roomID: message.roomID, messageID: message.messageID, revision: .init(revision))], to: targets)
     }
     func action(_ request: SharedRequest, room: RoomID) async throws {
         guard self.room == room, try await store.roomAllowsLocalRead(roomID: room), let id = UUID(uuidString: request.intentID ?? "") else { throw SharedFailure.invalidInput }

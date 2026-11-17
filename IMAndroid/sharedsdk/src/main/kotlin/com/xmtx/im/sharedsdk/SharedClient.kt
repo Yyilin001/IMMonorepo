@@ -134,6 +134,8 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun markVisibleMessages(roomID: String, ids: List<String>): SharedSnapshot = directoryCall("markVisibleMessages", "roomID" to roomID, "messageIDs" to org.json.JSONArray(ids))
     suspend fun messageReaders(roomID: String, messageID: String, next: Boolean = false): SharedSnapshot = directoryCall("messageReaders", "roomID" to roomID, "messageID" to messageID, "action" to if (next) "next" else "first")
     suspend fun forwardMessage(roomID: String, messageID: String, revision: Long, targetRoomID: String): SharedSnapshot = directoryCall("forwardMessage", "roomID" to roomID, "messageID" to messageID, "revision" to revision, "targetRoomID" to targetRoomID)
+    suspend fun forwardMessage(roomID: String, messageID: String, revision: Long, targetRoomIDs: List<String>): SharedSnapshot =
+        directoryCall("forwardMessage", "roomID" to roomID, "messageID" to messageID, "revision" to revision, "targetRoomIDs" to org.json.JSONArray(targetRoomIDs))
     suspend fun retryForward(roomID: String, id: String): SharedSnapshot = directoryCall("interactionAction", "roomID" to roomID, "intentID" to id, "action" to "retryForward")
     suspend fun cancelForward(roomID: String, id: String): SharedSnapshot = directoryCall("interactionAction", "roomID" to roomID, "intentID" to id, "action" to "cancelForward")
     suspend fun nextConversations(): SharedSnapshot = mutate("conversationsNext")

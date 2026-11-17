@@ -451,9 +451,20 @@ final class ImClient {
     String messageId,
     int revision,
     String targetRoomId,
-  ) => _ordered(
-    () => _host.forwardMessage(roomId, messageId, revision, targetRoomId),
-  );
+  ) => forwardMessageToRooms(roomId, messageId, revision, [targetRoomId]);
+
+  Future<void> forwardMessageToRooms(
+    String roomId,
+    String messageId,
+    int revision,
+    List<String> targetRoomIds,
+  ) {
+    final targets = List<String>.unmodifiable(targetRoomIds);
+    return _ordered(
+      () => _host.forwardMessage(roomId, messageId, revision, targets),
+    );
+  }
+
   Future<void> editMessage(
     String roomId,
     String messageId,

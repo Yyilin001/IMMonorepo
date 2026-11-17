@@ -244,31 +244,62 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     if (!activeMutations.add(item.id)) return;
     setState(() {});
     final sdk = _SdkScope.of(context)!;
+    final client = sdk.client!;
     final targets = sdk.rooms.where((r) => r.id != widget.room.id).toList();
     try {
-      final target = await showModalBottomSheet<String>(
+      final selected = <String>{};
+      final chosen = await showModalBottomSheet<List<String>>(
         context: context,
-        builder: (sheet) => SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              const ListTile(title: Text('转发到')),
-              if (targets.isEmpty) const ListTile(title: Text('暂无其他会话')),
-              for (final room in targets)
+        builder: (sheet) => StatefulBuilder(
+          builder: (_, update) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
                 ListTile(
-                  title: Text(room.title.isEmpty ? room.id : room.title),
-                  onTap: () => Navigator.pop(sheet, room.id),
+                  title: const Text('转发到'),
+                  trailing: TextButton(
+                    onPressed: selected.isEmpty
+                        ? null
+                        : () => Navigator.pop(sheet, selected.toList()),
+                    child: Text('转发（${selected.length}/10）'),
+                  ),
                 ),
-            ],
+                if (targets.isEmpty) const ListTile(title: Text('暂无其他会话')),
+                Flexible(
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: targets.length,
+                    itemBuilder: (_, index) {
+                      final room = targets[index];
+                      final checked = selected.contains(room.id);
+                      return CheckboxListTile(
+                        key: ValueKey('forward-target-${room.id}'),
+                        title: Text(room.title.isEmpty ? room.id : room.title),
+                        value: checked,
+                        onChanged: !checked && selected.length >= 10
+                            ? null
+                            : (value) => update(() {
+                                if (value == true) {
+                                  selected.add(room.id);
+                                } else {
+                                  selected.remove(room.id);
+                                }
+                              }),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       );
-      if (target == null || !mounted) return;
-      await sdk.client!.forwardMessage(
+      if (chosen == null || !mounted || sdk.client != client) return;
+      await client.forwardMessageToRooms(
         widget.room.id,
         item.id,
         revision,
-        target,
+        chosen,
       );
       if (mounted) {
         ScaffoldMessenger.of(context)
