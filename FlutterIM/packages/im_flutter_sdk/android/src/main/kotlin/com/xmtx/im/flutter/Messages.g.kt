@@ -511,6 +511,10 @@ data class GroupMember (
 /** Generated class from Pigeon that represents data sent in messages. */
 data class GroupPage (
   val announcement: String,
+  val editableAnnouncementRevision: Long? = null,
+  val membershipRevision: Long,
+  val actorRole: String,
+  val permissions: List<String>,
   val members: List<GroupMember>,
   val hasMore: Boolean
 )
@@ -518,14 +522,22 @@ data class GroupPage (
   companion object {
     fun fromList(pigeonVar_list: List<Any?>): GroupPage {
       val announcement = pigeonVar_list[0] as String
-      val members = pigeonVar_list[1] as List<GroupMember>
-      val hasMore = pigeonVar_list[2] as Boolean
-      return GroupPage(announcement, members, hasMore)
+      val editableAnnouncementRevision = pigeonVar_list[1] as Long?
+      val membershipRevision = pigeonVar_list[2] as Long
+      val actorRole = pigeonVar_list[3] as String
+      val permissions = pigeonVar_list[4] as List<String>
+      val members = pigeonVar_list[5] as List<GroupMember>
+      val hasMore = pigeonVar_list[6] as Boolean
+      return GroupPage(announcement, editableAnnouncementRevision, membershipRevision, actorRole, permissions, members, hasMore)
     }
   }
   fun toList(): List<Any?> {
     return listOf(
       announcement,
+      editableAnnouncementRevision,
+      membershipRevision,
+      actorRole,
+      permissions,
       members,
       hasMore,
     )
@@ -538,18 +550,22 @@ data class GroupPage (
       return true
     }
     val other = other as GroupPage
-    return MessagesPigeonUtils.deepEquals(this.announcement, other.announcement) && MessagesPigeonUtils.deepEquals(this.members, other.members) && MessagesPigeonUtils.deepEquals(this.hasMore, other.hasMore)
+    return MessagesPigeonUtils.deepEquals(this.announcement, other.announcement) && MessagesPigeonUtils.deepEquals(this.editableAnnouncementRevision, other.editableAnnouncementRevision) && MessagesPigeonUtils.deepEquals(this.membershipRevision, other.membershipRevision) && MessagesPigeonUtils.deepEquals(this.actorRole, other.actorRole) && MessagesPigeonUtils.deepEquals(this.permissions, other.permissions) && MessagesPigeonUtils.deepEquals(this.members, other.members) && MessagesPigeonUtils.deepEquals(this.hasMore, other.hasMore)
   }
 
   override fun hashCode(): Int {
     var result = javaClass.hashCode()
     result = 31 * result + MessagesPigeonUtils.deepHash(this.announcement)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.editableAnnouncementRevision)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.membershipRevision)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.actorRole)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.permissions)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.members)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.hasMore)
     return result
   }
   override fun toString(): String {
-    return "GroupPage(announcement=$announcement, members=$members, hasMore=$hasMore)"
+    return "GroupPage(announcement=$announcement, editableAnnouncementRevision=$editableAnnouncementRevision, membershipRevision=$membershipRevision, actorRole=$actorRole, permissions=$permissions, members=$members, hasMore=$hasMore)"
   }
 }
 
@@ -699,6 +715,8 @@ interface ImHost {
   suspend fun nextUpdate(windowId: String): WindowView
   suspend fun directory(nextGroups: Boolean?, scope: String): DirectoryPage
   suspend fun resolveUserId(handle: String): String
+  suspend fun changeMembership(roomId: String, revision: Long, action: String, target: String?, role: String?)
+  suspend fun updateAnnouncement(roomId: String, revision: Long, text: String)
   suspend fun groupMembers(roomId: String, next: Boolean): GroupPage
   suspend fun createGroup(title: String, members: List<String>)
   suspend fun requestContact(handle: String)
@@ -898,6 +916,52 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 listOf(api.resolveUserId(handleArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeMembership$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val revisionArg = args[1] as Long
+            val actionArg = args[2] as String
+            val targetArg = args[3] as String?
+            val roleArg = args[4] as String?
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.changeMembership(roomIdArg, revisionArg, actionArg, targetArg, roleArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.updateAnnouncement$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val revisionArg = args[1] as Long
+            val textArg = args[2] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.updateAnnouncement(roomIdArg, revisionArg, textArg)
+                listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

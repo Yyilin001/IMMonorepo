@@ -92,10 +92,18 @@ class GroupMember {
 class GroupPage {
   GroupPage({
     required this.announcement,
+    this.editableAnnouncementRevision,
+    required this.membershipRevision,
+    required this.actorRole,
+    required this.permissions,
     required this.members,
     required this.hasMore,
   });
   String announcement;
+  int? editableAnnouncementRevision;
+  int membershipRevision;
+  String actorRole;
+  List<String> permissions;
   List<GroupMember> members;
   bool hasMore;
 }
@@ -135,6 +143,16 @@ abstract class ImHost {
   DirectoryPage directory(bool? nextGroups, String scope);
   @async
   String resolveUserId(String handle);
+  @async
+  void changeMembership(
+    String roomId,
+    int revision,
+    String action,
+    String? target,
+    String? role,
+  );
+  @async
+  void updateAnnouncement(String roomId, int revision, String text);
   @async
   GroupPage groupMembers(String roomId, bool next);
   @async

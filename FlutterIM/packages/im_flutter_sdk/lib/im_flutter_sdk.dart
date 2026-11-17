@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 
 import 'src/messages.g.dart' as wire;
 
+enum ImMembershipAction { add, remove, role, transfer, leave, dissolve }
+
 enum ImContactScope { accepted, incoming, outgoing, blocked }
 
 enum ImSocialAction { accept, reject, remove, block, unblock }
@@ -232,11 +234,38 @@ final class ImClient {
 
   Future<String> resolveUserId(String handle) =>
       _ordered(() => _host.resolveUserId(handle));
-  Future<({String announcement, Map<String, String> members, bool hasMore})>
+  Future<void> changeMembership(
+    String roomId,
+    int revision,
+    ImMembershipAction action, {
+    String? target,
+    String? role,
+  }) => _ordered(
+    () => _host.changeMembership(roomId, revision, action.name, target, role),
+  );
+
+  Future<void> updateAnnouncement(String roomId, int revision, String text) =>
+      _ordered(() => _host.updateAnnouncement(roomId, revision, text));
+
+  Future<
+    ({
+      String announcement,
+      int? editableAnnouncementRevision,
+      int membershipRevision,
+      String actorRole,
+      Set<String> permissions,
+      Map<String, String> members,
+      bool hasMore,
+    })
+  >
   groupMembers(String roomId, {bool next = false}) => _ordered(() async {
     final page = await _host.groupMembers(roomId, next);
     return (
       announcement: page.announcement,
+      editableAnnouncementRevision: page.editableAnnouncementRevision,
+      membershipRevision: page.membershipRevision,
+      actorRole: page.actorRole,
+      permissions: page.permissions.toSet(),
       members: {for (final member in page.members) member.userId: member.role},
       hasMore: page.hasMore,
     );

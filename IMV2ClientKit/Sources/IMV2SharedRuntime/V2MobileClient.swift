@@ -120,13 +120,24 @@ public final class V2MobileClient: Sendable {
     }
     public struct GroupPage: Sendable {
         public let announcement: String
+        public let editableAnnouncementRevision: Int64?
+        public let membershipRevision: Int64
+        public let actorRole: String
+        public let permissions: [String]
         public let members: [(userID: String, role: String)]
         public let hasMore: Bool
+    }
+    public func changeMembership(roomID: String, revision: UInt64, action: String, target: String?, role: String?) async throws {
+        _ = try await run(.init(operation: .groupAction, roomID: roomID, targetUserID: target, action: action, revision: revision, role: role))
+    }
+    public func updateAnnouncement(roomID: String, revision: UInt64, text: String) async throws {
+        _ = try await run(.init(operation: .groupAction, roomID: roomID, text: text, action: "announcement", revision: revision))
     }
     public func groupMembers(roomID: String, next: Bool) async throws -> GroupPage {
         let result = try await run(.init(operation: next ? .groupMembersNext : .openGroup, roomID: roomID))
         guard let group = result.directory?.group, group.roomID == roomID else { throw Failure(code: "operationFailed") }
-        return GroupPage(announcement: group.announcement, members: group.members.map { ($0.userID, $0.role) }, hasMore: group.hasMore)
+        guard let revision = Int64(exactly: group.revision) else { throw Failure(code: "operationFailed") }
+        return GroupPage(announcement: group.announcement, editableAnnouncementRevision: group.permissions.contains("manage_announcements") ? Int64(exactly: group.announcementRevision) : nil, membershipRevision: revision, actorRole: group.actorRole, permissions: group.permissions, members: group.members.map { ($0.userID, $0.role) }, hasMore: group.hasMore)
     }
     public func createGroup(title: String, members: [String]) async throws {
         _ = try await run(.init(operation: .createGroup, text: title, members: members))

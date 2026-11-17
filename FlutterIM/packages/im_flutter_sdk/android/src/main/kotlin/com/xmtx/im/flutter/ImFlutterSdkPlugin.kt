@@ -87,10 +87,18 @@ private class MobileHost(private val context: Context) : ImHost {
     private suspend fun userId(handle: String): String =
         client.lookupIdentity(handle).directory?.identity?.userID ?: throw FlutterError("identityUnavailable")
     override suspend fun resolveUserId(handle: String): String = mutations.withLock { sdk { userId(handle) } }
+    override suspend fun changeMembership(roomId: String, revision: Long, action: String, target: String?, role: String?) {
+        val change = SharedGroupAction.entries.firstOrNull { it.wire == action } ?: throw FlutterError("invalidInput")
+        val newRole = role?.let { value -> SharedRole.entries.firstOrNull { it.wire == value } ?: throw FlutterError("invalidInput") }
+        mutations.withLock { sdk { client.groupAction(roomId, change, revision, targetUserID = target, role = newRole) } }
+    }
+    override suspend fun updateAnnouncement(roomId: String, revision: Long, text: String) {
+        mutations.withLock { sdk { client.groupAction(roomId, SharedGroupAction.Announcement, revision, text = text) } }
+    }
     override suspend fun groupMembers(roomId: String, next: Boolean): GroupPage = mutations.withLock { sdk {
         val snapshot = if (next) client.nextGroupMembers(roomId) else client.openGroup(roomId)
         val group = snapshot.directory?.group?.takeIf { it.roomID == roomId } ?: throw FlutterError("operationFailed")
-        GroupPage(group.announcement, group.members.map { GroupMember(it.userID, it.role.wire) }, group.hasMore)
+        GroupPage(group.announcement, group.announcementRevision.takeIf { SharedPermission.ManageAnnouncements in group.permissions }, group.revision, group.actorRole.wire, group.permissions.map { it.wire }, group.members.map { GroupMember(it.userID, it.role.wire) }, group.hasMore)
     } }
     override suspend fun createGroup(title: String, members: List<String>) {
         mutations.withLock { sdk { client.createGroup(title, members) } }

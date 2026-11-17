@@ -507,6 +507,10 @@ struct GroupMember: Hashable, CustomStringConvertible {
 /// Generated class from Pigeon that represents data sent in messages.
 struct GroupPage: Hashable, CustomStringConvertible {
   var announcement: String
+  var editableAnnouncementRevision: Int64? = nil
+  var membershipRevision: Int64
+  var actorRole: String
+  var permissions: [String]
   var members: [GroupMember]
   var hasMore: Bool
 
@@ -514,11 +518,19 @@ struct GroupPage: Hashable, CustomStringConvertible {
   // swift-format-ignore: AlwaysUseLowerCamelCase
   static func fromList(_ pigeonVar_list: [Any?]) -> GroupPage? {
     let announcement = pigeonVar_list[0] as! String
-    let members = pigeonVar_list[1] as! [GroupMember]
-    let hasMore = pigeonVar_list[2] as! Bool
+    let editableAnnouncementRevision: Int64? = nilOrValue(pigeonVar_list[1])
+    let membershipRevision = pigeonVar_list[2] as! Int64
+    let actorRole = pigeonVar_list[3] as! String
+    let permissions = pigeonVar_list[4] as! [String]
+    let members = pigeonVar_list[5] as! [GroupMember]
+    let hasMore = pigeonVar_list[6] as! Bool
 
     return GroupPage(
       announcement: announcement,
+      editableAnnouncementRevision: editableAnnouncementRevision,
+      membershipRevision: membershipRevision,
+      actorRole: actorRole,
+      permissions: permissions,
       members: members,
       hasMore: hasMore
     )
@@ -526,6 +538,10 @@ struct GroupPage: Hashable, CustomStringConvertible {
   func toList() -> [Any?] {
     return [
       announcement,
+      editableAnnouncementRevision,
+      membershipRevision,
+      actorRole,
+      permissions,
       members,
       hasMore,
     ]
@@ -534,18 +550,22 @@ struct GroupPage: Hashable, CustomStringConvertible {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.announcement, rhs.announcement) && MessagesPigeonInternal.deepEquals(lhs.members, rhs.members) && MessagesPigeonInternal.deepEquals(lhs.hasMore, rhs.hasMore)
+    return MessagesPigeonInternal.deepEquals(lhs.announcement, rhs.announcement) && MessagesPigeonInternal.deepEquals(lhs.editableAnnouncementRevision, rhs.editableAnnouncementRevision) && MessagesPigeonInternal.deepEquals(lhs.membershipRevision, rhs.membershipRevision) && MessagesPigeonInternal.deepEquals(lhs.actorRole, rhs.actorRole) && MessagesPigeonInternal.deepEquals(lhs.permissions, rhs.permissions) && MessagesPigeonInternal.deepEquals(lhs.members, rhs.members) && MessagesPigeonInternal.deepEquals(lhs.hasMore, rhs.hasMore)
   }
 
   func hash(into hasher: inout Hasher) {
     hasher.combine("GroupPage")
     MessagesPigeonInternal.deepHash(value: announcement, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: editableAnnouncementRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: membershipRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: actorRole, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: permissions, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: members, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: hasMore, hasher: &hasher)
   }
 
   public var description: String {
-    return "GroupPage(announcement: \(String(describing: announcement)), members: \(String(describing: members)), hasMore: \(String(describing: hasMore)))"
+    return "GroupPage(announcement: \(String(describing: announcement)), editableAnnouncementRevision: \(String(describing: editableAnnouncementRevision)), membershipRevision: \(String(describing: membershipRevision)), actorRole: \(String(describing: actorRole)), permissions: \(String(describing: permissions)), members: \(String(describing: members)), hasMore: \(String(describing: hasMore)))"
   }
 }
 
@@ -683,6 +703,8 @@ protocol ImHost {
   func nextUpdate(windowId: String) async throws -> WindowView
   func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage
   func resolveUserId(handle: String) async throws -> String
+  func changeMembership(roomId: String, revision: Int64, action: String, target: String?, role: String?) async throws
+  func updateAnnouncement(roomId: String, revision: Int64, text: String) async throws
   func groupMembers(roomId: String, next: Bool) async throws -> GroupPage
   func createGroup(title: String, members: [String]) async throws
   func requestContact(handle: String) async throws
@@ -867,6 +889,46 @@ class ImHostSetup {
       }
     } else {
       resolveUserIdChannel.setMessageHandler(nil)
+    }
+    let changeMembershipChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeMembership\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      changeMembershipChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let revisionArg = args[1] as! Int64
+        let actionArg = args[2] as! String
+        let targetArg: String? = nilOrValue(args[3])
+        let roleArg: String? = nilOrValue(args[4])
+        Task { @MainActor in
+          do {
+            try await api.changeMembership(roomId: roomIdArg, revision: revisionArg, action: actionArg, target: targetArg, role: roleArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      changeMembershipChannel.setMessageHandler(nil)
+    }
+    let updateAnnouncementChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.updateAnnouncement\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      updateAnnouncementChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let revisionArg = args[1] as! Int64
+        let textArg = args[2] as! String
+        Task { @MainActor in
+          do {
+            try await api.updateAnnouncement(roomId: roomIdArg, revision: revisionArg, text: textArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      updateAnnouncementChannel.setMessageHandler(nil)
     }
     let groupMembersChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.groupMembers\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

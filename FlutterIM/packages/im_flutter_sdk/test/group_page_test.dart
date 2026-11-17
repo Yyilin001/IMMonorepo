@@ -16,6 +16,8 @@ void main() {
         'resolveUserId',
         'createGroup',
         'groupMembers',
+        'updateAnnouncement',
+        'changeMembership',
         'close',
       ]) {
         final channel = BasicMessageChannel<Object?>(
@@ -32,12 +34,20 @@ void main() {
                 '读书会',
                 ['user-1'],
               ]);
+            case 'changeMembership':
+              expect(args, ['room', 11, 'role', 'user-2', 'admin']);
+            case 'updateAnnouncement':
+              expect(args, ['room', 7, '']);
             case 'groupMembers':
               pages.add(args);
               final next = (args as List).last == true;
               return [
                 wire.GroupPage(
                   announcement: '周六见',
+                  membershipRevision: 11,
+                  actorRole: "owner",
+                  permissions: ["change_member_roles"],
+                  editableAnnouncementRevision: next ? null : 7,
                   members: [
                     wire.GroupMember(
                       userId: next ? 'user-2' : 'user-1',
@@ -64,9 +74,23 @@ void main() {
       expect(first.members, {'user-1': 'owner'});
       expect(first.announcement, '周六见');
       expect(first.hasMore, true);
+      await client.updateAnnouncement(
+        'room',
+        first.editableAnnouncementRevision!,
+        '',
+      );
       final second = await client.groupMembers('room', next: true);
       expect(second.members, {'user-2': 'member'});
       expect(second.hasMore, false);
+      expect(second.permissions, contains("change_member_roles"));
+      await client.changeMembership(
+        "room",
+        second.membershipRevision,
+        ImMembershipAction.role,
+        target: "user-2",
+        role: "admin",
+      );
+      expect(second.editableAnnouncementRevision, isNull);
       expect(pages, [
         ['room', false],
         ['room', true],

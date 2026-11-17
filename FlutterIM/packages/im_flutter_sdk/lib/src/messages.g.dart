@@ -480,11 +480,23 @@ class GroupMember {
 class GroupPage {
   GroupPage({
     required this.announcement,
+    this.editableAnnouncementRevision,
+    required this.membershipRevision,
+    required this.actorRole,
+    required this.permissions,
     required this.members,
     required this.hasMore,
   });
 
   String announcement;
+
+  int? editableAnnouncementRevision;
+
+  int membershipRevision;
+
+  String actorRole;
+
+  List<String> permissions;
 
   List<GroupMember> members;
 
@@ -493,6 +505,10 @@ class GroupPage {
   List<Object?> _toList() {
     return <Object?>[
       announcement,
+      editableAnnouncementRevision,
+      membershipRevision,
+      actorRole,
+      permissions,
       members,
       hasMore,
     ];
@@ -505,8 +521,12 @@ class GroupPage {
     result as List<Object?>;
     return GroupPage(
       announcement: result[0]! as String,
-      members: (result[1]! as List<Object?>).cast<GroupMember>(),
-      hasMore: result[2]! as bool,
+      editableAnnouncementRevision: result[1] as int?,
+      membershipRevision: result[2]! as int,
+      actorRole: result[3]! as String,
+      permissions: (result[4]! as List<Object?>).cast<String>(),
+      members: (result[5]! as List<Object?>).cast<GroupMember>(),
+      hasMore: result[6]! as bool,
     );
   }
 
@@ -519,7 +539,7 @@ class GroupPage {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(announcement, other.announcement) && _deepEquals(members, other.members) && _deepEquals(hasMore, other.hasMore);
+    return _deepEquals(announcement, other.announcement) && _deepEquals(editableAnnouncementRevision, other.editableAnnouncementRevision) && _deepEquals(membershipRevision, other.membershipRevision) && _deepEquals(actorRole, other.actorRole) && _deepEquals(permissions, other.permissions) && _deepEquals(members, other.members) && _deepEquals(hasMore, other.hasMore);
   }
 
   @override
@@ -528,7 +548,7 @@ class GroupPage {
 
   @override
   String toString() {
-    return 'GroupPage(announcement: $announcement, members: $members, hasMore: $hasMore)';
+    return 'GroupPage(announcement: $announcement, editableAnnouncementRevision: $editableAnnouncementRevision, membershipRevision: $membershipRevision, actorRole: $actorRole, permissions: $permissions, members: $members, hasMore: $hasMore)';
   }
 }
 
@@ -847,6 +867,40 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as String;
+  }
+
+  Future<void> changeMembership(String roomId, int revision, String action, String? target, String? role) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.changeMembership$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, revision, action, target, role]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> updateAnnouncement(String roomId, int revision, String text) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.updateAnnouncement$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, revision, text]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   Future<GroupPage> groupMembers(String roomId, bool next) async {

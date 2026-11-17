@@ -76,10 +76,18 @@ private actor MobileHost: ImHost {
     func resolveUserId(handle: String) async throws -> String {
         try await ordered { try await self.client.resolveUserID(handle: handle) }
     }
+    func changeMembership(roomId: String, revision: Int64, action: String, target: String?, role: String?) async throws {
+        guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered { try await self.client.changeMembership(roomID: roomId, revision: expected, action: action, target: target, role: role) }
+    }
+    func updateAnnouncement(roomId: String, revision: Int64, text: String) async throws {
+        guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered { try await self.client.updateAnnouncement(roomID: roomId, revision: expected, text: text) }
+    }
     func groupMembers(roomId: String, next: Bool) async throws -> GroupPage {
         try await ordered {
             let page = try await self.client.groupMembers(roomID: roomId, next: next)
-            return GroupPage(announcement: page.announcement, members: page.members.map { GroupMember(userId: $0.userID, role: $0.role) }, hasMore: page.hasMore)
+            return GroupPage(announcement: page.announcement, editableAnnouncementRevision: page.editableAnnouncementRevision, membershipRevision: page.membershipRevision, actorRole: page.actorRole, permissions: page.permissions, members: page.members.map { GroupMember(userId: $0.userID, role: $0.role) }, hasMore: page.hasMore)
         }
     }
     func createGroup(title: String, members: [String]) async throws {

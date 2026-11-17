@@ -87,9 +87,10 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     final client = _SdkScope.of(context)!.client!;
     try {
       if (editing) {
-        await showDialog<void>(
+        await showDialog<bool>(
           context: context,
-          builder: (_) => _EditMessageDialog(
+          builder: (_) => _EditTextDialog(
+            title: '编辑消息',
             original: item.text,
             save: (text) =>
                 client.editMessage(widget.room.id, item.id, revision, text),
@@ -335,16 +336,23 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   }
 }
 
-class _EditMessageDialog extends StatefulWidget {
-  const _EditMessageDialog({required this.original, required this.save});
+class _EditTextDialog extends StatefulWidget {
+  const _EditTextDialog({
+    required this.original,
+    required this.save,
+    required this.title,
+    this.allowEmpty = false,
+  });
+  final String title;
+  final bool allowEmpty;
   final String original;
   final Future<void> Function(String) save;
 
   @override
-  State<_EditMessageDialog> createState() => _EditMessageDialogState();
+  State<_EditTextDialog> createState() => _EditTextDialogState();
 }
 
-class _EditMessageDialogState extends State<_EditMessageDialog> {
+class _EditTextDialogState extends State<_EditTextDialog> {
   late String text = widget.original;
   bool busy = false;
   String? error;
@@ -357,7 +365,7 @@ class _EditMessageDialogState extends State<_EditMessageDialog> {
     });
     try {
       await widget.save(text);
-      if (mounted) Navigator.pop(context);
+      if (mounted) Navigator.pop(context, true);
     } catch (failure) {
       if (mounted) {
         setState(() {
@@ -370,7 +378,7 @@ class _EditMessageDialogState extends State<_EditMessageDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('编辑消息'),
+    title: Text(widget.title),
     content: TextFormField(
       initialValue: widget.original,
       autofocus: true,
@@ -385,7 +393,10 @@ class _EditMessageDialogState extends State<_EditMessageDialog> {
         child: const Text('取消'),
       ),
       FilledButton(
-        onPressed: busy || text.trim().isEmpty || text == widget.original
+        onPressed:
+            busy ||
+                (!widget.allowEmpty && text.trim().isEmpty) ||
+                text == widget.original
             ? null
             : submit,
         child: const Text('保存'),
