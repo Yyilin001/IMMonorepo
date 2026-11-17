@@ -998,7 +998,15 @@ class _ConversationRow extends ConsumerWidget {
   final bool selected;
   final Widget? avatar;
   @override
-  Widget build(BuildContext context, WidgetRef ref) => Container(
+  Widget build(BuildContext context, WidgetRef ref) => Semantics(
+    label: [
+      item.displayName,
+      if (item.unread > 0) '${item.unread} 条未读',
+      if (item.pinned) '已置顶',
+      if (item.muted) '已静音',
+    ].join('，'),
+    hint: '长按打开会话菜单',
+    child: Container(
     decoration: BoxDecoration(
       border: Border(
         bottom: BorderSide(
@@ -1110,6 +1118,7 @@ class _ConversationRow extends ConsumerWidget {
         ),
       ],
     ),
+    ),
   );
 }
 
@@ -1143,7 +1152,12 @@ class ChatAvatar extends StatelessWidget {
       Color(0xFF8C6D94),
       Color(0xFFA37F61),
     ];
-    return Container(
+    return Semantics(
+      container: true,
+      excludeSemantics: true,
+      image: true,
+      label: group ? '群头像：$name' : '头像：$name',
+      child: Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
@@ -1175,6 +1189,7 @@ class ChatAvatar extends StatelessWidget {
               cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).round(),
               gaplessPlayback: true,
             ),
+    ),
     );
   }
 }
@@ -1787,7 +1802,13 @@ class _MessageBubble extends ConsumerWidget {
                     ),
                   ),
           );
-    return GestureDetector(
+    return Semantics(
+      container: true,
+      label:
+          '${mine ? '我' : displayName}：${message.text.isEmpty ? '[附件消息]' : message.text}',
+      hint: selecting ? '轻点选择消息' : '长按打开消息菜单',
+      selected: selecting ? selected : null,
+      child: GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: selecting ? onToggleSelect : null,
       child: Padding(
@@ -1990,6 +2011,7 @@ class _MessageBubble extends ConsumerWidget {
           ] else
             SizedBox(width: mine ? 4 : 16),
         ],
+      ),
       ),
       ),
     );
