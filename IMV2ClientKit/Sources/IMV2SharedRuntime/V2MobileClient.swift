@@ -223,6 +223,71 @@ public final class V2MobileClient: Sendable {
                     avatar: $0.avatar.flatMap { Data(base64Encoded: $0) })
         }
     }
+    public struct Invite: Sendable {
+        public let id: String
+        public let url: String
+        public let expires: Int64
+        public let used: Int
+        public let maximum: Int
+    }
+    public struct JoinRequest: Sendable {
+        public let id: String
+        public let userID: String
+        public let note: String
+        public let state: String
+    }
+    public struct InvitePreview: Sendable {
+        public let roomID: String
+        public let title: String
+        public let requestID: String?
+        public let state: String?
+        public let member: Bool
+        public let canSubmit: Bool
+        public let canCancel: Bool
+    }
+    public struct Community: Sendable {
+        public let roomID: String?
+        public let invites: [Invite]
+        public let requests: [JoinRequest]
+        public let hasMore: Bool
+        public let preview: InvitePreview?
+        public let failure: String?
+    }
+    public func invitations(roomID: String) async throws -> Community {
+        try await community(try await run(.init(operation: .invitations, roomID: roomID)))
+    }
+    public func nextInvitations(roomID: String) async throws -> Community {
+        try await community(try await run(.init(operation: .invitationsNext, roomID: roomID)))
+    }
+    public func previewInvite(text: String) async throws -> Community {
+        try await community(try await run(.init(operation: .previewInvite, text: text)))
+    }
+    public func refreshInvite() async throws -> Community {
+        try await community(try await run(.init(operation: .refreshInvite)))
+    }
+    public func inviteAction(roomID: String, revision: UInt64, action: String, intentID: String?, note: String?) async throws {
+        _ = try await run(.init(operation: .inviteAction, roomID: roomID, text: note, intentID: intentID,
+                                action: action, revision: revision))
+    }
+    public func submitJoin(note: String) async throws {
+        _ = try await run(.init(operation: .inviteAction, text: note, action: "submit"))
+    }
+    public func cancelJoin(roomID: String) async throws {
+        _ = try await run(.init(operation: .inviteAction, roomID: roomID, action: "cancel"))
+    }
+    public func muteMember(roomID: String, userID: String, revision: UInt64) async throws {
+        _ = try await run(.init(operation: .muteMember, roomID: roomID, targetUserID: userID, revision: revision))
+    }
+    private func community(_ value: SharedSnapshot) throws -> Community {
+        guard let community = value.directory?.community else { throw Failure(code: "authenticationRequired") }
+        return Community(roomID: community.roomID,
+            invites: community.invites.map { Invite(id: $0.id, url: $0.url, expires: $0.expires, used: $0.used, maximum: $0.maximum) },
+            requests: community.requests.map { JoinRequest(id: $0.id, userID: $0.userID, note: $0.note, state: $0.state) },
+            hasMore: community.hasMore,
+            preview: community.preview.map { InvitePreview(roomID: $0.roomID, title: $0.title, requestID: $0.requestID,
+                state: $0.state, member: $0.member, canSubmit: $0.canSubmit, canCancel: $0.canCancel) },
+            failure: community.failure)
+    }
     public struct GroupPage: Sendable {
         public let announcement: String
         public let editableAnnouncementRevision: Int64?

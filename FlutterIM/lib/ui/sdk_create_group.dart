@@ -399,6 +399,25 @@ class _GroupDetailsPageState extends State<_GroupDetailsPage> {
                 ),
         ),
 
+      if (membershipRevision != null && error == null)
+        ListTile(
+          key: const Key('group-invites'),
+          leading: const Icon(Icons.link_rounded, color: green),
+          title: const Text('邀请与审批'),
+          subtitle: const Text('邀请链接、二维码和入群申请'),
+          trailing: const Icon(Icons.chevron_right_rounded, color: muted),
+          onTap: () async {
+            await Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => _GroupInvitesPage(
+                  roomId: widget.roomId,
+                  membershipRevision: membershipRevision!,
+                ),
+              ),
+            );
+            if (mounted) await load();
+          },
+        ),
       if (permissions.contains('invite_members'))
         TextButton(
           onPressed: loading || submitting || error != null

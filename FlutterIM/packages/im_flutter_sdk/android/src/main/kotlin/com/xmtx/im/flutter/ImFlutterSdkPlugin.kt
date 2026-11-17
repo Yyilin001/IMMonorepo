@@ -144,6 +144,32 @@ private class MobileHost(private val context: Context) : ImHost {
         val group = snapshot.directory?.group?.takeIf { it.roomID == roomId } ?: throw FlutterError("operationFailed")
         GroupPage(group.announcement, group.announcementRevision.takeIf { SharedPermission.ManageAnnouncements in group.permissions }, group.revision, group.actorRole.wire, group.permissions.map { it.wire }, group.members.map { GroupMember(it.userID, it.role.wire) }, group.hasMore)
     } }
+    private fun SharedCommunity.wire(): ImCommunity = ImCommunity(roomID,
+        invites.map { ImInvite(it.id, it.url, it.expires, it.used.toLong(), it.maximum.toLong()) },
+        requests.map { ImJoinRequest(it.id, it.userID, it.note, it.state) }, hasMore,
+        preview?.let { ImInvitePreview(it.roomID, it.title, it.requestID, it.state, it.member, it.canSubmit, it.canCancel) },
+        failure?.name?.wire())
+
+    private fun SharedSnapshot.community(): ImCommunity =
+        directory?.community?.wire() ?: throw FlutterError("authenticationRequired")
+
+    override suspend fun invitations(roomId: String): ImCommunity = mutations.withLock { sdk { client.invitations(roomId).community() } }
+    override suspend fun nextInvitations(roomId: String): ImCommunity = mutations.withLock { sdk { client.nextInvitations(roomId).community() } }
+    override suspend fun previewInvite(text: String): ImCommunity = mutations.withLock { sdk { client.previewInvite(text).community() } }
+    override suspend fun refreshInvite(): ImCommunity = mutations.withLock { sdk { client.refreshInvite().community() } }
+    override suspend fun inviteAction(roomId: String, revision: Long, action: String, intentId: String?, note: String?) {
+        val command = SharedInviteAction.entries.firstOrNull { it.wire == action } ?: throw FlutterError("invalidInput")
+        mutations.withLock { sdk { client.inviteAction(roomId, command, revision = revision, id = intentId, note = note) } }
+    }
+    override suspend fun submitJoin(note: String) {
+        mutations.withLock { sdk { client.inviteAction("", SharedInviteAction.Submit, note = note) } }
+    }
+    override suspend fun cancelJoin(roomId: String) {
+        mutations.withLock { sdk { client.inviteAction(roomId, SharedInviteAction.Cancel) } }
+    }
+    override suspend fun muteMember(roomId: String, userId: String, revision: Long) {
+        mutations.withLock { sdk { client.muteMember(roomId, userId, revision) } }
+    }
     override suspend fun createGroup(title: String, members: List<String>) {
         mutations.withLock { sdk { client.createGroup(title, members) } }
     }

@@ -122,7 +122,7 @@ actor SharedCommunity {
             guard let revision = request.revision else { throw SharedFailure.invalidInput }
             let action: V2GroupInvitationOperationAction
             switch request.action {
-            case "create": action = .create(lifetimeSeconds: 3600, maximumApprovedUses: 10, expectedMembershipRevision: revision)
+            case "create": action = .create(lifetimeSeconds: 7 * 24 * 3600, maximumApprovedUses: 100, expectedMembershipRevision: revision)
             case "revoke": action = .revoke(inviteID: try .init(request.intentID ?? ""), expectedMembershipRevision: revision)
             case "approve", "reject": action = .decide(requestID: try .init(request.intentID ?? ""), decision: request.action == "approve" ? .approve : .reject, expectedMembershipRevision: revision)
             default: throw SharedFailure.invalidInput

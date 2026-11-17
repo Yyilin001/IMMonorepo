@@ -157,6 +157,39 @@ private actor MobileHost: ImHost {
             return GroupPage(announcement: page.announcement, editableAnnouncementRevision: page.editableAnnouncementRevision, membershipRevision: page.membershipRevision, actorRole: page.actorRole, permissions: page.permissions, members: page.members.map { GroupMember(userId: $0.userID, role: $0.role) }, hasMore: page.hasMore)
         }
     }
+    func invitations(roomId: String) async throws -> ImCommunity {
+        try await ordered { Self.community(try await self.client.invitations(roomID: roomId)) }
+    }
+    func nextInvitations(roomId: String) async throws -> ImCommunity {
+        try await ordered { Self.community(try await self.client.nextInvitations(roomID: roomId)) }
+    }
+    func previewInvite(text: String) async throws -> ImCommunity {
+        try await ordered { Self.community(try await self.client.previewInvite(text: text)) }
+    }
+    func refreshInvite() async throws -> ImCommunity {
+        try await ordered { Self.community(try await self.client.refreshInvite()) }
+    }
+    func inviteAction(roomId: String, revision: Int64, action: String, intentId: String?, note: String?) async throws {
+        guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered {
+            try await self.client.inviteAction(roomID: roomId, revision: expected, action: action, intentID: intentId, note: note)
+        }
+    }
+    func submitJoin(note: String) async throws { try await ordered { try await self.client.submitJoin(note: note) } }
+    func cancelJoin(roomId: String) async throws { try await ordered { try await self.client.cancelJoin(roomID: roomId) } }
+    func muteMember(roomId: String, userId: String, revision: Int64) async throws {
+        guard let expected = UInt64(exactly: revision) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
+        try await ordered { try await self.client.muteMember(roomID: roomId, userID: userId, revision: expected) }
+    }
+    private static func community(_ value: V2MobileClient.Community) -> ImCommunity {
+        ImCommunity(roomId: value.roomID,
+                    invites: value.invites.map { ImInvite(id: $0.id, url: $0.url, expires: $0.expires, used: Int64($0.used), maximum: Int64($0.maximum)) },
+                    requests: value.requests.map { ImJoinRequest(id: $0.id, userId: $0.userID, note: $0.note, state: $0.state) },
+                    hasMore: value.hasMore,
+                    preview: value.preview.map { ImInvitePreview(roomId: $0.roomID, title: $0.title, requestId: $0.requestID,
+                                                                 state: $0.state, member: $0.member, canSubmit: $0.canSubmit, canCancel: $0.canCancel) },
+                    failure: value.failure)
+    }
     func createGroup(title: String, members: [String]) async throws {
         try await ordered { try await self.client.createGroup(title: title, members: members) }
     }

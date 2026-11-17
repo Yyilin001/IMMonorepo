@@ -234,6 +234,9 @@ actor SharedSocialGroups {
         case "room":
             guard let roomID else { throw SharedFailure.invalidInput }
             return .room(try RoomID(roomID))
+        case "joinReview":
+            guard let roomID else { throw SharedFailure.invalidInput }
+            return .groupJoinReview(try RoomID(roomID))
         default: throw SharedFailure.invalidInput
         }
     }

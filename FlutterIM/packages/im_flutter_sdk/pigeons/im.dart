@@ -228,6 +228,70 @@ class GroupPage {
   bool hasMore;
 }
 
+class ImInvite {
+  ImInvite({
+    required this.id,
+    required this.url,
+    required this.expires,
+    required this.used,
+    required this.maximum,
+  });
+  String id;
+  String url;
+  int expires;
+  int used;
+  int maximum;
+}
+
+class ImJoinRequest {
+  ImJoinRequest({
+    required this.id,
+    required this.userId,
+    required this.note,
+    required this.state,
+  });
+  String id;
+  String userId;
+  String note;
+  String state;
+}
+
+class ImInvitePreview {
+  ImInvitePreview({
+    required this.roomId,
+    required this.title,
+    this.requestId,
+    this.state,
+    required this.member,
+    required this.canSubmit,
+    required this.canCancel,
+  });
+  String roomId;
+  String title;
+  String? requestId;
+  String? state;
+  bool member;
+  bool canSubmit;
+  bool canCancel;
+}
+
+class ImCommunity {
+  ImCommunity({
+    this.roomId,
+    required this.invites,
+    required this.requests,
+    required this.hasMore,
+    this.preview,
+    this.failure,
+  });
+  String? roomId;
+  List<ImInvite> invites;
+  List<ImJoinRequest> requests;
+  bool hasMore;
+  ImInvitePreview? preview;
+  String? failure;
+}
+
 class WindowView {
   WindowView({
     required this.conversations,
@@ -314,6 +378,28 @@ abstract class ImHost {
   void updateAnnouncement(String roomId, int revision, String text);
   @async
   GroupPage groupMembers(String roomId, bool next);
+  @async
+  ImCommunity invitations(String roomId);
+  @async
+  ImCommunity nextInvitations(String roomId);
+  @async
+  ImCommunity previewInvite(String text);
+  @async
+  ImCommunity refreshInvite();
+  @async
+  void inviteAction(
+    String roomId,
+    int revision,
+    String action,
+    String? intentId,
+    String? note,
+  );
+  @async
+  void submitJoin(String note);
+  @async
+  void cancelJoin(String roomId);
+  @async
+  void muteMember(String roomId, String userId, int revision);
   @async
   void createGroup(String title, List<String> members);
   @async

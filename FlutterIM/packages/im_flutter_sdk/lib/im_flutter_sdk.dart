@@ -64,6 +64,36 @@ typedef ImConversation = ({
   int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImInvite = ({
+  String id,
+  String url,
+  int expires,
+  int used,
+  int maximum,
+});
+typedef ImJoinRequest = ({
+  String id,
+  String userId,
+  String note,
+  String state,
+});
+typedef ImInvitePreview = ({
+  String roomId,
+  String title,
+  String? requestId,
+  String? state,
+  bool member,
+  bool canSubmit,
+  bool canCancel,
+});
+typedef ImCommunity = ({
+  String? roomId,
+  List<ImInvite> invites,
+  List<ImJoinRequest> requests,
+  bool hasMore,
+  ImInvitePreview? preview,
+  String? failure,
+});
 typedef ImProfile = ({
   String page,
   String userId,
@@ -432,6 +462,68 @@ final class ImClient {
       hasMore: page.hasMore,
     );
   });
+  Future<ImCommunity> invitations(String roomId) =>
+      _ordered(() async => _community(await _host.invitations(roomId)));
+  Future<ImCommunity> nextInvitations(String roomId) =>
+      _ordered(() async => _community(await _host.nextInvitations(roomId)));
+  Future<ImCommunity> previewInvite(String text) =>
+      _ordered(() async => _community(await _host.previewInvite(text.trim())));
+  Future<ImCommunity> refreshInvite() =>
+      _ordered(() async => _community(await _host.refreshInvite()));
+  Future<void> inviteAction(
+    String roomId,
+    int revision,
+    String action, {
+    String? intentId,
+    String? note,
+  }) => _ordered(
+    () => _host.inviteAction(roomId, revision, action, intentId, note),
+  );
+  Future<void> submitJoin(String note) =>
+      _ordered(() => _host.submitJoin(note));
+  Future<void> cancelJoin(String roomId) =>
+      _ordered(() => _host.cancelJoin(roomId));
+  Future<void> muteMember(String roomId, String userId, int revision) =>
+      _ordered(() => _host.muteMember(roomId, userId, revision));
+
+  ImCommunity _community(wire.ImCommunity value) => (
+    roomId: value.roomId,
+    invites: value.invites
+        .map(
+          (invite) => (
+            id: invite.id,
+            url: invite.url,
+            expires: invite.expires,
+            used: invite.used,
+            maximum: invite.maximum,
+          ),
+        )
+        .toList(growable: false),
+    requests: value.requests
+        .map(
+          (request) => (
+            id: request.id,
+            userId: request.userId,
+            note: request.note,
+            state: request.state,
+          ),
+        )
+        .toList(growable: false),
+    hasMore: value.hasMore,
+    preview: value.preview == null
+        ? null
+        : (
+            roomId: value.preview!.roomId,
+            title: value.preview!.title,
+            requestId: value.preview!.requestId,
+            state: value.preview!.state,
+            member: value.preview!.member,
+            canSubmit: value.preview!.canSubmit,
+            canCancel: value.preview!.canCancel,
+          ),
+    failure: value.failure,
+  );
+
   Future<void> createGroup(String title, List<String> members) =>
       _ordered(() => _host.createGroup(title, members));
 

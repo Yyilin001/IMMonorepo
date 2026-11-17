@@ -284,8 +284,18 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                                     await owner.refreshDirectory();
                                   }
                                 },
-                        )
-                      else if (owner?.userId != null)
+                        ),
+                      if (owner?.userId != null && groups)
+                        IconButton(
+                          tooltip: '加入群聊',
+                          icon: const Icon(Icons.qr_code_scanner_rounded),
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const _JoinGroupPage(),
+                            ),
+                          ),
+                        ),
+                      if (owner?.userId != null && !groups)
                         IconButton(
                           tooltip: '添加好友',
                           icon: const Icon(Icons.person_add_outlined),

@@ -1107,6 +1107,276 @@ class GroupPage {
   }
 }
 
+class ImInvite {
+  ImInvite({
+    required this.id,
+    required this.url,
+    required this.expires,
+    required this.used,
+    required this.maximum,
+  });
+
+  String id;
+
+  String url;
+
+  int expires;
+
+  int used;
+
+  int maximum;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      id,
+      url,
+      expires,
+      used,
+      maximum,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImInvite decode(Object result) {
+    result as List<Object?>;
+    return ImInvite(
+      id: result[0]! as String,
+      url: result[1]! as String,
+      expires: result[2]! as int,
+      used: result[3]! as int,
+      maximum: result[4]! as int,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImInvite || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(id, other.id) && _deepEquals(url, other.url) && _deepEquals(expires, other.expires) && _deepEquals(used, other.used) && _deepEquals(maximum, other.maximum);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImInvite(id: $id, url: $url, expires: $expires, used: $used, maximum: $maximum)';
+  }
+}
+
+class ImJoinRequest {
+  ImJoinRequest({
+    required this.id,
+    required this.userId,
+    required this.note,
+    required this.state,
+  });
+
+  String id;
+
+  String userId;
+
+  String note;
+
+  String state;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      id,
+      userId,
+      note,
+      state,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImJoinRequest decode(Object result) {
+    result as List<Object?>;
+    return ImJoinRequest(
+      id: result[0]! as String,
+      userId: result[1]! as String,
+      note: result[2]! as String,
+      state: result[3]! as String,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImJoinRequest || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(id, other.id) && _deepEquals(userId, other.userId) && _deepEquals(note, other.note) && _deepEquals(state, other.state);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImJoinRequest(id: $id, userId: $userId, note: $note, state: $state)';
+  }
+}
+
+class ImInvitePreview {
+  ImInvitePreview({
+    required this.roomId,
+    required this.title,
+    this.requestId,
+    this.state,
+    required this.member,
+    required this.canSubmit,
+    required this.canCancel,
+  });
+
+  String roomId;
+
+  String title;
+
+  String? requestId;
+
+  String? state;
+
+  bool member;
+
+  bool canSubmit;
+
+  bool canCancel;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      roomId,
+      title,
+      requestId,
+      state,
+      member,
+      canSubmit,
+      canCancel,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImInvitePreview decode(Object result) {
+    result as List<Object?>;
+    return ImInvitePreview(
+      roomId: result[0]! as String,
+      title: result[1]! as String,
+      requestId: result[2] as String?,
+      state: result[3] as String?,
+      member: result[4]! as bool,
+      canSubmit: result[5]! as bool,
+      canCancel: result[6]! as bool,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImInvitePreview || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(roomId, other.roomId) && _deepEquals(title, other.title) && _deepEquals(requestId, other.requestId) && _deepEquals(state, other.state) && _deepEquals(member, other.member) && _deepEquals(canSubmit, other.canSubmit) && _deepEquals(canCancel, other.canCancel);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImInvitePreview(roomId: $roomId, title: $title, requestId: $requestId, state: $state, member: $member, canSubmit: $canSubmit, canCancel: $canCancel)';
+  }
+}
+
+class ImCommunity {
+  ImCommunity({
+    this.roomId,
+    required this.invites,
+    required this.requests,
+    required this.hasMore,
+    this.preview,
+    this.failure,
+  });
+
+  String? roomId;
+
+  List<ImInvite> invites;
+
+  List<ImJoinRequest> requests;
+
+  bool hasMore;
+
+  ImInvitePreview? preview;
+
+  String? failure;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      roomId,
+      invites,
+      requests,
+      hasMore,
+      preview,
+      failure,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImCommunity decode(Object result) {
+    result as List<Object?>;
+    return ImCommunity(
+      roomId: result[0] as String?,
+      invites: (result[1]! as List<Object?>).cast<ImInvite>(),
+      requests: (result[2]! as List<Object?>).cast<ImJoinRequest>(),
+      hasMore: result[3]! as bool,
+      preview: result[4] as ImInvitePreview?,
+      failure: result[5] as String?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImCommunity || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(roomId, other.roomId) && _deepEquals(invites, other.invites) && _deepEquals(requests, other.requests) && _deepEquals(hasMore, other.hasMore) && _deepEquals(preview, other.preview) && _deepEquals(failure, other.failure);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImCommunity(roomId: $roomId, invites: $invites, requests: $requests, hasMore: $hasMore, preview: $preview, failure: $failure)';
+  }
+}
+
 class WindowView {
   WindowView({
     required this.conversations,
@@ -1220,8 +1490,20 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is GroupPage) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is ImInvite) {
       buffer.putUint8(144);
+      writeValue(buffer, value.encode());
+    }    else if (value is ImJoinRequest) {
+      buffer.putUint8(145);
+      writeValue(buffer, value.encode());
+    }    else if (value is ImInvitePreview) {
+      buffer.putUint8(146);
+      writeValue(buffer, value.encode());
+    }    else if (value is ImCommunity) {
+      buffer.putUint8(147);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(148);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1262,6 +1544,14 @@ class _PigeonCodec extends StandardMessageCodec {
       case 143:
         return GroupPage.decode(readValue(buffer)!);
       case 144:
+        return ImInvite.decode(readValue(buffer)!);
+      case 145:
+        return ImJoinRequest.decode(readValue(buffer)!);
+      case 146:
+        return ImInvitePreview.decode(readValue(buffer)!);
+      case 147:
+        return ImCommunity.decode(readValue(buffer)!);
+      case 148:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1654,6 +1944,146 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as GroupPage;
+  }
+
+  Future<ImCommunity> invitations(String roomId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.invitations$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as ImCommunity;
+  }
+
+  Future<ImCommunity> nextInvitations(String roomId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.nextInvitations$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as ImCommunity;
+  }
+
+  Future<ImCommunity> previewInvite(String text) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.previewInvite$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[text]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as ImCommunity;
+  }
+
+  Future<ImCommunity> refreshInvite() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.refreshInvite$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as ImCommunity;
+  }
+
+  Future<void> inviteAction(String roomId, int revision, String action, String? intentId, String? note) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.inviteAction$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, revision, action, intentId, note]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> submitJoin(String note) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.submitJoin$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[note]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> cancelJoin(String roomId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.cancelJoin$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> muteMember(String roomId, String userId, int revision) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.muteMember$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, userId, revision]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   Future<void> createGroup(String title, List<String> members) async {

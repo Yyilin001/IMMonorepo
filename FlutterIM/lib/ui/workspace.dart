@@ -13,6 +13,7 @@ import 'package:mime/mime.dart' show lookupMimeType;
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 import 'package:material_ui/material_ui.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -28,6 +29,7 @@ import '../mock/group_members.dart';
 part 'mobile_workspace.dart';
 part 'sdk_workspace.dart';
 part 'sdk_avatars.dart';
+part 'sdk_community.dart';
 part 'sdk_chat.dart';
 part 'sdk_transfers.dart';
 part 'sdk_create_group.dart';
