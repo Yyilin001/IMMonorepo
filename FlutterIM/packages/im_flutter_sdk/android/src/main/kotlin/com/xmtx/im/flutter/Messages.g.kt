@@ -1030,6 +1030,59 @@ data class GroupMember (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class ImPushState (
+  val preferenceEnabled: Boolean,
+  val desiredEnabled: Boolean,
+  val waitingForToken: Boolean,
+  val pending: Boolean,
+  val pauseReason: String? = null
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImPushState {
+      val preferenceEnabled = pigeonVar_list[0] as Boolean
+      val desiredEnabled = pigeonVar_list[1] as Boolean
+      val waitingForToken = pigeonVar_list[2] as Boolean
+      val pending = pigeonVar_list[3] as Boolean
+      val pauseReason = pigeonVar_list[4] as String?
+      return ImPushState(preferenceEnabled, desiredEnabled, waitingForToken, pending, pauseReason)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      preferenceEnabled,
+      desiredEnabled,
+      waitingForToken,
+      pending,
+      pauseReason,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImPushState
+    return MessagesPigeonUtils.deepEquals(this.preferenceEnabled, other.preferenceEnabled) && MessagesPigeonUtils.deepEquals(this.desiredEnabled, other.desiredEnabled) && MessagesPigeonUtils.deepEquals(this.waitingForToken, other.waitingForToken) && MessagesPigeonUtils.deepEquals(this.pending, other.pending) && MessagesPigeonUtils.deepEquals(this.pauseReason, other.pauseReason)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.preferenceEnabled)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.desiredEnabled)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.waitingForToken)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.pending)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.pauseReason)
+    return result
+  }
+  override fun toString(): String {
+    return "ImPushState(preferenceEnabled=$preferenceEnabled, desiredEnabled=$desiredEnabled, waitingForToken=$waitingForToken, pending=$pending, pauseReason=$pauseReason)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class ImActivity (
   val roomId: String,
   val isGroup: Boolean,
@@ -1899,75 +1952,80 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       144.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImActivity.fromList(it)
+          ImPushState.fromList(it)
         }
       }
       145.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImPrivacy.fromList(it)
+          ImActivity.fromList(it)
         }
       }
       146.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImDeviceSession.fromList(it)
+          ImPrivacy.fromList(it)
         }
       }
       147.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImDeviceSessions.fromList(it)
+          ImDeviceSession.fromList(it)
         }
       }
       148.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImGroupNickname.fromList(it)
+          ImDeviceSessions.fromList(it)
         }
       }
       149.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImGroupPolicy.fromList(it)
+          ImGroupNickname.fromList(it)
         }
       }
       150.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          ImGroupPolicy.fromList(it)
         }
       }
       151.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImInvite.fromList(it)
+          GroupPage.fromList(it)
         }
       }
       152.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImJoinRequest.fromList(it)
+          ImInvite.fromList(it)
         }
       }
       153.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImInvitePreview.fromList(it)
+          ImJoinRequest.fromList(it)
         }
       }
       154.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImCommunity.fromList(it)
+          ImInvitePreview.fromList(it)
         }
       }
       155.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImFavoriteMessage.fromList(it)
+          ImCommunity.fromList(it)
         }
       }
       156.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImFavorites.fromList(it)
+          ImFavoriteMessage.fromList(it)
         }
       }
       157.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImReaders.fromList(it)
+          ImFavorites.fromList(it)
         }
       }
       158.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          ImReaders.fromList(it)
+        }
+      }
+      159.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -2037,64 +2095,68 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(143)
         writeValue(stream, value.toList())
       }
-      is ImActivity -> {
+      is ImPushState -> {
         stream.write(144)
         writeValue(stream, value.toList())
       }
-      is ImPrivacy -> {
+      is ImActivity -> {
         stream.write(145)
         writeValue(stream, value.toList())
       }
-      is ImDeviceSession -> {
+      is ImPrivacy -> {
         stream.write(146)
         writeValue(stream, value.toList())
       }
-      is ImDeviceSessions -> {
+      is ImDeviceSession -> {
         stream.write(147)
         writeValue(stream, value.toList())
       }
-      is ImGroupNickname -> {
+      is ImDeviceSessions -> {
         stream.write(148)
         writeValue(stream, value.toList())
       }
-      is ImGroupPolicy -> {
+      is ImGroupNickname -> {
         stream.write(149)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is ImGroupPolicy -> {
         stream.write(150)
         writeValue(stream, value.toList())
       }
-      is ImInvite -> {
+      is GroupPage -> {
         stream.write(151)
         writeValue(stream, value.toList())
       }
-      is ImJoinRequest -> {
+      is ImInvite -> {
         stream.write(152)
         writeValue(stream, value.toList())
       }
-      is ImInvitePreview -> {
+      is ImJoinRequest -> {
         stream.write(153)
         writeValue(stream, value.toList())
       }
-      is ImCommunity -> {
+      is ImInvitePreview -> {
         stream.write(154)
         writeValue(stream, value.toList())
       }
-      is ImFavoriteMessage -> {
+      is ImCommunity -> {
         stream.write(155)
         writeValue(stream, value.toList())
       }
-      is ImFavorites -> {
+      is ImFavoriteMessage -> {
         stream.write(156)
         writeValue(stream, value.toList())
       }
-      is ImReaders -> {
+      is ImFavorites -> {
         stream.write(157)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is ImReaders -> {
         stream.write(158)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(159)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -2116,6 +2178,11 @@ interface ImHost {
   suspend fun passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?)
   suspend fun connect(): ImSession
   suspend fun synchronize()
+  suspend fun pushState(): ImPushState?
+  suspend fun setPushEnabled(enabled: Boolean)
+  suspend fun receivePushToken(provider: String, environment: String, token: String)
+  suspend fun retryPush()
+  suspend fun removePushEndpoint()
   suspend fun activity(roomId: String): ImActivity?
   suspend fun setTyping(roomId: String, typing: Boolean)
   suspend fun closeActivity()
@@ -2392,6 +2459,101 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 api.synchronize()
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.pushState$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.pushState())
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.setPushEnabled$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val enabledArg = args[0] as Boolean
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.setPushEnabled(enabledArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.receivePushToken$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val providerArg = args[0] as String
+            val environmentArg = args[1] as String
+            val tokenArg = args[2] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.receivePushToken(providerArg, environmentArg, tokenArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.retryPush$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.retryPush()
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.removePushEndpoint$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.removePushEndpoint()
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

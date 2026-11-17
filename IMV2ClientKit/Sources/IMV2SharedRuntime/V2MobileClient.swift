@@ -229,6 +229,19 @@ public final class V2MobileClient: Sendable {
                             text: $0.text, createdAt: $0.createdAt, attachmentNames: $0.attachmentNames)
         }, hasMore: page.hasMore)
     }
+    public func pushState() async throws -> PushState? {
+        guard let value = try await run(.init(operation: .pushState)).push else { return nil }
+        return PushState(preferenceEnabled: value.preferenceEnabled, desiredEnabled: value.desiredEnabled,
+                         waitingForToken: value.waitingForToken, pending: value.pending, pauseReason: value.pauseReason)
+    }
+    public func setPushEnabled(_ enabled: Bool) async throws {
+        _ = try await run(.init(operation: .setPushEnabled, flag1: enabled))
+    }
+    public func receivePushToken(provider: String, environment: String, token: String) async throws {
+        _ = try await run(.init(operation: .receivePushToken, text: token, scope: provider, action: environment))
+    }
+    public func retryPush() async throws { _ = try await run(.init(operation: .retryPush)) }
+    public func removePushEndpoint() async throws { _ = try await run(.init(operation: .removePushEndpoint)) }
     public func activity(roomID: String) async throws -> Activity? {
         let value = try await run(.init(operation: .activity, roomID: roomID))
         guard let activity = value.activity else { return nil }
@@ -419,6 +432,13 @@ public final class V2MobileClient: Sendable {
         public let allowsOnlinePresence: Bool?
         public let allowsTypingIndicators: Bool?
         public let blockedUsers: [String]
+    }
+    public struct PushState: Sendable {
+        public let preferenceEnabled: Bool
+        public let desiredEnabled: Bool
+        public let waitingForToken: Bool
+        public let pending: Bool
+        public let pauseReason: String?
     }
     public struct Activity: Sendable {
         public let roomID: String

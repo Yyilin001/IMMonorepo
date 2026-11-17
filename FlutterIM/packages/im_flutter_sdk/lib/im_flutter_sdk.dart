@@ -90,6 +90,13 @@ typedef ImConversation = ({
   int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImPushState = ({
+  bool preferenceEnabled,
+  bool desiredEnabled,
+  bool waitingForToken,
+  bool pending,
+  String? pauseReason,
+});
 typedef ImActivity = ({
   String roomId,
   bool isGroup,
@@ -412,6 +419,32 @@ final class ImClient {
   });
 
   Future<void> synchronize() => _ordered(_host.synchronize);
+
+  Future<ImPushState?> pushState() => _ordered(() async {
+    final value = await _host.pushState();
+    return value == null
+        ? null
+        : (
+            preferenceEnabled: value.preferenceEnabled,
+            desiredEnabled: value.desiredEnabled,
+            waitingForToken: value.waitingForToken,
+            pending: value.pending,
+            pauseReason: value.pauseReason,
+          );
+  });
+
+  Future<void> setPushEnabled({required bool enabled}) =>
+      _ordered(() => _host.setPushEnabled(enabled));
+
+  Future<void> receivePushToken({
+    required String provider,
+    required String environment,
+    required String token,
+  }) => _ordered(() => _host.receivePushToken(provider, environment, token));
+
+  Future<void> retryPush() => _ordered(_host.retryPush);
+
+  Future<void> removePushEndpoint() => _ordered(_host.removePushEndpoint);
 
   Future<ImActivity?> activity(String roomId) => _ordered(() async {
     final value = await _host.activity(roomId);

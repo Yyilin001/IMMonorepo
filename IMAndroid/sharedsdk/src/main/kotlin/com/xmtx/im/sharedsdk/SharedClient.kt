@@ -47,11 +47,12 @@ data class SharedDeviceSession(val deviceID: String, val deviceName: String, val
 data class SharedDeviceSessions(val sessions: PersistentList<SharedDeviceSession>, val nextCursor: String?)
 data class SharedFavoriteMessage(val id: String, val roomID: String, val roomTitle: String, val senderID: String, val text: String, val createdAt: Long?, val attachmentNames: List<String>)
 data class SharedFavorites(val messages: List<SharedFavoriteMessage>, val hasMore: Boolean)
+data class SharedPushState(val preferenceEnabled: Boolean, val desiredEnabled: Boolean, val waitingForToken: Boolean, val pending: Boolean, val pauseReason: String?)
 data class SharedActivity(val roomID: String, val isGroup: Boolean, val isOnline: Boolean?, val typingUserIDs: List<String>)
 data class SharedPrivacy(val allowsStrangerMessages: Boolean?, val allowsUserAdd: Boolean?, val allowsDirectReadReceipts: Boolean?,
     val allowsGroupReadReceipts: Boolean?, val allowsOnlinePresence: Boolean?, val allowsTypingIndicators: Boolean?, val blockedUsers: List<String>)
 data class SharedSnapshot(val state: SharedSessionState, val userID: String?, val allowsStrangerMessages: Boolean?, val appliedSequence: Long,
-    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null, val privacy: SharedPrivacy? = null, val favorites: SharedFavorites? = null, val activity: SharedActivity? = null)
+    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null, val privacy: SharedPrivacy? = null, val favorites: SharedFavorites? = null, val activity: SharedActivity? = null, val push: SharedPushState? = null)
 
 internal object NativeSharedSDK {
     init { System.loadLibrary("IMV2SharedSDK") }
@@ -145,6 +146,16 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun favorites(next: Boolean = false): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "favorites").put("action", if (next) "next" else "first"))
     }
+    suspend fun pushState(): SharedSnapshot = mutate("pushState")
+    suspend fun setPushEnabled(enabled: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "setPushEnabled").put("flag1", enabled))
+    }
+    suspend fun receivePushToken(provider: String, environment: String, token: String): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "receivePushToken").put("text", token)
+            .put("scope", provider).put("action", environment))
+    }
+    suspend fun retryPush(): SharedSnapshot = mutate("retryPush")
+    suspend fun removePushEndpoint(): SharedSnapshot = mutate("removePushEndpoint")
     suspend fun activity(roomID: String): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "activity").put("roomID", roomID))
     }
@@ -429,6 +440,10 @@ class SharedClient private constructor(private val handle: Long) {
                 SharedActivity(activity.getString("roomID"), activity.getBoolean("isGroup"),
                     if (activity.has("isOnline")) activity.getBoolean("isOnline") else null,
                     (0 until typing.length()).map { typing.getString(it) })
+            }, push = value.optJSONObject("push")?.let { push ->
+                SharedPushState(push.getBoolean("preferenceEnabled"), push.getBoolean("desiredEnabled"),
+                    push.getBoolean("waitingForToken"), push.getBoolean("pending"),
+                    push.optString("pauseReason").takeIf(String::isNotEmpty))
             }, favorites = value.optJSONObject("favorites")?.let { favorites ->
                 val rows = favorites.getJSONArray("messages")
                 SharedFavorites((0 until rows.length()).map { index -> rows.getJSONObject(index).let {

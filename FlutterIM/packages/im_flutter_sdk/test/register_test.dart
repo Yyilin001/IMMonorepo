@@ -12,7 +12,7 @@ void main() {
     final calls = <Object?>[];
     final lifecycle = <Object?>[];
     final devices = <Object?>[];
-    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'sendText', 'pinMessage', 'moderateMessage', 'synchronize', 'activity', 'setTyping', 'closeActivity', 'close']) {
+    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'sendText', 'pinMessage', 'moderateMessage', 'synchronize', 'activity', 'setTyping', 'closeActivity', 'pushState', 'setPushEnabled', 'receivePushToken', 'retryPush', 'removePushEndpoint', 'close']) {
       final channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.im_flutter_sdk.ImHost.$method',
         wire.ImHost.pigeonChannelCodec,
@@ -61,7 +61,20 @@ void main() {
             ];
           case 'setTyping':
           case 'closeActivity':
+          case 'setPushEnabled':
+          case 'receivePushToken':
+          case 'retryPush':
+          case 'removePushEndpoint':
             devices.add(args as List<Object?>? ?? const []);
+          case 'pushState':
+            return [
+              wire.ImPushState(
+                preferenceEnabled: true,
+                desiredEnabled: true,
+                waitingForToken: false,
+                pending: false,
+              ),
+            ];
           case 'privacy':
           case 'setPrivacy':
             devices.add(args as List<Object?>? ?? const []);
@@ -174,6 +187,21 @@ void main() {
     await client.setTyping('room', typing: true);
     expect(devices.last, ['room', true]);
     await client.closeActivity();
+    expect(devices.last, isEmpty);
+
+    final push = await client.pushState();
+    expect(push?.desiredEnabled, true);
+    await client.setPushEnabled(enabled: true);
+    expect(devices.last, [true]);
+    await client.receivePushToken(
+      provider: 'apns',
+      environment: 'development',
+      token: 'abc',
+    );
+    expect(devices.last, ['apns', 'development', 'abc']);
+    await client.retryPush();
+    expect(devices.last, isEmpty);
+    await client.removePushEndpoint();
     expect(devices.last, isEmpty);
     await client.close();
   });

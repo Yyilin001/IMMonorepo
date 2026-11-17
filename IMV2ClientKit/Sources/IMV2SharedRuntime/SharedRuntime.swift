@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, pinMessage, moderateMessage, activity, setTyping, closeActivity, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, pinMessage, moderateMessage, activity, setTyping, closeActivity, pushState, setPushEnabled, receivePushToken, retryPush, removePushEndpoint, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -118,6 +118,13 @@ struct SharedDeviceSession: Encodable, Sendable {
     let createdAt: Int64; let lastActiveAt: Int64; let isCurrentDevice: Bool
 }
 struct SharedDeviceSessions: Encodable, Sendable { let sessions: [SharedDeviceSession]; let nextCursor: String? }
+struct SharedPushState: Encodable, Sendable {
+    var preferenceEnabled: Bool
+    var desiredEnabled: Bool
+    var waitingForToken: Bool
+    var pending: Bool
+    var pauseReason: String?
+}
 struct SharedPrivacy: Encodable, Sendable {
     var allowsStrangerMessages: Bool?
     var allowsUserAdd: Bool?
@@ -147,6 +154,7 @@ package struct SharedSnapshot: Encodable, Sendable {
     var privacy: SharedPrivacy? = nil
     var favorites: SharedFavorites? = nil
     var activity: SharedActivityView? = nil
+    var push: SharedPushState? = nil
 }
 package enum SharedFailure: String, Error { case invalidConfiguration, invalidInput, busy, closed, authenticationRequired, networkUnavailable, storageUnavailable, operationFailed, cancelled, accountExists, publicHandleTaken, invalidPublicHandle, invalidDisplayName, invalidPassword, invalidRecoveryCode, rateLimited }
 package func sharedFailure(_ error: any Error) -> SharedFailure {
@@ -215,6 +223,7 @@ package actor SharedRuntime {
     private var preferencePreparation: Task<Void, Never>?
     private var messageModeration: V2MessageModerationOperationService?
     private var conversationActivity: SharedActivity?
+    private var pushReconciler: V2PushIntentReconciler?
     private var dispatcher: Task<Void, Never>?
     private var roomRecovery: V2RoomRecoveryRunner?
     private var selectedRoom: RoomID?
@@ -346,6 +355,34 @@ package actor SharedRuntime {
                     attachmentNames: message.mediaPresentations.map { $0.resourceDescriptor?.displayName.value ?? "附件" }))
             }
             favorites = SharedFavorites(messages: rows, hasMore: page.nextCursor != nil)
+        case .pushState:
+            if let pushReconciler { _ = try await pushSummary(await pushReconciler.state()) }
+        case .setPushEnabled:
+            guard let enabled = request.flag1 else { throw SharedFailure.invalidInput }
+            try await setPushEnabled(enabled)
+        case .receivePushToken:
+            guard let reconciler = pushReconciler, let token = request.text,
+                  let provider = V2ClientPushEndpointProvider(rawValue: request.scope ?? ""),
+                  let environment = V2ClientPushEndpointEnvironment(rawValue: request.action ?? "") else {
+                throw SharedFailure.invalidInput
+            }
+            try await reconciler.receiveToken(provider: provider, environment: environment, value: token)
+            try await flushPush()
+        case .retryPush:
+            guard let reconciler = pushReconciler else { throw SharedFailure.authenticationRequired }
+            let current = try await reconciler.state()
+            try await reconciler.setEnabled(current.preferenceEnabled)
+            if current.pauseReason != nil { try await reconciler.restartSession() }
+            try await flushPush()
+        case .removePushEndpoint:
+            guard let reconciler = pushReconciler else { return try await snapshot() }
+            try await reconciler.prepareSignOut()
+            for _ in 0..<4 {
+                let current = try await reconciler.state()
+                if !current.desiredEnabled && !current.pending { break }
+                let result = try await reconciler.flushOnce()
+                if result == .retryScheduled || result == .paused || result == .idle { break }
+            }
         case .activity:
             guard let conversationActivity, let store, let roomID = request.roomID else { throw SharedFailure.authenticationRequired }
             let room = try RoomID(roomID)
@@ -601,10 +638,19 @@ package actor SharedRuntime {
         accountHTTP = nil; deviceSessionsClient = nil; deviceSessions = nil
         favorites = nil; favoriteCursor = nil
         preferencePreparation?.cancel(); preferencePreparation = nil; accountPreferences = nil; privacy = nil
-        messageModeration = nil
+        messageModeration = nil; pushReconciler = nil
         await conversationActivity?.close(); conversationActivity = nil
     }
     private func signOut() async throws {
+        if let reconciler = pushReconciler {
+            try await reconciler.prepareSignOut()
+            for _ in 0..<4 {
+                let current = try await reconciler.state()
+                if !current.desiredEnabled && !current.pending { break }
+                let result = try await reconciler.flushOnce()
+                if result == .retryScheduled || result == .paused || result == .idle { break }
+            }
+        }
         // Intent survives cancellation/crash between revocation handoff and local deletion.
         try await session.beginSignOut()
         state = "signingOut"; userID = nil; selectedRoom = nil
@@ -677,6 +723,11 @@ package actor SharedRuntime {
             roomCursor: { roomID in try await store.groupEventCursor(roomID: roomID) })
         let conversationActivity = SharedActivity(accountID: identity.userID, transport: transport, rooms: subscriptions)
         self.conversationActivity = conversationActivity
+        let pushScope = try await store.pushIntentScope(deviceID: identity.deviceID)
+        let previousPush = try await store.inspectPushIntent(scope: pushScope)
+        pushReconciler = try await V2PushIntentReconciler.activate(store: store,
+            transport: try V2HTTPPushEndpointClient(endpoint: base.appendingPathComponent("v2/push-endpoint"), credentials: accountHTTP, transport: accountHTTP),
+            scope: pushScope, initialPreference: previousPush?.preferenceEnabled ?? false)
         let moderationClient = try V2HTTPMessageModerationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)
         let messageModeration = V2MessageModerationOperationService(accountID: identity.userID,
             activationID: identity.deviceID.uuidValue ?? UUID(), store: store, client: moderationClient)
@@ -831,6 +882,28 @@ package actor SharedRuntime {
         return "提及 \(users) 位成员"
     }
 
+    private func pushStateSnapshot() async -> SharedPushState? {
+        guard let reconciler = pushReconciler, let value = try? await reconciler.state() else { return nil }
+        return pushSummary(value)
+    }
+    private func pushSummary(_ value: V2LocalPushIntent) -> SharedPushState {
+        SharedPushState(preferenceEnabled: value.preferenceEnabled, desiredEnabled: value.desiredEnabled,
+                        waitingForToken: value.waitingForToken, pending: value.pending,
+                        pauseReason: value.pauseReason.map { String(describing: $0) })
+    }
+    private func setPushEnabled(_ enabled: Bool) async throws {
+        guard let reconciler = pushReconciler else { throw SharedFailure.authenticationRequired }
+        try await reconciler.setEnabled(enabled)
+        try await flushPush()
+    }
+    private func flushPush() async throws {
+        guard let reconciler = pushReconciler else { return }
+        for _ in 0..<3 {
+            let result = try await reconciler.flushOnce()
+            if result == .retryScheduled || result == .paused || result == .idle { break }
+        }
+    }
+
     private func snapshot(resourceChunk: String? = nil) async throws -> SharedSnapshot {
         var currentState = state
         if let runtime, state == "connected", await runtime.currentState() == .stopped { currentState = "offline" }
@@ -857,6 +930,7 @@ package actor SharedRuntime {
         return .init(state: currentState, userID: userID, allowsStrangerMessages: preference?.allowsStrangerMessages, appliedSequence: cursor?.appliedSequence ?? 0,
             acknowledgedSequence: cursor?.serverAcknowledgedSequence ?? 0, connections: connections,
             conversations: rows, failure: failure?.rawValue,
-            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions, privacy: privacy, favorites: favorites, activity: await conversationActivity?.view())
+            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions, privacy: privacy, favorites: favorites, activity: await conversationActivity?.view(),
+            push: await pushStateSnapshot())
     }
 }

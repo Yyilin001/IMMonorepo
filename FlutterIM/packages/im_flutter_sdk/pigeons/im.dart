@@ -236,6 +236,21 @@ class GroupMember {
   String role;
 }
 
+class ImPushState {
+  ImPushState({
+    required this.preferenceEnabled,
+    required this.desiredEnabled,
+    required this.waitingForToken,
+    required this.pending,
+    this.pauseReason,
+  });
+  bool preferenceEnabled;
+  bool desiredEnabled;
+  bool waitingForToken;
+  bool pending;
+  String? pauseReason;
+}
+
 class ImActivity {
   ImActivity({
     required this.roomId,
@@ -484,6 +499,16 @@ abstract class ImHost {
   ImSession connect();
   @async
   void synchronize();
+  @async
+  ImPushState? pushState();
+  @async
+  void setPushEnabled(bool enabled);
+  @async
+  void receivePushToken(String provider, String environment, String token);
+  @async
+  void retryPush();
+  @async
+  void removePushEndpoint();
   @async
   ImActivity? activity(String roomId);
   @async

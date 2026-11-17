@@ -1055,6 +1055,61 @@ struct GroupMember: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct ImPushState: Hashable, CustomStringConvertible {
+  var preferenceEnabled: Bool
+  var desiredEnabled: Bool
+  var waitingForToken: Bool
+  var pending: Bool
+  var pauseReason: String? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImPushState? {
+    let preferenceEnabled = pigeonVar_list[0] as! Bool
+    let desiredEnabled = pigeonVar_list[1] as! Bool
+    let waitingForToken = pigeonVar_list[2] as! Bool
+    let pending = pigeonVar_list[3] as! Bool
+    let pauseReason: String? = nilOrValue(pigeonVar_list[4])
+
+    return ImPushState(
+      preferenceEnabled: preferenceEnabled,
+      desiredEnabled: desiredEnabled,
+      waitingForToken: waitingForToken,
+      pending: pending,
+      pauseReason: pauseReason
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      preferenceEnabled,
+      desiredEnabled,
+      waitingForToken,
+      pending,
+      pauseReason,
+    ]
+  }
+  static func == (lhs: ImPushState, rhs: ImPushState) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.preferenceEnabled, rhs.preferenceEnabled) && MessagesPigeonInternal.deepEquals(lhs.desiredEnabled, rhs.desiredEnabled) && MessagesPigeonInternal.deepEquals(lhs.waitingForToken, rhs.waitingForToken) && MessagesPigeonInternal.deepEquals(lhs.pending, rhs.pending) && MessagesPigeonInternal.deepEquals(lhs.pauseReason, rhs.pauseReason)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImPushState")
+    MessagesPigeonInternal.deepHash(value: preferenceEnabled, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: desiredEnabled, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: waitingForToken, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: pending, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: pauseReason, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImPushState(preferenceEnabled: \(String(describing: preferenceEnabled)), desiredEnabled: \(String(describing: desiredEnabled)), waitingForToken: \(String(describing: waitingForToken)), pending: \(String(describing: pending)), pauseReason: \(String(describing: pauseReason)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct ImActivity: Hashable, CustomStringConvertible {
   var roomId: String
   var isGroup: Bool
@@ -1908,34 +1963,36 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 143:
       return GroupMember.fromList(self.readValue() as! [Any?])
     case 144:
-      return ImActivity.fromList(self.readValue() as! [Any?])
+      return ImPushState.fromList(self.readValue() as! [Any?])
     case 145:
-      return ImPrivacy.fromList(self.readValue() as! [Any?])
+      return ImActivity.fromList(self.readValue() as! [Any?])
     case 146:
-      return ImDeviceSession.fromList(self.readValue() as! [Any?])
+      return ImPrivacy.fromList(self.readValue() as! [Any?])
     case 147:
-      return ImDeviceSessions.fromList(self.readValue() as! [Any?])
+      return ImDeviceSession.fromList(self.readValue() as! [Any?])
     case 148:
-      return ImGroupNickname.fromList(self.readValue() as! [Any?])
+      return ImDeviceSessions.fromList(self.readValue() as! [Any?])
     case 149:
-      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
+      return ImGroupNickname.fromList(self.readValue() as! [Any?])
     case 150:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
     case 151:
-      return ImInvite.fromList(self.readValue() as! [Any?])
+      return GroupPage.fromList(self.readValue() as! [Any?])
     case 152:
-      return ImJoinRequest.fromList(self.readValue() as! [Any?])
+      return ImInvite.fromList(self.readValue() as! [Any?])
     case 153:
-      return ImInvitePreview.fromList(self.readValue() as! [Any?])
+      return ImJoinRequest.fromList(self.readValue() as! [Any?])
     case 154:
-      return ImCommunity.fromList(self.readValue() as! [Any?])
+      return ImInvitePreview.fromList(self.readValue() as! [Any?])
     case 155:
-      return ImFavoriteMessage.fromList(self.readValue() as! [Any?])
+      return ImCommunity.fromList(self.readValue() as! [Any?])
     case 156:
-      return ImFavorites.fromList(self.readValue() as! [Any?])
+      return ImFavoriteMessage.fromList(self.readValue() as! [Any?])
     case 157:
-      return ImReaders.fromList(self.readValue() as! [Any?])
+      return ImFavorites.fromList(self.readValue() as! [Any?])
     case 158:
+      return ImReaders.fromList(self.readValue() as! [Any?])
+    case 159:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -1990,50 +2047,53 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? GroupMember {
       super.writeByte(143)
       super.writeValue(value.toList())
-    } else if let value = value as? ImActivity {
+    } else if let value = value as? ImPushState {
       super.writeByte(144)
       super.writeValue(value.toList())
-    } else if let value = value as? ImPrivacy {
+    } else if let value = value as? ImActivity {
       super.writeByte(145)
       super.writeValue(value.toList())
-    } else if let value = value as? ImDeviceSession {
+    } else if let value = value as? ImPrivacy {
       super.writeByte(146)
       super.writeValue(value.toList())
-    } else if let value = value as? ImDeviceSessions {
+    } else if let value = value as? ImDeviceSession {
       super.writeByte(147)
       super.writeValue(value.toList())
-    } else if let value = value as? ImGroupNickname {
+    } else if let value = value as? ImDeviceSessions {
       super.writeByte(148)
       super.writeValue(value.toList())
-    } else if let value = value as? ImGroupPolicy {
+    } else if let value = value as? ImGroupNickname {
       super.writeByte(149)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? ImGroupPolicy {
       super.writeByte(150)
       super.writeValue(value.toList())
-    } else if let value = value as? ImInvite {
+    } else if let value = value as? GroupPage {
       super.writeByte(151)
       super.writeValue(value.toList())
-    } else if let value = value as? ImJoinRequest {
+    } else if let value = value as? ImInvite {
       super.writeByte(152)
       super.writeValue(value.toList())
-    } else if let value = value as? ImInvitePreview {
+    } else if let value = value as? ImJoinRequest {
       super.writeByte(153)
       super.writeValue(value.toList())
-    } else if let value = value as? ImCommunity {
+    } else if let value = value as? ImInvitePreview {
       super.writeByte(154)
       super.writeValue(value.toList())
-    } else if let value = value as? ImFavoriteMessage {
+    } else if let value = value as? ImCommunity {
       super.writeByte(155)
       super.writeValue(value.toList())
-    } else if let value = value as? ImFavorites {
+    } else if let value = value as? ImFavoriteMessage {
       super.writeByte(156)
       super.writeValue(value.toList())
-    } else if let value = value as? ImReaders {
+    } else if let value = value as? ImFavorites {
       super.writeByte(157)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? ImReaders {
       super.writeByte(158)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(159)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -2069,6 +2129,11 @@ protocol ImHost {
   func passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) async throws
   func connect() async throws -> ImSession
   func synchronize() async throws
+  func pushState() async throws -> ImPushState?
+  func setPushEnabled(enabled: Bool) async throws
+  func receivePushToken(provider: String, environment: String, token: String) async throws
+  func retryPush() async throws
+  func removePushEndpoint() async throws
   func activity(roomId: String) async throws -> ImActivity?
   func setTyping(roomId: String, typing: Bool) async throws
   func closeActivity() async throws
@@ -2327,6 +2392,87 @@ class ImHostSetup {
       }
     } else {
       synchronizeChannel.setMessageHandler(nil)
+    }
+    let pushStateChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.pushState\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      pushStateChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            let result = try await api.pushState()
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      pushStateChannel.setMessageHandler(nil)
+    }
+    let setPushEnabledChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setPushEnabled\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setPushEnabledChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let enabledArg = args[0] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.setPushEnabled(enabled: enabledArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setPushEnabledChannel.setMessageHandler(nil)
+    }
+    let receivePushTokenChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.receivePushToken\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      receivePushTokenChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let providerArg = args[0] as! String
+        let environmentArg = args[1] as! String
+        let tokenArg = args[2] as! String
+        Task { @MainActor in
+          do {
+            try await api.receivePushToken(provider: providerArg, environment: environmentArg, token: tokenArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      receivePushTokenChannel.setMessageHandler(nil)
+    }
+    let retryPushChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.retryPush\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      retryPushChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.retryPush()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      retryPushChannel.setMessageHandler(nil)
+    }
+    let removePushEndpointChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.removePushEndpoint\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      removePushEndpointChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.removePushEndpoint()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      removePushEndpointChannel.setMessageHandler(nil)
     }
     let activityChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.activity\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

@@ -144,6 +144,24 @@ class _AccountSecurityPageState extends State<_AccountSecurityPage> {
         _InfoCard(
           children: [
             ListTile(
+              key: const Key('push-settings'),
+              leading: const Icon(Icons.notifications_active_outlined, color: green),
+              title: const Text('后台同步唤醒'),
+              subtitle: const Text('接收系统推送后唤醒同步，不包含消息正文'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => _PushSettingsPage(
+                    client: _SdkScope.of(context)!.client!,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        _InfoCard(
+          children: [
+            ListTile(
               leading: const Icon(Icons.person_outline, color: green),
               title: TextField(
                 key: const Key('security-account'),
@@ -1143,5 +1161,142 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
         ),
       );
     },
+  );
+}
+
+class _PushSettingsPage extends StatefulWidget {
+  const _PushSettingsPage({required this.client});
+  final ImClient client;
+
+  @override
+  State<_PushSettingsPage> createState() => _PushSettingsPageState();
+}
+
+class _PushSettingsPageState extends State<_PushSettingsPage> {
+  static const channel = MethodChannel('local_im/push');
+  ImPushState? push;
+  bool busy = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(load());
+  }
+
+  Future<void> load() async {
+    try {
+      final value = await widget.client.pushState();
+      if (mounted) setState(() => push = value);
+    } catch (failure) {
+      if (mounted) setState(() => error = _errorText(failure));
+    }
+  }
+
+  String status(ImPushState value) {
+    if (!value.preferenceEnabled) return '未开启';
+    if (value.waitingForToken) return '等待系统推送令牌';
+    if (value.pending) return '变更待服务器确认';
+    if (value.pauseReason != null) return '已暂停：${value.pauseReason}';
+    if (value.desiredEnabled) return '已开启';
+    return '正在关闭';
+  }
+
+  Future<void> toggle(bool enabled) async {
+    if (busy) return;
+    if (enabled && defaultTargetPlatform != TargetPlatform.iOS) {
+      setState(() => error = '当前平台尚未配置系统推送通道');
+      return;
+    }
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await widget.client.setPushEnabled(enabled: enabled);
+      if (enabled) {
+        final token = await channel.invokeMethod<String>('requestToken');
+        if (token == null || token.isEmpty) throw StateError('没有取得系统推送令牌');
+        await widget.client.receivePushToken(
+          provider: 'apns',
+          environment: kReleaseMode ? 'production' : 'development',
+          token: token,
+        );
+      }
+      await load();
+    } catch (failure) {
+      if (mounted) setState(() => error = _errorText(failure));
+      await load();
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> retry() async {
+    if (busy) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await widget.client.retryPush();
+      await load();
+    } catch (failure) {
+      if (mounted) setState(() => error = _errorText(failure));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => _ProfileScaffold(
+    title: '后台同步唤醒',
+    children: [
+      const Padding(
+        padding: EdgeInsets.fromLTRB(20, 12, 20, 4),
+        child: Text(
+          '开启后，系统推送只用于唤醒已认证同步，不携带聊天正文。断开网络或退出登录时不会继续接收。',
+          style: TextStyle(fontSize: 12, color: muted, height: 1.5),
+        ),
+      ),
+      _InfoCard(
+        children: [
+          SwitchListTile(
+            key: const Key('push-enabled'),
+            secondary: const Icon(Icons.notifications_active_outlined, color: green),
+            title: const Text('允许后台同步唤醒'),
+            subtitle: Text(
+              push == null ? '正在读取设置…' : status(push!),
+              key: const Key('push-status'),
+            ),
+            value: push?.preferenceEnabled ?? false,
+            onChanged: push == null || busy ? null : toggle,
+          ),
+        ],
+      ),
+      if (busy) const LinearProgressIndicator(),
+      if (error != null)
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(error!, style: const TextStyle(color: Color(0xFFB3261E))),
+        ),
+      if (push?.pauseReason != null || push?.pending == true)
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: OutlinedButton.icon(
+            key: const Key('push-retry'),
+            onPressed: busy ? null : retry,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('重试注册'),
+          ),
+        ),
+      const Padding(
+        padding: EdgeInsets.all(16),
+        child: Text(
+          '真机上需要应用具备推送能力并配置 APNs 凭据；模拟器通常无法取得令牌。',
+          style: TextStyle(fontSize: 11, color: muted, height: 1.5),
+        ),
+      ),
+    ],
   );
 }

@@ -97,6 +97,20 @@ private actor MobileHost: ImHost {
     }
     func connect() async throws -> ImSession { try await ordered { try await self.client.connect().wire } }
     func synchronize() async throws { try await ordered { try await self.client.synchronize() } }
+    func pushState() async throws -> ImPushState? {
+        try await ordered {
+            guard let value = try await self.client.pushState() else { return nil }
+            return ImPushState(preferenceEnabled: value.preferenceEnabled, desiredEnabled: value.desiredEnabled,
+                               waitingForToken: value.waitingForToken, pending: value.pending,
+                               pauseReason: value.pauseReason)
+        }
+    }
+    func setPushEnabled(enabled: Bool) async throws { try await ordered { try await self.client.setPushEnabled(enabled) } }
+    func receivePushToken(provider: String, environment: String, token: String) async throws {
+        try await ordered { try await self.client.receivePushToken(provider: provider, environment: environment, token: token) }
+    }
+    func retryPush() async throws { try await ordered { try await self.client.retryPush() } }
+    func removePushEndpoint() async throws { try await ordered { try await self.client.removePushEndpoint() } }
     func activity(roomId: String) async throws -> ImActivity? {
         try await ordered {
             guard let value = try await self.client.activity(roomID: roomId) else { return nil }

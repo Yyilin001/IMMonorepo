@@ -84,6 +84,15 @@ private class MobileHost(private val context: Context) : ImHost {
     }
     override suspend fun connect() = sdk { client.connect().session() }
     override suspend fun synchronize() { mutations.withLock { sdk { client.synchronize() } } }
+    override suspend fun pushState(): ImPushState? = mutations.withLock { sdk {
+        client.pushState().push?.let { ImPushState(it.preferenceEnabled, it.desiredEnabled, it.waitingForToken, it.pending, it.pauseReason) }
+    } }
+    override suspend fun setPushEnabled(enabled: Boolean) { mutations.withLock { sdk { client.setPushEnabled(enabled) } } }
+    override suspend fun receivePushToken(provider: String, environment: String, token: String) {
+        mutations.withLock { sdk { client.receivePushToken(provider, environment, token) } }
+    }
+    override suspend fun retryPush() { mutations.withLock { sdk { client.retryPush() } } }
+    override suspend fun removePushEndpoint() { mutations.withLock { sdk { client.removePushEndpoint() } } }
     override suspend fun activity(roomId: String): ImActivity? = mutations.withLock { sdk {
         client.activity(roomId).activity?.let { ImActivity(it.roomID, it.isGroup, it.isOnline, it.typingUserIDs) }
     } }

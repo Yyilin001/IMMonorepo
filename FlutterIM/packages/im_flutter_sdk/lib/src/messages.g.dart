@@ -1117,6 +1117,71 @@ class GroupMember {
   }
 }
 
+class ImPushState {
+  ImPushState({
+    required this.preferenceEnabled,
+    required this.desiredEnabled,
+    required this.waitingForToken,
+    required this.pending,
+    this.pauseReason,
+  });
+
+  bool preferenceEnabled;
+
+  bool desiredEnabled;
+
+  bool waitingForToken;
+
+  bool pending;
+
+  String? pauseReason;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      preferenceEnabled,
+      desiredEnabled,
+      waitingForToken,
+      pending,
+      pauseReason,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImPushState decode(Object result) {
+    result as List<Object?>;
+    return ImPushState(
+      preferenceEnabled: result[0]! as bool,
+      desiredEnabled: result[1]! as bool,
+      waitingForToken: result[2]! as bool,
+      pending: result[3]! as bool,
+      pauseReason: result[4] as String?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImPushState || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(preferenceEnabled, other.preferenceEnabled) && _deepEquals(desiredEnabled, other.desiredEnabled) && _deepEquals(waitingForToken, other.waitingForToken) && _deepEquals(pending, other.pending) && _deepEquals(pauseReason, other.pauseReason);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImPushState(preferenceEnabled: $preferenceEnabled, desiredEnabled: $desiredEnabled, waitingForToken: $waitingForToken, pending: $pending, pauseReason: $pauseReason)';
+  }
+}
+
 class ImActivity {
   ImActivity({
     required this.roomId,
@@ -2140,50 +2205,53 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is GroupMember) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    }    else if (value is ImActivity) {
+    }    else if (value is ImPushState) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
-    }    else if (value is ImPrivacy) {
+    }    else if (value is ImActivity) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    }    else if (value is ImDeviceSession) {
+    }    else if (value is ImPrivacy) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    }    else if (value is ImDeviceSessions) {
+    }    else if (value is ImDeviceSession) {
       buffer.putUint8(147);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupNickname) {
+    }    else if (value is ImDeviceSessions) {
       buffer.putUint8(148);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupPolicy) {
+    }    else if (value is ImGroupNickname) {
       buffer.putUint8(149);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is ImGroupPolicy) {
       buffer.putUint8(150);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvite) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(151);
       writeValue(buffer, value.encode());
-    }    else if (value is ImJoinRequest) {
+    }    else if (value is ImInvite) {
       buffer.putUint8(152);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvitePreview) {
+    }    else if (value is ImJoinRequest) {
       buffer.putUint8(153);
       writeValue(buffer, value.encode());
-    }    else if (value is ImCommunity) {
+    }    else if (value is ImInvitePreview) {
       buffer.putUint8(154);
       writeValue(buffer, value.encode());
-    }    else if (value is ImFavoriteMessage) {
+    }    else if (value is ImCommunity) {
       buffer.putUint8(155);
       writeValue(buffer, value.encode());
-    }    else if (value is ImFavorites) {
+    }    else if (value is ImFavoriteMessage) {
       buffer.putUint8(156);
       writeValue(buffer, value.encode());
-    }    else if (value is ImReaders) {
+    }    else if (value is ImFavorites) {
       buffer.putUint8(157);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is ImReaders) {
       buffer.putUint8(158);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(159);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -2224,34 +2292,36 @@ class _PigeonCodec extends StandardMessageCodec {
       case 143:
         return GroupMember.decode(readValue(buffer)!);
       case 144:
-        return ImActivity.decode(readValue(buffer)!);
+        return ImPushState.decode(readValue(buffer)!);
       case 145:
-        return ImPrivacy.decode(readValue(buffer)!);
+        return ImActivity.decode(readValue(buffer)!);
       case 146:
-        return ImDeviceSession.decode(readValue(buffer)!);
+        return ImPrivacy.decode(readValue(buffer)!);
       case 147:
-        return ImDeviceSessions.decode(readValue(buffer)!);
+        return ImDeviceSession.decode(readValue(buffer)!);
       case 148:
-        return ImGroupNickname.decode(readValue(buffer)!);
+        return ImDeviceSessions.decode(readValue(buffer)!);
       case 149:
-        return ImGroupPolicy.decode(readValue(buffer)!);
+        return ImGroupNickname.decode(readValue(buffer)!);
       case 150:
-        return GroupPage.decode(readValue(buffer)!);
+        return ImGroupPolicy.decode(readValue(buffer)!);
       case 151:
-        return ImInvite.decode(readValue(buffer)!);
+        return GroupPage.decode(readValue(buffer)!);
       case 152:
-        return ImJoinRequest.decode(readValue(buffer)!);
+        return ImInvite.decode(readValue(buffer)!);
       case 153:
-        return ImInvitePreview.decode(readValue(buffer)!);
+        return ImJoinRequest.decode(readValue(buffer)!);
       case 154:
-        return ImCommunity.decode(readValue(buffer)!);
+        return ImInvitePreview.decode(readValue(buffer)!);
       case 155:
-        return ImFavoriteMessage.decode(readValue(buffer)!);
+        return ImCommunity.decode(readValue(buffer)!);
       case 156:
-        return ImFavorites.decode(readValue(buffer)!);
+        return ImFavoriteMessage.decode(readValue(buffer)!);
       case 157:
-        return ImReaders.decode(readValue(buffer)!);
+        return ImFavorites.decode(readValue(buffer)!);
       case 158:
+        return ImReaders.decode(readValue(buffer)!);
+      case 159:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -2455,6 +2525,92 @@ class ImHost {
 
   Future<void> synchronize() async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.synchronize$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<ImPushState?> pushState() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.pushState$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+    return pigeonVar_replyValue as ImPushState?;
+  }
+
+  Future<void> setPushEnabled(bool enabled) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.setPushEnabled$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[enabled]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> receivePushToken(String provider, String environment, String token) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.receivePushToken$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[provider, environment, token]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> retryPush() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.retryPush$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> removePushEndpoint() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.removePushEndpoint$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
       pigeonChannelCodec,
