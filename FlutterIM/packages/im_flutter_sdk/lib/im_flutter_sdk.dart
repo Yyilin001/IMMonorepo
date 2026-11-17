@@ -395,6 +395,12 @@ final class ImClient {
     _schedule(Duration.zero);
   });
 
+  Future<void> connectNow() => _ordered(() async {
+    _publish((await _host.connect()).value);
+  });
+
+  Future<void> synchronize() => _ordered(_host.synchronize);
+
   void _schedule(Duration delay) {
     _timer?.cancel();
     if (!_foreground || _closed || _session.userId == null) return;

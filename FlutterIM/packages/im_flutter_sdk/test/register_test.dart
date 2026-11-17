@@ -12,7 +12,7 @@ void main() {
     final calls = <Object?>[];
     final lifecycle = <Object?>[];
     final devices = <Object?>[];
-    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'sendText', 'pinMessage', 'moderateMessage', 'close']) {
+    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'sendText', 'pinMessage', 'moderateMessage', 'synchronize', 'close']) {
       final channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.im_flutter_sdk.ImHost.$method',
         wire.ImHost.pigeonChannelCodec,
@@ -41,13 +41,15 @@ void main() {
               ),
             ];
           case 'setFavorite':
-            devices.add(args);
+            devices.add(args as List<Object?>? ?? const []);
           case 'sendText':
-            devices.add(args);
+            devices.add(args as List<Object?>? ?? const []);
           case 'pinMessage':
-            devices.add(args);
+            devices.add(args as List<Object?>? ?? const []);
           case 'moderateMessage':
-            devices.add(args);
+            devices.add(args as List<Object?>? ?? const []);
+          case 'synchronize':
+            devices.add(args as List<Object?>? ?? const []);
           case 'privacy':
           case 'setPrivacy':
             devices.add(args as List<Object?>? ?? const []);
@@ -151,6 +153,8 @@ void main() {
     expect(devices.last, ['room', 'message', 12, true]);
     await client.moderateMessage('room', 'message');
     expect(devices.last, ['room', 'message']);
+    await client.synchronize();
+    expect(devices.last, isEmpty);
     await client.close();
   });
 }

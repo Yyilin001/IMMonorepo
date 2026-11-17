@@ -2053,6 +2053,7 @@ interface ImHost {
   suspend fun revokeDevice(deviceId: String?, all: Boolean)
   suspend fun passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?)
   suspend fun connect(): ImSession
+  suspend fun synchronize()
   suspend fun status(): ImSession
   suspend fun disconnect()
   suspend fun openWindow(roomId: String?, archived: Boolean): String
@@ -2309,6 +2310,24 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 listOf(api.connect())
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.synchronize$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.synchronize()
+                listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

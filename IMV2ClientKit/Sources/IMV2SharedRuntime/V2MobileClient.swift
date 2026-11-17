@@ -172,6 +172,7 @@ public final class V2MobileClient: Sendable {
                                 newPassword: newPassword, recoveryCode: recoveryCode, action: action))
     }
     public func connect() async throws -> Session { try await session(.init(operation: .connect)) }
+    public func synchronize() async throws { _ = try await run(.init(operation: .synchronize)) }
     public func status() async throws -> Session { try await session(.init(operation: .snapshot)) }
     public func disconnect() async throws { _ = try await run(.init(operation: .disconnect)) }
     public func signOut() async throws { _ = try await run(.init(operation: .signOut)) }

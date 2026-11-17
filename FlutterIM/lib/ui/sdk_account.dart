@@ -997,3 +997,150 @@ class _FavoritesPageState extends State<_FavoritesPage> {
     ],
   );
 }
+
+Future<void> _openConnectionSheet(BuildContext context) {
+  final sdk = _SdkScope.of(context);
+  if (sdk?.client == null) return Future.value();
+  return showModalBottomSheet<void>(
+    context: context,
+    useSafeArea: true,
+    builder: (_) => _ConnectionSheet(sdk: sdk!),
+  );
+}
+
+class _ConnectionSheet extends StatefulWidget {
+  const _ConnectionSheet({required this.sdk});
+  final _SdkWorkspaceState sdk;
+
+  @override
+  State<_ConnectionSheet> createState() => _ConnectionSheetState();
+}
+
+class _ConnectionSheetState extends State<_ConnectionSheet> {
+  bool busy = false;
+
+  String label(ImSessionState state) => switch (state) {
+    ImSessionState.signedOut => '未登录',
+    ImSessionState.signingOut => '正在退出登录',
+    ImSessionState.ready => '已就绪，等待连接',
+    ImSessionState.connecting => '正在连接',
+    ImSessionState.connected => '已连接',
+    ImSessionState.offline => '连接已断开',
+    ImSessionState.closed => '已关闭',
+  };
+
+  Future<void> run(Future<void> Function() action, String success) async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      await action();
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(success)));
+    } catch (failure) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => StreamBuilder<ImSession>(
+    stream: widget.sdk.client!.sessions,
+    initialData: widget.sdk.client!.session,
+    builder: (context, snapshot) {
+      final session = snapshot.data ?? widget.sdk.client!.session;
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  session.state == ImSessionState.connected
+                      ? Icons.wifi_rounded
+                      : Icons.wifi_off_rounded,
+                  color: session.state == ImSessionState.connected
+                      ? green
+                      : muted,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    '连接与同步',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                      color: ink,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              label(session.state),
+              key: const Key('connection-state'),
+              style: const TextStyle(fontSize: 14, color: ink),
+            ),
+            if (session.userId != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '账号 ${session.userId}',
+                  style: const TextStyle(fontSize: 12, color: muted),
+                ),
+              ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    key: const Key('connection-reconnect'),
+                    onPressed: busy
+                        ? null
+                        : () => run(
+                            () => widget.sdk.client!.connectNow(),
+                            '已请求重新连接',
+                          ),
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('重新连接'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: const Key('connection-sync'),
+                    onPressed: busy
+                        ? null
+                        : () => run(
+                            () => widget.sdk.client!.synchronize(),
+                            '同步完成',
+                          ),
+                    icon: const Icon(Icons.sync_rounded),
+                    label: const Text('立即同步'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              '应用回到前台会自动重连；离线时已保存的发送和设置会在恢复连接后继续。',
+              style: TextStyle(fontSize: 12, color: muted, height: 1.5),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}

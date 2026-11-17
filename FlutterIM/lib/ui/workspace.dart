@@ -629,9 +629,12 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
         ),
       );
     }
-    return ListView.builder(
+    return RefreshIndicator(
+      onRefresh: sdk.syncNow,
+      child: ListView.builder(
       key: const Key('conversation-list'),
       controller: scroll,
+      physics: const AlwaysScrollableScrollPhysics(),
       itemCount: rows.length,
       itemExtent: 82,
       itemBuilder: (_, index) {
@@ -655,27 +658,73 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
             widget.onSdkOpen?.call(row);
           },
           onLongPress: () => _showSdkConversationMenu(context, ref, row),
-          child: _ConversationRow(
-            item: item,
-            selected: false,
-            mobile: true,
-            avatar: row.isGroup
-                ? SdkGroupAvatar(
-                    roomId: row.id,
-                    name: item.displayName,
-                    size: 50,
-                  )
-                : row.peerId != null
-                ? SdkAvatar(
-                    userId: row.peerId!,
-                    name: item.displayName,
-                    context: 'direct',
-                    size: 50,
-                  )
-                : null,
+          child: Dismissible(
+            key: ValueKey('swipe-${row.id}'),
+            background: Container(
+              color: green,
+              alignment: Alignment.centerLeft,
+              padding: const EdgeInsets.only(left: 20),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    row.isPinned
+                        ? Icons.push_pin_outlined
+                        : Icons.push_pin_rounded,
+                    color: Colors.white,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    row.isPinned ? '取消置顶' : '置顶',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+            secondaryBackground: Container(
+              color: const Color(0xFF3F51B5),
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.only(right: 20),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('隐藏', style: TextStyle(color: Colors.white)),
+                  SizedBox(width: 6),
+                  Icon(Icons.visibility_off_outlined, color: Colors.white),
+                ],
+              ),
+            ),
+            confirmDismiss: (direction) async {
+              if (direction == DismissDirection.startToEnd) {
+                await sdk.applyConversationState(row, pinned: !row.isPinned);
+              } else {
+                await sdk.applyConversationState(row, archived: true);
+              }
+              return false;
+            },
+            child: _ConversationRow(
+              item: item,
+              selected: false,
+              mobile: true,
+              avatar: row.isGroup
+                  ? SdkGroupAvatar(
+                      roomId: row.id,
+                      name: item.displayName,
+                      size: 50,
+                    )
+                  : row.peerId != null
+                  ? SdkAvatar(
+                      userId: row.peerId!,
+                      name: item.displayName,
+                      context: 'direct',
+                      size: 50,
+                    )
+                  : null,
+            ),
           ),
         );
       },
+      ),
     );
   }
 

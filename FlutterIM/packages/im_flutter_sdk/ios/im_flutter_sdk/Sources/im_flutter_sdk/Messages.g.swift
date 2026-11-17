@@ -2008,6 +2008,7 @@ protocol ImHost {
   func revokeDevice(deviceId: String?, all: Bool) async throws
   func passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) async throws
   func connect() async throws -> ImSession
+  func synchronize() async throws
   func status() async throws -> ImSession
   func disconnect() async throws
   func openWindow(roomId: String?, archived: Bool) async throws -> String
@@ -2248,6 +2249,21 @@ class ImHostSetup {
       }
     } else {
       connectChannel.setMessageHandler(nil)
+    }
+    let synchronizeChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.synchronize\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      synchronizeChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.synchronize()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      synchronizeChannel.setMessageHandler(nil)
     }
     let statusChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.status\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

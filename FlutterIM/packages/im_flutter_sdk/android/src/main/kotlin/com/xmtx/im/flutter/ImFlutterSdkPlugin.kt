@@ -83,6 +83,7 @@ private class MobileHost(private val context: Context) : ImHost {
         mutations.withLock { sdk { client.passwordLifecycle(account, action, currentPassword, newPassword, recoveryCode) } }
     }
     override suspend fun connect() = sdk { client.connect().session() }
+    override suspend fun synchronize() { mutations.withLock { sdk { client.synchronize() } } }
     override suspend fun disconnect() { sdk { client.disconnect() } }
 
     override suspend fun openWindow(roomId: String?, archived: Boolean) = mutations.withLock {

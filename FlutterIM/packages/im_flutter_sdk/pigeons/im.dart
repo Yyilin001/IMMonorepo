@@ -464,6 +464,8 @@ abstract class ImHost {
   @async
   ImSession connect();
   @async
+  void synchronize();
+  @async
   ImSession status();
   @async
   void disconnect();

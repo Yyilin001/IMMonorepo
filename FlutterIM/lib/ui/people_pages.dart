@@ -690,6 +690,19 @@ class PersonalPane extends ConsumerWidget {
               const SizedBox(height: 18),
               _InfoCard(
                 children: [
+                  if (sdk?.userId != null)
+                    ListTile(
+                      key: const Key('connection-status'),
+                      leading: const Icon(Icons.wifi_rounded, color: green),
+                      title: const Text('连接与同步'),
+                      subtitle: Text(
+                        sdk!.client!.session.state == ImSessionState.connected
+                            ? '已连接'
+                            : '等待连接',
+                      ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => _openConnectionSheet(context),
+                    ),
                   if (sdk?.userId != null) const _TransfersLink(),
                   if (sdk?.userId != null)
                     ListTile(

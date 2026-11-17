@@ -268,6 +268,18 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
     });
   }
 
+  Future<void> syncNow() async {
+    final client = this.client;
+    if (client == null) return;
+    try {
+      await client.synchronize();
+    } catch (failure) {
+      if (mounted) {
+        setState(() => listError = _errorText(failure));
+      }
+    }
+  }
+
   Future<void> register(
     String name,
     String password,
