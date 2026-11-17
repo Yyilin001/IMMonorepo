@@ -315,11 +315,14 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     }
   }
 
-  Future<void> recoverSend(String id, {required bool resend}) async {
+  Future<void> updatePendingSend(
+    String id,
+    Future<void> Function(ImClient) apply,
+  ) async {
     if (!activeMutations.add(id)) return;
     setState(() {});
     try {
-      await _SdkScope.of(context)!.client!.recoverSend(id, resend: resend);
+      await apply(_SdkScope.of(context)!.client!);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -588,18 +591,43 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                   : switch (item.pendingStatus) {
                                       ImSendStatus.needsAttention => (
                                         label: '继续确认',
-                                        action: () =>
-                                            recoverSend(item.id, resend: false),
+                                        action: () => updatePendingSend(
+                                          item.id,
+                                          (client) => client.recoverSend(
+                                            item.id,
+                                            resend: false,
+                                          ),
+                                        ),
                                       ),
                                       ImSendStatus.expiredUnsubmitted ||
                                       ImSendStatus.closed ||
                                       ImSendStatus.rejected => (
                                         label: '重新发送',
-                                        action: () =>
-                                            recoverSend(item.id, resend: true),
+                                        action: () => updatePendingSend(
+                                          item.id,
+                                          (client) => client.recoverSend(
+                                            item.id,
+                                            resend: true,
+                                          ),
+                                        ),
                                       ),
                                       _ => null,
                                     },
+                              onCancelSend:
+                                  !activeMutations.contains(item.id) &&
+                                      switch (item.pendingStatus) {
+                                        ImSendStatus.preparing ||
+                                        ImSendStatus.expiredUnsubmitted ||
+                                        ImSendStatus.closed ||
+                                        ImSendStatus.rejected => true,
+                                        _ => false,
+                                      }
+                                  ? () => updatePendingSend(
+                                      item.id,
+                                      (client) =>
+                                          client.cancelPendingSend(item.id),
+                                    )
+                                  : null,
                               onForward:
                                   !item.withdrawn &&
                                       item.revision != null &&

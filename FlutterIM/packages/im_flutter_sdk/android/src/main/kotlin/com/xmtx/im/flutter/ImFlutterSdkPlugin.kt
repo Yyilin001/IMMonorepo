@@ -118,6 +118,9 @@ private class MobileHost(private val context: Context) : ImHost {
         } }
     }
     override suspend fun closeWindow(windowId: String) { sdk { windows.remove(windowId)?.close() } }
+    override suspend fun cancelPendingSend(intentId: String) {
+        mutations.withLock { sdk { client.cancelAttachmentSend(intentId) } }
+    }
     override suspend fun recoverSend(intentId: String, resend: Boolean) {
         mutations.withLock { sdk { if (resend) client.resendUnsent(intentId) else client.retrySend(intentId) } }
     }

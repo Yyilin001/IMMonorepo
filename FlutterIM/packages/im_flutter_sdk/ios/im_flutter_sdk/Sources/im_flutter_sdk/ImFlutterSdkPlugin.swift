@@ -103,6 +103,9 @@ private actor MobileHost: ImHost {
         try await ordered { try await self.client.changeWindowPage(windowId, latest: latest) }
     }
     func closeWindow(windowId: String) async throws { try await ordered { try await self.client.closeWindow(windowId) } }
+    func cancelPendingSend(intentId: String) async throws {
+        try await ordered { try await self.client.cancelPendingSend(intentID: intentId) }
+    }
     func recoverSend(intentId: String, resend: Bool) async throws {
         try await ordered { try await self.client.recoverSend(intentID: intentId, resend: resend) }
     }

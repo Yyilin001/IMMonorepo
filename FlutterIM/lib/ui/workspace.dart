@@ -1550,6 +1550,7 @@ class _MessageBubble extends ConsumerWidget {
     this.onReply,
     this.onForward,
     this.recovery,
+    this.onCancelSend,
     this.onEdit,
     this.onWithdraw,
     this.isForwarded = false,
@@ -1559,6 +1560,7 @@ class _MessageBubble extends ConsumerWidget {
   final bool isForwarded;
   final Widget? attachmentList;
   final ({String label, VoidCallback action})? recovery;
+  final VoidCallback? onCancelSend;
   final VoidCallback? onReply, onForward, onEdit, onWithdraw;
   final bool showTime;
   final ChatMessage message;
@@ -1658,7 +1660,8 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      if (recovery != null ||
+                      if (onCancelSend != null ||
+                          recovery != null ||
                           onReply != null ||
                           onForward != null ||
                           onEdit != null ||
@@ -1671,6 +1674,11 @@ class _MessageBubble extends ConsumerWidget {
                               PopupMenuItem(
                                 value: recovery.action,
                                 child: Text(recovery.label),
+                              ),
+                            if (onCancelSend != null)
+                              PopupMenuItem(
+                                value: onCancelSend,
+                                child: const Text('取消发送'),
                               ),
                             if (onReply != null)
                               PopupMenuItem(

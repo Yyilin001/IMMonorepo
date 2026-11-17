@@ -909,6 +909,7 @@ interface ImHost {
   suspend fun socialAction(userId: String, action: String)
   suspend fun changeWindowPage(windowId: String, latest: Boolean)
   suspend fun closeWindow(windowId: String)
+  suspend fun cancelPendingSend(intentId: String)
   suspend fun recoverSend(intentId: String, resend: Boolean)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
   suspend fun sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String)
@@ -1278,6 +1279,26 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 api.closeWindow(windowIdArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.cancelPendingSend$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val intentIdArg = args[0] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.cancelPendingSend(intentIdArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

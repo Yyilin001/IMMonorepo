@@ -181,9 +181,18 @@ actor SharedMedia {
         }
     }
     func cancelSend(_ id: UUID) async throws {
-        guard let intent = try await store.preparingSendIntent(id: id) else { throw SharedFailure.invalidInput }
-        try await store.cancelSendIntent(id)
-        for job in intent.attachmentJobIDs { try await uploads.cancel(id: job) }
+        if let intent = try await store.preparingSendIntent(id: id) {
+            try await store.cancelSendIntent(id)
+            for job in intent.attachmentJobIDs {
+                if try await store.resourceImport(id: job) != nil {
+                    try await store.requestImportCancellation(id: job)
+                } else {
+                    try await uploads.cancel(id: job)
+                }
+            }
+        } else {
+            try await store.abandonProvenUnsentSendIntent(id)
+        }
         try await uploads.releaseFinishedSources()
     }
     static func identity(_ id: V2ManagedResourceTransferID) -> (String,String) { switch id { case .upload(let id): ("upload",id.uuidString); case .download(let id): ("download",id.uuidString); case .serverImport(let id): ("import",id.uuidString) } }

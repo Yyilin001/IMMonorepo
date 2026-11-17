@@ -891,6 +891,7 @@ protocol ImHost {
   func socialAction(userId: String, action: String) async throws
   func changeWindowPage(windowId: String, latest: Bool) async throws
   func closeWindow(windowId: String) async throws
+  func cancelPendingSend(intentId: String) async throws
   func recoverSend(intentId: String, resend: Bool) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
   func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws
@@ -1223,6 +1224,23 @@ class ImHostSetup {
       }
     } else {
       closeWindowChannel.setMessageHandler(nil)
+    }
+    let cancelPendingSendChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.cancelPendingSend\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      cancelPendingSendChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let intentIdArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            try await api.cancelPendingSend(intentId: intentIdArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      cancelPendingSendChannel.setMessageHandler(nil)
     }
     let recoverSendChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.recoverSend\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
