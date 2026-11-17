@@ -142,6 +142,43 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     });
   }
 
+  Future<void> moderateRemove(ImMessage message) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('移除消息？'),
+        content: const Text('此操作将对所有成员移除消息。状态或权限变化时，服务器会拒绝原确认。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('移除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _SdkScope.of(
+        context,
+      )!.client!.moderateMessage(widget.room.id, message.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('已提交移除消息')));
+      final page = currentPage;
+      if (page != null) await changePage(page, latest: true);
+    } catch (failure) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
   Future<void> copyAttachments(ImMessage message) async {
     final attachments = message.attachments;
     if (attachments.isEmpty) return;
@@ -998,6 +1035,10 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                               mentionSummary: item.mentionSummary,
                               entities: item.entities,
                               isPinned: item.isPinned ?? false,
+                              onModerateRemove:
+                                  room.isGroup && !item.withdrawn
+                                  ? () => moderateRemove(item)
+                                  : null,
                               onCopyAttachments:
                                   !item.withdrawn && item.attachments.isNotEmpty
                                   ? () => copyAttachments(item)

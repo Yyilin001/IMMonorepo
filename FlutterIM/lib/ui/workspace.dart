@@ -1633,6 +1633,7 @@ class _MessageBubble extends ConsumerWidget {
     this.isPinned = false,
     this.onPin,
     this.onCopyAttachments,
+    this.onModerateRemove,
     this.selecting = false,
     this.selected = false,
     this.onToggleSelect,
@@ -1650,7 +1651,7 @@ class _MessageBubble extends ConsumerWidget {
   final String? mentionSummary;
   final List<ImEntity> entities;
   final bool isPinned;
-  final VoidCallback? onPin, onCopyAttachments;
+  final VoidCallback? onPin, onCopyAttachments, onModerateRemove;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1781,7 +1782,8 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      if (onCopyAttachments != null ||
+                      if (onModerateRemove != null ||
+                          onCopyAttachments != null ||
                           onPin != null ||
                           onEnterSelection != null ||
                           onCancelSend != null ||
@@ -1823,6 +1825,14 @@ class _MessageBubble extends ConsumerWidget {
                               PopupMenuItem(
                                 value: onFavorite,
                                 child: const Text('收藏'),
+                              ),
+                            if (onModerateRemove != null)
+                              PopupMenuItem(
+                                value: onModerateRemove,
+                                child: const Text(
+                                  '移除消息',
+                                  style: TextStyle(color: Color(0xFFB3261E)),
+                                ),
                               ),
                             if (onCopyAttachments != null)
                               PopupMenuItem(

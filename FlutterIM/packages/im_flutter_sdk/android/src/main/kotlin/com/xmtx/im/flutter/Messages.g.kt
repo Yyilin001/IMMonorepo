@@ -2093,6 +2093,7 @@ interface ImHost {
   suspend fun messageReaders(roomId: String, messageId: String, next: Boolean): ImReaders
   suspend fun favorites(next: Boolean): ImFavorites
   suspend fun setFavorite(roomId: String, messageId: String, favorited: Boolean)
+  suspend fun moderateMessage(roomId: String, messageId: String)
   suspend fun pinMessage(roomId: String, messageId: String, roomSequence: Long, isPinned: Boolean)
   suspend fun clearMessageSearch()
   suspend fun recoverSend(intentId: String, resend: Boolean)
@@ -3133,6 +3134,27 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 api.setFavorite(roomIdArg, messageIdArg, favoritedArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.moderateMessage$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val messageIdArg = args[1] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.moderateMessage(roomIdArg, messageIdArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

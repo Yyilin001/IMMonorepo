@@ -946,6 +946,9 @@ final class ImClient {
     () => _host.setFavorite(roomId, messageId, favorited),
   );
 
+  Future<void> moderateMessage(String roomId, String messageId) =>
+      _ordered(() => _host.moderateMessage(roomId, messageId));
+
   Future<void> pinMessage(
     String roomId,
     String messageId, {

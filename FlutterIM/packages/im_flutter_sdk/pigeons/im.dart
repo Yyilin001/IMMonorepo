@@ -584,6 +584,8 @@ abstract class ImHost {
   @async
   void setFavorite(String roomId, String messageId, bool favorited);
   @async
+  void moderateMessage(String roomId, String messageId);
+  @async
   void pinMessage(
     String roomId,
     String messageId,

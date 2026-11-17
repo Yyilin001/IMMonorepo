@@ -226,6 +226,9 @@ public final class V2MobileClient: Sendable {
                             text: $0.text, createdAt: $0.createdAt, attachmentNames: $0.attachmentNames)
         }, hasMore: page.hasMore)
     }
+    public func moderateMessage(roomID: String, messageID: String) async throws {
+        _ = try await run(.init(operation: .moderateMessage, messageID: messageID, roomID: roomID))
+    }
     public func pinMessage(roomID: String, messageID: String, roomSequence: UInt64, isPinned: Bool) async throws {
         guard let sequence = Int64(exactly: roomSequence) else { throw Failure(code: "invalidInput") }
         _ = try await run(.init(operation: .pinMessage, offset: sequence, messageID: messageID,

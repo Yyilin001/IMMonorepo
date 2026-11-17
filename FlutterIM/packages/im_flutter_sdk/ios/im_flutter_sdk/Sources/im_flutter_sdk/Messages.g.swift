@@ -2048,6 +2048,7 @@ protocol ImHost {
   func messageReaders(roomId: String, messageId: String, next: Bool) async throws -> ImReaders
   func favorites(next: Bool) async throws -> ImFavorites
   func setFavorite(roomId: String, messageId: String, favorited: Bool) async throws
+  func moderateMessage(roomId: String, messageId: String) async throws
   func pinMessage(roomId: String, messageId: String, roomSequence: Int64, isPinned: Bool) async throws
   func clearMessageSearch() async throws
   func recoverSend(intentId: String, resend: Bool) async throws
@@ -2972,6 +2973,24 @@ class ImHostSetup {
       }
     } else {
       setFavoriteChannel.setMessageHandler(nil)
+    }
+    let moderateMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.moderateMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      moderateMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        Task { @MainActor in
+          do {
+            try await api.moderateMessage(roomId: roomIdArg, messageId: messageIdArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      moderateMessageChannel.setMessageHandler(nil)
     }
     let pinMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.pinMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

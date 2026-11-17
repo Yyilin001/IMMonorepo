@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, pinMessage, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, pinMessage, moderateMessage, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -212,6 +212,7 @@ package actor SharedRuntime {
     private var favoriteCursor: V2ClientFavoriteMessageCursor?
     private var accountPreferences: V2AccountPreferenceService?
     private var preferencePreparation: Task<Void, Never>?
+    private var messageModeration: V2MessageModerationOperationService?
     private var dispatcher: Task<Void, Never>?
     private var roomRecovery: V2RoomRecoveryRunner?
     private var selectedRoom: RoomID?
@@ -333,6 +334,11 @@ package actor SharedRuntime {
                     attachmentNames: message.mediaPresentations.map { $0.resourceDescriptor?.displayName.value ?? "附件" }))
             }
             favorites = SharedFavorites(messages: rows, hasMore: page.nextCursor != nil)
+        case .moderateMessage:
+            guard let service = messageModeration, let roomID = request.roomID,
+                  let messageID = request.messageID else { throw SharedFailure.invalidInput }
+            let baseline = try await service.baseline(roomID: try RoomID(roomID), messageID: try MessageID(messageID))
+            _ = try await service.enqueue(baseline: baseline, reason: try .init("ADMIN_ACTION"))
         case .pinMessage:
             guard let socialGroups, let roomID = request.roomID, let messageID = request.messageID,
                   let sequence = request.offset, let pinned = request.flag1 else { throw SharedFailure.invalidInput }
@@ -567,6 +573,7 @@ package actor SharedRuntime {
         accountHTTP = nil; deviceSessionsClient = nil; deviceSessions = nil
         favorites = nil; favoriteCursor = nil
         preferencePreparation?.cancel(); preferencePreparation = nil; accountPreferences = nil; privacy = nil
+        messageModeration = nil
     }
     private func signOut() async throws {
         // Intent survives cancellation/crash between revocation handoff and local deletion.
@@ -635,6 +642,10 @@ package actor SharedRuntime {
             didPersistProgress: { room, cursor in try await transport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: cursor) }),
             source: wire, personalSync: sync)
         roomRecovery = recovery
+        let moderationClient = try V2HTTPMessageModerationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP)
+        let messageModeration = V2MessageModerationOperationService(accountID: identity.userID,
+            activationID: identity.deviceID.uuidValue ?? UUID(), store: store, client: moderationClient)
+        self.messageModeration = messageModeration
         let accountPreferences = V2AccountPreferenceService(accountID: identity.userID, activationID: identity.deviceID.uuidValue ?? UUID(), store: store,
             client: try V2HTTPAccountPreferenceOperationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP))
         self.accountPreferences = accountPreferences
@@ -664,6 +675,7 @@ package actor SharedRuntime {
             .init(kind: .userAddPreference) { try await accountPreferences.execute($0) },
             .init(kind: .readReceiptPreference) { try await accountPreferences.execute($0) },
             .init(kind: .liveActivityPreference) { try await accountPreferences.execute($0) },
+            .init(kind: .moderation) { try await messageModeration.execute($0) },
         ])
         dispatcher = Task {
             do {

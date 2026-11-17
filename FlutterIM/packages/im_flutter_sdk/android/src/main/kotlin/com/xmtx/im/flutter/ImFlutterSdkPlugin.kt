@@ -57,6 +57,9 @@ private class MobileHost(private val context: Context) : ImHost {
             ImFavoriteMessage(it.id, it.roomID, it.roomTitle, it.senderID, it.text, it.createdAt, it.attachmentNames)
         }, page.hasMore)
     } }
+    override suspend fun moderateMessage(roomId: String, messageId: String) {
+        mutations.withLock { sdk { client.moderateMessage(roomId, messageId) } }
+    }
     override suspend fun pinMessage(roomId: String, messageId: String, roomSequence: Long, isPinned: Boolean) {
         mutations.withLock { sdk { client.pinMessage(roomId, messageId, roomSequence, isPinned) } }
     }

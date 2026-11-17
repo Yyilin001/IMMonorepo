@@ -144,6 +144,9 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun favorites(next: Boolean = false): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "favorites").put("action", if (next) "next" else "first"))
     }
+    suspend fun moderateMessage(roomID: String, messageID: String): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "moderateMessage").put("roomID", roomID).put("messageID", messageID))
+    }
     suspend fun pinMessage(roomID: String, messageID: String, roomSequence: Long, isPinned: Boolean): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "pinMessage").put("roomID", roomID).put("messageID", messageID)
             .put("offset", roomSequence).put("flag1", isPinned))

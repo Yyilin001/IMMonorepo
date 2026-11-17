@@ -290,6 +290,9 @@ private actor MobileHost: ImHost {
             }, hasMore: page.hasMore)
         }
     }
+    func moderateMessage(roomId: String, messageId: String) async throws {
+        try await ordered { try await self.client.moderateMessage(roomID: roomId, messageID: messageId) }
+    }
     func pinMessage(roomId: String, messageId: String, roomSequence: Int64, isPinned: Bool) async throws {
         guard let sequence = UInt64(exactly: roomSequence) else { throw PigeonError(code: "invalidInput", message: nil, details: nil) }
         try await ordered { try await self.client.pinMessage(roomID: roomId, messageID: messageId, roomSequence: sequence, isPinned: isPinned) }
