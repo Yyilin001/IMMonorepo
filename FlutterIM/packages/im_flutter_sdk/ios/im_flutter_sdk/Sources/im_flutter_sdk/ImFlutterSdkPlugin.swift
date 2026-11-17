@@ -119,6 +119,9 @@ private actor MobileHost: ImHost {
             return AttachmentPreview(bytes: FlutterStandardTypedData(bytes: preview.data), remainingMilliseconds: preview.remainingMilliseconds)
         }
     }
+    func exportAttachment(roomId: String, messageId: String, mediaId: String, destination: String) async throws {
+        try await ordered { try await self.client.exportAttachment(roomID: roomId, messageID: messageId, mediaID: mediaId, destination: URL(fileURLWithPath: destination)) }
+    }
     func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws {
         try await ordered { try await self.client.downloadAttachment(roomID: roomId, messageID: messageId, mediaID: mediaId) }
     }

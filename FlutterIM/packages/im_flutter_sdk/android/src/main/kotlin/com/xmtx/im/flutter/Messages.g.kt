@@ -909,6 +909,7 @@ interface ImHost {
   suspend fun sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String)
   suspend fun transfers(): List<Transfer>
   suspend fun transferAction(id: String, action: String)
+  suspend fun exportAttachment(roomId: String, messageId: String, mediaId: String, destination: String)
   suspend fun previewAttachment(roomId: String, messageId: String, mediaId: String): AttachmentPreview
   suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String)
   suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String)
@@ -1355,6 +1356,29 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 api.transferAction(idArg, actionArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.exportAttachment$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val messageIdArg = args[1] as String
+            val mediaIdArg = args[2] as String
+            val destinationArg = args[3] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.exportAttachment(roomIdArg, messageIdArg, mediaIdArg, destinationArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

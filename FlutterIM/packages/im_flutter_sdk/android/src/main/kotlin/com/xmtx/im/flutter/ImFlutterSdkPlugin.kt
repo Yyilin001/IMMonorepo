@@ -152,6 +152,23 @@ private class MobileHost(private val context: Context) : ImHost {
             resource.messageID != messageId || resource.selected?.id != mediaId) throw FlutterError("previewUnavailable")
         AttachmentPreview(android.util.Base64.decode(encoded, android.util.Base64.DEFAULT), remaining)
     } }
+    override suspend fun exportAttachment(roomId: String, messageId: String, mediaId: String, destination: String) {
+        mutations.withLock { sdk {
+            val selected = client.openResource(roomId, messageId, mediaId).resource?.selected
+            if (selected?.id != mediaId) throw FlutterError("invalidInput")
+            withContext(Dispatchers.IO) {
+                val path = java.io.File(destination).toPath()
+                val output = java.nio.file.Files.newOutputStream(path, java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)
+                try {
+                    output.use { client.exportResource(it) }
+                    if (java.nio.file.Files.size(path) != selected.bytes) throw FlutterError("operationFailed")
+                } catch (error: Exception) {
+                    java.nio.file.Files.deleteIfExists(path)
+                    throw error
+                }
+            }
+        } }
+    }
     override suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String) {
         mutations.withLock { sdk {
             client.openResource(roomId, messageId, mediaId)

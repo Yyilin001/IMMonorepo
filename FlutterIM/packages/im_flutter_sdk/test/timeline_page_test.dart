@@ -19,6 +19,7 @@ void main() {
       'nextUpdate',
       'changeWindowPage',
       'downloadAttachment',
+      'exportAttachment',
       'previewAttachment',
       'sendAttachment',
       'closeWindow',
@@ -49,6 +50,13 @@ void main() {
                 remainingMilliseconds: location.last == 'expired' ? 0 : 30000,
               ),
             ];
+          case 'exportAttachment':
+            expect(args, [
+              'room',
+              'message',
+              'media',
+              '/sandbox/unique/note.txt',
+            ]);
           case 'downloadAttachment':
             expect(args, ['room', 'message', 'media']);
           case 'sendAttachment':
@@ -131,6 +139,12 @@ void main() {
     await expectLater(
       client.previewAttachment('room', message.id, 'expired'),
       throwsA(isA<PlatformException>()),
+    );
+    await client.exportAttachment(
+      'room',
+      message.id,
+      attachment.id,
+      '/sandbox/unique/note.txt',
     );
     await client.downloadAttachment('room', message.id, attachment.id);
     await client.sendAttachment(

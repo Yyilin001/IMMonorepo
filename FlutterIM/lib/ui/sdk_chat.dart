@@ -172,6 +172,53 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     }
   }
 
+  bool exporting = false;
+
+  Future<void> export(ImMessage message, ImAttachment attachment) async {
+    if (exporting) return;
+    final client = _SdkScope.of(context)!.client!;
+    setState(() => exporting = true);
+    try {
+      final saved = await saveAttachmentCopy(
+        name: attachment.name,
+        write: (path) => client.exportAttachment(
+          widget.room.id,
+          message.id,
+          attachment.id,
+          path,
+        ),
+        chooseDestination: (path) async {
+          if (!mounted ||
+              ModalRoute.isCurrentOf(context) == false ||
+              currentPage?.messages.any(
+                    (m) =>
+                        m.id == message.id &&
+                        !m.withdrawn &&
+                        m.attachments.any((a) => a.id == attachment.id),
+                  ) !=
+                  true) {
+            return null;
+          }
+          return FlutterFileDialog.saveFile(
+            params: SaveFileDialogParams(sourceFilePath: path),
+          );
+        },
+      );
+      if (mounted && saved != null) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('附件已保存')));
+      }
+    } catch (failure) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('请确认附件已下载，再重试保存。 ${_errorText(failure)}')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => exporting = false);
+    }
+  }
+
   Future<void> download(ImMessage message, ImAttachment attachment) async {
     final key = (message.id, attachment.id);
     if (!downloads.add(key)) return;
@@ -409,6 +456,17 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                                           ),
                                                   ),
                                           ),
+                                          if (attachment.bytes <= 33554432)
+                                            TextButton.icon(
+                                              onPressed: exporting
+                                                  ? null
+                                                  : () => export(
+                                                      item,
+                                                      attachment,
+                                                    ),
+                                              icon: const Icon(Icons.save_alt),
+                                              label: const Text('保存到文件'),
+                                            ),
                                           if (attachment.contentType.startsWith(
                                             'image/',
                                           ))

@@ -220,6 +220,13 @@ abstract class ImHost {
   @async
   void transferAction(String id, String action);
   @async
+  void exportAttachment(
+    String roomId,
+    String messageId,
+    String mediaId,
+    String destination,
+  );
+  @async
   AttachmentPreview previewAttachment(
     String roomId,
     String messageId,

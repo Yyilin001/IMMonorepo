@@ -8,6 +8,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart' show openFile;
+import 'package:flutter_file_dialog/flutter_file_dialog.dart';
 import 'package:mime/mime.dart' show lookupMimeType;
 import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 import 'package:material_ui/material_ui.dart';
@@ -16,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/im_providers.dart';
 import '../state/photo_library.dart';
+import '../state/attachment_export.dart';
 import '../state/recent_searches.dart';
 import '../core/models.dart';
 import '../core/history.dart';

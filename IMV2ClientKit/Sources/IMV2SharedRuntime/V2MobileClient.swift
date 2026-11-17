@@ -208,6 +208,34 @@ public final class V2MobileClient: Sendable {
               let encoded = resource.image, let data = Data(base64Encoded: encoded) else { throw Failure(code: "previewUnavailable") }
         return (data, resource.remainingMilliseconds)
     }
+    public func exportAttachment(roomID: String, messageID: String, mediaID: String, destination: URL) async throws {
+        let selected = try await run(.init(operation: .openResource, messageID: messageID, mediaID: mediaID, roomID: roomID))
+        guard destination.isFileURL, let attachment = selected.resource?.selected, attachment.id == mediaID else { throw Failure(code: "invalidInput") }
+        try Data().write(to: destination, options: .withoutOverwriting)
+        do {
+            let output = try FileHandle(forWritingTo: destination)
+            defer { try? output.close() }
+            let begin = try await run(.init(operation: .beginResourceRead))
+            guard let id = begin.resource?.readID else { throw Failure(code: "operationFailed") }
+            var offset: Int64 = 0
+            while true {
+                try Task.checkCancellation()
+                let result = try await run(.init(operation: .readResource, offset: offset, intentID: id))
+                guard let encoded = result.resource?.chunk, let data = Data(base64Encoded: encoded) else { throw Failure(code: "operationFailed") }
+                if data.isEmpty { break }
+                offset += Int64(data.count)
+                guard offset <= attachment.bytes else { throw Failure(code: "operationFailed") }
+                try output.write(contentsOf: data)
+            }
+            guard offset == attachment.bytes else { throw Failure(code: "operationFailed") }
+            try output.synchronize()
+            _ = try await run(.init(operation: .endResourceRead))
+        } catch {
+            _ = try? await run(.init(operation: .endResourceRead))
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
     public func downloadAttachment(roomID: String, messageID: String, mediaID: String) async throws {
         _ = try await run(.init(operation: .openResource, messageID: messageID, mediaID: mediaID, roomID: roomID))
         _ = try await run(.init(operation: .downloadResource))

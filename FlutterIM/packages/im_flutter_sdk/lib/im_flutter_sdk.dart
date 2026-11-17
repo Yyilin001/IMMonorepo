@@ -429,6 +429,15 @@ final class ImClient {
     return (bytes: view.bytes, remaining: remaining);
   });
 
+  Future<void> exportAttachment(
+    String roomId,
+    String messageId,
+    String mediaId,
+    String destination,
+  ) => _ordered(
+    () => _host.exportAttachment(roomId, messageId, mediaId, destination),
+  );
+
   Future<void> downloadAttachment(
     String roomId,
     String messageId,

@@ -890,6 +890,7 @@ protocol ImHost {
   func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws
   func transfers() async throws -> [Transfer]
   func transferAction(id: String, action: String) async throws
+  func exportAttachment(roomId: String, messageId: String, mediaId: String, destination: String) async throws
   func previewAttachment(roomId: String, messageId: String, mediaId: String) async throws -> AttachmentPreview
   func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws
   func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
@@ -1288,6 +1289,26 @@ class ImHostSetup {
       }
     } else {
       transferActionChannel.setMessageHandler(nil)
+    }
+    let exportAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.exportAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      exportAttachmentChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let mediaIdArg = args[2] as! String
+        let destinationArg = args[3] as! String
+        Task { @MainActor in
+          do {
+            try await api.exportAttachment(roomId: roomIdArg, messageId: messageIdArg, mediaId: mediaIdArg, destination: destinationArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      exportAttachmentChannel.setMessageHandler(nil)
     }
     let previewAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.previewAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
