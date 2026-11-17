@@ -61,7 +61,25 @@ struct SharedMessage: Encodable, Sendable {
     let revision: UInt64; let canMutate: Bool; let readByPeer: Bool
     let replyToID: String?; let replyPreview: String?; let forwardedFromID: String?
 }
-struct SharedPendingMessage: Encodable, Sendable { let id: String; let text: String; let status: String }
+struct SharedPendingMessage: Encodable, Sendable {
+    let id: String
+    let text: String
+    let status: String
+    var preparationStatus: String?
+    let createdAt: Int64
+
+    static func preparing(_ intent: V2PreparingResourceSendPresentation) -> Self {
+        let detail: String
+        if intent.isRejected { detail = "preparationRejected" }
+        else if intent.isExpired { detail = "preparationExpired" }
+        else if intent.isUserPaused { detail = "preparationUserPaused" }
+        else if intent.isPaused { detail = "preparationPaused" }
+        else if intent.isProcessing { detail = "preparationProcessing" }
+        else { detail = intent.total == 0 ? "preparationWaiting" : "preparing" }
+        return .init(id: intent.id.uuidString, text: intent.text, status: intent.isExpired ? "expiredUnsubmitted" : "preparing",
+                     preparationStatus: detail, createdAt: Int64(intent.createdAt.timeIntervalSince1970 * 1000))
+    }
+}
 struct SharedChat: Encodable, Sendable {
     let roomID: String; let messages: [SharedMessage]; let pending: [SharedPendingMessage]
     let focusMessageID: String?
@@ -490,8 +508,8 @@ package actor SharedRuntime {
                     replyToID: message.isWithdrawn ? nil : message.replyTo?.messageID.rawValue,
                     replyPreview: message.isWithdrawn ? nil : message.replyTo.flatMap { replyPreviews[$0.messageID] },
                     forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue)
-            }, pending: pending.preparing.map { .init(id: $0.id.uuidString, text: $0.text, status: $0.isExpired ? "expiredUnsubmitted" : "preparing") }
-                + pending.submitted.map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status)) },
+            }, pending: pending.preparing.map(SharedPendingMessage.preparing)
+                + pending.submitted.map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status), createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000)) },
                 focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest, hasMorePending: pending.hasNext, pendingPage: pendingPage)
     }
 

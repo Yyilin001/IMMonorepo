@@ -91,7 +91,7 @@ public final class V2MobileClient: Sendable {
         }
         return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID) },
                       messages: messages + (value.chat?.pending ?? []).map {
-                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, pendingStatus: $0.status, createdAt: nil)
+                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyPreview: nil, isForwarded: false, revision: nil, mutableRevision: nil, pendingStatus: $0.preparationStatus ?? $0.status, createdAt: $0.createdAt)
                       }, hasOlder: value.chat?.hasOlder ?? false, isLatest: value.chat?.isLatest ?? true)
     }
     public struct DirectoryEntry: Sendable {

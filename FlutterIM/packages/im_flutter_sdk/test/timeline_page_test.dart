@@ -115,6 +115,26 @@ void main() {
             readByPeer: false,
             isForwarded: false,
           ),
+          for (final status in [
+            'preparationPaused',
+            'preparationUserPaused',
+            'preparationExpired',
+            'preparationRejected',
+            'preparationProcessing',
+            'preparationWaiting',
+          ])
+            wire.ImMessage(
+              id: status,
+              senderId: 'sender',
+              text: 'pending',
+              withdrawn: false,
+              hasMedia: false,
+              attachments: [],
+              readByPeer: false,
+              isForwarded: false,
+              pendingStatus: status,
+              createdAt: 12345,
+            ),
         ],
         hasOlder: true,
         isLatest: true,
@@ -122,7 +142,20 @@ void main() {
     ]);
     expect(await next, true);
     expect(iterator.current.hasOlder, true);
-    final message = iterator.current.messages.single;
+    final message = iterator.current.messages.first;
+    expect(
+      iterator.current.messages
+          .skip(1)
+          .map((row) => (row.pendingStatus, row.createdAt)),
+      [
+        (ImSendStatus.preparationPaused, 12345),
+        (ImSendStatus.preparationUserPaused, 12345),
+        (ImSendStatus.preparationExpired, 12345),
+        (ImSendStatus.preparationRejected, 12345),
+        (ImSendStatus.preparationProcessing, 12345),
+        (ImSendStatus.preparationWaiting, 12345),
+      ],
+    );
     final attachment = message.attachments.single;
     expect(
       (attachment.name, attachment.contentType, attachment.bytes),

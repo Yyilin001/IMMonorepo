@@ -68,7 +68,7 @@ private class MobileHost(private val context: Context) : ImHost {
         }
         WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
             messages + value.chat?.pending.orEmpty().map {
-                ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, emptyList(), false, false, pendingStatus = it.status.name.wire())
+                ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, emptyList(), false, false, pendingStatus = it.preparationStatus ?: it.status.name.wire(), createdAt = it.createdAt)
             }, value.chat?.hasOlder ?: false, value.chat?.isLatest ?: true)
     }
     override suspend fun directory(nextGroups: Boolean?, scope: String): DirectoryPage = sdk {

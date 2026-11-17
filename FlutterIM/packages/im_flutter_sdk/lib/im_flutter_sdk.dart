@@ -22,6 +22,12 @@ enum ImSessionState {
 
 enum ImSendStatus {
   preparing,
+  preparationWaiting,
+  preparationPaused,
+  preparationUserPaused,
+  preparationExpired,
+  preparationRejected,
+  preparationProcessing,
   pending,
   waitingForNetwork,
   waitingForAuthentication,

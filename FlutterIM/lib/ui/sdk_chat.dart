@@ -501,7 +501,13 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                             ImSendStatus.acceptedAwaitingProjection =>
                               '服务器已受理，等待同步',
                             ImSendStatus.waitingForAuthentication => '等待登录恢复',
-                            ImSendStatus.preparing => '正在准备发送',
+                            ImSendStatus.preparing => '正在准备附件',
+                            ImSendStatus.preparationWaiting => '等待发送',
+                            ImSendStatus.preparationPaused => '上传已暂停，可重试',
+                            ImSendStatus.preparationUserPaused => '附件准备已暂停',
+                            ImSendStatus.preparationExpired => '发送准备已过期',
+                            ImSendStatus.preparationRejected => '附件处理失败',
+                            ImSendStatus.preparationProcessing => '正在安全处理',
                             ImSendStatus.waitingForNetwork => '等待网络',
                             _ => '发送中',
                           };
@@ -599,10 +605,18 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                           ),
                                         ),
                                       ),
+                                      ImSendStatus.preparationPaused ||
+                                      ImSendStatus.preparationExpired ||
                                       ImSendStatus.expiredUnsubmitted ||
                                       ImSendStatus.closed ||
                                       ImSendStatus.rejected => (
-                                        label: '重新发送',
+                                        label: switch (item.pendingStatus) {
+                                          ImSendStatus.preparationPaused =>
+                                            '重试准备',
+                                          ImSendStatus.preparationExpired =>
+                                            '重新准备',
+                                          _ => '重新发送',
+                                        },
                                         action: () => updatePendingSend(
                                           item.id,
                                           (client) => client.recoverSend(
@@ -617,6 +631,12 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                   !activeMutations.contains(item.id) &&
                                       switch (item.pendingStatus) {
                                         ImSendStatus.preparing ||
+                                        ImSendStatus.preparationWaiting ||
+                                        ImSendStatus.preparationPaused ||
+                                        ImSendStatus.preparationUserPaused ||
+                                        ImSendStatus.preparationExpired ||
+                                        ImSendStatus.preparationRejected ||
+                                        ImSendStatus.preparationProcessing ||
                                         ImSendStatus.expiredUnsubmitted ||
                                         ImSendStatus.closed ||
                                         ImSendStatus.rejected => true,
