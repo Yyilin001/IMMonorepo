@@ -16,12 +16,23 @@ public final class V2MobileClient: Sendable {
         public let isGroup: Bool
         public let peerID: String?
     }
+    public struct Attachment: Sendable {
+        public let id: String
+        public let name: String
+        public let contentType: String
+        public let bytes: Int64
+
+        fileprivate init(_ value: SharedAttachment) {
+            id = value.id; name = value.name; contentType = value.contentType; bytes = value.bytes
+        }
+    }
     public struct Message: Sendable {
         public let id: String
         public let senderID: String
         public let text: String
         public let withdrawn: Bool
         public let hasMedia: Bool
+        public let attachments: [Attachment]
         public let readByPeer: Bool
         public let replyPreview: String?
         public let isForwarded: Bool
@@ -75,11 +86,11 @@ public final class V2MobileClient: Sendable {
     public func nextUpdate(windowID: String) async throws -> Window {
         let value = try await run(.init(operation: .watchWindow, windowID: windowID))
         let messages = (value.chat?.messages ?? []).map {
-            Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, readByPeer: $0.readByPeer, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, pendingStatus: nil, createdAt: $0.createdAt)
+            Message(id: $0.id, senderID: $0.senderID, text: $0.text, withdrawn: $0.withdrawn, hasMedia: $0.hasMedia, attachments: $0.attachments.map(Attachment.init), readByPeer: $0.readByPeer, replyPreview: $0.replyPreview ?? ($0.replyToID == nil ? nil : "引用消息"), isForwarded: $0.forwardedFromID != nil, mutableRevision: $0.canMutate ? Int64(exactly: $0.revision) : nil, pendingStatus: nil, createdAt: $0.createdAt)
         }
         return Window(conversations: value.conversations.map { Conversation(id: $0.id, title: $0.title, preview: $0.preview, unread: $0.unread, updatedAt: $0.updatedAt, isGroup: $0.isGroup, peerID: $0.peerID) },
                       messages: messages + (value.chat?.pending ?? []).map {
-                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, readByPeer: false, replyPreview: nil, isForwarded: false, mutableRevision: nil, pendingStatus: $0.status, createdAt: nil)
+                          Message(id: $0.id, senderID: value.userID ?? "", text: $0.text, withdrawn: false, hasMedia: false, attachments: [], readByPeer: false, replyPreview: nil, isForwarded: false, mutableRevision: nil, pendingStatus: $0.status, createdAt: nil)
                       }, hasOlder: value.chat?.hasOlder ?? false, isLatest: value.chat?.isLatest ?? true)
     }
     public struct DirectoryEntry: Sendable {
@@ -152,6 +163,30 @@ public final class V2MobileClient: Sendable {
     public func sendText(roomID: String, text: String, replyToMessageID: String? = nil) async throws {
         _ = try await run(.init(operation: .openConversation, roomID: roomID))
         _ = try await run(.init(operation: .sendText, replyToMessageID: replyToMessageID, roomID: roomID, text: text))
+    }
+    public func sendAttachment(roomID: String, file: URL, name: String, contentType: String, text: String) async throws {
+        guard file.isFileURL else { throw Failure(code: "invalidInput") }
+        let input = try FileHandle(forReadingFrom: file)
+        defer { try? input.close() }
+        let begin = try await run(.init(operation: .beginAttachment, displayName: name, contentType: contentType, roomID: roomID))
+        do {
+            guard let id = begin.resource?.importID else { throw Failure(code: "operationFailed") }
+            var offset: Int64 = 0
+            while let bytes = try input.read(upToCount: 65_536), !bytes.isEmpty {
+                _ = try await run(.init(operation: .appendAttachment, data: bytes.base64EncodedString(), offset: offset, intentID: id))
+                offset += Int64(bytes.count)
+            }
+            let finished = try await run(.init(operation: .finishAttachment, offset: offset, intentID: id))
+            guard let assetID = finished.resource?.draft?.id else { throw Failure(code: "operationFailed") }
+            _ = try await run(.init(operation: .sendAttachment, roomID: roomID, text: text, intentID: assetID))
+        } catch {
+            _ = try? await run(.init(operation: .clearResources))
+            throw error
+        }
+    }
+    public func downloadAttachment(roomID: String, messageID: String, mediaID: String) async throws {
+        _ = try await run(.init(operation: .openResource, messageID: messageID, mediaID: mediaID, roomID: roomID))
+        _ = try await run(.init(operation: .downloadResource))
     }
     public func editMessage(roomID: String, messageID: String, revision: UInt64, text: String) async throws {
         _ = try await run(.init(operation: .messageAction, messageID: messageID, roomID: roomID,

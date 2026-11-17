@@ -301,12 +301,62 @@ data class ImConversation (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class Attachment (
+  val id: String,
+  val name: String,
+  val contentType: String,
+  val bytes: Long
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): Attachment {
+      val id = pigeonVar_list[0] as String
+      val name = pigeonVar_list[1] as String
+      val contentType = pigeonVar_list[2] as String
+      val bytes = pigeonVar_list[3] as Long
+      return Attachment(id, name, contentType, bytes)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      id,
+      name,
+      contentType,
+      bytes,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as Attachment
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.name, other.name) && MessagesPigeonUtils.deepEquals(this.contentType, other.contentType) && MessagesPigeonUtils.deepEquals(this.bytes, other.bytes)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.id)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.name)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.contentType)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.bytes)
+    return result
+  }
+  override fun toString(): String {
+    return "Attachment(id=$id, name=$name, contentType=$contentType, bytes=$bytes)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class ImMessage (
   val id: String,
   val senderId: String,
   val text: String,
   val withdrawn: Boolean,
   val hasMedia: Boolean,
+  val attachments: List<Attachment>,
   val readByPeer: Boolean,
   val isForwarded: Boolean,
   val mutableRevision: Long? = null,
@@ -322,13 +372,14 @@ data class ImMessage (
       val text = pigeonVar_list[2] as String
       val withdrawn = pigeonVar_list[3] as Boolean
       val hasMedia = pigeonVar_list[4] as Boolean
-      val readByPeer = pigeonVar_list[5] as Boolean
-      val isForwarded = pigeonVar_list[6] as Boolean
-      val mutableRevision = pigeonVar_list[7] as Long?
-      val replyPreview = pigeonVar_list[8] as String?
-      val pendingStatus = pigeonVar_list[9] as String?
-      val createdAt = pigeonVar_list[10] as Long?
-      return ImMessage(id, senderId, text, withdrawn, hasMedia, readByPeer, isForwarded, mutableRevision, replyPreview, pendingStatus, createdAt)
+      val attachments = pigeonVar_list[5] as List<Attachment>
+      val readByPeer = pigeonVar_list[6] as Boolean
+      val isForwarded = pigeonVar_list[7] as Boolean
+      val mutableRevision = pigeonVar_list[8] as Long?
+      val replyPreview = pigeonVar_list[9] as String?
+      val pendingStatus = pigeonVar_list[10] as String?
+      val createdAt = pigeonVar_list[11] as Long?
+      return ImMessage(id, senderId, text, withdrawn, hasMedia, attachments, readByPeer, isForwarded, mutableRevision, replyPreview, pendingStatus, createdAt)
     }
   }
   fun toList(): List<Any?> {
@@ -338,6 +389,7 @@ data class ImMessage (
       text,
       withdrawn,
       hasMedia,
+      attachments,
       readByPeer,
       isForwarded,
       mutableRevision,
@@ -354,7 +406,7 @@ data class ImMessage (
       return true
     }
     val other = other as ImMessage
-    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt)
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.withdrawn, other.withdrawn) && MessagesPigeonUtils.deepEquals(this.hasMedia, other.hasMedia) && MessagesPigeonUtils.deepEquals(this.attachments, other.attachments) && MessagesPigeonUtils.deepEquals(this.readByPeer, other.readByPeer) && MessagesPigeonUtils.deepEquals(this.isForwarded, other.isForwarded) && MessagesPigeonUtils.deepEquals(this.mutableRevision, other.mutableRevision) && MessagesPigeonUtils.deepEquals(this.replyPreview, other.replyPreview) && MessagesPigeonUtils.deepEquals(this.pendingStatus, other.pendingStatus) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt)
   }
 
   override fun hashCode(): Int {
@@ -364,6 +416,7 @@ data class ImMessage (
     result = 31 * result + MessagesPigeonUtils.deepHash(this.text)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.withdrawn)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.hasMedia)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.attachments)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.readByPeer)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.isForwarded)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.mutableRevision)
@@ -373,7 +426,7 @@ data class ImMessage (
     return result
   }
   override fun toString(): String {
-    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, readByPeer=$readByPeer, isForwarded=$isForwarded, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt)"
+    return "ImMessage(id=$id, senderId=$senderId, text=$text, withdrawn=$withdrawn, hasMedia=$hasMedia, attachments=$attachments, readByPeer=$readByPeer, isForwarded=$isForwarded, mutableRevision=$mutableRevision, replyPreview=$replyPreview, pendingStatus=$pendingStatus, createdAt=$createdAt)"
   }
 }
 
@@ -632,30 +685,35 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       131.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImMessage.fromList(it)
+          Attachment.fromList(it)
         }
       }
       132.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryEntry.fromList(it)
+          ImMessage.fromList(it)
         }
       }
       133.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryPage.fromList(it)
+          DirectoryEntry.fromList(it)
         }
       }
       134.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupMember.fromList(it)
+          DirectoryPage.fromList(it)
         }
       }
       135.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          GroupMember.fromList(it)
         }
       }
       136.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          GroupPage.fromList(it)
+        }
+      }
+      137.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -673,28 +731,32 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(130)
         writeValue(stream, value.toList())
       }
-      is ImMessage -> {
+      is Attachment -> {
         stream.write(131)
         writeValue(stream, value.toList())
       }
-      is DirectoryEntry -> {
+      is ImMessage -> {
         stream.write(132)
         writeValue(stream, value.toList())
       }
-      is DirectoryPage -> {
+      is DirectoryEntry -> {
         stream.write(133)
         writeValue(stream, value.toList())
       }
-      is GroupMember -> {
+      is DirectoryPage -> {
         stream.write(134)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is GroupMember -> {
         stream.write(135)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is GroupPage -> {
         stream.write(136)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(137)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -724,6 +786,8 @@ interface ImHost {
   suspend fun changeWindowPage(windowId: String, latest: Boolean)
   suspend fun closeWindow(windowId: String)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
+  suspend fun sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String)
+  suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String)
   suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String)
   suspend fun withdrawMessage(roomId: String, messageId: String, revision: Long)
   suspend fun signOut()
@@ -1106,6 +1170,52 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 api.sendText(roomIdArg, textArg, replyToMessageIdArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.sendAttachment$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val pathArg = args[1] as String
+            val nameArg = args[2] as String
+            val contentTypeArg = args[3] as String
+            val textArg = args[4] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.sendAttachment(roomIdArg, pathArg, nameArg, contentTypeArg, textArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.downloadAttachment$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val messageIdArg = args[1] as String
+            val mediaIdArg = args[2] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.downloadAttachment(roomIdArg, messageIdArg, mediaIdArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

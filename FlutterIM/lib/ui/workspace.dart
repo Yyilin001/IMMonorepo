@@ -7,7 +7,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart' show ImageSource;
+import 'package:file_selector/file_selector.dart' show openFile;
+import 'package:mime/mime.dart' show lookupMimeType;
+import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 import 'package:material_ui/material_ui.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1540,6 +1542,7 @@ class _MessageBubble extends ConsumerWidget {
     required this.conversation,
     this.sdkSender,
     this.sdkStatus,
+    this.attachmentList,
     this.replyPreview,
     this.onReply,
     this.onEdit,
@@ -1549,6 +1552,7 @@ class _MessageBubble extends ConsumerWidget {
   });
   final String? sdkSender, sdkStatus, replyPreview;
   final bool isForwarded;
+  final Widget? attachmentList;
   final VoidCallback? onReply, onEdit, onWithdraw;
   final bool showTime;
   final ChatMessage message;
@@ -1693,8 +1697,9 @@ class _MessageBubble extends ConsumerWidget {
                   ),
                 if (sdkSender == null)
                   _MessageActionsRegion(message: message, child: content)
-                else
+                else if (message.text.isNotEmpty || attachmentList == null)
                   SelectionArea(child: content),
+                ?attachmentList,
                 if (mine)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),

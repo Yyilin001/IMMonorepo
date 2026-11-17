@@ -52,12 +52,19 @@ typedef ImConversation = ({
   String? peerId,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImAttachment = ({
+  String id,
+  String name,
+  String contentType,
+  int bytes,
+});
 typedef ImMessage = ({
   String id,
   String senderId,
   String text,
   bool withdrawn,
   bool hasMedia,
+  List<ImAttachment> attachments,
   bool readByPeer,
   int? mutableRevision,
   bool isForwarded,
@@ -78,6 +85,16 @@ extension on wire.ImMessage {
     text: text,
     withdrawn: withdrawn,
     hasMedia: hasMedia,
+    attachments: List<ImAttachment>.unmodifiable(
+      attachments.map(
+        (a) => (
+          id: a.id,
+          name: a.name,
+          contentType: a.contentType,
+          bytes: a.bytes,
+        ),
+      ),
+    ),
     readByPeer: readByPeer,
     mutableRevision: mutableRevision,
     isForwarded: isForwarded,
@@ -358,6 +375,22 @@ final class ImClient {
     );
     return stream.stream;
   }
+
+  Future<void> sendAttachment(
+    String roomId, {
+    required String path,
+    required String name,
+    required String contentType,
+    String text = '',
+  }) => _ordered(
+    () => _host.sendAttachment(roomId, path, name, contentType, text),
+  );
+
+  Future<void> downloadAttachment(
+    String roomId,
+    String messageId,
+    String mediaId,
+  ) => _ordered(() => _host.downloadAttachment(roomId, messageId, mediaId));
 
   Future<void> editMessage(
     String roomId,

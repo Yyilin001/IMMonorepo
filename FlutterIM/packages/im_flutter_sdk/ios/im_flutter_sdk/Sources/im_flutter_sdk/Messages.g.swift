@@ -290,12 +290,63 @@ struct ImConversation: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct Attachment: Hashable, CustomStringConvertible {
+  var id: String
+  var name: String
+  var contentType: String
+  var bytes: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> Attachment? {
+    let id = pigeonVar_list[0] as! String
+    let name = pigeonVar_list[1] as! String
+    let contentType = pigeonVar_list[2] as! String
+    let bytes = pigeonVar_list[3] as! Int64
+
+    return Attachment(
+      id: id,
+      name: name,
+      contentType: contentType,
+      bytes: bytes
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      name,
+      contentType,
+      bytes,
+    ]
+  }
+  static func == (lhs: Attachment, rhs: Attachment) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.name, rhs.name) && MessagesPigeonInternal.deepEquals(lhs.contentType, rhs.contentType) && MessagesPigeonInternal.deepEquals(lhs.bytes, rhs.bytes)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("Attachment")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: name, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: contentType, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: bytes, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "Attachment(id: \(String(describing: id)), name: \(String(describing: name)), contentType: \(String(describing: contentType)), bytes: \(String(describing: bytes)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct ImMessage: Hashable, CustomStringConvertible {
   var id: String
   var senderId: String
   var text: String
   var withdrawn: Bool
   var hasMedia: Bool
+  var attachments: [Attachment]
   var readByPeer: Bool
   var isForwarded: Bool
   var mutableRevision: Int64? = nil
@@ -311,12 +362,13 @@ struct ImMessage: Hashable, CustomStringConvertible {
     let text = pigeonVar_list[2] as! String
     let withdrawn = pigeonVar_list[3] as! Bool
     let hasMedia = pigeonVar_list[4] as! Bool
-    let readByPeer = pigeonVar_list[5] as! Bool
-    let isForwarded = pigeonVar_list[6] as! Bool
-    let mutableRevision: Int64? = nilOrValue(pigeonVar_list[7])
-    let replyPreview: String? = nilOrValue(pigeonVar_list[8])
-    let pendingStatus: String? = nilOrValue(pigeonVar_list[9])
-    let createdAt: Int64? = nilOrValue(pigeonVar_list[10])
+    let attachments = pigeonVar_list[5] as! [Attachment]
+    let readByPeer = pigeonVar_list[6] as! Bool
+    let isForwarded = pigeonVar_list[7] as! Bool
+    let mutableRevision: Int64? = nilOrValue(pigeonVar_list[8])
+    let replyPreview: String? = nilOrValue(pigeonVar_list[9])
+    let pendingStatus: String? = nilOrValue(pigeonVar_list[10])
+    let createdAt: Int64? = nilOrValue(pigeonVar_list[11])
 
     return ImMessage(
       id: id,
@@ -324,6 +376,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
       text: text,
       withdrawn: withdrawn,
       hasMedia: hasMedia,
+      attachments: attachments,
       readByPeer: readByPeer,
       isForwarded: isForwarded,
       mutableRevision: mutableRevision,
@@ -339,6 +392,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
       text,
       withdrawn,
       hasMedia,
+      attachments,
       readByPeer,
       isForwarded,
       mutableRevision,
@@ -351,7 +405,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -361,6 +415,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: text, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: withdrawn, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: hasMedia, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: attachments, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: readByPeer, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: isForwarded, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: mutableRevision, hasher: &hasher)
@@ -370,7 +425,7 @@ struct ImMessage: Hashable, CustomStringConvertible {
   }
 
   public var description: String {
-    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)))"
+    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)))"
   }
 }
 
@@ -627,16 +682,18 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 130:
       return ImConversation.fromList(self.readValue() as! [Any?])
     case 131:
-      return ImMessage.fromList(self.readValue() as! [Any?])
+      return Attachment.fromList(self.readValue() as! [Any?])
     case 132:
-      return DirectoryEntry.fromList(self.readValue() as! [Any?])
+      return ImMessage.fromList(self.readValue() as! [Any?])
     case 133:
-      return DirectoryPage.fromList(self.readValue() as! [Any?])
+      return DirectoryEntry.fromList(self.readValue() as! [Any?])
     case 134:
-      return GroupMember.fromList(self.readValue() as! [Any?])
+      return DirectoryPage.fromList(self.readValue() as! [Any?])
     case 135:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return GroupMember.fromList(self.readValue() as! [Any?])
     case 136:
+      return GroupPage.fromList(self.readValue() as! [Any?])
+    case 137:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -652,23 +709,26 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? ImConversation {
       super.writeByte(130)
       super.writeValue(value.toList())
-    } else if let value = value as? ImMessage {
+    } else if let value = value as? Attachment {
       super.writeByte(131)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryEntry {
+    } else if let value = value as? ImMessage {
       super.writeByte(132)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryPage {
+    } else if let value = value as? DirectoryEntry {
       super.writeByte(133)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupMember {
+    } else if let value = value as? DirectoryPage {
       super.writeByte(134)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? GroupMember {
       super.writeByte(135)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? GroupPage {
       super.writeByte(136)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(137)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -712,6 +772,8 @@ protocol ImHost {
   func changeWindowPage(windowId: String, latest: Bool) async throws
   func closeWindow(windowId: String) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
+  func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws
+  func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws
   func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
   func withdrawMessage(roomId: String, messageId: String, revision: Int64) async throws
   func signOut() async throws
@@ -1054,6 +1116,46 @@ class ImHostSetup {
       }
     } else {
       sendTextChannel.setMessageHandler(nil)
+    }
+    let sendAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.sendAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      sendAttachmentChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let pathArg = args[1] as! String
+        let nameArg = args[2] as! String
+        let contentTypeArg = args[3] as! String
+        let textArg = args[4] as! String
+        Task { @MainActor in
+          do {
+            try await api.sendAttachment(roomId: roomIdArg, path: pathArg, name: nameArg, contentType: contentTypeArg, text: textArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      sendAttachmentChannel.setMessageHandler(nil)
+    }
+    let downloadAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.downloadAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      downloadAttachmentChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let mediaIdArg = args[2] as! String
+        Task { @MainActor in
+          do {
+            try await api.downloadAttachment(roomId: roomIdArg, messageId: messageIdArg, mediaId: mediaIdArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      downloadAttachmentChannel.setMessageHandler(nil)
     }
     let editMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.editMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

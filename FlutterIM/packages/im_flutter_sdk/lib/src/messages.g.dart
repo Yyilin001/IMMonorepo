@@ -222,6 +222,66 @@ class ImConversation {
   }
 }
 
+class Attachment {
+  Attachment({
+    required this.id,
+    required this.name,
+    required this.contentType,
+    required this.bytes,
+  });
+
+  String id;
+
+  String name;
+
+  String contentType;
+
+  int bytes;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      id,
+      name,
+      contentType,
+      bytes,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static Attachment decode(Object result) {
+    result as List<Object?>;
+    return Attachment(
+      id: result[0]! as String,
+      name: result[1]! as String,
+      contentType: result[2]! as String,
+      bytes: result[3]! as int,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! Attachment || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(id, other.id) && _deepEquals(name, other.name) && _deepEquals(contentType, other.contentType) && _deepEquals(bytes, other.bytes);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'Attachment(id: $id, name: $name, contentType: $contentType, bytes: $bytes)';
+  }
+}
+
 class ImMessage {
   ImMessage({
     required this.id,
@@ -229,6 +289,7 @@ class ImMessage {
     required this.text,
     required this.withdrawn,
     required this.hasMedia,
+    required this.attachments,
     required this.readByPeer,
     required this.isForwarded,
     this.mutableRevision,
@@ -246,6 +307,8 @@ class ImMessage {
   bool withdrawn;
 
   bool hasMedia;
+
+  List<Attachment> attachments;
 
   bool readByPeer;
 
@@ -266,6 +329,7 @@ class ImMessage {
       text,
       withdrawn,
       hasMedia,
+      attachments,
       readByPeer,
       isForwarded,
       mutableRevision,
@@ -286,12 +350,13 @@ class ImMessage {
       text: result[2]! as String,
       withdrawn: result[3]! as bool,
       hasMedia: result[4]! as bool,
-      readByPeer: result[5]! as bool,
-      isForwarded: result[6]! as bool,
-      mutableRevision: result[7] as int?,
-      replyPreview: result[8] as String?,
-      pendingStatus: result[9] as String?,
-      createdAt: result[10] as int?,
+      attachments: (result[5]! as List<Object?>).cast<Attachment>(),
+      readByPeer: result[6]! as bool,
+      isForwarded: result[7]! as bool,
+      mutableRevision: result[8] as int?,
+      replyPreview: result[9] as String?,
+      pendingStatus: result[10] as String?,
+      createdAt: result[11] as int?,
     );
   }
 
@@ -304,7 +369,7 @@ class ImMessage {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt);
+    return _deepEquals(id, other.id) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(withdrawn, other.withdrawn) && _deepEquals(hasMedia, other.hasMedia) && _deepEquals(attachments, other.attachments) && _deepEquals(readByPeer, other.readByPeer) && _deepEquals(isForwarded, other.isForwarded) && _deepEquals(mutableRevision, other.mutableRevision) && _deepEquals(replyPreview, other.replyPreview) && _deepEquals(pendingStatus, other.pendingStatus) && _deepEquals(createdAt, other.createdAt);
   }
 
   @override
@@ -313,7 +378,7 @@ class ImMessage {
 
   @override
   String toString() {
-    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, readByPeer: $readByPeer, isForwarded: $isForwarded, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt)';
+    return 'ImMessage(id: $id, senderId: $senderId, text: $text, withdrawn: $withdrawn, hasMedia: $hasMedia, attachments: $attachments, readByPeer: $readByPeer, isForwarded: $isForwarded, mutableRevision: $mutableRevision, replyPreview: $replyPreview, pendingStatus: $pendingStatus, createdAt: $createdAt)';
   }
 }
 
@@ -626,23 +691,26 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is ImConversation) {
       buffer.putUint8(130);
       writeValue(buffer, value.encode());
-    }    else if (value is ImMessage) {
+    }    else if (value is Attachment) {
       buffer.putUint8(131);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryEntry) {
+    }    else if (value is ImMessage) {
       buffer.putUint8(132);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryPage) {
+    }    else if (value is DirectoryEntry) {
       buffer.putUint8(133);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupMember) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(136);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(137);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -657,16 +725,18 @@ class _PigeonCodec extends StandardMessageCodec {
       case 130:
         return ImConversation.decode(readValue(buffer)!);
       case 131:
-        return ImMessage.decode(readValue(buffer)!);
+        return Attachment.decode(readValue(buffer)!);
       case 132:
-        return DirectoryEntry.decode(readValue(buffer)!);
+        return ImMessage.decode(readValue(buffer)!);
       case 133:
-        return DirectoryPage.decode(readValue(buffer)!);
+        return DirectoryEntry.decode(readValue(buffer)!);
       case 134:
-        return GroupMember.decode(readValue(buffer)!);
+        return DirectoryPage.decode(readValue(buffer)!);
       case 135:
-        return GroupPage.decode(readValue(buffer)!);
+        return GroupMember.decode(readValue(buffer)!);
       case 136:
+        return GroupPage.decode(readValue(buffer)!);
+      case 137:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1014,6 +1084,40 @@ class ImHost {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, text, replyToMessageId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> sendAttachment(String roomId, String path, String name, String contentType, String text) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.sendAttachment$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, path, name, contentType, text]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<void> downloadAttachment(String roomId, String messageId, String mediaId) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.downloadAttachment$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, messageId, mediaId]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     _extractReplyValueOrThrow(
         pigeonVar_replyList,

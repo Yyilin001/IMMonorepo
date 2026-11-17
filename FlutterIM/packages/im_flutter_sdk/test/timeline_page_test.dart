@@ -18,6 +18,8 @@ void main() {
       'openWindow',
       'nextUpdate',
       'changeWindowPage',
+      'downloadAttachment',
+      'sendAttachment',
       'closeWindow',
       'close',
     ]) {
@@ -37,6 +39,16 @@ void main() {
             final result = await update.future;
             update = Completer<Object?>();
             return result;
+          case 'downloadAttachment':
+            expect(args, ['room', 'message', 'media']);
+          case 'sendAttachment':
+            expect(args, [
+              'room',
+              '/picked/file',
+              'note.txt',
+              'text/plain',
+              'caption',
+            ]);
           case 'changeWindowPage':
             calls.add(args);
             final latest = (args as List).last as bool;
@@ -67,13 +79,45 @@ void main() {
     update.complete([
       wire.WindowView(
         conversations: [],
-        messages: [],
+        messages: [
+          wire.ImMessage(
+            id: 'message',
+            senderId: 'sender',
+            text: 'caption',
+            withdrawn: false,
+            hasMedia: true,
+            attachments: [
+              wire.Attachment(
+                id: 'media',
+                name: 'note.txt',
+                contentType: 'text/plain',
+                bytes: 17,
+              ),
+            ],
+            readByPeer: false,
+            isForwarded: false,
+          ),
+        ],
         hasOlder: true,
         isLatest: true,
       ),
     ]);
     expect(await next, true);
     expect(iterator.current.hasOlder, true);
+    final message = iterator.current.messages.single;
+    final attachment = message.attachments.single;
+    expect(
+      (attachment.name, attachment.contentType, attachment.bytes),
+      ('note.txt', 'text/plain', 17),
+    );
+    await client.downloadAttachment('room', message.id, attachment.id);
+    await client.sendAttachment(
+      'room',
+      path: '/picked/file',
+      name: attachment.name,
+      contentType: attachment.contentType,
+      text: message.text,
+    );
     for (final latest in [false, true]) {
       final id = iterator.current.windowId;
       next = iterator.moveNext();

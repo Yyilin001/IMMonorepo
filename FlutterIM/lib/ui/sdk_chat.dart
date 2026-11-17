@@ -16,6 +16,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   ImTimelinePage? currentPage;
   bool paging = false;
   ImMessage? replyTarget;
+  final downloads = <(String, String)>{};
   final activeMutations = <String>{};
   bool initialized = false, sending = false;
 
@@ -77,6 +78,118 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
       }
     } finally {
       if (mounted) setState(() => sending = false);
+    }
+  }
+
+  Future<void> attach() async {
+    if (sending || replyTarget != null) return;
+    final client = _SdkScope.of(context)!.client!;
+    setState(() => sending = true);
+    try {
+      final photo = await showModalBottomSheet<bool>(
+        context: context,
+        builder: (sheet) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.image_outlined),
+                title: const Text('相册'),
+                onTap: () => Navigator.pop(sheet, true),
+              ),
+              ListTile(
+                leading: const Icon(Icons.insert_drive_file_outlined),
+                title: const Text('文件'),
+                onTap: () => Navigator.pop(sheet, false),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (!mounted || photo == null) return;
+      final file = photo
+          ? await ImagePicker().pickImage(
+              source: ImageSource.gallery,
+              requestFullMetadata: false,
+            )
+          : await openFile();
+      if (!mounted || file == null) return;
+      final bytes = await file.length();
+      if (!mounted) return;
+      if (bytes < 1 || bytes > 33554432) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('请选择非空且不超过 32 MiB 的附件')));
+        return;
+      }
+      final caption = input.text;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: const Text('发送附件'),
+          content: Text(
+            [file.name, if (caption.isNotEmpty) caption].join('\n'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: const Text('发送'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || confirmed != true) return;
+      await client.sendAttachment(
+        widget.room.id,
+        path: file.path,
+        name: file.name,
+        contentType:
+            file.mimeType ??
+            lookupMimeType(file.name) ??
+            'application/octet-stream',
+        text: caption,
+      );
+      if (!mounted) return;
+      if (input.text == caption) {
+        input.clear();
+        ref.read(draftProvider(id).notifier).save('');
+      }
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('附件已加入发送队列')));
+      final page = currentPage;
+      if (page != null && !page.isLatest) await changePage(page, latest: true);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(_errorText(error))));
+      }
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  Future<void> download(ImMessage message, ImAttachment attachment) async {
+    final key = (message.id, attachment.id);
+    if (!downloads.add(key)) return;
+    setState(() {});
+    try {
+      await _SdkScope.of(context)!.client!
+          .downloadAttachment(widget.room.id, message.id, attachment.id);
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已提交附件下载请求')));
+      }
+    } catch (failure) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(_errorText(failure))));
+      }
+    } finally {
+      if (mounted) setState(() => downloads.remove(key));
     }
   }
 
@@ -232,7 +345,9 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                           final mine = item.senderId == sdk.userId;
                           final text = item.withdrawn
                               ? '消息已撤回'
-                              : item.hasMedia && item.text.isEmpty
+                              : item.hasMedia &&
+                                    item.attachments.isEmpty &&
+                                    item.text.isEmpty
                               ? '[附件]'
                               : item.text;
                           final caption = switch (item.pendingStatus) {
@@ -258,6 +373,43 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                   ? item.senderId
                                   : name,
                               sdkStatus: caption,
+                              attachmentList:
+                                  item.withdrawn || item.attachments.isEmpty
+                                  ? null
+                                  : Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        for (final attachment
+                                            in item.attachments)
+                                          ListTile(
+                                            contentPadding: EdgeInsets.zero,
+                                            title: Text(attachment.name),
+                                            subtitle: Text(
+                                              '${attachment.contentType} · ${number(attachment.bytes)} 字节',
+                                            ),
+                                            trailing:
+                                                attachment.bytes > 33554432
+                                                ? null
+                                                : IconButton(
+                                                    tooltip: '下载附件',
+                                                    icon: const Icon(
+                                                      Icons.download_outlined,
+                                                    ),
+                                                    onPressed:
+                                                        downloads.contains((
+                                                          item.id,
+                                                          attachment.id,
+                                                        ))
+                                                        ? null
+                                                        : () => download(
+                                                            item,
+                                                            attachment,
+                                                          ),
+                                                  ),
+                                          ),
+                                      ],
+                                    ),
                               onEdit:
                                   item.mutableRevision != null &&
                                       !activeMutations.contains(item.id)
@@ -324,11 +476,11 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
           input: input,
           focus: focus,
           onSend: sending ? null : send,
-          attachmentButton: const _ComposerActionButton(
-            tooltip: '当前支持文本消息',
+          attachmentButton: _ComposerActionButton(
+            tooltip: '发送附件',
             icon: Icons.add_rounded,
             outlined: true,
-            onPressed: null,
+            onPressed: sending || replyTarget != null ? null : attach,
           ),
         ),
       ],

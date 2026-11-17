@@ -34,6 +34,19 @@ class ImConversation {
   String? peerId;
 }
 
+class Attachment {
+  Attachment({
+    required this.id,
+    required this.name,
+    required this.contentType,
+    required this.bytes,
+  });
+  String id;
+  String name;
+  String contentType;
+  int bytes;
+}
+
 class ImMessage {
   ImMessage({
     required this.id,
@@ -41,6 +54,7 @@ class ImMessage {
     required this.text,
     required this.withdrawn,
     required this.hasMedia,
+    required this.attachments,
     required this.readByPeer,
     required this.isForwarded,
     this.mutableRevision,
@@ -53,6 +67,7 @@ class ImMessage {
   String text;
   bool withdrawn;
   bool hasMedia;
+  List<Attachment> attachments;
   bool readByPeer;
   bool isForwarded;
   int? mutableRevision;
@@ -167,6 +182,16 @@ abstract class ImHost {
   void closeWindow(String windowId);
   @async
   void sendText(String roomId, String text, String? replyToMessageId);
+  @async
+  void sendAttachment(
+    String roomId,
+    String path,
+    String name,
+    String contentType,
+    String text,
+  );
+  @async
+  void downloadAttachment(String roomId, String messageId, String mediaId);
   @async
   void editMessage(String roomId, String messageId, int revision, String text);
   @async

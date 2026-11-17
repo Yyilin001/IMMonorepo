@@ -64,11 +64,11 @@ private class MobileHost(private val context: Context) : ImHost {
         val window = windows[windowId] ?: throw FlutterError("closed")
         val value = window.states().first()
         val messages = value.chat?.messages.orEmpty().map {
-            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.readByPeer, it.forwardedFromID != null, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt)
+            ImMessage(it.id, it.senderID, it.text, it.withdrawn, it.hasMedia, it.attachments.map { a -> Attachment(a.id, a.name, a.contentType, a.bytes) }, it.readByPeer, it.forwardedFromID != null, if (it.canMutate) it.revision else null, it.replyPreview ?: it.replyToID?.let { "引用消息" }, createdAt = it.createdAt)
         }
         WindowView(value.conversations.map { ImConversation(it.id, it.title, it.preview, it.unread, it.isGroup, it.updatedAt, it.peerID) },
             messages + value.chat?.pending.orEmpty().map {
-                ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, false, false, pendingStatus = it.status.name.wire())
+                ImMessage(it.id, value.userID.orEmpty(), it.text, false, false, emptyList(), false, false, pendingStatus = it.status.name.wire())
             }, value.chat?.hasOlder ?: false, value.chat?.isLatest ?: true)
     }
     override suspend fun directory(nextGroups: Boolean?, scope: String): DirectoryPage = sdk {
@@ -121,6 +121,26 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun sendText(roomId: String, text: String, replyToMessageId: String?) { mutations.withLock {
         sdk { client.openConversation(roomId); client.sendText(roomId, text, replyToMessageId) }
     } }
+    override suspend fun sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) {
+        mutations.withLock { sdk {
+            val asset = withContext(Dispatchers.IO) {
+                java.io.File(path).inputStream().use { input ->
+                    client.importAttachment(roomId, name, contentType, input).resource?.draft?.id
+                }
+            } ?: throw FlutterError("operationFailed")
+            try { client.sendAttachment(roomId, asset, text) }
+            catch (failure: Exception) {
+                withContext(NonCancellable) { runCatching { client.clearResources() } }
+                throw failure
+            }
+        } }
+    }
+    override suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String) {
+        mutations.withLock { sdk {
+            client.openResource(roomId, messageId, mediaId)
+            client.downloadResource()
+        } }
+    }
     override suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String) {
         mutations.withLock { sdk { client.editMessage(roomId, messageId, revision, text) } }
     }
