@@ -142,6 +142,80 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     });
   }
 
+  Future<void> copyAttachments(ImMessage message) async {
+    final attachments = message.attachments;
+    if (attachments.isEmpty) return;
+    final sdk = _SdkScope.of(context)!;
+    final targets = sdk.rooms.where((r) => r.id != widget.room.id).toList();
+    final target = await showModalBottomSheet<ImConversation>(
+      context: context,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ListTile(title: Text('复制附件到会话')),
+            if (targets.isEmpty) const ListTile(title: Text('暂无其他会话')),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: targets.length,
+                itemBuilder: (_, index) {
+                  final room = targets[index];
+                  return ListTile(
+                    key: ValueKey('copy-attachment-target-${room.id}'),
+                    title: Text(room.title.isEmpty ? room.id : room.title),
+                    onTap: () => Navigator.pop(sheet, room),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (target == null || !mounted) return;
+    final client = sdk.client!;
+    final directory = await Directory.systemTemp.createTemp('im-copy-');
+    var copied = 0, failed = 0;
+    try {
+      for (final attachment in attachments) {
+        final safe = attachment.name.replaceAll(RegExp(r'[/\\]'), '_');
+        final path = '${directory.path}/$safe';
+        try {
+          await client.exportAttachment(
+            widget.room.id,
+            message.id,
+            attachment.id,
+            path,
+          );
+          await client.sendAttachment(
+            target.id,
+            path: path,
+            name: attachment.name,
+            contentType: attachment.contentType,
+          );
+          copied += 1;
+        } catch (_) {
+          failed += 1;
+        }
+      }
+    } finally {
+      try {
+        await directory.delete(recursive: true);
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          failed == 0
+              ? '已复制 $copied 个附件到「${target.title}」'
+              : '已复制 $copied 个附件，$failed 个未能提交',
+        ),
+      ),
+    );
+  }
+
   Future<void> forwardSelected() async {
     final page = currentPage;
     if (page == null || forwarding) return;
@@ -924,6 +998,10 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                               mentionSummary: item.mentionSummary,
                               entities: item.entities,
                               isPinned: item.isPinned ?? false,
+                              onCopyAttachments:
+                                  !item.withdrawn && item.attachments.isNotEmpty
+                                  ? () => copyAttachments(item)
+                                  : null,
                               onPin:
                                   room.isGroup &&
                                       !item.withdrawn &&
