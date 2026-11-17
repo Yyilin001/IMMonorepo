@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -35,6 +35,8 @@ package struct SharedRequest: Decodable, Sendable {
     var publicHandle: String?
     var newPassword: String?
     var recoveryCode: String?
+    var flag1: Bool?
+    var flag2: Bool?
     var roomID: String?
     var text: String?
     var intentID: String?
@@ -104,6 +106,15 @@ struct SharedDeviceSession: Encodable, Sendable {
     let createdAt: Int64; let lastActiveAt: Int64; let isCurrentDevice: Bool
 }
 struct SharedDeviceSessions: Encodable, Sendable { let sessions: [SharedDeviceSession]; let nextCursor: String? }
+struct SharedPrivacy: Encodable, Sendable {
+    var allowsStrangerMessages: Bool?
+    var allowsUserAdd: Bool?
+    var allowsDirectReadReceipts: Bool?
+    var allowsGroupReadReceipts: Bool?
+    var allowsOnlinePresence: Bool?
+    var allowsTypingIndicators: Bool?
+    var blockedUsers: [String]
+}
 package struct SharedSnapshot: Encodable, Sendable {
     let state: String
     let userID: String?
@@ -121,6 +132,7 @@ package struct SharedSnapshot: Encodable, Sendable {
     let messaging: SharedMessagingView?
     var windowID: String? = nil
     var deviceSessions: SharedDeviceSessions? = nil
+    var privacy: SharedPrivacy? = nil
 }
 package enum SharedFailure: String, Error { case invalidConfiguration, invalidInput, busy, closed, authenticationRequired, networkUnavailable, storageUnavailable, operationFailed, cancelled, accountExists, publicHandleTaken, invalidPublicHandle, invalidDisplayName, invalidPassword, invalidRecoveryCode, rateLimited }
 package func sharedFailure(_ error: any Error) -> SharedFailure {
@@ -182,6 +194,9 @@ package actor SharedRuntime {
     private var accountHTTP: V2SessionHTTPAuthorization?
     private var deviceSessionsClient: V2HTTPDeviceSessionClient?
     private var deviceSessions: SharedDeviceSessions?
+    private var privacy: SharedPrivacy?
+    private var accountPreferences: V2AccountPreferenceService?
+    private var preferencePreparation: Task<Void, Never>?
     private var dispatcher: Task<Void, Never>?
     private var roomRecovery: V2RoomRecoveryRunner?
     private var selectedRoom: RoomID?
@@ -271,6 +286,54 @@ package actor SharedRuntime {
                     lastActiveAt: Int64($0.lastActiveAt.timeIntervalSince1970 * 1000),
                     isCurrentDevice: $0.isCurrentDevice)
             }, nextCursor: page.nextCursor)
+        case .privacy:
+            guard let service = accountPreferences, let store else { throw SharedFailure.authenticationRequired }
+            var value = privacy ?? SharedPrivacy(blockedUsers: [])
+            for kind in [V2OperationKind.strangerMessagePreference, .userAddPreference, .readReceiptPreference, .liveActivityPreference] {
+                guard let snapshot = try? await service.baseline(kind: kind) else { continue }
+                switch snapshot.value {
+                case .strangerMessage(let permission): value.allowsStrangerMessages = permission == .allow
+                case .userAdd(let permission): value.allowsUserAdd = permission == .allow
+                case .readReceipt(let direct, let group):
+                    value.allowsDirectReadReceipts = direct; value.allowsGroupReadReceipts = group
+                case .liveActivity(let online, let typing):
+                    value.allowsOnlinePresence = online; value.allowsTypingIndicators = typing
+                }
+            }
+            value.blockedUsers = try await store.blocks().filter(\.isBlocked).map(\.targetUserID.rawValue)
+            privacy = value
+        case .setPrivacy:
+            guard let service = accountPreferences, let kind = request.action else { throw SharedFailure.invalidInput }
+            let patch: V2AccountPreferencePatch
+            switch kind {
+            case "strangerMessage":
+                guard let flag = request.flag1 else { throw SharedFailure.invalidInput }
+                patch = .strangerMessage(flag ? .allow : .deny)
+            case "userAdd":
+                guard let flag = request.flag1 else { throw SharedFailure.invalidInput }
+                patch = .userAdd(flag ? .allow : .deny)
+            case "readReceipt":
+                guard request.flag1 != nil || request.flag2 != nil else { throw SharedFailure.invalidInput }
+                patch = .readReceipt(direct: request.flag1, group: request.flag2)
+            case "liveActivity":
+                guard request.flag1 != nil || request.flag2 != nil else { throw SharedFailure.invalidInput }
+                patch = .liveActivity(online: request.flag1, typing: request.flag2)
+            default: throw SharedFailure.invalidInput
+            }
+            try await service.enqueue(patch: patch)
+            var value = privacy ?? SharedPrivacy(blockedUsers: [])
+            switch patch {
+            case .strangerMessage(let permission): value.allowsStrangerMessages = permission == .allow
+            case .userAdd(let permission): value.allowsUserAdd = permission == .allow
+            case .readReceipt(let direct, let group):
+                if let direct { value.allowsDirectReadReceipts = direct }
+                if let group { value.allowsGroupReadReceipts = group }
+            case .liveActivity(let online, let typing):
+                if let online { value.allowsOnlinePresence = online }
+                if let typing { value.allowsTypingIndicators = typing }
+            }
+            privacy = value
+            try? await service.prepareNext()
         case .revokeDevice:
             guard let accountHTTP else { throw SharedFailure.authenticationRequired }
             let identity = try await auth.localAccountIdentity()
@@ -461,6 +524,7 @@ package actor SharedRuntime {
         await dispatcher?.value
         dispatcher = nil; sender = nil; roomRecovery = nil; personalPreferences = nil
         accountHTTP = nil; deviceSessionsClient = nil; deviceSessions = nil
+        preferencePreparation?.cancel(); preferencePreparation = nil; accountPreferences = nil; privacy = nil
     }
     private func signOut() async throws {
         // Intent survives cancellation/crash between revocation handoff and local deletion.
@@ -529,6 +593,10 @@ package actor SharedRuntime {
             didPersistProgress: { room, cursor in try await transport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: cursor) }),
             source: wire, personalSync: sync)
         roomRecovery = recovery
+        let accountPreferences = V2AccountPreferenceService(accountID: identity.userID, activationID: identity.deviceID.uuidValue ?? UUID(), store: store,
+            client: try V2HTTPAccountPreferenceOperationClient(baseURL: base, credentials: accountHTTP, transport: accountHTTP))
+        self.accountPreferences = accountPreferences
+        preferencePreparation = Task { try? await accountPreferences.runPreparation() }
         let personalPreferences = V2PersonalPreferenceService(accountID: identity.userID, store: store, transport: transport,
             recovery: try V2HTTPPersonalPreferenceRecoveryClient(roomsEndpoint: base.appendingPathComponent("v2/rooms"),
                 credentials: accountHTTP, transport: accountHTTP))
@@ -550,6 +618,10 @@ package actor SharedRuntime {
         let worker = V2OperationWorkDispatcher(store: store, handlers: (await business.handlers()) + (await socialGroups.handlers()) + (await messaging.handlers()) + [
             .init(kind: .conversationPreference) { try await personalPreferences.execute($0) },
             .init(kind: .messageFavorite) { try await personalPreferences.execute($0) },
+            .init(kind: .strangerMessagePreference) { try await accountPreferences.execute($0) },
+            .init(kind: .userAddPreference) { try await accountPreferences.execute($0) },
+            .init(kind: .readReceiptPreference) { try await accountPreferences.execute($0) },
+            .init(kind: .liveActivityPreference) { try await accountPreferences.execute($0) },
         ])
         dispatcher = Task {
             do {
@@ -662,6 +734,6 @@ package actor SharedRuntime {
         return .init(state: currentState, userID: userID, allowsStrangerMessages: preference?.allowsStrangerMessages, appliedSequence: cursor?.appliedSequence ?? 0,
             acknowledgedSequence: cursor?.serverAcknowledgedSequence ?? 0, connections: connections,
             conversations: rows, failure: failure?.rawValue,
-            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions)
+            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions, privacy: privacy)
     }
 }

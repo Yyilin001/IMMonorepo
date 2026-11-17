@@ -521,3 +521,332 @@ String _relativeSessionTime(int milliseconds) {
   if (delta.inDays < 1) return '${delta.inHours} 小时前';
   return '${delta.inDays} 天前';
 }
+
+class _PrivacySettingsPage extends StatefulWidget {
+  const _PrivacySettingsPage();
+
+  @override
+  State<_PrivacySettingsPage> createState() => _PrivacySettingsPageState();
+}
+
+class _PrivacySettingsPageState extends State<_PrivacySettingsPage> {
+  ImPrivacy? privacy;
+  final Map<String, ImProfile> profiles = {};
+  bool loading = true, saving = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(load());
+    });
+  }
+
+  Future<void> load() async {
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      final value = await _SdkScope.of(context)!.client!.privacy();
+      if (!mounted) return;
+      setState(() {
+        privacy = value;
+        loading = false;
+      });
+      unawaited(_loadBlockedProfiles(value?.blockedUsers ?? const []));
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        loading = false;
+      });
+    }
+  }
+
+  Future<void> _loadBlockedProfiles(List<String> ids) async {
+    final wanted = ids
+        .where((id) => !profiles.containsKey(id))
+        .take(50)
+        .toList(growable: false);
+    if (wanted.isEmpty) return;
+    try {
+      final rows = await _SdkScope.of(context)!.client!.profiles(
+        page: 'blocked',
+        context: 'relationship',
+        userIds: wanted,
+      );
+      if (!mounted) return;
+      setState(() {
+        for (final row in rows) {
+          profiles[row.userId] = row;
+        }
+      });
+    } catch (_) {
+      // Raw public IDs remain visible if cards are unavailable.
+    }
+  }
+
+  Future<void> setPrivacy(
+    String kind, {
+    bool? flag1,
+    bool? flag2,
+  }) async {
+    if (saving) return;
+    setState(() => saving = true);
+    try {
+      final value = await _SdkScope.of(context)!.client!.setPrivacy(
+        kind,
+        flag1: flag1,
+        flag2: flag2,
+      );
+      if (!mounted) return;
+      setState(() {
+        privacy = value;
+        saving = false;
+      });
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('设置已提交但尚未确认：${_errorText(failure)}')),
+      );
+    }
+  }
+
+  Future<void> unblock(String userId) async {
+    if (saving) return;
+    setState(() => saving = true);
+    try {
+      await _SdkScope.of(
+        context,
+      )!.client!.socialAction(userId, ImSocialAction.unblock);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('已提交解除屏蔽')));
+      setState(() => saving = false);
+      await load();
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  Future<void> blockByHandle({required bool block}) async {
+    final controller = TextEditingController();
+    final handle = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: Text(block ? '按公开 ID 屏蔽' : '按公开 ID 解除屏蔽'),
+        content: TextField(
+          key: const Key('privacy-handle-input'),
+          controller: controller,
+          autofocus: true,
+          autocorrect: false,
+          enableSuggestions: false,
+          decoration: const InputDecoration(labelText: '公开 ID（例如 @alice）'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, controller.text),
+            child: Text(block ? '屏蔽' : '解除屏蔽'),
+          ),
+        ],
+      ),
+    );
+    if (handle == null || handle.trim().isEmpty || !mounted) return;
+    setState(() => saving = true);
+    try {
+      final client = _SdkScope.of(context)!.client!;
+      final userId = await client.resolveUserId(handle.trim());
+      await client.socialAction(
+        userId,
+        block ? ImSocialAction.block : ImSocialAction.unblock,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(block ? '已提交屏蔽' : '已提交解除屏蔽')),
+      );
+      setState(() => saving = false);
+      await load();
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() => saving = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = privacy;
+    return _ProfileScaffold(
+      title: '消息接收设置',
+      actions: [
+        IconButton(
+          tooltip: '刷新',
+          onPressed: loading || saving ? null : load,
+          icon: const Icon(Icons.refresh_rounded),
+        ),
+      ],
+      children: [
+        if (error != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Text(
+              error!,
+              style: const TextStyle(color: Color(0xFFB3261E)),
+            ),
+          ),
+        if (loading)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (value != null) ...[
+          SwitchListTile(
+            key: const Key('privacy-stranger'),
+            title: const Text('陌生人消息'),
+            subtitle: const Text('关闭后，非好友无法向你发起新的陌生人消息。'),
+            value: value.allowsStrangerMessages ?? true,
+            onChanged: saving
+                ? null
+                : (enabled) => setPrivacy('strangerMessage', flag1: enabled),
+          ),
+          SwitchListTile(
+            key: const Key('privacy-user-add'),
+            title: const Text('添加权限'),
+            subtitle: const Text('关闭后，新的添加请求会被拒绝；已有好友不受影响。'),
+            value: value.allowsUserAdd ?? true,
+            onChanged: saving
+                ? null
+                : (enabled) => setPrivacy('userAdd', flag1: enabled),
+          ),
+          SwitchListTile(
+            key: const Key('privacy-direct-receipt'),
+            title: const Text('单聊已读回执'),
+            subtitle: const Text('关闭后，双方都不会看到彼此的已读状态。'),
+            value: value.allowsDirectReadReceipts ?? true,
+            onChanged: saving
+                ? null
+                : (enabled) => setPrivacy(
+                    'readReceipt',
+                    flag1: enabled,
+                    flag2: value.allowsGroupReadReceipts,
+                  ),
+          ),
+          SwitchListTile(
+            key: const Key('privacy-group-receipt'),
+            title: const Text('群聊已读回执'),
+            subtitle: const Text('关闭后，群成员不会看到你的已读状态。'),
+            value: value.allowsGroupReadReceipts ?? true,
+            onChanged: saving
+                ? null
+                : (enabled) => setPrivacy(
+                    'readReceipt',
+                    flag1: value.allowsDirectReadReceipts,
+                    flag2: enabled,
+                  ),
+          ),
+          SwitchListTile(
+            key: const Key('privacy-online'),
+            title: const Text('在线状态'),
+            subtitle: const Text('关闭后，不再向会话成员共享你的在线状态。'),
+            value: value.allowsOnlinePresence ?? true,
+            onChanged: saving
+                ? null
+                : (enabled) => setPrivacy(
+                    'liveActivity',
+                    flag1: enabled,
+                    flag2: value.allowsTypingIndicators,
+                  ),
+          ),
+          SwitchListTile(
+            key: const Key('privacy-typing'),
+            title: const Text('正在输入'),
+            subtitle: const Text('关闭后，不再向会话成员共享正在输入提示。'),
+            value: value.allowsTypingIndicators ?? true,
+            onChanged: saving
+                ? null
+                : (enabled) => setPrivacy(
+                    'liveActivity',
+                    flag1: value.allowsOnlinePresence,
+                    flag2: enabled,
+                  ),
+          ),
+          const _AccountHeading('已屏蔽用户'),
+          for (final user in value.blockedUsers)
+            ListTile(
+              key: ValueKey('blocked-$user'),
+              leading: SdkAvatar(
+                userId: user,
+                name: profiles[user]?.name ?? user,
+                size: 40,
+              ),
+              title: Text(profiles[user]?.name ?? user),
+              trailing: TextButton(
+                onPressed: saving ? null : () => unblock(user),
+                child: const Text('解除屏蔽'),
+              ),
+            ),
+          if (value.blockedUsers.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              child: Text('暂无已屏蔽用户', style: TextStyle(color: muted)),
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: OutlinedButton.icon(
+              key: const Key('privacy-block-handle'),
+              onPressed: saving ? null : () => blockByHandle(block: true),
+              icon: const Icon(Icons.person_off_outlined),
+              label: const Text('按公开 ID 屏蔽'),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: OutlinedButton.icon(
+              onPressed: saving ? null : () => blockByHandle(block: false),
+              icon: const Icon(Icons.person_add_alt_outlined),
+              label: const Text('按公开 ID 解除屏蔽'),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 16, 20, 24),
+            child: Text(
+              '屏蔽会解除已有好友关系并阻止新的私聊消息；解除屏蔽不会自动恢复好友。',
+              style: TextStyle(fontSize: 12, color: muted, height: 1.5),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _AccountHeading extends StatelessWidget {
+  const _AccountHeading(this.text);
+  final String text;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 18, 20, 6),
+    child: Text(
+      text,
+      style: const TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w700,
+        color: muted,
+      ),
+    ),
+  );
+}

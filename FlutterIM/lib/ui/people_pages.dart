@@ -693,6 +693,19 @@ class PersonalPane extends ConsumerWidget {
                   if (sdk?.userId != null) const _TransfersLink(),
                   if (sdk?.userId != null)
                     ListTile(
+                      key: const Key('privacy-settings'),
+                      leading: const Icon(Icons.lock_person_outlined, color: green),
+                      title: const Text('消息接收设置'),
+                      subtitle: const Text('陌生人消息、添加权限、已读回执与状态'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const _PrivacySettingsPage(),
+                        ),
+                      ),
+                    ),
+                  if (sdk?.userId != null)
+                    ListTile(
                       key: const Key('device-sessions'),
                       leading: const Icon(Icons.devices_outlined, color: green),
                       title: const Text('登录设备'),

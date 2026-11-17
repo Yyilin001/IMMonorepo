@@ -124,6 +124,22 @@ public final class V2MobileClient: Sendable {
                           createdAt: $0.createdAt, lastActiveAt: $0.lastActiveAt, isCurrentDevice: $0.isCurrentDevice)
         }, nextCursor: page.nextCursor)
     }
+    public func privacy() async throws -> Privacy? {
+        privacy(from: try await run(.init(operation: .privacy)))
+    }
+    public func setPrivacy(kind: String, flag1: Bool?, flag2: Bool?) async throws -> Privacy? {
+        privacy(from: try await run(.init(operation: .setPrivacy, flag1: flag1, flag2: flag2, action: kind)))
+    }
+    private func privacy(from value: SharedSnapshot) -> Privacy? {
+        value.privacy.map {
+            Privacy(allowsStrangerMessages: $0.allowsStrangerMessages, allowsUserAdd: $0.allowsUserAdd,
+                    allowsDirectReadReceipts: $0.allowsDirectReadReceipts,
+                    allowsGroupReadReceipts: $0.allowsGroupReadReceipts,
+                    allowsOnlinePresence: $0.allowsOnlinePresence,
+                    allowsTypingIndicators: $0.allowsTypingIndicators,
+                    blockedUsers: $0.blockedUsers)
+        }
+    }
     public func revokeDevice(deviceID: String?, all: Bool) async throws {
         _ = try await run(.init(operation: .revokeDevice, targetUserID: deviceID, action: all ? "all" : "device"))
     }
@@ -335,6 +351,15 @@ public final class V2MobileClient: Sendable {
     public struct DeviceSessions: Sendable {
         public let sessions: [DeviceSession]
         public let nextCursor: String?
+    }
+    public struct Privacy: Sendable {
+        public let allowsStrangerMessages: Bool?
+        public let allowsUserAdd: Bool?
+        public let allowsDirectReadReceipts: Bool?
+        public let allowsGroupReadReceipts: Bool?
+        public let allowsOnlinePresence: Bool?
+        public let allowsTypingIndicators: Bool?
+        public let blockedUsers: [String]
     }
     public struct GroupNickname: Sendable {
         public let roomID: String

@@ -71,6 +71,15 @@ typedef ImConversation = ({
   int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImPrivacy = ({
+  bool? allowsStrangerMessages,
+  bool? allowsUserAdd,
+  bool? allowsDirectReadReceipts,
+  bool? allowsGroupReadReceipts,
+  bool? allowsOnlinePresence,
+  bool? allowsTypingIndicators,
+  List<String> blockedUsers,
+});
 typedef ImDeviceSession = ({
   String deviceId,
   String deviceName,
@@ -275,6 +284,40 @@ final class ImClient {
   ) => _ordered(() async {
     _publish((await _host.register(account, password, publicHandle, displayName)).value);
     _schedule(Duration.zero);
+  });
+
+  Future<ImPrivacy?> privacy() => _ordered(() async {
+    final value = await _host.privacy();
+    return value == null
+        ? null
+        : (
+            allowsStrangerMessages: value.allowsStrangerMessages,
+            allowsUserAdd: value.allowsUserAdd,
+            allowsDirectReadReceipts: value.allowsDirectReadReceipts,
+            allowsGroupReadReceipts: value.allowsGroupReadReceipts,
+            allowsOnlinePresence: value.allowsOnlinePresence,
+            allowsTypingIndicators: value.allowsTypingIndicators,
+            blockedUsers: List<String>.unmodifiable(value.blockedUsers),
+          );
+  });
+
+  Future<ImPrivacy?> setPrivacy(
+    String kind, {
+    bool? flag1,
+    bool? flag2,
+  }) => _ordered(() async {
+    final value = await _host.setPrivacy(kind, flag1, flag2);
+    return value == null
+        ? null
+        : (
+            allowsStrangerMessages: value.allowsStrangerMessages,
+            allowsUserAdd: value.allowsUserAdd,
+            allowsDirectReadReceipts: value.allowsDirectReadReceipts,
+            allowsGroupReadReceipts: value.allowsGroupReadReceipts,
+            allowsOnlinePresence: value.allowsOnlinePresence,
+            allowsTypingIndicators: value.allowsTypingIndicators,
+            blockedUsers: List<String>.unmodifiable(value.blockedUsers),
+          );
   });
 
   Future<ImDeviceSessions> deviceSessions({String? cursor}) =>

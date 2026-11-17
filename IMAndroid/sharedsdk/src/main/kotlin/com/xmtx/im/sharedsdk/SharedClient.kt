@@ -43,8 +43,10 @@ data class SharedPendingMessage(val id: String, val text: String, val status: Sh
 data class SharedChat(val roomID: String, val messages: PersistentList<SharedMessage>, val pending: PersistentList<SharedPendingMessage>, val hasOlder: Boolean, val isLatest: Boolean, val hasMorePending: Boolean, val pendingPage: Int, val focusMessageID: String?)
 data class SharedDeviceSession(val deviceID: String, val deviceName: String, val platform: String, val createdAt: Long, val lastActiveAt: Long, val isCurrentDevice: Boolean)
 data class SharedDeviceSessions(val sessions: PersistentList<SharedDeviceSession>, val nextCursor: String?)
+data class SharedPrivacy(val allowsStrangerMessages: Boolean?, val allowsUserAdd: Boolean?, val allowsDirectReadReceipts: Boolean?,
+    val allowsGroupReadReceipts: Boolean?, val allowsOnlinePresence: Boolean?, val allowsTypingIndicators: Boolean?, val blockedUsers: List<String>)
 data class SharedSnapshot(val state: SharedSessionState, val userID: String?, val allowsStrangerMessages: Boolean?, val appliedSequence: Long,
-    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null)
+    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null, val privacy: SharedPrivacy? = null)
 
 internal object NativeSharedSDK {
     init { System.loadLibrary("IMV2SharedSDK") }
@@ -135,6 +137,13 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun deviceSessions(cursor: String? = null): SharedSnapshot = execute(JSONObject().put("operation", "deviceSessions").apply {
         if (cursor != null) put("intentID", cursor)
     })
+    suspend fun privacy(): SharedSnapshot = mutation.withLock { execute(JSONObject().put("operation", "privacy")) }
+    suspend fun setPrivacy(kind: String, flag1: Boolean?, flag2: Boolean?): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "setPrivacy").put("action", kind).apply {
+            if (flag1 != null) put("flag1", flag1)
+            if (flag2 != null) put("flag2", flag2)
+        })
+    }
     suspend fun revokeDevice(deviceID: String?, all: Boolean): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "revokeDevice").put("action", if (all) "all" else "device").apply {
             if (deviceID != null) put("targetUserID", deviceID)
@@ -370,8 +379,18 @@ class SharedClient private constructor(private val handle: Long) {
                         it.optString("preparationStatus").takeIf(String::isNotEmpty), it.optionalLong("createdAt"),
                         it.optionalLong("preparedAttachments"), it.optionalLong("totalAttachments"))
                 } }.toPersistentList(), chat.getBoolean("hasOlder"), chat.getBoolean("isLatest"), chat.getBoolean("hasMorePending"), chat.getInt("pendingPage"), chat.optString("focusMessageID").takeIf { it.isNotEmpty() })
-            }, value.optJSONObject("directory")?.let { decodeDirectory(it, startedAt) }, value.optJSONObject("resource")?.let { decodeResources(it, startedAt) }, value.optJSONObject("messaging")?.let { decodeMessaging(it, startedAt) }, value.optString("windowID").takeIf { it.isNotEmpty() },
-            value.optJSONObject("deviceSessions")?.let { sessions ->
+            }, value.optJSONObject("directory")?.let { decodeDirectory(it, startedAt) }, value.optJSONObject("resource")?.let { decodeResources(it, startedAt) }, value.optJSONObject("messaging")?.let { decodeMessaging(it, startedAt) }, windowID = value.optString("windowID").takeIf { it.isNotEmpty() },
+            privacy = value.optJSONObject("privacy")?.let { privacy ->
+                val blocked = privacy.getJSONArray("blockedUsers")
+                SharedPrivacy(
+                    if (privacy.has("allowsStrangerMessages")) privacy.getBoolean("allowsStrangerMessages") else null,
+                    if (privacy.has("allowsUserAdd")) privacy.getBoolean("allowsUserAdd") else null,
+                    if (privacy.has("allowsDirectReadReceipts")) privacy.getBoolean("allowsDirectReadReceipts") else null,
+                    if (privacy.has("allowsGroupReadReceipts")) privacy.getBoolean("allowsGroupReadReceipts") else null,
+                    if (privacy.has("allowsOnlinePresence")) privacy.getBoolean("allowsOnlinePresence") else null,
+                    if (privacy.has("allowsTypingIndicators")) privacy.getBoolean("allowsTypingIndicators") else null,
+                    (0 until blocked.length()).map { blocked.getString(it) })
+            }, deviceSessions = value.optJSONObject("deviceSessions")?.let { sessions ->
                 val rows = sessions.getJSONArray("sessions")
                 SharedDeviceSessions((0 until rows.length()).map { index -> rows.getJSONObject(index).let {
                     SharedDeviceSession(it.getString("deviceID"), it.getString("deviceName"), it.getString("platform"),

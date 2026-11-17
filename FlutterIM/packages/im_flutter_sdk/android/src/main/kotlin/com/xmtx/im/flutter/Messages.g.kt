@@ -961,6 +961,67 @@ data class GroupMember (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class ImPrivacy (
+  val allowsStrangerMessages: Boolean? = null,
+  val allowsUserAdd: Boolean? = null,
+  val allowsDirectReadReceipts: Boolean? = null,
+  val allowsGroupReadReceipts: Boolean? = null,
+  val allowsOnlinePresence: Boolean? = null,
+  val allowsTypingIndicators: Boolean? = null,
+  val blockedUsers: List<String>
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImPrivacy {
+      val allowsStrangerMessages = pigeonVar_list[0] as Boolean?
+      val allowsUserAdd = pigeonVar_list[1] as Boolean?
+      val allowsDirectReadReceipts = pigeonVar_list[2] as Boolean?
+      val allowsGroupReadReceipts = pigeonVar_list[3] as Boolean?
+      val allowsOnlinePresence = pigeonVar_list[4] as Boolean?
+      val allowsTypingIndicators = pigeonVar_list[5] as Boolean?
+      val blockedUsers = pigeonVar_list[6] as List<String>
+      return ImPrivacy(allowsStrangerMessages, allowsUserAdd, allowsDirectReadReceipts, allowsGroupReadReceipts, allowsOnlinePresence, allowsTypingIndicators, blockedUsers)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      allowsStrangerMessages,
+      allowsUserAdd,
+      allowsDirectReadReceipts,
+      allowsGroupReadReceipts,
+      allowsOnlinePresence,
+      allowsTypingIndicators,
+      blockedUsers,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImPrivacy
+    return MessagesPigeonUtils.deepEquals(this.allowsStrangerMessages, other.allowsStrangerMessages) && MessagesPigeonUtils.deepEquals(this.allowsUserAdd, other.allowsUserAdd) && MessagesPigeonUtils.deepEquals(this.allowsDirectReadReceipts, other.allowsDirectReadReceipts) && MessagesPigeonUtils.deepEquals(this.allowsGroupReadReceipts, other.allowsGroupReadReceipts) && MessagesPigeonUtils.deepEquals(this.allowsOnlinePresence, other.allowsOnlinePresence) && MessagesPigeonUtils.deepEquals(this.allowsTypingIndicators, other.allowsTypingIndicators) && MessagesPigeonUtils.deepEquals(this.blockedUsers, other.blockedUsers)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.allowsStrangerMessages)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.allowsUserAdd)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.allowsDirectReadReceipts)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.allowsGroupReadReceipts)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.allowsOnlinePresence)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.allowsTypingIndicators)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.blockedUsers)
+    return result
+  }
+  override fun toString(): String {
+    return "ImPrivacy(allowsStrangerMessages=$allowsStrangerMessages, allowsUserAdd=$allowsUserAdd, allowsDirectReadReceipts=$allowsDirectReadReceipts, allowsGroupReadReceipts=$allowsGroupReadReceipts, allowsOnlinePresence=$allowsOnlinePresence, allowsTypingIndicators=$allowsTypingIndicators, blockedUsers=$blockedUsers)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class ImDeviceSession (
   val deviceId: String,
   val deviceName: String,
@@ -1613,55 +1674,60 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       143.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImDeviceSession.fromList(it)
+          ImPrivacy.fromList(it)
         }
       }
       144.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImDeviceSessions.fromList(it)
+          ImDeviceSession.fromList(it)
         }
       }
       145.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImGroupNickname.fromList(it)
+          ImDeviceSessions.fromList(it)
         }
       }
       146.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImGroupPolicy.fromList(it)
+          ImGroupNickname.fromList(it)
         }
       }
       147.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          ImGroupPolicy.fromList(it)
         }
       }
       148.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImInvite.fromList(it)
+          GroupPage.fromList(it)
         }
       }
       149.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImJoinRequest.fromList(it)
+          ImInvite.fromList(it)
         }
       }
       150.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImInvitePreview.fromList(it)
+          ImJoinRequest.fromList(it)
         }
       }
       151.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImCommunity.fromList(it)
+          ImInvitePreview.fromList(it)
         }
       }
       152.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImReaders.fromList(it)
+          ImCommunity.fromList(it)
         }
       }
       153.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          ImReaders.fromList(it)
+        }
+      }
+      154.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -1727,48 +1793,52 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(142)
         writeValue(stream, value.toList())
       }
-      is ImDeviceSession -> {
+      is ImPrivacy -> {
         stream.write(143)
         writeValue(stream, value.toList())
       }
-      is ImDeviceSessions -> {
+      is ImDeviceSession -> {
         stream.write(144)
         writeValue(stream, value.toList())
       }
-      is ImGroupNickname -> {
+      is ImDeviceSessions -> {
         stream.write(145)
         writeValue(stream, value.toList())
       }
-      is ImGroupPolicy -> {
+      is ImGroupNickname -> {
         stream.write(146)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is ImGroupPolicy -> {
         stream.write(147)
         writeValue(stream, value.toList())
       }
-      is ImInvite -> {
+      is GroupPage -> {
         stream.write(148)
         writeValue(stream, value.toList())
       }
-      is ImJoinRequest -> {
+      is ImInvite -> {
         stream.write(149)
         writeValue(stream, value.toList())
       }
-      is ImInvitePreview -> {
+      is ImJoinRequest -> {
         stream.write(150)
         writeValue(stream, value.toList())
       }
-      is ImCommunity -> {
+      is ImInvitePreview -> {
         stream.write(151)
         writeValue(stream, value.toList())
       }
-      is ImReaders -> {
+      is ImCommunity -> {
         stream.write(152)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is ImReaders -> {
         stream.write(153)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(154)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -1783,6 +1853,8 @@ interface ImHost {
   suspend fun restore(): ImSession
   suspend fun signIn(account: String, password: String): ImSession
   suspend fun register(account: String, password: String, publicHandle: String, displayName: String): ImSession
+  suspend fun privacy(): ImPrivacy?
+  suspend fun setPrivacy(kind: String, flag1: Boolean?, flag2: Boolean?): ImPrivacy?
   suspend fun deviceSessions(cursor: String?): ImDeviceSessions
   suspend fun revokeDevice(deviceId: String?, all: Boolean)
   suspend fun passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?)
@@ -1920,6 +1992,44 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 listOf(api.register(accountArg, passwordArg, publicHandleArg, displayNameArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.privacy$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.privacy())
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.setPrivacy$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val kindArg = args[0] as String
+            val flag1Arg = args[1] as Boolean?
+            val flag2Arg = args[2] as Boolean?
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.setPrivacy(kindArg, flag1Arg, flag2Arg))
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

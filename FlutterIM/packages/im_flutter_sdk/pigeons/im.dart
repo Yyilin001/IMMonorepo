@@ -209,6 +209,25 @@ class GroupMember {
   String role;
 }
 
+class ImPrivacy {
+  ImPrivacy({
+    this.allowsStrangerMessages,
+    this.allowsUserAdd,
+    this.allowsDirectReadReceipts,
+    this.allowsGroupReadReceipts,
+    this.allowsOnlinePresence,
+    this.allowsTypingIndicators,
+    required this.blockedUsers,
+  });
+  bool? allowsStrangerMessages;
+  bool? allowsUserAdd;
+  bool? allowsDirectReadReceipts;
+  bool? allowsGroupReadReceipts;
+  bool? allowsOnlinePresence;
+  bool? allowsTypingIndicators;
+  List<String> blockedUsers;
+}
+
 class ImDeviceSession {
   ImDeviceSession({
     required this.deviceId,
@@ -380,6 +399,10 @@ abstract class ImHost {
     String publicHandle,
     String displayName,
   );
+  @async
+  ImPrivacy? privacy();
+  @async
+  ImPrivacy? setPrivacy(String kind, bool? flag1, bool? flag2);
   @async
   ImDeviceSessions deviceSessions(String? cursor);
   @async

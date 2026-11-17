@@ -1032,6 +1032,81 @@ class GroupMember {
   }
 }
 
+class ImPrivacy {
+  ImPrivacy({
+    this.allowsStrangerMessages,
+    this.allowsUserAdd,
+    this.allowsDirectReadReceipts,
+    this.allowsGroupReadReceipts,
+    this.allowsOnlinePresence,
+    this.allowsTypingIndicators,
+    required this.blockedUsers,
+  });
+
+  bool? allowsStrangerMessages;
+
+  bool? allowsUserAdd;
+
+  bool? allowsDirectReadReceipts;
+
+  bool? allowsGroupReadReceipts;
+
+  bool? allowsOnlinePresence;
+
+  bool? allowsTypingIndicators;
+
+  List<String> blockedUsers;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      allowsStrangerMessages,
+      allowsUserAdd,
+      allowsDirectReadReceipts,
+      allowsGroupReadReceipts,
+      allowsOnlinePresence,
+      allowsTypingIndicators,
+      blockedUsers,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImPrivacy decode(Object result) {
+    result as List<Object?>;
+    return ImPrivacy(
+      allowsStrangerMessages: result[0] as bool?,
+      allowsUserAdd: result[1] as bool?,
+      allowsDirectReadReceipts: result[2] as bool?,
+      allowsGroupReadReceipts: result[3] as bool?,
+      allowsOnlinePresence: result[4] as bool?,
+      allowsTypingIndicators: result[5] as bool?,
+      blockedUsers: (result[6]! as List<Object?>).cast<String>(),
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImPrivacy || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(allowsStrangerMessages, other.allowsStrangerMessages) && _deepEquals(allowsUserAdd, other.allowsUserAdd) && _deepEquals(allowsDirectReadReceipts, other.allowsDirectReadReceipts) && _deepEquals(allowsGroupReadReceipts, other.allowsGroupReadReceipts) && _deepEquals(allowsOnlinePresence, other.allowsOnlinePresence) && _deepEquals(allowsTypingIndicators, other.allowsTypingIndicators) && _deepEquals(blockedUsers, other.blockedUsers);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImPrivacy(allowsStrangerMessages: $allowsStrangerMessages, allowsUserAdd: $allowsUserAdd, allowsDirectReadReceipts: $allowsDirectReadReceipts, allowsGroupReadReceipts: $allowsGroupReadReceipts, allowsOnlinePresence: $allowsOnlinePresence, allowsTypingIndicators: $allowsTypingIndicators, blockedUsers: $blockedUsers)';
+  }
+}
+
 class ImDeviceSession {
   ImDeviceSession({
     required this.deviceId,
@@ -1792,38 +1867,41 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is GroupMember) {
       buffer.putUint8(142);
       writeValue(buffer, value.encode());
-    }    else if (value is ImDeviceSession) {
+    }    else if (value is ImPrivacy) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    }    else if (value is ImDeviceSessions) {
+    }    else if (value is ImDeviceSession) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupNickname) {
+    }    else if (value is ImDeviceSessions) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    }    else if (value is ImGroupPolicy) {
+    }    else if (value is ImGroupNickname) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is ImGroupPolicy) {
       buffer.putUint8(147);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvite) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(148);
       writeValue(buffer, value.encode());
-    }    else if (value is ImJoinRequest) {
+    }    else if (value is ImInvite) {
       buffer.putUint8(149);
       writeValue(buffer, value.encode());
-    }    else if (value is ImInvitePreview) {
+    }    else if (value is ImJoinRequest) {
       buffer.putUint8(150);
       writeValue(buffer, value.encode());
-    }    else if (value is ImCommunity) {
+    }    else if (value is ImInvitePreview) {
       buffer.putUint8(151);
       writeValue(buffer, value.encode());
-    }    else if (value is ImReaders) {
+    }    else if (value is ImCommunity) {
       buffer.putUint8(152);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is ImReaders) {
       buffer.putUint8(153);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(154);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1862,26 +1940,28 @@ class _PigeonCodec extends StandardMessageCodec {
       case 142:
         return GroupMember.decode(readValue(buffer)!);
       case 143:
-        return ImDeviceSession.decode(readValue(buffer)!);
+        return ImPrivacy.decode(readValue(buffer)!);
       case 144:
-        return ImDeviceSessions.decode(readValue(buffer)!);
+        return ImDeviceSession.decode(readValue(buffer)!);
       case 145:
-        return ImGroupNickname.decode(readValue(buffer)!);
+        return ImDeviceSessions.decode(readValue(buffer)!);
       case 146:
-        return ImGroupPolicy.decode(readValue(buffer)!);
+        return ImGroupNickname.decode(readValue(buffer)!);
       case 147:
-        return GroupPage.decode(readValue(buffer)!);
+        return ImGroupPolicy.decode(readValue(buffer)!);
       case 148:
-        return ImInvite.decode(readValue(buffer)!);
+        return GroupPage.decode(readValue(buffer)!);
       case 149:
-        return ImJoinRequest.decode(readValue(buffer)!);
+        return ImInvite.decode(readValue(buffer)!);
       case 150:
-        return ImInvitePreview.decode(readValue(buffer)!);
+        return ImJoinRequest.decode(readValue(buffer)!);
       case 151:
-        return ImCommunity.decode(readValue(buffer)!);
+        return ImInvitePreview.decode(readValue(buffer)!);
       case 152:
-        return ImReaders.decode(readValue(buffer)!);
+        return ImCommunity.decode(readValue(buffer)!);
       case 153:
+        return ImReaders.decode(readValue(buffer)!);
+      case 154:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1975,6 +2055,42 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as ImSession;
+  }
+
+  Future<ImPrivacy?> privacy() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.privacy$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+    return pigeonVar_replyValue as ImPrivacy?;
+  }
+
+  Future<ImPrivacy?> setPrivacy(String kind, bool? flag1, bool? flag2) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.setPrivacy$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[kind, flag1, flag2]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+    return pigeonVar_replyValue as ImPrivacy?;
   }
 
   Future<ImDeviceSessions> deviceSessions(String? cursor) async {

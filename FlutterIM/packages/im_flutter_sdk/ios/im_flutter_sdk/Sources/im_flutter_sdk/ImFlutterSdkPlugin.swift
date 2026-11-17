@@ -55,6 +55,28 @@ private actor MobileHost: ImHost {
         try await ordered { try await self.client.register(account: account, password: password,
             publicHandle: publicHandle, displayName: displayName).wire }
     }
+    func privacy() async throws -> ImPrivacy? {
+        try await ordered {
+            guard let value = try await self.client.privacy() else { return nil }
+            return ImPrivacy(allowsStrangerMessages: value.allowsStrangerMessages, allowsUserAdd: value.allowsUserAdd,
+                             allowsDirectReadReceipts: value.allowsDirectReadReceipts,
+                             allowsGroupReadReceipts: value.allowsGroupReadReceipts,
+                             allowsOnlinePresence: value.allowsOnlinePresence,
+                             allowsTypingIndicators: value.allowsTypingIndicators,
+                             blockedUsers: value.blockedUsers)
+        }
+    }
+    func setPrivacy(kind: String, flag1: Bool?, flag2: Bool?) async throws -> ImPrivacy? {
+        try await ordered {
+            guard let value = try await self.client.setPrivacy(kind: kind, flag1: flag1, flag2: flag2) else { return nil }
+            return ImPrivacy(allowsStrangerMessages: value.allowsStrangerMessages, allowsUserAdd: value.allowsUserAdd,
+                             allowsDirectReadReceipts: value.allowsDirectReadReceipts,
+                             allowsGroupReadReceipts: value.allowsGroupReadReceipts,
+                             allowsOnlinePresence: value.allowsOnlinePresence,
+                             allowsTypingIndicators: value.allowsTypingIndicators,
+                             blockedUsers: value.blockedUsers)
+        }
+    }
     func deviceSessions(cursor: String?) async throws -> ImDeviceSessions {
         try await ordered {
             let page = try await self.client.deviceSessions(cursor: cursor)

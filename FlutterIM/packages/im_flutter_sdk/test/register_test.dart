@@ -12,7 +12,7 @@ void main() {
     final calls = <Object?>[];
     final lifecycle = <Object?>[];
     final devices = <Object?>[];
-    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'close']) {
+    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'close']) {
       final channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.im_flutter_sdk.ImHost.$method',
         wire.ImHost.pigeonChannelCodec,
@@ -24,10 +24,24 @@ void main() {
             return [wire.ImSession(state: 'ready', userId: 'user')];
           case 'passwordLifecycle':
             lifecycle.add(args);
+          case 'privacy':
+          case 'setPrivacy':
+            devices.add(args as List<Object?>? ?? const []);
+            return [
+              wire.ImPrivacy(
+                allowsStrangerMessages: false,
+                allowsUserAdd: true,
+                allowsDirectReadReceipts: true,
+                allowsGroupReadReceipts: false,
+                allowsOnlinePresence: true,
+                allowsTypingIndicators: false,
+                blockedUsers: ['peer'],
+              ),
+            ];
           case 'revokeDevice':
-            devices.add(args);
+            devices.add(args as List<Object?>? ?? const []);
           case 'deviceSessions':
-            devices.add(args);
+            devices.add(args as List<Object?>? ?? const []);
             return [
               wire.ImDeviceSessions(
                 sessions: [
@@ -78,6 +92,14 @@ void main() {
     expect(devices.last, ['device', false]);
     await client.revokeDevice(all: true);
     expect(devices.last, [null, true]);
+
+    final privacy = await client.privacy();
+    expect(privacy?.allowsStrangerMessages, false);
+    expect(privacy?.blockedUsers, ['peer']);
+    expect(devices.last, isEmpty);
+    final updated = await client.setPrivacy('readReceipt', flag1: true, flag2: false);
+    expect(updated?.allowsGroupReadReceipts, false);
+    expect(devices.last, ['readReceipt', true, false]);
     await client.close();
   });
 }

@@ -49,6 +49,12 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun register(account: String, password: String, publicHandle: String, displayName: String) =
         sdk { client.register(account, password, publicHandle, displayName).session() }
     override suspend fun status() = sdk { client.snapshot().session() }
+    private fun SharedPrivacy.wire() = ImPrivacy(allowsStrangerMessages, allowsUserAdd, allowsDirectReadReceipts,
+        allowsGroupReadReceipts, allowsOnlinePresence, allowsTypingIndicators, blockedUsers)
+    override suspend fun privacy(): ImPrivacy? = mutations.withLock { sdk { client.privacy().privacy?.wire() } }
+    override suspend fun setPrivacy(kind: String, flag1: Boolean?, flag2: Boolean?): ImPrivacy? = mutations.withLock {
+        sdk { client.setPrivacy(kind, flag1, flag2).privacy?.wire() }
+    }
     override suspend fun deviceSessions(cursor: String?): ImDeviceSessions = sdk {
         val page = client.deviceSessions(cursor).deviceSessions ?: throw FlutterError("operationFailed")
         ImDeviceSessions(page.sessions.map {
