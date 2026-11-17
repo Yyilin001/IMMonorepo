@@ -204,58 +204,53 @@ void main() {
       bubble('附件字节已校验 ios $run'),
       'attachment acknowledgement visible after reopening',
     );
-    if (sender) {
-      const destinations = [
-        String.fromEnvironment('IM_FORWARD_FIRST'),
-        String.fromEnvironment('IM_FORWARD_SECOND'),
-      ];
-      // Select the newest confirmed message, then verify each server projection.
-      final timeline = await mediaHost.openWindow(room);
-      late final wire.ImMessage source;
-      try {
-        source = (await mediaHost.nextUpdate(timeline)).messages
-            .singleWhere((m) => m.text == '附件字节已校验 ios $run');
-      } finally {
-        await mediaHost.closeWindow(timeline);
-      }
-      final menu = find.descendant(
-        of: find.byKey(ValueKey(source.id)),
-        matching: find.byTooltip('消息操作'),
-      );
-      await tester.ensureVisible(menu);
-      await tester.tap(menu);
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('转发'));
-      await tester.pumpAndSettle();
-      for (final id in destinations) {
-        final choice = find.byKey(ValueKey('forward-target-$id'));
-        await tester.ensureVisible(choice);
-        await tester.tap(choice);
-        await tester.pump();
-      }
-      await tester.tap(find.text('转发（2/10）'));
-      await tester.pumpAndSettle();
-      await tester.pageBack();
-      await tester.pumpAndSettle();
-      for (final id in destinations) {
-        final destination = find.byKey(ValueKey(id));
-        await until(destination, 'forward destination in conversation list');
-        await tester.ensureVisible(destination);
-        await tester.tap(destination);
-        await until(bubble(source.text), 'forward delivered to destination');
-        await until(
-          bubble('转发的消息'),
-          'destination retained forward attribution',
-        );
-        await tester.pageBack();
-        await tester.pumpAndSettle();
-      }
-      await tester.tap(tile);
-      await tester.pumpAndSettle();
+    final destinations = sender
+        ? const [
+            String.fromEnvironment('IM_ANDROID_FORWARD_FIRST'),
+            String.fromEnvironment('IM_ANDROID_FORWARD_SECOND'),
+          ]
+        : const [
+            String.fromEnvironment('IM_IOS_FORWARD_FIRST'),
+            String.fromEnvironment('IM_IOS_FORWARD_SECOND'),
+          ];
+    // Select the newest confirmed message, then verify each server projection.
+    final timeline = await mediaHost.openWindow(room);
+    late final wire.ImMessage source;
+    try {
+      source = (await mediaHost.nextUpdate(timeline)).messages
+          .singleWhere((m) => m.text == '附件字节已校验 ios $run');
+    } finally {
+      await mediaHost.closeWindow(timeline);
     }
+    final menu = find.descendant(
+      of: find.byKey(ValueKey(source.id)),
+      matching: find.byTooltip('消息操作'),
+    );
+    await tester.ensureVisible(menu);
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('转发'));
+    await tester.pumpAndSettle();
+    for (final id in destinations) {
+      final choice = find.byKey(ValueKey('forward-target-$id'));
+      await tester.ensureVisible(choice);
+      await tester.tap(choice);
+      await tester.pump();
+    }
+    await tester.tap(find.text('转发（2/10）'));
     await tester.pumpAndSettle();
     await tester.pageBack();
     await tester.pumpAndSettle();
+    for (final id in destinations) {
+      final destination = find.byKey(ValueKey(id));
+      await until(destination, 'forward destination in conversation list');
+      await tester.ensureVisible(destination);
+      await tester.tap(destination);
+      await until(bubble(source.text), 'forward delivered to destination');
+      await until(bubble('转发的消息'), 'destination retained forward attribution');
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+    }
     await tester.tap(find.byKey(const Key('nav-contacts')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('open-contact-search')), findsOneWidget);

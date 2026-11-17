@@ -54,11 +54,11 @@ await client.sendText(roomId, text);
 python3 IMV2/scripts/verify_v2_isolated_native_account.py --resource-part-uploads --hold-seconds 900
 ```
 
-在另一个终端将输出的配置路径和已有 Android arm64 模拟器序列号交给驱动。驱动在构建测试包时自动注入隔离后端地址，创建四个临时账号、一个收发消息的私聊和两个转发目标私聊，自动创建并清理一个 iOS 模拟器，在两个 Flutter 界面依次登录、收发文本、重开消息窗口并退出。附件用例通过真实平台绑定向对方发送 280001 字节的测试文件，接收端检查聊天页文件名、下载后导出并逐字节比对。Android 端还通过消息菜单一次选中两个目标，分别打开目标会话核对正文和转发标记。附件用例使用应用私有测试文件，跳过系统文件选择器。测试 CA 只加进临时 iOS 模拟器和专用 Android Debug 包的 localhost 信任配置。
+在另一个终端将输出的配置路径和已有 Android arm64 模拟器序列号交给驱动。驱动在构建测试包时自动注入隔离后端地址，创建四个临时账号、一个收发消息的私聊，并为两端分别准备两个转发目标私聊，自动创建并清理一个 iOS 模拟器，在两个 Flutter 界面依次登录、收发文本、重开消息窗口并退出。附件用例通过真实平台绑定向对方发送 280001 字节的测试文件，接收端检查聊天页文件名、下载后导出并逐字节比对。两端各自通过消息菜单一次选中两个目标，分别打开目标会话核对正文和转发标记。附件用例使用应用私有测试文件，跳过系统文件选择器。测试 CA 只加进临时 iOS 模拟器和专用 Android Debug 包的 localhost 信任配置。
 
 ```sh
 cd FlutterIM
 python3 tool/verify_shared_sdk.py --endpoints /path/to/test-endpoints.json --android emulator-5556
 ```
 
-双向文本与附件验收已在 Android API 31、API 36 arm64 模拟器与 iPhone 16 Pro（iOS 18.5 模拟器）上通过，连接隔离 PostgreSQL、账户 HTTPS 服务和 TLS 网关。多目标转发已在 API 36 模拟器通过上述验收。普通 Debug APK 和 iOS 模拟器 App 也已构建。
+双向文本与附件验收已在 Android API 31、API 36 arm64 模拟器与 iPhone 16 Pro（iOS 18.5 模拟器）上通过，连接隔离 PostgreSQL、账户 HTTPS 服务和 TLS 网关。多目标转发已在 Android API 36 和 iOS 18.5 模拟器分别发起并通过上述验收。普通 Debug APK 和 iOS 模拟器 App 也已构建。

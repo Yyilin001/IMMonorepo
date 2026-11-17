@@ -49,14 +49,18 @@ def accounts(config, origin):
                              'issueBeforeMilliseconds': int((time.time() + 600) * 1000)}})
 
     sender, peer = register('a'), register('b')
-    def direct(target):
+    first, second = register('c'), register('d')
+
+    def direct(actor, target):
         result = post('direct-room-operations/submit', {
-            'actorUserID': {'rawValue': sender['userID']}, 'targetUserID': {'rawValue': target['userID']},
-            'operationID': {'rawValue': new_id()}, 'firstSubmissionDeadlineMilliseconds': int((time.time() + 60) * 1000)}, sender)
+            'actorUserID': {'rawValue': actor['userID']}, 'targetUserID': {'rawValue': target['userID']},
+            'operationID': {'rawValue': new_id()}, 'firstSubmissionDeadlineMilliseconds': int((time.time() + 60) * 1000)}, actor)
         return result['receipt']['_0']['outcome']['opened']['roomID']['rawValue']
 
     return dict(IM_ACCOUNT_URL=origin, IM_GATEWAY_HOST='localhost', IM_GATEWAY_PORT=str(config['gatewayPort']),
-                IM_E2E_ROOM=direct(peer), IM_FORWARD_FIRST=direct(register('c')), IM_FORWARD_SECOND=direct(register('d')),
+                IM_E2E_ROOM=direct(sender, peer),
+                IM_ANDROID_FORWARD_FIRST=direct(sender, first), IM_ANDROID_FORWARD_SECOND=direct(sender, second),
+                IM_IOS_FORWARD_FIRST=direct(peer, first), IM_IOS_FORWARD_SECOND=direct(peer, second),
                 IM_E2E_RUN=run, IM_E2E_PASSWORD=password)
 
 
