@@ -491,7 +491,7 @@ final class ImClient {
       _ordered(() => _host.cancelPendingSend(intentId));
 
   Future<ImSearchPage> searchMessages(
-    String roomId,
+    String? roomId,
     String query, {
     bool next = false,
   }) => _ordered(() async {

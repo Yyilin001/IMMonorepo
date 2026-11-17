@@ -1363,7 +1363,7 @@ class ImHost {
     ;
   }
 
-  Future<SearchPage> searchMessages(String roomId, String query, bool next) async {
+  Future<SearchPage> searchMessages(String? roomId, String query, bool next) async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.searchMessages$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,

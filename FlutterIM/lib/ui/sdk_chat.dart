@@ -402,7 +402,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) =>
-                      _RoomMessageSearch(client: sdk.client!, room: room),
+                      _MessageSearchPage(client: sdk.client!, room: room),
                 ),
               ),
             ),
@@ -924,17 +924,22 @@ class _AttachmentImagePreviewState extends State<AttachmentImagePreview>
   );
 }
 
-class _RoomMessageSearch extends StatefulWidget {
-  const _RoomMessageSearch({required this.client, required this.room});
+class _MessageSearchPage extends StatefulWidget {
+  const _MessageSearchPage({
+    required this.client,
+    this.room,
+    this.roomTitles = const {},
+  });
   final ImClient client;
-  final ImConversation room;
+  final ImConversation? room;
+  final Map<String, String> roomTitles;
   @override
-  State<_RoomMessageSearch> createState() => _RoomMessageSearchState();
+  State<_MessageSearchPage> createState() => _MessageSearchPageState();
 }
 
-class _RoomMessageSearchState extends State<_RoomMessageSearch> {
+class _MessageSearchPageState extends State<_MessageSearchPage> {
   final input = TextEditingController();
-  final hits = <String, ImSearchHit>{};
+  final hits = <(String, String), ImSearchHit>{};
   bool busy = false, hasNext = false;
   String? status;
 
@@ -949,14 +954,14 @@ class _RoomMessageSearchState extends State<_RoomMessageSearch> {
     });
     try {
       final page = await widget.client.searchMessages(
-        widget.room.id,
+        widget.room?.id,
         query,
         next: next,
       );
       if (!mounted) return;
       setState(() {
         for (final hit in page.hits) {
-          hits[hit.id] = hit;
+          hits[(hit.roomId, hit.id)] = hit;
         }
         hasNext = page.hasNext;
         status = switch (page.status) {
@@ -981,7 +986,7 @@ class _RoomMessageSearchState extends State<_RoomMessageSearch> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('搜索聊天记录')),
+    appBar: AppBar(title: Text(widget.room == null ? '搜索全部聊天记录' : '搜索聊天记录')),
     body: Column(
       children: [
         Padding(
@@ -1015,7 +1020,13 @@ class _RoomMessageSearchState extends State<_RoomMessageSearch> {
           child: ListView(
             children: [
               for (final hit in hits.values)
-                ListTile(title: SelectableText(hit.text)),
+                ListTile(
+                  key: ValueKey(('search-hit', hit.roomId, hit.id)),
+                  title: SelectableText(hit.text),
+                  subtitle: widget.room == null
+                      ? Text(widget.roomTitles[hit.roomId] ?? hit.roomId)
+                      : null,
+                ),
               if (hasNext)
                 TextButton(
                   onPressed: busy ? null : () => search(next: true),

@@ -264,6 +264,22 @@ void main() {
       await tester.pageBack();
       await tester.pumpAndSettle();
     }
+    await tester.tap(find.byTooltip('搜索全部聊天记录'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(EditableText), source.text);
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+    for (final expectedRoom in [room, ...destinations]) {
+      final row = find.byWidgetPredicate((widget) {
+        final key = widget.key;
+        return key is ValueKey<(String, String, String)> &&
+            key.value.$1 == 'search-hit' &&
+            key.value.$2 == expectedRoom;
+      });
+      await until(row, 'global search found message in expected room');
+    }
+    await tester.pageBack();
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('nav-contacts')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('open-contact-search')), findsOneWidget);

@@ -1002,7 +1002,7 @@ protocol ImHost {
   func changeWindowPage(windowId: String, latest: Bool) async throws
   func closeWindow(windowId: String) async throws
   func cancelPendingSend(intentId: String) async throws
-  func searchMessages(roomId: String, query: String, next: Bool) async throws -> SearchPage
+  func searchMessages(roomId: String?, query: String, next: Bool) async throws -> SearchPage
   func clearMessageSearch() async throws
   func recoverSend(intentId: String, resend: Bool) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
@@ -1358,7 +1358,7 @@ class ImHostSetup {
     if let api = api {
       searchMessagesChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
-        let roomIdArg = args[0] as! String
+        let roomIdArg: String? = nilOrValue(args[0])
         let queryArg = args[1] as! String
         let nextArg = args[2] as! Bool
         Task { @MainActor in

@@ -58,11 +58,13 @@ void main() {
       final last = await client.searchMessages('room', '正文', next: true);
       expect(last.hits.single.id, 'older');
       expect(last.hasNext, false);
+      await client.searchMessages(null, '正文');
       await client.clearMessageSearch();
       await client.close();
       expect(calls, [
         ['room', '正文', false],
         ['room', '正文', true],
+        [null, '正文', false],
         'clearMessageSearch',
       ]);
     },

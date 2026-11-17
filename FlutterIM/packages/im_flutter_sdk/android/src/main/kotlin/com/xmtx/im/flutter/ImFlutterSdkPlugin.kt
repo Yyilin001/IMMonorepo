@@ -122,7 +122,7 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun cancelPendingSend(intentId: String) {
         mutations.withLock { sdk { client.cancelAttachmentSend(intentId) } }
     }
-    override suspend fun searchMessages(roomId: String, query: String, next: Boolean): SearchPage = mutations.withLock {
+    override suspend fun searchMessages(roomId: String?, query: String, next: Boolean): SearchPage = mutations.withLock {
         sdk {
             val snapshot = if (next) client.nextSearch() else client.searchMessages(query, roomId)
             val page = snapshot.messaging?.search ?: throw FlutterError("invalidInput")

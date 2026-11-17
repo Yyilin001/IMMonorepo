@@ -1026,7 +1026,7 @@ interface ImHost {
   suspend fun changeWindowPage(windowId: String, latest: Boolean)
   suspend fun closeWindow(windowId: String)
   suspend fun cancelPendingSend(intentId: String)
-  suspend fun searchMessages(roomId: String, query: String, next: Boolean): SearchPage
+  suspend fun searchMessages(roomId: String?, query: String, next: Boolean): SearchPage
   suspend fun clearMessageSearch()
   suspend fun recoverSend(intentId: String, resend: Boolean)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
@@ -1433,7 +1433,7 @@ interface ImHost {
         if (api != null) {
           channel.setMessageHandler { message, reply ->
             val args = message as List<Any?>
-            val roomIdArg = args[0] as String
+            val roomIdArg = args[0] as String?
             val queryArg = args[1] as String
             val nextArg = args[2] as Boolean
             CoroutineScope(Dispatchers.Main).launch {

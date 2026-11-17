@@ -228,7 +228,7 @@ abstract class ImHost {
   @async
   void cancelPendingSend(String intentId);
   @async
-  SearchPage searchMessages(String roomId, String query, bool next);
+  SearchPage searchMessages(String? roomId, String query, bool next);
   @async
   void clearMessageSearch();
   @async

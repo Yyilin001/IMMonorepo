@@ -106,7 +106,7 @@ def main():
                 subprocess.run(command, cwd=APP, env=env, check=True, timeout=540)
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 list(pool.map(test, [args.android, simulator]))
-            print('PASS Flutter Android ↔ iOS: login, text, attachment upload/download/export byte equality in both directions, room message search, multi-room forward, reopen, sign out')
+            print('PASS Flutter Android ↔ iOS: login, text, attachment upload/download/export byte equality in both directions, room and cross-room message search, multi-room forward, reopen, sign out')
         finally:
             subprocess.run(adb + ['uninstall', 'com.xmtx.im.flutterexample.verification'], check=False, stdout=subprocess.DEVNULL)
             for local in reverses:

@@ -768,6 +768,17 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
                   },
                 ),
                 const Spacer(),
+                if (sdk?.client != null && sdk!.userId != null)
+                  IconButton(
+                    tooltip: '搜索全部聊天记录',
+                    icon: const Icon(Icons.manage_search),
+                    onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => _MessageSearchPage(
+                        client: sdk.client!,
+                        roomTitles: {for (final room in sdk.rooms) if (room.title.isNotEmpty) room.id: room.title},
+                      ),
+                    )),
+                  ),
                 const Icon(Icons.swap_vert_rounded, size: 17, color: muted),
               ],
             ),
