@@ -1499,6 +1499,108 @@ data class ImCommunity (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class ImFavoriteMessage (
+  val id: String,
+  val roomId: String,
+  val roomTitle: String,
+  val senderId: String,
+  val text: String,
+  val createdAt: Long? = null,
+  val attachmentNames: List<String>
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImFavoriteMessage {
+      val id = pigeonVar_list[0] as String
+      val roomId = pigeonVar_list[1] as String
+      val roomTitle = pigeonVar_list[2] as String
+      val senderId = pigeonVar_list[3] as String
+      val text = pigeonVar_list[4] as String
+      val createdAt = pigeonVar_list[5] as Long?
+      val attachmentNames = pigeonVar_list[6] as List<String>
+      return ImFavoriteMessage(id, roomId, roomTitle, senderId, text, createdAt, attachmentNames)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      id,
+      roomId,
+      roomTitle,
+      senderId,
+      text,
+      createdAt,
+      attachmentNames,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImFavoriteMessage
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.roomId, other.roomId) && MessagesPigeonUtils.deepEquals(this.roomTitle, other.roomTitle) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.createdAt, other.createdAt) && MessagesPigeonUtils.deepEquals(this.attachmentNames, other.attachmentNames)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.id)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.roomId)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.roomTitle)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.senderId)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.text)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.createdAt)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.attachmentNames)
+    return result
+  }
+  override fun toString(): String {
+    return "ImFavoriteMessage(id=$id, roomId=$roomId, roomTitle=$roomTitle, senderId=$senderId, text=$text, createdAt=$createdAt, attachmentNames=$attachmentNames)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
+data class ImFavorites (
+  val messages: List<ImFavoriteMessage>,
+  val hasMore: Boolean
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ImFavorites {
+      val messages = pigeonVar_list[0] as List<ImFavoriteMessage>
+      val hasMore = pigeonVar_list[1] as Boolean
+      return ImFavorites(messages, hasMore)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      messages,
+      hasMore,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ImFavorites
+    return MessagesPigeonUtils.deepEquals(this.messages, other.messages) && MessagesPigeonUtils.deepEquals(this.hasMore, other.hasMore)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.messages)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.hasMore)
+    return result
+  }
+  override fun toString(): String {
+    return "ImFavorites(messages=$messages, hasMore=$hasMore)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class ImReaders (
   val roomId: String,
   val messageId: String,
@@ -1724,10 +1826,20 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       153.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImReaders.fromList(it)
+          ImFavoriteMessage.fromList(it)
         }
       }
       154.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          ImFavorites.fromList(it)
+        }
+      }
+      155.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          ImReaders.fromList(it)
+        }
+      }
+      156.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -1833,12 +1945,20 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(152)
         writeValue(stream, value.toList())
       }
-      is ImReaders -> {
+      is ImFavoriteMessage -> {
         stream.write(153)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is ImFavorites -> {
         stream.write(154)
+        writeValue(stream, value.toList())
+      }
+      is ImReaders -> {
+        stream.write(155)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(156)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -1897,6 +2017,8 @@ interface ImHost {
   suspend fun locateMessage(roomId: String, messageId: String): WindowView
   suspend fun searchMessages(roomId: String?, query: String, next: Boolean): SearchPage
   suspend fun messageReaders(roomId: String, messageId: String, next: Boolean): ImReaders
+  suspend fun favorites(next: Boolean): ImFavorites
+  suspend fun setFavorite(roomId: String, messageId: String, favorited: Boolean)
   suspend fun clearMessageSearch()
   suspend fun recoverSend(intentId: String, resend: Boolean)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
@@ -2896,6 +3018,47 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 listOf(api.messageReaders(roomIdArg, messageIdArg, nextArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.favorites$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val nextArg = args[0] as Boolean
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.favorites(nextArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.setFavorite$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val roomIdArg = args[0] as String
+            val messageIdArg = args[1] as String
+            val favoritedArg = args[2] as Boolean
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.setFavorite(roomIdArg, messageIdArg, favoritedArg)
+                listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

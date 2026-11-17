@@ -711,6 +711,40 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                       !activeMutations.contains(item.id)
                                   ? () => forwardMessage(item, item.revision!)
                                   : null,
+                              onFavorite:
+                                  !item.withdrawn &&
+                                      item.pendingStatus == null
+                                  ? () async {
+                                      try {
+                                        await sdk.client!.setFavorite(
+                                          room.id,
+                                          item.id,
+                                          favorited: true,
+                                        );
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            const SnackBar(
+                                              content: Text('已加入收藏'),
+                                            ),
+                                          );
+                                        }
+                                      } catch (failure) {
+                                        if (context.mounted) {
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                _errorText(failure),
+                                              ),
+                                            ),
+                                          );
+                                        }
+                                      }
+                                    }
+                                  : null,
                               onReaders:
                                   room.isGroup &&
                                       mine &&

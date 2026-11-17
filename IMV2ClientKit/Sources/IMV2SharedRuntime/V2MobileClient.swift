@@ -47,6 +47,19 @@ public final class V2MobileClient: Sendable {
         public let pendingStatus: String?
         public let createdAt: Int64?
     }
+    public struct FavoriteMessage: Sendable {
+        public let id: String
+        public let roomID: String
+        public let roomTitle: String
+        public let senderID: String
+        public let text: String
+        public let createdAt: Int64?
+        public let attachmentNames: [String]
+    }
+    public struct Favorites: Sendable {
+        public let messages: [FavoriteMessage]
+        public let hasMore: Bool
+    }
     public struct Window: Sendable {
         public let conversations: [Conversation]
         public let messages: [Message]
@@ -193,6 +206,17 @@ public final class V2MobileClient: Sendable {
         return .init(status: page.status, hits: page.hits.map { .init(id: $0.id, roomID: $0.roomID, text: $0.text) }, hasNext: page.hasNext)
     }
     public func clearMessageSearch() async throws { _ = try await run(.init(operation: .clearMessaging)) }
+    public func favorites(next: Bool) async throws -> Favorites {
+        let value = try await run(.init(operation: .favorites, action: next ? "next" : "first"))
+        guard let page = value.favorites else { throw Failure(code: "authenticationRequired") }
+        return Favorites(messages: page.messages.map {
+            FavoriteMessage(id: $0.id, roomID: $0.roomID, roomTitle: $0.roomTitle, senderID: $0.senderID,
+                            text: $0.text, createdAt: $0.createdAt, attachmentNames: $0.attachmentNames)
+        }, hasMore: page.hasMore)
+    }
+    public func setFavorite(roomID: String, messageID: String, favorited: Bool) async throws {
+        _ = try await run(.init(operation: .setFavorite, messageID: messageID, flag1: favorited, roomID: roomID))
+    }
     public func messageReaders(roomID: String, messageID: String, next: Bool) async throws -> Readers {
         let value = try await run(.init(operation: .messageReaders, messageID: messageID,
                                         roomID: roomID, action: next ? "next" : "first"))

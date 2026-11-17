@@ -40,6 +40,19 @@ enum ImSendStatus {
   unknown,
 }
 
+typedef ImFavoriteMessage = ({
+  String id,
+  String roomId,
+  String roomTitle,
+  String senderId,
+  String text,
+  int? createdAt,
+  List<String> attachmentNames,
+});
+typedef ImFavorites = ({
+  List<ImFavoriteMessage> messages,
+  bool hasMore,
+});
 typedef ImReaders = ({
   String roomId,
   String messageId,
@@ -885,6 +898,36 @@ final class ImClient {
     );
   });
   Future<void> clearMessageSearch() => _ordered(_host.clearMessageSearch);
+  Future<ImFavorites> favorites({bool next = false}) => _ordered(() async {
+    final page = await _host.favorites(next);
+    return (
+      messages: page.messages
+          .map(
+            (message) => (
+              id: message.id,
+              roomId: message.roomId,
+              roomTitle: message.roomTitle,
+              senderId: message.senderId,
+              text: message.text,
+              createdAt: message.createdAt,
+              attachmentNames: List<String>.unmodifiable(
+                message.attachmentNames,
+              ),
+            ),
+          )
+          .toList(growable: false),
+      hasMore: page.hasMore,
+    );
+  });
+
+  Future<void> setFavorite(
+    String roomId,
+    String messageId, {
+    required bool favorited,
+  }) => _ordered(
+    () => _host.setFavorite(roomId, messageId, favorited),
+  );
+
   Future<ImReaders> messageReaders(
     String roomId,
     String messageId, {

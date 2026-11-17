@@ -356,6 +356,31 @@ class ImCommunity {
   String? failure;
 }
 
+class ImFavoriteMessage {
+  ImFavoriteMessage({
+    required this.id,
+    required this.roomId,
+    required this.roomTitle,
+    required this.senderId,
+    required this.text,
+    this.createdAt,
+    required this.attachmentNames,
+  });
+  String id;
+  String roomId;
+  String roomTitle;
+  String senderId;
+  String text;
+  int? createdAt;
+  List<String> attachmentNames;
+}
+
+class ImFavorites {
+  ImFavorites({required this.messages, required this.hasMore});
+  List<ImFavoriteMessage> messages;
+  bool hasMore;
+}
+
 class ImReaders {
   ImReaders({
     required this.roomId,
@@ -533,6 +558,10 @@ abstract class ImHost {
   SearchPage searchMessages(String? roomId, String query, bool next);
   @async
   ImReaders messageReaders(String roomId, String messageId, bool next);
+  @async
+  ImFavorites favorites(bool next);
+  @async
+  void setFavorite(String roomId, String messageId, bool favorited);
   @async
   void clearMessageSearch();
   @async

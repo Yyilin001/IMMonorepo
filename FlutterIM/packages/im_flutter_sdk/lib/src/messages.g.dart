@@ -1692,6 +1692,131 @@ class ImCommunity {
   }
 }
 
+class ImFavoriteMessage {
+  ImFavoriteMessage({
+    required this.id,
+    required this.roomId,
+    required this.roomTitle,
+    required this.senderId,
+    required this.text,
+    this.createdAt,
+    required this.attachmentNames,
+  });
+
+  String id;
+
+  String roomId;
+
+  String roomTitle;
+
+  String senderId;
+
+  String text;
+
+  int? createdAt;
+
+  List<String> attachmentNames;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      id,
+      roomId,
+      roomTitle,
+      senderId,
+      text,
+      createdAt,
+      attachmentNames,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImFavoriteMessage decode(Object result) {
+    result as List<Object?>;
+    return ImFavoriteMessage(
+      id: result[0]! as String,
+      roomId: result[1]! as String,
+      roomTitle: result[2]! as String,
+      senderId: result[3]! as String,
+      text: result[4]! as String,
+      createdAt: result[5] as int?,
+      attachmentNames: (result[6]! as List<Object?>).cast<String>(),
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImFavoriteMessage || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(id, other.id) && _deepEquals(roomId, other.roomId) && _deepEquals(roomTitle, other.roomTitle) && _deepEquals(senderId, other.senderId) && _deepEquals(text, other.text) && _deepEquals(createdAt, other.createdAt) && _deepEquals(attachmentNames, other.attachmentNames);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImFavoriteMessage(id: $id, roomId: $roomId, roomTitle: $roomTitle, senderId: $senderId, text: $text, createdAt: $createdAt, attachmentNames: $attachmentNames)';
+  }
+}
+
+class ImFavorites {
+  ImFavorites({
+    required this.messages,
+    required this.hasMore,
+  });
+
+  List<ImFavoriteMessage> messages;
+
+  bool hasMore;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      messages,
+      hasMore,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static ImFavorites decode(Object result) {
+    result as List<Object?>;
+    return ImFavorites(
+      messages: (result[0]! as List<Object?>).cast<ImFavoriteMessage>(),
+      hasMore: result[1]! as bool,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ImFavorites || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(messages, other.messages) && _deepEquals(hasMore, other.hasMore);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'ImFavorites(messages: $messages, hasMore: $hasMore)';
+  }
+}
+
 class ImReaders {
   ImReaders({
     required this.roomId,
@@ -1897,11 +2022,17 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is ImCommunity) {
       buffer.putUint8(152);
       writeValue(buffer, value.encode());
-    }    else if (value is ImReaders) {
+    }    else if (value is ImFavoriteMessage) {
       buffer.putUint8(153);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is ImFavorites) {
       buffer.putUint8(154);
+      writeValue(buffer, value.encode());
+    }    else if (value is ImReaders) {
+      buffer.putUint8(155);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(156);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1960,8 +2091,12 @@ class _PigeonCodec extends StandardMessageCodec {
       case 152:
         return ImCommunity.decode(readValue(buffer)!);
       case 153:
-        return ImReaders.decode(readValue(buffer)!);
+        return ImFavoriteMessage.decode(readValue(buffer)!);
       case 154:
+        return ImFavorites.decode(readValue(buffer)!);
+      case 155:
+        return ImReaders.decode(readValue(buffer)!);
+      case 156:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -2825,6 +2960,41 @@ class ImHost {
     )
     ;
     return pigeonVar_replyValue! as ImReaders;
+  }
+
+  Future<ImFavorites> favorites(bool next) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.favorites$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[next]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as ImFavorites;
+  }
+
+  Future<void> setFavorite(String roomId, String messageId, bool favorited) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.setFavorite$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, messageId, favorited]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   Future<void> clearMessageSearch() async {

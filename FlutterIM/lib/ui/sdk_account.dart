@@ -850,3 +850,150 @@ class _AccountHeading extends StatelessWidget {
     ),
   );
 }
+
+class _FavoritesPage extends StatefulWidget {
+  const _FavoritesPage();
+
+  @override
+  State<_FavoritesPage> createState() => _FavoritesPageState();
+}
+
+class _FavoritesPageState extends State<_FavoritesPage> {
+  final messages = <ImFavoriteMessage>[];
+  bool loading = true, more = false, hasMore = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(load());
+    });
+  }
+
+  Future<void> load({bool next = false}) async {
+    if (loading || more) return;
+    setState(() {
+      if (next) {
+        more = true;
+      } else {
+        loading = true;
+      }
+      error = null;
+    });
+    try {
+      final page = await _SdkScope.of(
+        context,
+      )!.client!.favorites(next: next);
+      if (!mounted) return;
+      setState(() {
+        if (!next) messages.clear();
+        messages.addAll(page.messages);
+        hasMore = page.hasMore;
+        loading = false;
+        more = false;
+      });
+    } catch (failure) {
+      if (!mounted) return;
+      setState(() {
+        error = _errorText(failure);
+        loading = false;
+        more = false;
+      });
+    }
+  }
+
+  Future<void> unfavorite(ImFavoriteMessage message) async {
+    try {
+      await _SdkScope.of(
+        context,
+      )!.client!.setFavorite(message.roomId, message.id, favorited: false);
+      if (!mounted) return;
+      setState(() => messages.removeWhere((item) => item.id == message.id));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('已取消收藏')));
+    } catch (failure) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_errorText(failure))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => _ProfileScaffold(
+    title: '收藏',
+    actions: [
+      IconButton(
+        tooltip: '刷新',
+        onPressed: loading || more ? null : load,
+        icon: const Icon(Icons.refresh_rounded),
+      ),
+    ],
+    children: [
+      if (error != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Text(
+            error!,
+            style: const TextStyle(color: Color(0xFFB3261E)),
+          ),
+        ),
+      if (loading)
+        const Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: CircularProgressIndicator()),
+        )
+      else if (messages.isEmpty)
+        const Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(
+            child: Text(
+              '暂无收藏。长按消息后选择「收藏」，会显示在这里。',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: muted, height: 1.5),
+            ),
+          ),
+        ),
+      for (final message in messages)
+        ListTile(
+          key: ValueKey('favorite-${message.id}'),
+          leading: const Icon(Icons.star_rounded, color: Color(0xFFD79A2B)),
+          title: Text(
+            message.roomTitle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: Text(
+            message.text.isNotEmpty
+                ? message.text
+                : message.attachmentNames.isEmpty
+                ? '[附件]'
+                : message.attachmentNames.join('、'),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: IconButton(
+            tooltip: '取消收藏',
+            icon: const Icon(Icons.star_outline_rounded, color: muted),
+            onPressed: () => unfavorite(message),
+          ),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => _LocatedMessagePage(
+                client: _SdkScope.of(context)!.client!,
+                roomId: message.roomId,
+                messageId: message.id,
+              ),
+            ),
+          ),
+        ),
+      if (hasMore)
+        TextButton(
+          onPressed: () => load(next: true),
+          child: const Text('加载更多收藏'),
+        ),
+    ],
+  );
+}

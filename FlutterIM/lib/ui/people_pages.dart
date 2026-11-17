@@ -693,6 +693,19 @@ class PersonalPane extends ConsumerWidget {
                   if (sdk?.userId != null) const _TransfersLink(),
                   if (sdk?.userId != null)
                     ListTile(
+                      key: const Key('favorites'),
+                      leading: const Icon(Icons.star_outline_rounded, color: green),
+                      title: const Text('收藏'),
+                      subtitle: const Text('已收藏的消息'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const _FavoritesPage(),
+                        ),
+                      ),
+                    ),
+                  if (sdk?.userId != null)
+                    ListTile(
                       key: const Key('privacy-settings'),
                       leading: const Icon(Icons.lock_person_outlined, color: green),
                       title: const Text('消息接收设置'),

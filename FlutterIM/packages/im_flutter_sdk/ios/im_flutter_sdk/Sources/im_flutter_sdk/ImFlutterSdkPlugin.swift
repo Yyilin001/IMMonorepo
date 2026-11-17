@@ -279,6 +279,18 @@ private actor MobileHost: ImHost {
         }
     }
     func clearMessageSearch() async throws { try await ordered { try await self.client.clearMessageSearch() } }
+    func favorites(next: Bool) async throws -> ImFavorites {
+        try await ordered {
+            let page = try await self.client.favorites(next: next)
+            return ImFavorites(messages: page.messages.map {
+                ImFavoriteMessage(id: $0.id, roomId: $0.roomID, roomTitle: $0.roomTitle, senderId: $0.senderID,
+                                  text: $0.text, createdAt: $0.createdAt, attachmentNames: $0.attachmentNames)
+            }, hasMore: page.hasMore)
+        }
+    }
+    func setFavorite(roomId: String, messageId: String, favorited: Bool) async throws {
+        try await ordered { try await self.client.setFavorite(roomID: roomId, messageID: messageId, favorited: favorited) }
+    }
     func messageReaders(roomId: String, messageId: String, next: Bool) async throws -> ImReaders {
         try await ordered {
             let value = try await self.client.messageReaders(roomID: roomId, messageID: messageId, next: next)

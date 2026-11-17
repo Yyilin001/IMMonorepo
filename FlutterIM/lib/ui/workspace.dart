@@ -1625,6 +1625,7 @@ class _MessageBubble extends ConsumerWidget {
     this.onEdit,
     this.onWithdraw,
     this.onReaders,
+    this.onFavorite,
     this.isForwarded = false,
     this.showTime = true,
   });
@@ -1634,6 +1635,7 @@ class _MessageBubble extends ConsumerWidget {
   final ({String label, VoidCallback action})? recovery;
   final VoidCallback? onCancelSend, onOpenReply;
   final VoidCallback? onReply, onForward, onEdit, onWithdraw, onReaders;
+  final VoidCallback? onFavorite;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1766,6 +1768,11 @@ class _MessageBubble extends ConsumerWidget {
                               PopupMenuItem(
                                 value: onReaders,
                                 child: const Text('查看已读'),
+                              ),
+                            if (onFavorite != null)
+                              PopupMenuItem(
+                                value: onFavorite,
+                                child: const Text('收藏'),
                               ),
                             if (onEdit != null)
                               PopupMenuItem(

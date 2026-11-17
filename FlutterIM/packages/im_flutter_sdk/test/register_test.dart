@@ -12,7 +12,7 @@ void main() {
     final calls = <Object?>[];
     final lifecycle = <Object?>[];
     final devices = <Object?>[];
-    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'close']) {
+    for (final method in ['open', 'register', 'passwordLifecycle', 'deviceSessions', 'revokeDevice', 'privacy', 'setPrivacy', 'favorites', 'setFavorite', 'close']) {
       final channel = BasicMessageChannel<Object?>(
         'dev.flutter.pigeon.im_flutter_sdk.ImHost.$method',
         wire.ImHost.pigeonChannelCodec,
@@ -24,6 +24,24 @@ void main() {
             return [wire.ImSession(state: 'ready', userId: 'user')];
           case 'passwordLifecycle':
             lifecycle.add(args);
+          case 'favorites':
+            return [
+              wire.ImFavorites(
+                messages: [
+                  wire.ImFavoriteMessage(
+                    id: 'message',
+                    roomId: 'room',
+                    roomTitle: '会话',
+                    senderId: 'peer',
+                    text: '收藏内容',
+                    attachmentNames: ['a.txt'],
+                  ),
+                ],
+                hasMore: true,
+              ),
+            ];
+          case 'setFavorite':
+            devices.add(args);
           case 'privacy':
           case 'setPrivacy':
             devices.add(args as List<Object?>? ?? const []);
@@ -100,6 +118,12 @@ void main() {
     final updated = await client.setPrivacy('readReceipt', flag1: true, flag2: false);
     expect(updated?.allowsGroupReadReceipts, false);
     expect(devices.last, ['readReceipt', true, false]);
+
+    final favorites = await client.favorites();
+    expect(favorites.messages.single.text, '收藏内容');
+    expect(favorites.hasMore, true);
+    await client.setFavorite('room', 'message', favorited: true);
+    expect(devices.last, ['room', 'message', true]);
     await client.close();
   });
 }

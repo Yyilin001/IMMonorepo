@@ -1540,6 +1540,111 @@ struct ImCommunity: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct ImFavoriteMessage: Hashable, CustomStringConvertible {
+  var id: String
+  var roomId: String
+  var roomTitle: String
+  var senderId: String
+  var text: String
+  var createdAt: Int64? = nil
+  var attachmentNames: [String]
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImFavoriteMessage? {
+    let id = pigeonVar_list[0] as! String
+    let roomId = pigeonVar_list[1] as! String
+    let roomTitle = pigeonVar_list[2] as! String
+    let senderId = pigeonVar_list[3] as! String
+    let text = pigeonVar_list[4] as! String
+    let createdAt: Int64? = nilOrValue(pigeonVar_list[5])
+    let attachmentNames = pigeonVar_list[6] as! [String]
+
+    return ImFavoriteMessage(
+      id: id,
+      roomId: roomId,
+      roomTitle: roomTitle,
+      senderId: senderId,
+      text: text,
+      createdAt: createdAt,
+      attachmentNames: attachmentNames
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      roomId,
+      roomTitle,
+      senderId,
+      text,
+      createdAt,
+      attachmentNames,
+    ]
+  }
+  static func == (lhs: ImFavoriteMessage, rhs: ImFavoriteMessage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.roomTitle, rhs.roomTitle) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.attachmentNames, rhs.attachmentNames)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImFavoriteMessage")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: roomTitle, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: senderId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: text, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: createdAt, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: attachmentNames, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImFavoriteMessage(id: \(String(describing: id)), roomId: \(String(describing: roomId)), roomTitle: \(String(describing: roomTitle)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), createdAt: \(String(describing: createdAt)), attachmentNames: \(String(describing: attachmentNames)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImFavorites: Hashable, CustomStringConvertible {
+  var messages: [ImFavoriteMessage]
+  var hasMore: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImFavorites? {
+    let messages = pigeonVar_list[0] as! [ImFavoriteMessage]
+    let hasMore = pigeonVar_list[1] as! Bool
+
+    return ImFavorites(
+      messages: messages,
+      hasMore: hasMore
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      messages,
+      hasMore,
+    ]
+  }
+  static func == (lhs: ImFavorites, rhs: ImFavorites) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.messages, rhs.messages) && MessagesPigeonInternal.deepEquals(lhs.hasMore, rhs.hasMore)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImFavorites")
+    MessagesPigeonInternal.deepHash(value: messages, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasMore, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImFavorites(messages: \(String(describing: messages)), hasMore: \(String(describing: hasMore)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct ImReaders: Hashable, CustomStringConvertible {
   var roomId: String
   var messageId: String
@@ -1696,8 +1801,12 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 152:
       return ImCommunity.fromList(self.readValue() as! [Any?])
     case 153:
-      return ImReaders.fromList(self.readValue() as! [Any?])
+      return ImFavoriteMessage.fromList(self.readValue() as! [Any?])
     case 154:
+      return ImFavorites.fromList(self.readValue() as! [Any?])
+    case 155:
+      return ImReaders.fromList(self.readValue() as! [Any?])
+    case 156:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -1779,11 +1888,17 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? ImCommunity {
       super.writeByte(152)
       super.writeValue(value.toList())
-    } else if let value = value as? ImReaders {
+    } else if let value = value as? ImFavoriteMessage {
       super.writeByte(153)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? ImFavorites {
       super.writeByte(154)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImReaders {
+      super.writeByte(155)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(156)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -1856,6 +1971,8 @@ protocol ImHost {
   func locateMessage(roomId: String, messageId: String) async throws -> WindowView
   func searchMessages(roomId: String?, query: String, next: Bool) async throws -> SearchPage
   func messageReaders(roomId: String, messageId: String, next: Bool) async throws -> ImReaders
+  func favorites(next: Bool) async throws -> ImFavorites
+  func setFavorite(roomId: String, messageId: String, favorited: Bool) async throws
   func clearMessageSearch() async throws
   func recoverSend(intentId: String, resend: Bool) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
@@ -2743,6 +2860,42 @@ class ImHostSetup {
       }
     } else {
       messageReadersChannel.setMessageHandler(nil)
+    }
+    let favoritesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.favorites\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      favoritesChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let nextArg = args[0] as! Bool
+        Task { @MainActor in
+          do {
+            let result = try await api.favorites(next: nextArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      favoritesChannel.setMessageHandler(nil)
+    }
+    let setFavoriteChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setFavorite\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setFavoriteChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let favoritedArg = args[2] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.setFavorite(roomId: roomIdArg, messageId: messageIdArg, favorited: favoritedArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setFavoriteChannel.setMessageHandler(nil)
     }
     let clearMessageSearchChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.clearMessageSearch\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, passwordLifecycle, deviceSessions, revokeDevice, privacy, setPrivacy, favorites, setFavorite, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -68,11 +68,17 @@ struct SharedConversation: Encodable, Sendable {
               muteUntil: entry.muteUntil.map { Int64($0.timeIntervalSince1970 * 1000) })
     }
 }
+struct SharedFavoriteMessage: Encodable, Sendable {
+    let id: String; let roomID: String; let roomTitle: String; let senderID: String
+    let text: String; let createdAt: Int64?; let attachmentNames: [String]
+}
+struct SharedFavorites: Encodable, Sendable { let messages: [SharedFavoriteMessage]; let hasMore: Bool }
 struct SharedMessage: Encodable, Sendable {
     let id: String; let senderID: String; let text: String; let sequence: UInt64; var createdAt: Int64?
     let withdrawn: Bool; let hasMedia: Bool; let attachments: [SharedAttachment]
     let revision: UInt64; let canMutate: Bool; let readByPeer: Bool
     let replyToID: String?; let replyPreview: String?; let forwardedFromID: String?
+    var isFavorited = false
 }
 struct SharedPendingMessage: Encodable, Sendable {
     let id: String
@@ -133,6 +139,7 @@ package struct SharedSnapshot: Encodable, Sendable {
     var windowID: String? = nil
     var deviceSessions: SharedDeviceSessions? = nil
     var privacy: SharedPrivacy? = nil
+    var favorites: SharedFavorites? = nil
 }
 package enum SharedFailure: String, Error { case invalidConfiguration, invalidInput, busy, closed, authenticationRequired, networkUnavailable, storageUnavailable, operationFailed, cancelled, accountExists, publicHandleTaken, invalidPublicHandle, invalidDisplayName, invalidPassword, invalidRecoveryCode, rateLimited }
 package func sharedFailure(_ error: any Error) -> SharedFailure {
@@ -195,6 +202,8 @@ package actor SharedRuntime {
     private var deviceSessionsClient: V2HTTPDeviceSessionClient?
     private var deviceSessions: SharedDeviceSessions?
     private var privacy: SharedPrivacy?
+    private var favorites: SharedFavorites?
+    private var favoriteCursor: V2ClientFavoriteMessageCursor?
     private var accountPreferences: V2AccountPreferenceService?
     private var preferencePreparation: Task<Void, Never>?
     private var dispatcher: Task<Void, Never>?
@@ -302,6 +311,27 @@ package actor SharedRuntime {
             }
             value.blockedUsers = try await store.blocks().filter(\.isBlocked).map(\.targetUserID.rawValue)
             privacy = value
+        case .favorites:
+            guard let store else { throw SharedFailure.authenticationRequired }
+            if request.action != "next" { favoriteCursor = nil }
+            let page = try await store.favoritedMessages(before: favoriteCursor, limit: 50)
+            favoriteCursor = page.nextCursor
+            let titles = try await store.conversationTitles(for: Array(Set(page.messages.map(\.roomID))))
+            var rows: [SharedFavoriteMessage] = []
+            for message in page.messages {
+                guard try await store.roomAllowsLocalRead(roomID: message.roomID) else { continue }
+                rows.append(SharedFavoriteMessage(id: message.messageID.rawValue, roomID: message.roomID.rawValue,
+                    roomTitle: titles[message.roomID] ?? "会话", senderID: message.senderUserID.rawValue,
+                    text: message.isWithdrawn ? "消息已撤回" : String(message.text.prefix(160)),
+                    createdAt: Int64(message.createdAt.timeIntervalSince1970 * 1000),
+                    attachmentNames: message.mediaPresentations.map { $0.resourceDescriptor?.displayName.value ?? "附件" }))
+            }
+            favorites = SharedFavorites(messages: rows, hasMore: page.nextCursor != nil)
+        case .setFavorite:
+            guard let preferences = personalPreferences, let roomID = request.roomID,
+                  let messageID = request.messageID, let favorited = request.flag1 else { throw SharedFailure.invalidInput }
+            try await preferences.enqueue(.favorite(roomID: try RoomID(roomID), messageID: try MessageID(messageID), isFavorited: favorited))
+            try? await preferences.runPreparation()
         case .setPrivacy:
             guard let service = accountPreferences, let kind = request.action else { throw SharedFailure.invalidInput }
             let patch: V2AccountPreferencePatch
@@ -524,6 +554,7 @@ package actor SharedRuntime {
         await dispatcher?.value
         dispatcher = nil; sender = nil; roomRecovery = nil; personalPreferences = nil
         accountHTTP = nil; deviceSessionsClient = nil; deviceSessions = nil
+        favorites = nil; favoriteCursor = nil
         preferencePreparation?.cancel(); preferencePreparation = nil; accountPreferences = nil; privacy = nil
     }
     private func signOut() async throws {
@@ -689,6 +720,7 @@ package actor SharedRuntime {
 
     private func renderChat(timeline: V2ClientConversationTimelinePage, pending: V2PendingResourceSendSnapshot?,
         room: RoomID, isLatest: Bool, focused: MessageID? = nil, pendingPage: Int = 0) async -> SharedChat {
+            let favorites = (try? await store?.favoritedMessageIDs(in: room)) ?? []
             var replyPreviews: [MessageID: String] = [:]
             for id in Set(timeline.messages.filter { !$0.isWithdrawn }.compactMap { $0.replyTo?.messageID }) {
                 if let original = try? await messaging?.message(room: room, id: id) {
@@ -702,7 +734,8 @@ package actor SharedRuntime {
                     readByPeer: message.senderUserID.rawValue == userID && timeline.directReadReceipt?.isVisible == true && timeline.directReadReceipt?.readerUserID.rawValue != userID && (timeline.directReadReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
                     replyToID: message.isWithdrawn ? nil : message.replyTo?.messageID.rawValue,
                     replyPreview: message.isWithdrawn ? nil : message.replyTo.flatMap { replyPreviews[$0.messageID] },
-                    forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue)
+                    forwardedFromID: message.isWithdrawn ? nil : message.forwardedFrom?.messageID.rawValue,
+                    isFavorited: favorites.contains(message.messageID))
             }, pending: (pending?.preparing ?? []).map(SharedPendingMessage.preparing)
                 + (pending?.submitted ?? []).map { .init(id: $0.id.uuidString, text: $0.text, status: String(describing: $0.status), createdAt: Int64($0.createdAt.timeIntervalSince1970 * 1000)) },
                 focusMessageID: focused?.rawValue, hasOlder: timeline.olderCursor != nil, isLatest: isLatest, hasMorePending: pending?.hasNext ?? false, pendingPage: pendingPage)
@@ -734,6 +767,6 @@ package actor SharedRuntime {
         return .init(state: currentState, userID: userID, allowsStrangerMessages: preference?.allowsStrangerMessages, appliedSequence: cursor?.appliedSequence ?? 0,
             acknowledgedSequence: cursor?.serverAcknowledgedSequence ?? 0, connections: connections,
             conversations: rows, failure: failure?.rawValue,
-            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions, privacy: privacy)
+            hasMoreConversations: page?.nextCursor != nil, isFirstConversationPage: conversationCursor == nil, chat: chat, directory: try await socialGroups?.snapshot(), resource: await media?.snapshot(chunk: resourceChunk), messaging: try await messaging?.snapshot(), deviceSessions: deviceSessions, privacy: privacy, favorites: favorites)
     }
 }

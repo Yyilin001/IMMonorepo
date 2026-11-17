@@ -51,6 +51,15 @@ private class MobileHost(private val context: Context) : ImHost {
     override suspend fun status() = sdk { client.snapshot().session() }
     private fun SharedPrivacy.wire() = ImPrivacy(allowsStrangerMessages, allowsUserAdd, allowsDirectReadReceipts,
         allowsGroupReadReceipts, allowsOnlinePresence, allowsTypingIndicators, blockedUsers)
+    override suspend fun favorites(next: Boolean): ImFavorites = mutations.withLock { sdk {
+        val page = client.favorites(next).favorites ?: throw FlutterError("authenticationRequired")
+        ImFavorites(page.messages.map {
+            ImFavoriteMessage(it.id, it.roomID, it.roomTitle, it.senderID, it.text, it.createdAt, it.attachmentNames)
+        }, page.hasMore)
+    } }
+    override suspend fun setFavorite(roomId: String, messageId: String, favorited: Boolean) {
+        mutations.withLock { sdk { client.setFavorite(roomId, messageId, favorited) } }
+    }
     override suspend fun privacy(): ImPrivacy? = mutations.withLock { sdk { client.privacy().privacy?.wire() } }
     override suspend fun setPrivacy(kind: String, flag1: Boolean?, flag2: Boolean?): ImPrivacy? = mutations.withLock {
         sdk { client.setPrivacy(kind, flag1, flag2).privacy?.wire() }

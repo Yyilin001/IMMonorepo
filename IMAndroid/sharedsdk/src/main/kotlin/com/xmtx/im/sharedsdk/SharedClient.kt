@@ -43,10 +43,12 @@ data class SharedPendingMessage(val id: String, val text: String, val status: Sh
 data class SharedChat(val roomID: String, val messages: PersistentList<SharedMessage>, val pending: PersistentList<SharedPendingMessage>, val hasOlder: Boolean, val isLatest: Boolean, val hasMorePending: Boolean, val pendingPage: Int, val focusMessageID: String?)
 data class SharedDeviceSession(val deviceID: String, val deviceName: String, val platform: String, val createdAt: Long, val lastActiveAt: Long, val isCurrentDevice: Boolean)
 data class SharedDeviceSessions(val sessions: PersistentList<SharedDeviceSession>, val nextCursor: String?)
+data class SharedFavoriteMessage(val id: String, val roomID: String, val roomTitle: String, val senderID: String, val text: String, val createdAt: Long?, val attachmentNames: List<String>)
+data class SharedFavorites(val messages: List<SharedFavoriteMessage>, val hasMore: Boolean)
 data class SharedPrivacy(val allowsStrangerMessages: Boolean?, val allowsUserAdd: Boolean?, val allowsDirectReadReceipts: Boolean?,
     val allowsGroupReadReceipts: Boolean?, val allowsOnlinePresence: Boolean?, val allowsTypingIndicators: Boolean?, val blockedUsers: List<String>)
 data class SharedSnapshot(val state: SharedSessionState, val userID: String?, val allowsStrangerMessages: Boolean?, val appliedSequence: Long,
-    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null, val privacy: SharedPrivacy? = null)
+    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null, val privacy: SharedPrivacy? = null, val favorites: SharedFavorites? = null)
 
 internal object NativeSharedSDK {
     init { System.loadLibrary("IMV2SharedSDK") }
@@ -137,6 +139,12 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun deviceSessions(cursor: String? = null): SharedSnapshot = execute(JSONObject().put("operation", "deviceSessions").apply {
         if (cursor != null) put("intentID", cursor)
     })
+    suspend fun favorites(next: Boolean = false): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "favorites").put("action", if (next) "next" else "first"))
+    }
+    suspend fun setFavorite(roomID: String, messageID: String, favorited: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "setFavorite").put("roomID", roomID).put("messageID", messageID).put("flag1", favorited))
+    }
     suspend fun privacy(): SharedSnapshot = mutation.withLock { execute(JSONObject().put("operation", "privacy")) }
     suspend fun setPrivacy(kind: String, flag1: Boolean?, flag2: Boolean?): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "setPrivacy").put("action", kind).apply {
@@ -390,6 +398,14 @@ class SharedClient private constructor(private val handle: Long) {
                     if (privacy.has("allowsOnlinePresence")) privacy.getBoolean("allowsOnlinePresence") else null,
                     if (privacy.has("allowsTypingIndicators")) privacy.getBoolean("allowsTypingIndicators") else null,
                     (0 until blocked.length()).map { blocked.getString(it) })
+            }, favorites = value.optJSONObject("favorites")?.let { favorites ->
+                val rows = favorites.getJSONArray("messages")
+                SharedFavorites((0 until rows.length()).map { index -> rows.getJSONObject(index).let {
+                    val names = it.getJSONArray("attachmentNames")
+                    SharedFavoriteMessage(it.getString("id"), it.getString("roomID"), it.getString("roomTitle"),
+                        it.getString("senderID"), it.getString("text"), it.optionalLong("createdAt"),
+                        (0 until names.length()).map { i -> names.getString(i) })
+                } }, favorites.getBoolean("hasMore"))
             }, deviceSessions = value.optJSONObject("deviceSessions")?.let { sessions ->
                 val rows = sessions.getJSONArray("sessions")
                 SharedDeviceSessions((0 until rows.length()).map { index -> rows.getJSONObject(index).let {
