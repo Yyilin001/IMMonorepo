@@ -1631,6 +1631,7 @@ protocol ImHost {
   func open(accountUrl: String, gatewayHost: String, gatewayPort: Int64) async throws
   func restore() async throws -> ImSession
   func signIn(account: String, password: String) async throws -> ImSession
+  func register(account: String, password: String, publicHandle: String, displayName: String) async throws -> ImSession
   func connect() async throws -> ImSession
   func status() async throws -> ImSession
   func disconnect() async throws
@@ -1743,6 +1744,26 @@ class ImHostSetup {
       }
     } else {
       signInChannel.setMessageHandler(nil)
+    }
+    let registerChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.register\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      registerChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let accountArg = args[0] as! String
+        let passwordArg = args[1] as! String
+        let publicHandleArg = args[2] as! String
+        let displayNameArg = args[3] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.register(account: accountArg, password: passwordArg, publicHandle: publicHandleArg, displayName: displayNameArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      registerChannel.setMessageHandler(nil)
     }
     let connectChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.connect\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

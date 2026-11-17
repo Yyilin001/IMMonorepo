@@ -1666,6 +1666,7 @@ interface ImHost {
   suspend fun open(accountUrl: String, gatewayHost: String, gatewayPort: Long)
   suspend fun restore(): ImSession
   suspend fun signIn(account: String, password: String): ImSession
+  suspend fun register(account: String, password: String, publicHandle: String, displayName: String): ImSession
   suspend fun connect(): ImSession
   suspend fun status(): ImSession
   suspend fun disconnect()
@@ -1778,6 +1779,28 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 listOf(api.signIn(accountArg, passwordArg))
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.register$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val accountArg = args[0] as String
+            val passwordArg = args[1] as String
+            val publicHandleArg = args[2] as String
+            val displayNameArg = args[3] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.register(accountArg, passwordArg, publicHandleArg, displayNameArg))
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

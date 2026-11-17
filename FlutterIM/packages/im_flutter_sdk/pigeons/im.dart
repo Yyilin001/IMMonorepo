@@ -351,6 +351,13 @@ abstract class ImHost {
   @async
   ImSession signIn(String account, String password);
   @async
+  ImSession register(
+    String account,
+    String password,
+    String publicHandle,
+    String displayName,
+  );
+  @async
   ImSession connect();
   @async
   ImSession status();

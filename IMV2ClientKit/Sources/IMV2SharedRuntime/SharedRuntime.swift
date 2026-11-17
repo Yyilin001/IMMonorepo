@@ -10,7 +10,7 @@ package struct SharedConfiguration: Decodable, Sendable {
     let storageDirectory: String
 }
 package struct SharedRequest: Decodable, Sendable {
-    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
+    package enum Operation: String, Decodable { case locateMessage, openListWindow, openTimelineWindow, readWindow, watchWindow, nextWindowPage, resetWindow, closeWindow, conversationState, profiles, clearProfiles, avatar, groupNickname, saveGroupNickname, moderateMemberRemoval, forwardMessage, interactionAction, searchMessages, clearMessaging, messageAction, markVisibleMessages, messageReaders, beginAttachment, appendAttachment, finishAttachment, clearResources, sendAttachment, openResource, downloadResource, previewResource, beginResourceRead, readResource, endResourceRead, transferAction, cancelAttachmentSend, restore, login, register, connect, disconnect, synchronize, snapshot, close, signOut, openConversation, conversationsNext, conversationsFirst, messagesOlder, messagesLatest, pendingNext, pendingFirst, sendText, retrySend, resendUnsent, contacts, contactsNext, groupsFirst, groupsNext, lookupIdentity, clearDiscovery, socialAction, openDirect, createGroup, openGroup, groupMembersNext, groupAction, retryDirectoryWork, discardDirectoryDraft, openProfile, saveAlias, invitations, invitationsNext, previewInvite, refreshInvite, inviteAction, muteMember, openAvatarEditor, changeAvatar, avatarAction }
     package let operation: Operation
     var windowID: String?
     var limit: Int?
@@ -32,6 +32,7 @@ package struct SharedRequest: Decodable, Sendable {
     var height: Int?
     var account: String?
     var password: String?
+    var publicHandle: String?
     var roomID: String?
     var text: String?
     var intentID: String?
@@ -113,7 +114,7 @@ package struct SharedSnapshot: Encodable, Sendable {
     let messaging: SharedMessagingView?
     var windowID: String? = nil
 }
-package enum SharedFailure: String, Error { case invalidConfiguration, invalidInput, busy, closed, authenticationRequired, networkUnavailable, storageUnavailable, operationFailed, cancelled }
+package enum SharedFailure: String, Error { case invalidConfiguration, invalidInput, busy, closed, authenticationRequired, networkUnavailable, storageUnavailable, operationFailed, cancelled, accountExists, publicHandleTaken, invalidPublicHandle, invalidDisplayName, invalidPassword, invalidRecoveryCode, rateLimited }
 package func sharedFailure(_ error: any Error) -> SharedFailure {
     if let error = error as? V2ReadReceiptServiceError { switch error { case .closed: return .closed; case .invalidInput: return .invalidInput } }
     if let error = error as? V2MessageServiceError { switch error { case .closed: return .closed; case .invalidInput: return .invalidInput } }
@@ -229,7 +230,7 @@ package actor SharedRuntime {
         guard !busy else { throw SharedFailure.busy }
         busy = true
         defer { busy = false }
-        if request.operation == .restore || request.operation == .login {
+        if request.operation == .restore || request.operation == .login || request.operation == .register {
             if try exitMarker.load() != nil { try await signOut() }
         }
         switch request.operation {
@@ -246,6 +247,17 @@ package actor SharedRuntime {
             guard let account = request.account, let password = request.password else { throw SharedFailure.invalidInput }
             try await recover()
             store = try await session.authenticatePassword(accountHandle: account, password: password,
+                baseURL: base, metadata: platform.registrationMetadata, recovery: recovery, transport: http)
+            userID = try await auth.localAccountIdentity().userID.rawValue
+            state = "ready"
+            try await configureConnection()
+        case .register:
+            guard store == nil, try await credentialStore.load() == nil else { throw SharedFailure.busy }
+            guard let account = request.account, let password = request.password,
+                  let handle = request.publicHandle, let name = request.displayName else { throw SharedFailure.invalidInput }
+            try await recover()
+            store = try await session.authenticatePassword(accountHandle: account, password: password,
+                mode: .register, publicHandle: handle, displayName: name,
                 baseURL: base, metadata: platform.registrationMetadata, recovery: recovery, transport: http)
             userID = try await auth.localAccountIdentity().userID.rawValue
             state = "ready"

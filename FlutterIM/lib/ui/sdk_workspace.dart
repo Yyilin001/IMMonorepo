@@ -268,6 +268,26 @@ class _SdkWorkspaceState extends State<SdkWorkspace>
     });
   }
 
+  Future<void> register(
+    String name,
+    String password,
+    String publicHandle,
+    String displayName,
+  ) async {
+    if (busy) return;
+    await _run(() async {
+      await _open();
+      if (!mounted || client!.session.userId != null) return;
+      await client!.register(
+        name.trim(),
+        password,
+        publicHandle.trim(),
+        displayName.trim(),
+      );
+      accountName = displayName.trim();
+    });
+  }
+
   /// Patches the visible row before the server projection arrives, then restores
   /// the previous list if the shared runtime rejects the command.
   Future<bool> applyConversationState(
@@ -402,10 +422,15 @@ class _SdkLogin extends StatefulWidget {
 
 class _SdkLoginState extends State<_SdkLogin> {
   final account = TextEditingController(), password = TextEditingController();
+  final publicHandle = TextEditingController(),
+      displayName = TextEditingController();
+  var registerMode = false;
   @override
   void dispose() {
     account.dispose();
     password.dispose();
+    publicHandle.dispose();
+    displayName.dispose();
     super.dispose();
   }
 
@@ -414,37 +439,107 @@ class _SdkLoginState extends State<_SdkLogin> {
     final sdk = _SdkScope.of(context)!;
     void submit() {
       FocusManager.instance.primaryFocus?.unfocus();
-      unawaited(sdk.signIn(account.text, password.text));
+      if (registerMode) {
+        unawaited(
+          sdk.register(
+            account.text,
+            password.text,
+            publicHandle.text,
+            displayName.text,
+          ),
+        );
+      } else {
+        unawaited(sdk.signIn(account.text, password.text));
+      }
     }
 
     return _ProfileScaffold(
-      title: '登录',
+      title: registerMode ? '注册' : '登录',
       children: [
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(value: false, label: Text('登录')),
+              ButtonSegment(value: true, label: Text('注册')),
+            ],
+            selected: {registerMode},
+            onSelectionChanged: sdk.busy
+                ? null
+                : (value) => setState(() => registerMode = value.first),
+          ),
+        ),
+        const SizedBox(height: 12),
         _InfoCard(
           children: [
-            for (final secret in [false, true])
-              ListTile(
-                leading: Icon(
-                  secret ? Icons.lock_outline : Icons.person_outline,
-                  color: green,
+            ListTile(
+              leading: const Icon(Icons.person_outline, color: green),
+              title: TextField(
+                key: const ValueKey('账号'),
+                controller: account,
+                enabled: !sdk.busy,
+                autocorrect: false,
+                enableSuggestions: false,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(hintText: '账号'),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.lock_outline, color: green),
+              title: TextField(
+                key: const ValueKey('密码'),
+                controller: password,
+                enabled: !sdk.busy,
+                obscureText: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                textInputAction: registerMode
+                    ? TextInputAction.next
+                    : TextInputAction.done,
+                onSubmitted: registerMode ? null : (_) => submit(),
+                decoration: InputDecoration(
+                  hintText: registerMode ? '密码（至少 12 个字符）' : '密码',
                 ),
+              ),
+            ),
+            if (registerMode)
+              ListTile(
+                leading: const Icon(Icons.alternate_email, color: green),
                 title: TextField(
-                  key: ValueKey(secret ? '密码' : '账号'),
-                  controller: secret ? password : account,
+                  key: const ValueKey('公开 ID'),
+                  controller: publicHandle,
                   enabled: !sdk.busy,
-                  obscureText: secret,
                   autocorrect: false,
                   enableSuggestions: false,
-                  textInputAction: secret
-                      ? TextInputAction.done
-                      : TextInputAction.next,
-                  onSubmitted: secret ? (_) => submit() : null,
-                  decoration: InputDecoration(hintText: secret ? '密码' : '账号'),
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(
+                    hintText: '公开 ID（例如 @alice）',
+                  ),
+                ),
+              ),
+            if (registerMode)
+              ListTile(
+                leading: const Icon(Icons.badge_outlined, color: green),
+                title: TextField(
+                  key: const ValueKey('显示名称'),
+                  controller: displayName,
+                  enabled: !sdk.busy,
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => submit(),
+                  decoration: const InputDecoration(hintText: '显示名称'),
                 ),
               ),
           ],
         ),
+        if (registerMode)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 12, 20, 0),
+            child: Text(
+              '注册后请妥善保存密码；在仍记得密码时到账号安全设置离线恢复码。密码和恢复码都丢失后，账号将无法找回。',
+              style: TextStyle(fontSize: 12, color: muted, height: 1.5),
+            ),
+          ),
         if (sdk.error case final message?)
           Padding(
             padding: const EdgeInsets.only(top: 12),
@@ -454,7 +549,7 @@ class _SdkLoginState extends State<_SdkLogin> {
         FilledButton(
           key: const Key('submit-login'),
           onPressed: sdk.busy ? null : submit,
-          child: const Text('登录'),
+          child: Text(registerMode ? '注册并登录' : '登录'),
         ),
       ],
     );
@@ -465,6 +560,13 @@ String _errorText(Object error) {
   final code = error is PlatformException ? error.code : '';
   return switch (code) {
     'authenticationRequired' => '登录失败，请检查账号和密码',
+    'accountExists' => '该账号已注册，请直接登录',
+    'publicHandleTaken' => '该公开 ID 已被占用，请换一个',
+    'invalidPublicHandle' => '公开 ID 格式不正确，请使用 @ 开头的账号',
+    'invalidDisplayName' => '显示名称不符合要求',
+    'invalidPassword' => '密码需为 12–1024 个 UTF-8 字节',
+    'invalidRecoveryCode' => '恢复码格式不正确',
+    'rateLimited' => '尝试过于频繁，请稍后重试',
     'networkUnavailable' => '无法连接服务器，请检查网络后重试',
     'identityUnavailable' => '未找到该公开账号',
     'previewUnavailable' => '图片预览已失效，请重新查看',

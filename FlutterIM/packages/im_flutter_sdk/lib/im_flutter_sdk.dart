@@ -255,6 +255,16 @@ final class ImClient {
     _publish((await _host.restore()).value);
     _schedule(Duration.zero);
   });
+  Future<void> register(
+    String account,
+    String password,
+    String publicHandle,
+    String displayName,
+  ) => _ordered(() async {
+    _publish((await _host.register(account, password, publicHandle, displayName)).value);
+    _schedule(Duration.zero);
+  });
+
   Future<void> signIn(String account, String password) => _ordered(() async {
     _publish((await _host.signIn(account, password)).value);
     _schedule(Duration.zero);

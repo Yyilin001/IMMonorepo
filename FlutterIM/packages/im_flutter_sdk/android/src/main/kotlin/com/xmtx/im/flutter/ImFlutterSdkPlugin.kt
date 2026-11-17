@@ -46,6 +46,8 @@ private class MobileHost(private val context: Context) : ImHost {
     }
     override suspend fun restore() = sdk { client.restore().session() }
     override suspend fun signIn(account: String, password: String) = sdk { client.login(account, password).session() }
+    override suspend fun register(account: String, password: String, publicHandle: String, displayName: String) =
+        sdk { client.register(account, password, publicHandle, displayName).session() }
     override suspend fun status() = sdk { client.snapshot().session() }
     override suspend fun connect() = sdk { client.connect().session() }
     override suspend fun disconnect() { sdk { client.disconnect() } }
