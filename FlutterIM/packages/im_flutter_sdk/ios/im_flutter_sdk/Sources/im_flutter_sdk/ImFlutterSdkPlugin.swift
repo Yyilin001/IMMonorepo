@@ -107,6 +107,12 @@ private actor MobileHost: ImHost {
     func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws {
         try await ordered { try await self.client.sendAttachment(roomID: roomId, file: URL(fileURLWithPath: path), name: name, contentType: contentType, text: text) }
     }
+    func transfers() async throws -> [Transfer] {
+        try await ordered { try await self.client.transfers().map { Transfer(id: $0.id, name: $0.name, kind: $0.kind, phase: $0.phase, total: $0.total, confirmed: $0.confirmed, actions: $0.actions) } }
+    }
+    func transferAction(id: String, action: String) async throws {
+        try await ordered { try await self.client.transferAction(id: id, action: action) }
+    }
     func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws {
         try await ordered { try await self.client.downloadAttachment(roomID: roomId, messageID: messageId, mediaID: mediaId) }
     }

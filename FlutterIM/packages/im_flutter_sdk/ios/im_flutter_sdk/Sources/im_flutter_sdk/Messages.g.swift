@@ -290,6 +290,71 @@ struct ImConversation: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct Transfer: Hashable, CustomStringConvertible {
+  var id: String
+  var name: String
+  var kind: String
+  var phase: String
+  var total: Int64? = nil
+  var confirmed: Int64? = nil
+  var actions: [String]
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> Transfer? {
+    let id = pigeonVar_list[0] as! String
+    let name = pigeonVar_list[1] as! String
+    let kind = pigeonVar_list[2] as! String
+    let phase = pigeonVar_list[3] as! String
+    let total: Int64? = nilOrValue(pigeonVar_list[4])
+    let confirmed: Int64? = nilOrValue(pigeonVar_list[5])
+    let actions = pigeonVar_list[6] as! [String]
+
+    return Transfer(
+      id: id,
+      name: name,
+      kind: kind,
+      phase: phase,
+      total: total,
+      confirmed: confirmed,
+      actions: actions
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      name,
+      kind,
+      phase,
+      total,
+      confirmed,
+      actions,
+    ]
+  }
+  static func == (lhs: Transfer, rhs: Transfer) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.name, rhs.name) && MessagesPigeonInternal.deepEquals(lhs.kind, rhs.kind) && MessagesPigeonInternal.deepEquals(lhs.phase, rhs.phase) && MessagesPigeonInternal.deepEquals(lhs.total, rhs.total) && MessagesPigeonInternal.deepEquals(lhs.confirmed, rhs.confirmed) && MessagesPigeonInternal.deepEquals(lhs.actions, rhs.actions)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("Transfer")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: name, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: kind, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: phase, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: total, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: confirmed, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: actions, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "Transfer(id: \(String(describing: id)), name: \(String(describing: name)), kind: \(String(describing: kind)), phase: \(String(describing: phase)), total: \(String(describing: total)), confirmed: \(String(describing: confirmed)), actions: \(String(describing: actions)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct Attachment: Hashable, CustomStringConvertible {
   var id: String
   var name: String
@@ -682,18 +747,20 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 130:
       return ImConversation.fromList(self.readValue() as! [Any?])
     case 131:
-      return Attachment.fromList(self.readValue() as! [Any?])
+      return Transfer.fromList(self.readValue() as! [Any?])
     case 132:
-      return ImMessage.fromList(self.readValue() as! [Any?])
+      return Attachment.fromList(self.readValue() as! [Any?])
     case 133:
-      return DirectoryEntry.fromList(self.readValue() as! [Any?])
+      return ImMessage.fromList(self.readValue() as! [Any?])
     case 134:
-      return DirectoryPage.fromList(self.readValue() as! [Any?])
+      return DirectoryEntry.fromList(self.readValue() as! [Any?])
     case 135:
-      return GroupMember.fromList(self.readValue() as! [Any?])
+      return DirectoryPage.fromList(self.readValue() as! [Any?])
     case 136:
-      return GroupPage.fromList(self.readValue() as! [Any?])
+      return GroupMember.fromList(self.readValue() as! [Any?])
     case 137:
+      return GroupPage.fromList(self.readValue() as! [Any?])
+    case 138:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -709,26 +776,29 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? ImConversation {
       super.writeByte(130)
       super.writeValue(value.toList())
-    } else if let value = value as? Attachment {
+    } else if let value = value as? Transfer {
       super.writeByte(131)
       super.writeValue(value.toList())
-    } else if let value = value as? ImMessage {
+    } else if let value = value as? Attachment {
       super.writeByte(132)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryEntry {
+    } else if let value = value as? ImMessage {
       super.writeByte(133)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryPage {
+    } else if let value = value as? DirectoryEntry {
       super.writeByte(134)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupMember {
+    } else if let value = value as? DirectoryPage {
       super.writeByte(135)
       super.writeValue(value.toList())
-    } else if let value = value as? GroupPage {
+    } else if let value = value as? GroupMember {
       super.writeByte(136)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? GroupPage {
       super.writeByte(137)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(138)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -773,6 +843,8 @@ protocol ImHost {
   func closeWindow(windowId: String) async throws
   func sendText(roomId: String, text: String, replyToMessageId: String?) async throws
   func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws
+  func transfers() async throws -> [Transfer]
+  func transferAction(id: String, action: String) async throws
   func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws
   func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
   func withdrawMessage(roomId: String, messageId: String, revision: Int64) async throws
@@ -1137,6 +1209,39 @@ class ImHostSetup {
       }
     } else {
       sendAttachmentChannel.setMessageHandler(nil)
+    }
+    let transfersChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.transfers\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      transfersChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            let result = try await api.transfers()
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      transfersChannel.setMessageHandler(nil)
+    }
+    let transferActionChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.transferAction\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      transferActionChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let idArg = args[0] as! String
+        let actionArg = args[1] as! String
+        Task { @MainActor in
+          do {
+            try await api.transferAction(id: idArg, action: actionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      transferActionChannel.setMessageHandler(nil)
     }
     let downloadAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.downloadAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

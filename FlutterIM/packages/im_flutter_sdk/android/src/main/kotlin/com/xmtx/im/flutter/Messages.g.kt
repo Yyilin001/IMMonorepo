@@ -301,6 +301,67 @@ data class ImConversation (
 }
 
 /** Generated class from Pigeon that represents data sent in messages. */
+data class Transfer (
+  val id: String,
+  val name: String,
+  val kind: String,
+  val phase: String,
+  val total: Long? = null,
+  val confirmed: Long? = null,
+  val actions: List<String>
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): Transfer {
+      val id = pigeonVar_list[0] as String
+      val name = pigeonVar_list[1] as String
+      val kind = pigeonVar_list[2] as String
+      val phase = pigeonVar_list[3] as String
+      val total = pigeonVar_list[4] as Long?
+      val confirmed = pigeonVar_list[5] as Long?
+      val actions = pigeonVar_list[6] as List<String>
+      return Transfer(id, name, kind, phase, total, confirmed, actions)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      id,
+      name,
+      kind,
+      phase,
+      total,
+      confirmed,
+      actions,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as Transfer
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.name, other.name) && MessagesPigeonUtils.deepEquals(this.kind, other.kind) && MessagesPigeonUtils.deepEquals(this.phase, other.phase) && MessagesPigeonUtils.deepEquals(this.total, other.total) && MessagesPigeonUtils.deepEquals(this.confirmed, other.confirmed) && MessagesPigeonUtils.deepEquals(this.actions, other.actions)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.id)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.name)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.kind)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.phase)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.total)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.confirmed)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.actions)
+    return result
+  }
+  override fun toString(): String {
+    return "Transfer(id=$id, name=$name, kind=$kind, phase=$phase, total=$total, confirmed=$confirmed, actions=$actions)"
+  }
+}
+
+/** Generated class from Pigeon that represents data sent in messages. */
 data class Attachment (
   val id: String,
   val name: String,
@@ -685,35 +746,40 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
       }
       131.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          Attachment.fromList(it)
+          Transfer.fromList(it)
         }
       }
       132.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          ImMessage.fromList(it)
+          Attachment.fromList(it)
         }
       }
       133.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryEntry.fromList(it)
+          ImMessage.fromList(it)
         }
       }
       134.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          DirectoryPage.fromList(it)
+          DirectoryEntry.fromList(it)
         }
       }
       135.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupMember.fromList(it)
+          DirectoryPage.fromList(it)
         }
       }
       136.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
-          GroupPage.fromList(it)
+          GroupMember.fromList(it)
         }
       }
       137.toByte() -> {
+        (readValue(buffer) as? List<Any?>)?.let {
+          GroupPage.fromList(it)
+        }
+      }
+      138.toByte() -> {
         (readValue(buffer) as? List<Any?>)?.let {
           WindowView.fromList(it)
         }
@@ -731,32 +797,36 @@ private open class MessagesPigeonCodec : StandardMessageCodec() {
         stream.write(130)
         writeValue(stream, value.toList())
       }
-      is Attachment -> {
+      is Transfer -> {
         stream.write(131)
         writeValue(stream, value.toList())
       }
-      is ImMessage -> {
+      is Attachment -> {
         stream.write(132)
         writeValue(stream, value.toList())
       }
-      is DirectoryEntry -> {
+      is ImMessage -> {
         stream.write(133)
         writeValue(stream, value.toList())
       }
-      is DirectoryPage -> {
+      is DirectoryEntry -> {
         stream.write(134)
         writeValue(stream, value.toList())
       }
-      is GroupMember -> {
+      is DirectoryPage -> {
         stream.write(135)
         writeValue(stream, value.toList())
       }
-      is GroupPage -> {
+      is GroupMember -> {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is WindowView -> {
+      is GroupPage -> {
         stream.write(137)
+        writeValue(stream, value.toList())
+      }
+      is WindowView -> {
+        stream.write(138)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -787,6 +857,8 @@ interface ImHost {
   suspend fun closeWindow(windowId: String)
   suspend fun sendText(roomId: String, text: String, replyToMessageId: String?)
   suspend fun sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String)
+  suspend fun transfers(): List<Transfer>
+  suspend fun transferAction(id: String, action: String)
   suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String)
   suspend fun editMessage(roomId: String, messageId: String, revision: Long, text: String)
   suspend fun withdrawMessage(roomId: String, messageId: String, revision: Long)
@@ -1194,6 +1266,44 @@ interface ImHost {
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
                 api.sendAttachment(roomIdArg, pathArg, nameArg, contentTypeArg, textArg)
+                listOf(null)
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.transfers$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                listOf(api.transfers())
+              } catch (exception: Throwable) {
+                MessagesPigeonUtils.wrapError(exception)
+              }
+              reply.reply(wrapped)
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.im_flutter_sdk.ImHost.transferAction$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val idArg = args[0] as String
+            val actionArg = args[1] as String
+            CoroutineScope(Dispatchers.Main).launch {
+              val wrapped: List<Any?> = try {
+                api.transferAction(idArg, actionArg)
                 listOf(null)
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)

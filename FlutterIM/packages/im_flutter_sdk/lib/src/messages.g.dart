@@ -222,6 +222,81 @@ class ImConversation {
   }
 }
 
+class Transfer {
+  Transfer({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.phase,
+    this.total,
+    this.confirmed,
+    required this.actions,
+  });
+
+  String id;
+
+  String name;
+
+  String kind;
+
+  String phase;
+
+  int? total;
+
+  int? confirmed;
+
+  List<String> actions;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      id,
+      name,
+      kind,
+      phase,
+      total,
+      confirmed,
+      actions,
+    ];
+  }
+
+  Object encode() {
+    return _toList();  }
+
+  static Transfer decode(Object result) {
+    result as List<Object?>;
+    return Transfer(
+      id: result[0]! as String,
+      name: result[1]! as String,
+      kind: result[2]! as String,
+      phase: result[3]! as String,
+      total: result[4] as int?,
+      confirmed: result[5] as int?,
+      actions: (result[6]! as List<Object?>).cast<String>(),
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! Transfer || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(id, other.id) && _deepEquals(name, other.name) && _deepEquals(kind, other.kind) && _deepEquals(phase, other.phase) && _deepEquals(total, other.total) && _deepEquals(confirmed, other.confirmed) && _deepEquals(actions, other.actions);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+
+  @override
+  String toString() {
+    return 'Transfer(id: $id, name: $name, kind: $kind, phase: $phase, total: $total, confirmed: $confirmed, actions: $actions)';
+  }
+}
+
 class Attachment {
   Attachment({
     required this.id,
@@ -691,26 +766,29 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is ImConversation) {
       buffer.putUint8(130);
       writeValue(buffer, value.encode());
-    }    else if (value is Attachment) {
+    }    else if (value is Transfer) {
       buffer.putUint8(131);
       writeValue(buffer, value.encode());
-    }    else if (value is ImMessage) {
+    }    else if (value is Attachment) {
       buffer.putUint8(132);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryEntry) {
+    }    else if (value is ImMessage) {
       buffer.putUint8(133);
       writeValue(buffer, value.encode());
-    }    else if (value is DirectoryPage) {
+    }    else if (value is DirectoryEntry) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupMember) {
+    }    else if (value is DirectoryPage) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is GroupPage) {
+    }    else if (value is GroupMember) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is WindowView) {
+    }    else if (value is GroupPage) {
       buffer.putUint8(137);
+      writeValue(buffer, value.encode());
+    }    else if (value is WindowView) {
+      buffer.putUint8(138);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -725,18 +803,20 @@ class _PigeonCodec extends StandardMessageCodec {
       case 130:
         return ImConversation.decode(readValue(buffer)!);
       case 131:
-        return Attachment.decode(readValue(buffer)!);
+        return Transfer.decode(readValue(buffer)!);
       case 132:
-        return ImMessage.decode(readValue(buffer)!);
+        return Attachment.decode(readValue(buffer)!);
       case 133:
-        return DirectoryEntry.decode(readValue(buffer)!);
+        return ImMessage.decode(readValue(buffer)!);
       case 134:
-        return DirectoryPage.decode(readValue(buffer)!);
+        return DirectoryEntry.decode(readValue(buffer)!);
       case 135:
-        return GroupMember.decode(readValue(buffer)!);
+        return DirectoryPage.decode(readValue(buffer)!);
       case 136:
-        return GroupPage.decode(readValue(buffer)!);
+        return GroupMember.decode(readValue(buffer)!);
       case 137:
+        return GroupPage.decode(readValue(buffer)!);
+      case 138:
         return WindowView.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1101,6 +1181,41 @@ class ImHost {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, path, name, contentType, text]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  Future<List<Transfer>> transfers() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.transfers$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return (pigeonVar_replyValue! as List<Object?>).cast<Transfer>();
+  }
+
+  Future<void> transferAction(String id, String action) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.transferAction$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[id, action]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     _extractReplyValueOrThrow(
         pigeonVar_replyList,

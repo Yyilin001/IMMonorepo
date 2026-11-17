@@ -691,6 +691,7 @@ class PersonalPane extends ConsumerWidget {
               const SizedBox(height: 18),
               _InfoCard(
                 children: [
+                  if (sdk?.userId != null) const _TransfersLink(),
                   if (sdk != null)
                     ListTile(
                       key: const Key('account-action'),

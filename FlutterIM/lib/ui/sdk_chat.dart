@@ -256,6 +256,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
               handle: room.peerId ?? room.id,
               group: room.isGroup,
             ),
+            const _TransfersLink(),
             if (room.isGroup) _GroupDetailsButton(roomId: room.id),
           ],
         ),

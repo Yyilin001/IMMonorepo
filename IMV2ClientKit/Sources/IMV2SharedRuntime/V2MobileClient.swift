@@ -184,6 +184,22 @@ public final class V2MobileClient: Sendable {
             throw error
         }
     }
+    public struct Transfer: Sendable {
+        public let id: String
+        public let name: String
+        public let kind: String
+        public let phase: String
+        public let total: Int64?
+        public let confirmed: Int64?
+        public let actions: [String]
+    }
+    public func transfers() async throws -> [Transfer] {
+        guard let resource = try await run(.init(operation: .snapshot)).resource else { throw Failure(code: "authenticationRequired") }
+        return resource.transfers.map { Transfer(id: $0.id, name: $0.name, kind: $0.kind, phase: $0.phase, total: $0.bytes, confirmed: $0.confirmed, actions: $0.actions) }
+    }
+    public func transferAction(id: String, action: String) async throws {
+        _ = try await run(.init(operation: .transferAction, intentID: id, action: action))
+    }
     public func downloadAttachment(roomID: String, messageID: String, mediaID: String) async throws {
         _ = try await run(.init(operation: .openResource, messageID: messageID, mediaID: mediaID, roomID: roomID))
         _ = try await run(.init(operation: .downloadResource))

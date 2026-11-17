@@ -52,6 +52,16 @@ typedef ImConversation = ({
   String? peerId,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImTransfer = ({
+  String id,
+  String name,
+  String kind,
+  String phase,
+  int? total,
+  int? confirmed,
+  List<String> actions,
+});
+
 typedef ImAttachment = ({
   String id,
   String name,
@@ -385,6 +395,24 @@ final class ImClient {
   }) => _ordered(
     () => _host.sendAttachment(roomId, path, name, contentType, text),
   );
+
+  Future<List<ImTransfer>> transfers() => _ordered(
+    () async => (await _host.transfers())
+        .map(
+          (row) => (
+            id: row.id,
+            name: row.name,
+            kind: row.kind,
+            phase: row.phase,
+            total: row.total,
+            confirmed: row.confirmed,
+            actions: List<String>.unmodifiable(row.actions),
+          ),
+        )
+        .toList(growable: false),
+  );
+  Future<void> transferAction(String id, String action) =>
+      _ordered(() => _host.transferAction(id, action));
 
   Future<void> downloadAttachment(
     String roomId,

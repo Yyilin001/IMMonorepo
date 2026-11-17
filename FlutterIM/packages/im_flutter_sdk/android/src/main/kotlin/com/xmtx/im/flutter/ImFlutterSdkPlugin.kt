@@ -135,6 +135,14 @@ private class MobileHost(private val context: Context) : ImHost {
             }
         } }
     }
+    override suspend fun transfers(): List<Transfer> = sdk {
+        val view = client.snapshot().resource ?: throw FlutterError("authenticationRequired")
+        view.transfers.map { Transfer(it.id, it.name, it.kind, it.phase, it.bytes, it.confirmed, it.actions) }
+    }
+    override suspend fun transferAction(id: String, action: String) {
+        val command = SharedTransferAction.entries.firstOrNull { it.wire == action } ?: throw FlutterError("invalidInput")
+        mutations.withLock { sdk { client.transferAction(id, command) } }
+    }
     override suspend fun downloadAttachment(roomId: String, messageId: String, mediaId: String) {
         mutations.withLock { sdk {
             client.openResource(roomId, messageId, mediaId)

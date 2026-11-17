@@ -34,6 +34,25 @@ class ImConversation {
   String? peerId;
 }
 
+class Transfer {
+  Transfer({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.phase,
+    this.total,
+    this.confirmed,
+    required this.actions,
+  });
+  String id;
+  String name;
+  String kind;
+  String phase;
+  int? total;
+  int? confirmed;
+  List<String> actions;
+}
+
 class Attachment {
   Attachment({
     required this.id,
@@ -190,6 +209,10 @@ abstract class ImHost {
     String contentType,
     String text,
   );
+  @async
+  List<Transfer> transfers();
+  @async
+  void transferAction(String id, String action);
   @async
   void downloadAttachment(String roomId, String messageId, String mediaId);
   @async
