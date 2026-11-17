@@ -414,7 +414,7 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     final client = _SdkScope.of(context)!.client!;
     setState(() => sending = true);
     try {
-      final photo = await showModalBottomSheet<bool>(
+      final photos = await showModalBottomSheet<bool>(
         context: context,
         builder: (sheet) => SafeArea(
           child: Column(
@@ -422,41 +422,51 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
             children: [
               ListTile(
                 leading: const Icon(Icons.image_outlined),
-                title: const Text('相册'),
+                title: const Text('照片（可多选）'),
                 onTap: () => Navigator.pop(sheet, true),
               ),
               ListTile(
                 leading: const Icon(Icons.insert_drive_file_outlined),
-                title: const Text('文件'),
+                title: const Text('文件（可多选）'),
                 onTap: () => Navigator.pop(sheet, false),
               ),
             ],
           ),
         ),
       );
-      if (!mounted || photo == null) return;
-      final file = photo
-          ? await ImagePicker().pickImage(
-              source: ImageSource.gallery,
-              requestFullMetadata: false,
-            )
-          : await openFile();
-      if (!mounted || file == null) return;
-      final bytes = await file.length();
+      if (!mounted || photos == null) return;
+      final List<XFile> picked = photos
+          ? await ImagePicker().pickMultiImage(requestFullMetadata: false)
+          : await openFiles();
+      if (!mounted || picked.isEmpty) return;
+      final valid = <XFile>[];
+      var rejected = 0;
+      for (final file in picked) {
+        final bytes = await file.length();
+        if (bytes < 1 || bytes > 33554432) {
+          rejected += 1;
+          continue;
+        }
+        valid.add(file);
+      }
       if (!mounted) return;
-      if (bytes < 1 || bytes > 33554432) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('请选择非空且不超过 32 MiB 的附件')));
+      if (valid.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请选择非空且不超过 32 MiB 的附件')),
+        );
         return;
       }
       final caption = input.text;
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (dialog) => AlertDialog(
-          title: const Text('发送附件'),
+          title: Text('发送 ${valid.length} 个附件'),
           content: Text(
-            [file.name, if (caption.isNotEmpty) caption].join('\n'),
+            [
+              for (final file in valid.take(5)) file.name,
+              if (valid.length > 5) '…还有 ${valid.length - 5} 个',
+              if (caption.isNotEmpty) '说明：$caption',
+            ].join('\n'),
           ),
           actions: [
             TextButton(
@@ -471,25 +481,45 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
         ),
       );
       if (!mounted || confirmed != true) return;
-      await client.sendAttachment(
-        widget.room.id,
-        path: file.path,
-        name: file.name,
-        contentType:
-            file.mimeType ??
-            lookupMimeType(file.name) ??
-            'application/octet-stream',
-        text: caption,
-      );
+      var sent = 0, failed = 0;
+      for (var index = 0; index < valid.length; index++) {
+        final file = valid[index];
+        try {
+          await client.sendAttachment(
+            widget.room.id,
+            path: file.path,
+            name: file.name,
+            contentType:
+                file.mimeType ??
+                lookupMimeType(file.name) ??
+                'application/octet-stream',
+            text: index == 0 ? caption : '',
+          );
+          sent += 1;
+        } catch (_) {
+          failed += 1;
+        }
+      }
       if (!mounted) return;
-      if (input.text == caption) {
+      if (sent > 0 && input.text == caption) {
         input.clear();
         ref.read(draftProvider(id).notifier).save('');
       }
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('附件已加入发送队列')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            [
+              '已提交 $sent 个附件',
+              if (failed > 0) '$failed 个未能提交',
+              if (rejected > 0) '$rejected 个超过 32 MiB 已跳过',
+            ].join('，'),
+          ),
+        ),
+      );
       final page = currentPage;
-      if (page != null && !page.isLatest) await changePage(page, latest: true);
+      if (sent > 0 && page != null && !page.isLatest) {
+        await changePage(page, latest: true);
+      }
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -1378,6 +1408,7 @@ class _AttachmentImagePreviewState extends State<AttachmentImagePreview>
     try {
       final result = await widget.load();
       if (!mounted || generation != request) return;
+      remaining = result.remaining;
       image = MemoryImage(result.bytes);
       expiry = Timer(result.remaining, () => setState(release));
     } catch (failure) {
@@ -1394,34 +1425,138 @@ class _AttachmentImagePreviewState extends State<AttachmentImagePreview>
     super.dispose();
   }
 
+  void openViewer({required Duration remaining}) {
+    final current = image;
+    if (current == null) return;
+    Navigator.of(context, rootNavigator: true).push(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => _ImageViewerPage(
+          bytes: current.bytes,
+          name: widget.name,
+          remaining: remaining,
+        ),
+      ),
+    );
+  }
+
+  Duration remaining = Duration.zero;
+
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       if (image case final preview?)
-        Image(
-          image: preview,
-          height: 180,
-          fit: BoxFit.contain,
-          semanticLabel: widget.name,
-          errorBuilder: (_, _, _) => const Text('无法显示图片'),
+        GestureDetector(
+          onTap: () => openViewer(remaining: remaining),
+          child: Image(
+            image: preview,
+            height: 180,
+            fit: BoxFit.contain,
+            semanticLabel: widget.name,
+            errorBuilder: (_, _, _) => const Text('无法显示图片'),
+          ),
         ),
       if (error != null) Text(error!),
-      TextButton(
-        onPressed: loading
-            ? null
-            : image == null
-            ? show
-            : () => setState(release),
-        child: Text(
-          loading
-              ? '正在读取预览…'
-              : image == null
-              ? '查看图片'
-              : '收起图片',
-        ),
+      Row(
+        children: [
+          TextButton(
+            onPressed: loading
+                ? null
+                : image == null
+                ? show
+                : () => setState(release),
+            child: Text(
+              loading
+                  ? '正在读取预览…'
+                  : image == null
+                  ? '查看图片'
+                  : '收起图片',
+            ),
+          ),
+          if (image != null)
+            TextButton(
+              key: const Key('open-image-viewer'),
+              onPressed: () => openViewer(remaining: remaining),
+              child: const Text('查看大图'),
+            ),
+        ],
       ),
     ],
+  );
+}
+
+class _ImageViewerPage extends StatefulWidget {
+  const _ImageViewerPage({
+    required this.bytes,
+    required this.name,
+    required this.remaining,
+  });
+  final Uint8List bytes;
+  final String name;
+  final Duration remaining;
+
+  @override
+  State<_ImageViewerPage> createState() => _ImageViewerPageState();
+}
+
+class _ImageViewerPageState extends State<_ImageViewerPage> {
+  final transform = TransformationController();
+  Timer? expiry;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.remaining > Duration.zero) {
+      expiry = Timer(widget.remaining, () {
+        if (mounted) Navigator.of(context).maybePop();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    expiry?.cancel();
+    transform.dispose();
+    super.dispose();
+  }
+
+  void toggleZoom() {
+    if (transform.value == Matrix4.identity()) {
+      transform.value = Matrix4.identity()
+        ..translateByDouble(-MediaQuery.sizeOf(context).width / 2, -160, 0, 1)
+        ..scaleByDouble(2, 2, 1, 1);
+    } else {
+      transform.value = Matrix4.identity();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: Colors.black,
+    appBar: AppBar(
+      backgroundColor: Colors.black,
+      foregroundColor: Colors.white,
+      title: Text(widget.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+    ),
+    body: GestureDetector(
+      onDoubleTap: toggleZoom,
+      child: InteractiveViewer(
+        transformationController: transform,
+        minScale: 0.8,
+        maxScale: 4,
+        child: Center(
+          child: Image.memory(
+            widget.bytes,
+            fit: BoxFit.contain,
+            errorBuilder: (_, _, _) => const Text(
+              '无法显示图片',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ),
+      ),
+    ),
   );
 }
 
