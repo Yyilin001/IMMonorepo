@@ -1626,6 +1626,10 @@ class _MessageBubble extends ConsumerWidget {
     this.onWithdraw,
     this.onReaders,
     this.onFavorite,
+    this.onEnterSelection,
+    this.selecting = false,
+    this.selected = false,
+    this.onToggleSelect,
     this.isForwarded = false,
     this.showTime = true,
   });
@@ -1635,7 +1639,8 @@ class _MessageBubble extends ConsumerWidget {
   final ({String label, VoidCallback action})? recovery;
   final VoidCallback? onCancelSend, onOpenReply;
   final VoidCallback? onReply, onForward, onEdit, onWithdraw, onReaders;
-  final VoidCallback? onFavorite;
+  final VoidCallback? onFavorite, onEnterSelection, onToggleSelect;
+  final bool selecting, selected;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1700,7 +1705,10 @@ class _MessageBubble extends ConsumerWidget {
               ),
             ),
           );
-    return Padding(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: selecting ? onToggleSelect : null,
+      child: Padding(
       padding: const EdgeInsets.only(bottom: 18),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1708,6 +1716,16 @@ class _MessageBubble extends ConsumerWidget {
             ? MainAxisAlignment.end
             : MainAxisAlignment.start,
         children: [
+          if (selecting)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, right: 6),
+              child: Checkbox(
+                value: selected,
+                onChanged: onToggleSelect == null
+                    ? null
+                    : (_) => onToggleSelect!(),
+              ),
+            ),
           if (!mine) ...[avatar, const SizedBox(width: 10)],
           Flexible(
             child: Column(
@@ -1734,7 +1752,8 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      if (onCancelSend != null ||
+                      if (onEnterSelection != null ||
+                          onCancelSend != null ||
                           recovery != null ||
                           onReply != null ||
                           onForward != null ||
@@ -1773,6 +1792,11 @@ class _MessageBubble extends ConsumerWidget {
                               PopupMenuItem(
                                 value: onFavorite,
                                 child: const Text('收藏'),
+                              ),
+                            if (onEnterSelection != null)
+                              PopupMenuItem(
+                                value: onEnterSelection,
+                                child: const Text('多选'),
                               ),
                             if (onEdit != null)
                               PopupMenuItem(
@@ -1829,6 +1853,7 @@ class _MessageBubble extends ConsumerWidget {
           ] else
             SizedBox(width: mine ? 4 : 16),
         ],
+      ),
       ),
     );
   }

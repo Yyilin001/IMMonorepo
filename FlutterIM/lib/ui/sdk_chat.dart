@@ -20,7 +20,136 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
   final activeMutations = <String>{};
   final Map<String, ImProfile> senderProfiles = {};
   final Set<String> _senderProfilesRequested = {};
-  bool initialized = false, sending = false;
+  final Set<String> selected = {};
+  bool initialized = false, sending = false, selecting = false, forwarding = false;
+
+  void enterSelection(ImMessage item) {
+    setState(() {
+      selecting = true;
+      selected
+        ..clear()
+        ..add(item.id);
+    });
+  }
+
+  void toggleSelection(ImMessage item) {
+    if (!selecting) return;
+    setState(() {
+      if (!selected.remove(item.id)) selected.add(item.id);
+    });
+  }
+
+  void exitSelection() {
+    setState(() {
+      selecting = false;
+      selected.clear();
+    });
+  }
+
+  Future<List<String>?> pickForwardTargets() async {
+    final sdk = _SdkScope.of(context)!;
+    final targets = sdk.rooms.where((r) => r.id != widget.room.id).toList();
+    final chosen = <String>{};
+    return showModalBottomSheet<List<String>>(
+      context: context,
+      builder: (sheet) => StatefulBuilder(
+        builder: (_, update) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                title: const Text('转发到'),
+                trailing: TextButton(
+                  onPressed: chosen.isEmpty
+                      ? null
+                      : () => Navigator.pop(sheet, chosen.toList()),
+                  child: Text('转发（${chosen.length}/10）'),
+                ),
+              ),
+              if (targets.isEmpty)
+                const ListTile(title: Text('暂无其他会话')),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: targets.length,
+                  itemBuilder: (_, index) {
+                    final room = targets[index];
+                    final checked = chosen.contains(room.id);
+                    return CheckboxListTile(
+                      key: ValueKey('forward-target-${room.id}'),
+                      title: Text(room.title.isEmpty ? room.id : room.title),
+                      value: checked,
+                      onChanged: !checked && chosen.length >= 10
+                          ? null
+                          : (value) => update(() {
+                              if (value == true) {
+                                chosen.add(room.id);
+                              } else {
+                                chosen.remove(room.id);
+                              }
+                            }),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> forwardSelected() async {
+    final page = currentPage;
+    if (page == null || forwarding) return;
+    final items = [
+      for (final item in page.messages)
+        if (selected.contains(item.id) &&
+            !item.withdrawn &&
+            item.revision != null)
+          item,
+    ];
+    if (items.isEmpty) return;
+    if (items.length > 100) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('一次最多转发 100 条消息')),
+      );
+      return;
+    }
+    final chosen = await pickForwardTargets();
+    if (chosen == null || chosen.isEmpty || !mounted) return;
+    final client = _SdkScope.of(context)!.client!;
+    setState(() => forwarding = true);
+    var ok = 0, failed = 0;
+    for (final item in items) {
+      try {
+        await client.forwardMessageToRooms(
+          widget.room.id,
+          item.id,
+          item.revision!,
+          chosen,
+        );
+        ok += 1;
+      } catch (_) {
+        failed += 1;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      forwarding = false;
+      selecting = false;
+      selected.clear();
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          failed == 0
+              ? '已转发 $ok 条消息到 ${chosen.length} 个会话'
+              : '已转发 $ok 条，$failed 条未能提交',
+        ),
+      ),
+    );
+  }
 
   Future<void> loadSenderProfiles(Iterable<String> ids) async {
     final sdk = _SdkScope.of(context);
@@ -445,7 +574,31 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
     }
     return Column(
       children: [
-        SizedBox(
+        if (selecting)
+          SizedBox(
+            height: kToolbarHeight,
+            child: AppBar(
+              primary: false,
+              leading: IconButton(
+                key: const Key('exit-selection'),
+                icon: const Icon(Icons.close),
+                tooltip: '取消多选',
+                onPressed: forwarding ? null : exitSelection,
+              ),
+              title: Text('已选 ${selected.length} 条'),
+              actions: [
+                TextButton(
+                  key: const Key('forward-selected'),
+                  onPressed: forwarding || selected.isEmpty
+                      ? null
+                      : forwardSelected,
+                  child: Text(forwarding ? '转发中…' : '转发'),
+                ),
+              ],
+            ),
+          )
+        else
+          SizedBox(
           height: kToolbarHeight,
           child: AppBar(
             primary: false,
@@ -711,6 +864,15 @@ class _SdkChatState extends ConsumerState<_SdkChat> {
                                       !activeMutations.contains(item.id)
                                   ? () => forwardMessage(item, item.revision!)
                                   : null,
+                              onEnterSelection:
+                                  !item.withdrawn &&
+                                      item.revision != null &&
+                                      !selecting
+                                  ? () => enterSelection(item)
+                                  : null,
+                              selecting: selecting,
+                              selected: selected.contains(item.id),
+                              onToggleSelect: () => toggleSelection(item),
                               onFavorite:
                                   !item.withdrawn &&
                                       item.pendingStatus == null
