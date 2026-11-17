@@ -879,6 +879,7 @@ struct SearchHit: Hashable, CustomStringConvertible {
   var id: String
   var roomId: String
   var text: String
+  var senderId: String
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -886,11 +887,13 @@ struct SearchHit: Hashable, CustomStringConvertible {
     let id = pigeonVar_list[0] as! String
     let roomId = pigeonVar_list[1] as! String
     let text = pigeonVar_list[2] as! String
+    let senderId = pigeonVar_list[3] as! String
 
     return SearchHit(
       id: id,
       roomId: roomId,
-      text: text
+      text: text,
+      senderId: senderId
     )
   }
   func toList() -> [Any?] {
@@ -898,13 +901,14 @@ struct SearchHit: Hashable, CustomStringConvertible {
       id,
       roomId,
       text,
+      senderId,
     ]
   }
   static func == (lhs: SearchHit, rhs: SearchHit) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -912,10 +916,11 @@ struct SearchHit: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: text, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: senderId, hasher: &hasher)
   }
 
   public var description: String {
-    return "SearchHit(id: \(String(describing: id)), roomId: \(String(describing: roomId)), text: \(String(describing: text)))"
+    return "SearchHit(id: \(String(describing: id)), roomId: \(String(describing: roomId)), text: \(String(describing: text)), senderId: \(String(describing: senderId)))"
   }
 }
 
@@ -2103,7 +2108,7 @@ protocol ImHost {
   func closeWindow(windowId: String) async throws
   func cancelPendingSend(intentId: String) async throws
   func locateMessage(roomId: String, messageId: String) async throws -> WindowView
-  func searchMessages(roomId: String?, query: String, next: Bool) async throws -> SearchPage
+  func searchMessages(roomId: String?, query: String, next: Bool, filter: String?, senderUserId: String?) async throws -> SearchPage
   func messageReaders(roomId: String, messageId: String, next: Bool) async throws -> ImReaders
   func favorites(next: Bool) async throws -> ImFavorites
   func setFavorite(roomId: String, messageId: String, favorited: Bool) async throws
@@ -3031,9 +3036,11 @@ class ImHostSetup {
         let roomIdArg: String? = nilOrValue(args[0])
         let queryArg = args[1] as! String
         let nextArg = args[2] as! Bool
+        let filterArg: String? = nilOrValue(args[3])
+        let senderUserIdArg: String? = nilOrValue(args[4])
         Task { @MainActor in
           do {
-            let result = try await api.searchMessages(roomId: roomIdArg, query: queryArg, next: nextArg)
+            let result = try await api.searchMessages(roomId: roomIdArg, query: queryArg, next: nextArg, filter: filterArg, senderUserId: senderUserIdArg)
             reply(wrapResult(result))
           } catch {
             reply(wrapError(error))

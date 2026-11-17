@@ -1680,10 +1680,14 @@ class _MessageSearchPageState extends State<_MessageSearchPage> {
   final hits = <(String, String), ImSearchHit>{};
   bool busy = false, hasNext = false;
   String? status;
+  var filter = 'all';
+  String? senderFilter;
 
   Future<void> search({bool next = false}) async {
     final query = input.text.trim();
-    if (busy || query.isEmpty) return;
+    if (busy || (query.isEmpty && filter == 'all' && senderFilter == null)) {
+      return;
+    }
     setState(() {
       busy = true;
       if (!next) hits.clear();
@@ -1695,6 +1699,8 @@ class _MessageSearchPageState extends State<_MessageSearchPage> {
         widget.room?.id,
         query,
         next: next,
+        filter: filter,
+        senderUserId: senderFilter,
       );
       if (!mounted) return;
       setState(() {
@@ -1741,17 +1747,80 @@ class _MessageSearchPageState extends State<_MessageSearchPage> {
               status = null;
             }),
             decoration: InputDecoration(
-              hintText: '输入消息正文',
+              hintText: filter == 'all' ? '输入消息正文' : '可只按内容类型筛选',
               suffixIcon: IconButton(
                 tooltip: '搜索',
                 icon: const Icon(Icons.search),
-                onPressed: busy || input.text.trim().isEmpty
+                onPressed:
+                    busy ||
+                        (input.text.trim().isEmpty &&
+                            filter == 'all' &&
+                            senderFilter == null)
                     ? null
                     : () => search(),
               ),
             ),
           ),
         ),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              for (final entry in const {
+                'all': '全部',
+                'media': '媒体',
+                'image': '图片',
+                'video': '视频',
+                'file': '文件',
+                'audio': '音频',
+              }.entries)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    key: ValueKey('search-filter-${entry.key}'),
+                    label: Text(entry.value),
+                    selected: filter == entry.key,
+                    onSelected: busy
+                        ? null
+                        : (_) {
+                            setState(() {
+                              filter = entry.key;
+                              hits.clear();
+                              hasNext = false;
+                              status = null;
+                            });
+                            if (filter != 'all') unawaited(search());
+                          },
+                  ),
+                ),
+            ],
+          ),
+        ),
+        if (senderFilter != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '已按成员筛选：$senderFilter',
+                    style: const TextStyle(fontSize: 12, color: muted),
+                  ),
+                ),
+                TextButton(
+                  onPressed: busy
+                      ? null
+                      : () => setState(() {
+                          senderFilter = null;
+                          hits.clear();
+                          status = null;
+                        }),
+                  child: const Text('清除'),
+                ),
+              ],
+            ),
+          ),
         if (busy) const LinearProgressIndicator(),
         if (status != null) Text(status!),
         Expanded(
@@ -1773,6 +1842,16 @@ class _MessageSearchPageState extends State<_MessageSearchPage> {
                   subtitle: widget.room == null
                       ? Text(widget.roomTitles[hit.roomId] ?? hit.roomId)
                       : null,
+                  onLongPress: busy
+                      ? null
+                      : () {
+                          setState(() {
+                            senderFilter = hit.senderId;
+                            hits.clear();
+                            hasNext = false;
+                          });
+                          unawaited(search());
+                        },
                 ),
               if (hasNext)
                 TextButton(

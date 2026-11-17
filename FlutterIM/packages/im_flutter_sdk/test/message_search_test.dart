@@ -25,7 +25,7 @@ void main() {
         messenger.setMockDecodedMessageHandler<Object?>(channel, (args) async {
           if (method == 'searchMessages') {
             calls.add(args);
-            final next = (args as List).last == true;
+            final next = (args as List)[2] == true;
             return [
               wire.SearchPage(
                 status: 'ready',
@@ -34,6 +34,7 @@ void main() {
                     id: next ? 'older' : 'newer',
                     roomId: 'room',
                     text: '正文',
+                    senderId: 'sender',
                   ),
                 ],
                 hasNext: !next,
@@ -53,18 +54,28 @@ void main() {
         gatewayPort: 7443,
       );
       final first = await client.searchMessages('room', ' 正文 ');
-      expect(first.hits.single, (id: 'newer', roomId: 'room', text: '正文'));
+      expect(
+        first.hits.single,
+        (id: 'newer', roomId: 'room', text: '正文', senderId: 'sender'),
+      );
       expect(first.hasNext, true);
       final last = await client.searchMessages('room', '正文', next: true);
       expect(last.hits.single.id, 'older');
       expect(last.hasNext, false);
       await client.searchMessages(null, '正文');
+      await client.searchMessages(
+        'room',
+        '',
+        filter: 'image',
+        senderUserId: 'sender',
+      );
       await client.clearMessageSearch();
       await client.close();
       expect(calls, [
-        ['room', '正文', false],
-        ['room', '正文', true],
-        [null, '正文', false],
+        ['room', '正文', false, null, null],
+        ['room', '正文', true, null, null],
+        [null, '正文', false, null, null],
+        ['room', '', false, 'image', 'sender'],
         'clearMessageSearch',
       ]);
     },

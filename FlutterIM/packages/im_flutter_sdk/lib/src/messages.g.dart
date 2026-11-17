@@ -902,6 +902,7 @@ class SearchHit {
     required this.id,
     required this.roomId,
     required this.text,
+    required this.senderId,
   });
 
   String id;
@@ -910,11 +911,14 @@ class SearchHit {
 
   String text;
 
+  String senderId;
+
   List<Object?> _toList() {
     return <Object?>[
       id,
       roomId,
       text,
+      senderId,
     ];
   }
 
@@ -927,6 +931,7 @@ class SearchHit {
       id: result[0]! as String,
       roomId: result[1]! as String,
       text: result[2]! as String,
+      senderId: result[3]! as String,
     );
   }
 
@@ -939,7 +944,7 @@ class SearchHit {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(id, other.id) && _deepEquals(roomId, other.roomId) && _deepEquals(text, other.text);
+    return _deepEquals(id, other.id) && _deepEquals(roomId, other.roomId) && _deepEquals(text, other.text) && _deepEquals(senderId, other.senderId);
   }
 
   @override
@@ -948,7 +953,7 @@ class SearchHit {
 
   @override
   String toString() {
-    return 'SearchHit(id: $id, roomId: $roomId, text: $text)';
+    return 'SearchHit(id: $id, roomId: $roomId, text: $text, senderId: $senderId)';
   }
 }
 
@@ -3145,14 +3150,14 @@ class ImHost {
     return pigeonVar_replyValue! as WindowView;
   }
 
-  Future<SearchPage> searchMessages(String? roomId, String query, bool next) async {
+  Future<SearchPage> searchMessages(String? roomId, String query, bool next, String? filter, String? senderUserId) async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.im_flutter_sdk.ImHost.searchMessages$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
       pigeonChannelCodec,
       binaryMessenger: pigeonVar_binaryMessenger,
     );
-    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, query, next]);
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[roomId, query, next, filter, senderUserId]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
     final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
         pigeonVar_replyList,

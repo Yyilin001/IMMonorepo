@@ -200,10 +200,16 @@ class DirectoryEntry {
 }
 
 class SearchHit {
-  SearchHit({required this.id, required this.roomId, required this.text});
+  SearchHit({
+    required this.id,
+    required this.roomId,
+    required this.text,
+    required this.senderId,
+  });
   String id;
   String roomId;
   String text;
+  String senderId;
 }
 
 class SearchPage {
@@ -597,7 +603,13 @@ abstract class ImHost {
   @async
   WindowView locateMessage(String roomId, String messageId);
   @async
-  SearchPage searchMessages(String? roomId, String query, bool next);
+  SearchPage searchMessages(
+    String? roomId,
+    String query,
+    bool next,
+    String? filter,
+    String? senderUserId,
+  );
   @async
   ImReaders messageReaders(String roomId, String messageId, bool next);
   @async

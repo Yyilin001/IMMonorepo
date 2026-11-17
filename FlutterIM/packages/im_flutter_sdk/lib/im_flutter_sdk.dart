@@ -60,7 +60,12 @@ typedef ImReaders = ({
   bool hasNext,
   int remainingMilliseconds,
 });
-typedef ImSearchHit = ({String id, String roomId, String text});
+typedef ImSearchHit = ({
+  String id,
+  String roomId,
+  String text,
+  String senderId,
+});
 typedef ImSearchPage = ({String status, List<ImSearchHit> hits, bool hasNext});
 
 typedef ImTimelinePage = ({
@@ -934,12 +939,27 @@ final class ImClient {
     String? roomId,
     String query, {
     bool next = false,
+    String? filter,
+    String? senderUserId,
   }) => _ordered(() async {
-    final page = await _host.searchMessages(roomId, query.trim(), next);
+    final page = await _host.searchMessages(
+      roomId,
+      query.trim(),
+      next,
+      filter,
+      senderUserId,
+    );
     return (
       status: page.status,
       hits: page.hits
-          .map((hit) => (id: hit.id, roomId: hit.roomId, text: hit.text))
+          .map(
+        (hit) => (
+          id: hit.id,
+          roomId: hit.roomId,
+          text: hit.text,
+          senderId: hit.senderId,
+        ),
+      )
           .toList(growable: false),
       hasNext: page.hasNext,
     );

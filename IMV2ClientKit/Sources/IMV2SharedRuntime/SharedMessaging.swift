@@ -2,7 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2ClientRuntime
 
-struct SharedSearchHit: Encodable, Sendable { let id: String; let roomID: String; let text: String }
+struct SharedSearchHit: Encodable, Sendable { let id: String; let roomID: String; let text: String; let senderID: String }
 struct SharedSearch: Encodable, Sendable { let query: String; let roomID: String?; let status: String; let hits: [SharedSearchHit]; let hasNext: Bool }
 struct SharedMessageWork: Encodable, Sendable { let id: String; let messageID: String; let kind: String; let text: String?; let status: String; let retryable: Bool }
 struct SharedReaders: Encodable, Sendable { let roomID: String; let messageID: String; let users: [String]; let hasNext: Bool; let remainingMilliseconds: Int64 }
@@ -86,12 +86,18 @@ actor SharedMessaging {
     func search(_ request: SharedRequest) throws {
         if request.action == "next" {
             guard let current = searchRequest, let cursor = nextSearch else { throw SharedFailure.invalidInput }
-            searchRequest = .init(query: current.query, scope: current.scope, limit: 20, cursor: cursor)
+            searchRequest = .init(query: current.query, scope: current.scope,
+                                  contentFilter: current.contentFilter, senderUserID: current.senderUserID,
+                                  limit: 20, cursor: cursor)
         } else {
             let query = (request.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard query.utf8.count <= 1024 else { throw SharedFailure.invalidInput }
+            let filter = V2MessageSearchContentFilter(rawValue: request.scope ?? "all") ?? .all
+            let sender = try request.targetUserID.map(UserID.init)
             searchRoom = try request.roomID.map(RoomID.init)
-            searchRequest = query.isEmpty ? nil : .init(query: query, scope: searchRoom.map(V2MessageSearchScope.room) ?? .allMessages, limit: 20)
+            searchRequest = (query.isEmpty && filter == .all) ? nil : .init(query: query,
+                scope: searchRoom.map(V2MessageSearchScope.room) ?? .allMessages,
+                contentFilter: filter, senderUserID: sender, limit: 20)
         }
         searchVisible = true; nextSearch = nil
     }
@@ -117,7 +123,7 @@ actor SharedMessaging {
                 do {
                     if let searchRoom, try await !store.roomAllowsLocalRead(roomID: searchRoom) { throw SharedFailure.invalidInput }
                     let page = try await searchService.search(request)
-                    nextSearch = page.nextCursor; hits = page.hits.map { .init(id: $0.messageID.rawValue, roomID: $0.roomID.rawValue, text: String($0.text.prefix(160))) }; status = "ready"
+                    nextSearch = page.nextCursor; hits = page.hits.map { .init(id: $0.messageID.rawValue, roomID: $0.roomID.rawValue, text: String($0.text.prefix(160)), senderID: $0.senderUserID.rawValue) }; status = "ready"
                 } catch is CancellationError { throw CancellationError() }
                 catch V2MessageSearchError.indexUnavailable(let state) { status = String(describing: state); nextSearch = nil }
                 catch V2MessageSearchError.cursorDoesNotMatchScope { status = "refreshRequired"; nextSearch = nil }

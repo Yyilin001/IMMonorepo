@@ -853,7 +853,8 @@ data class DirectoryEntry (
 data class SearchHit (
   val id: String,
   val roomId: String,
-  val text: String
+  val text: String,
+  val senderId: String
 )
  {
   companion object {
@@ -861,7 +862,8 @@ data class SearchHit (
       val id = pigeonVar_list[0] as String
       val roomId = pigeonVar_list[1] as String
       val text = pigeonVar_list[2] as String
-      return SearchHit(id, roomId, text)
+      val senderId = pigeonVar_list[3] as String
+      return SearchHit(id, roomId, text, senderId)
     }
   }
   fun toList(): List<Any?> {
@@ -869,6 +871,7 @@ data class SearchHit (
       id,
       roomId,
       text,
+      senderId,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -879,7 +882,7 @@ data class SearchHit (
       return true
     }
     val other = other as SearchHit
-    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.roomId, other.roomId) && MessagesPigeonUtils.deepEquals(this.text, other.text)
+    return MessagesPigeonUtils.deepEquals(this.id, other.id) && MessagesPigeonUtils.deepEquals(this.roomId, other.roomId) && MessagesPigeonUtils.deepEquals(this.text, other.text) && MessagesPigeonUtils.deepEquals(this.senderId, other.senderId)
   }
 
   override fun hashCode(): Int {
@@ -887,10 +890,11 @@ data class SearchHit (
     result = 31 * result + MessagesPigeonUtils.deepHash(this.id)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.roomId)
     result = 31 * result + MessagesPigeonUtils.deepHash(this.text)
+    result = 31 * result + MessagesPigeonUtils.deepHash(this.senderId)
     return result
   }
   override fun toString(): String {
-    return "SearchHit(id=$id, roomId=$roomId, text=$text)"
+    return "SearchHit(id=$id, roomId=$roomId, text=$text, senderId=$senderId)"
   }
 }
 
@@ -2151,7 +2155,7 @@ interface ImHost {
   suspend fun closeWindow(windowId: String)
   suspend fun cancelPendingSend(intentId: String)
   suspend fun locateMessage(roomId: String, messageId: String): WindowView
-  suspend fun searchMessages(roomId: String?, query: String, next: Boolean): SearchPage
+  suspend fun searchMessages(roomId: String?, query: String, next: Boolean, filter: String?, senderUserId: String?): SearchPage
   suspend fun messageReaders(roomId: String, messageId: String, next: Boolean): ImReaders
   suspend fun favorites(next: Boolean): ImFavorites
   suspend fun setFavorite(roomId: String, messageId: String, favorited: Boolean)
@@ -3208,9 +3212,11 @@ interface ImHost {
             val roomIdArg = args[0] as String?
             val queryArg = args[1] as String
             val nextArg = args[2] as Boolean
+            val filterArg = args[3] as String?
+            val senderUserIdArg = args[4] as String?
             CoroutineScope(Dispatchers.Main).launch {
               val wrapped: List<Any?> = try {
-                listOf(api.searchMessages(roomIdArg, queryArg, nextArg))
+                listOf(api.searchMessages(roomIdArg, queryArg, nextArg, filterArg, senderUserIdArg))
               } catch (exception: Throwable) {
                 MessagesPigeonUtils.wrapError(exception)
               }

@@ -193,7 +193,8 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun signOut(): SharedSnapshot = withContext(NonCancellable) { mutate("signOut") }
     suspend fun openConversation(roomID: String, messageID: String? = null): SharedSnapshot = directoryCall("openConversation", "roomID" to roomID, "messageID" to messageID)
     suspend fun locateMessage(roomID: String, messageID: String): SharedSnapshot = directoryCall("locateMessage", "roomID" to roomID, "messageID" to messageID)
-    suspend fun searchMessages(query: String, roomID: String? = null): SharedSnapshot = directoryCall("searchMessages", "text" to query, "roomID" to roomID)
+    suspend fun searchMessages(query: String, roomID: String? = null, filter: String? = null, senderUserID: String? = null): SharedSnapshot =
+        directoryCall("searchMessages", "text" to query, "roomID" to roomID, "scope" to filter, "targetUserID" to senderUserID)
     suspend fun nextSearch(): SharedSnapshot = directoryCall("searchMessages", "action" to "next")
     suspend fun clearMessaging(): SharedSnapshot = mutate("clearMessaging")
     suspend fun editMessage(roomID: String, messageID: String, revision: Long, text: String): SharedSnapshot = directoryCall("messageAction", "roomID" to roomID, "messageID" to messageID, "revision" to revision, "action" to "edit", "text" to text)
