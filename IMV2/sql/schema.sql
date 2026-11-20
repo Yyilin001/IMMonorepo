@@ -2049,14 +2049,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-82'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-82'::text))
+    schema_id text DEFAULT 'im-v2-current-83'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-83'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-82');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-83');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2364,10 +2364,19 @@ CREATE TABLE im_v2.user_shard_route_overrides (
     CONSTRAINT user_shard_route_overrides_write_bucket_check CHECK ((length(btrim(write_bucket)) > 0))
 );
 
+-- Fresh fixed-shard deployments bind each logical shard to an independently
+-- restorable database. Addresses may change; the durable journal UUID must not.
+CREATE TABLE im_v2.deployment_shard_sources (
+    logical_id text PRIMARY KEY,
+    source_id uuid NOT NULL UNIQUE
+);
+
 CREATE TABLE im_v2.user_shard_router_configuration (
     configuration_key boolean DEFAULT true NOT NULL,
     router_epoch bigint NOT NULL,
     default_write_bucket text NOT NULL,
+    fixed_buckets text[] DEFAULT ARRAY[]::text[] NOT NULL,
+    CONSTRAINT user_shard_router_configuration_fixed_count CHECK (cardinality(fixed_buckets) <= 256),
     updated_at timestamp with time zone NOT NULL,
     CONSTRAINT user_shard_router_configuration_configuration_key_check CHECK (configuration_key),
     CONSTRAINT user_shard_router_configuration_default_write_bucket_check CHECK ((length(btrim(default_write_bucket)) > 0)),

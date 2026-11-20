@@ -2,6 +2,16 @@ import Testing
 @testable import IMV2LoadGeneratorSupport
 
 struct V2LoadCompletionPolicyTests {
+    @Test func exhaustedSendBudgetPreservesUnknownCommitStatus() {
+        let resubmit = V2LoadMessageFailure.retryBudgetExhausted(resubmitting: true)
+        #expect(resubmit.auditOutcome == "unknown")
+        #expect(resubmit.code == "TCP_OUTCOME_UNKNOWN_DEFERRED_RETRY_EXHAUSTED")
+        let reconcile = V2LoadMessageFailure.retryBudgetExhausted(resubmitting: false)
+        #expect(reconcile.auditOutcome == "unknown")
+        #expect(reconcile.code == "TCP_OUTCOME_UNKNOWN_UNRESOLVED")
+        #expect(V2LoadMessageFailure.failed("TCP_REJECTED_POLICY").auditOutcome == "failed")
+    }
+
     @Test func sendAcknowledgementAloneCannotCompleteReceiverMeasurement() {
         #expect(!V2LoadCompletionPolicy.receiverComplete(sent: 100, acknowledged: 100, observed: 99))
         #expect(!V2LoadCompletionPolicy.receiverComplete(sent: 100, acknowledged: 99, observed: 100))

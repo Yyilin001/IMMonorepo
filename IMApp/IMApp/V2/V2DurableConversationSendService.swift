@@ -25,6 +25,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
     private let store: GRDBV2LocalSyncStore
     private let engine: V2ResourceTransferEngine
     private let resources: V2ResourceCenter
+    private let resourceBusiness: V2ResourceService?
     private let messages: V2MessageService?
     private let messageOperations: V2MessageSendOperationService
     private let imports: any V2ResourceImportControlling
@@ -36,9 +37,10 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
     private let operations = V2ResourceOperationScope()
     private var importOwner = UUID()
 
-    init(store: GRDBV2LocalSyncStore, engine: V2ResourceTransferEngine, resources: V2ResourceCenter, messageOperations: V2MessageSendOperationService, messages: V2MessageService? = nil,
+    init(store: GRDBV2LocalSyncStore, engine: V2ResourceTransferEngine, resources: V2ResourceCenter, messageOperations: V2MessageSendOperationService, messages: V2MessageService? = nil, resourceBusiness: V2ResourceService? = nil,
          imports: any V2ResourceImportControlling, groupAvatars: V2GroupAvatarIntentEngine,
          groupAvatarManager: V2GroupAvatarManagementService? = nil) {
+        self.resourceBusiness = resourceBusiness
         self.messages = messages
         self.store = store; self.engine = engine; self.resources = resources; self.messageOperations = messageOperations; self.imports = imports
         self.groupAvatars = groupAvatars
@@ -52,6 +54,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
 
     private func performPrepare(_ attachment: V2StagedConversationAttachment, usage: V2ResourceUsage) async throws -> UUID {
         try requireOpen()
+        if let resourceBusiness { return try await resourceBusiness.prepareUpload(id: attachment.id, localAssetID: attachment.localAssetID, usage: usage) }
         if let existing = try await store.resourceTransfer(id: attachment.id) {
             guard existing.request.usage == usage, existing.localAssetID == attachment.localAssetID else { throw V2ResourceJournalError.conflict }
             return existing.id
@@ -90,6 +93,12 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
 
     private func performFreezeSend(text: String, mentions: [V2MentionTarget], replyTo: V2MessageReplyReference?, roomID: RoomID, attachments: [V2StagedConversationAttachment]) async throws {
         try requireOpen()
+        if let resourceBusiness, let messages {
+            let intent = try V2SendIntent(id: UUID(), roomID: roomID, clientMessageID: .init(uuid: UUID()), text: text,
+                mentions: mentions, replyTo: replyTo, attachmentJobIDs: attachments.map(\.id))
+            try await resourceBusiness.send(intent, assets: attachments.map(\.localAssetID), messages: messages)
+            return
+        }
         var resources: [V2ResourcePreparedUpload] = []
         for attachment in attachments {
             try Task.checkCancellation()
@@ -274,6 +283,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
 
     private func performCancel(intentID: UUID) async throws {
         try requireOpen()
+        if let resourceBusiness { try await resourceBusiness.cancelSend(intentID); return }
         guard let intent = try await store.preparingSendIntent(id:intentID) else {
             try requireOpen()
             try await store.abandonProvenUnsentSendIntent(intentID)
@@ -359,15 +369,18 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
             }
             try await store.releaseResourceImportExecution(candidate.id, owner: importOwner)
         }
-        for intent in try await store.duePreparedSendIntents() {
-            try requireOpen()
-            do { _ = try await store.handOffSendIntent(intent.id) }
-            catch is CancellationError { throw CancellationError() }
-            catch V2ServerTimeAnchor.Failure.unavailable {
+        if let resourceBusiness { try await resourceBusiness.handoffPreparedSends() }
+        else {
+            for intent in try await store.duePreparedSendIntents() {
                 try requireOpen()
-                try await store.deferPreparedSendIntent(intent.id, consumeAttempt: false)
+                do { _ = try await store.handOffSendIntent(intent.id) }
+                catch is CancellationError { throw CancellationError() }
+                catch V2ServerTimeAnchor.Failure.unavailable {
+                    try requireOpen()
+                    try await store.deferPreparedSendIntent(intent.id, consumeAttempt: false)
+                }
+                catch { try requireOpen(); try await store.deferPreparedSendIntent(intent.id) }
             }
-            catch { try requireOpen(); try await store.deferPreparedSendIntent(intent.id) }
         }
         // The outbox and byte journal have their own owners and DB schedules.
         try await groupAvatars.recoverOnce()

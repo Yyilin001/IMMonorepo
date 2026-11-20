@@ -12,7 +12,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BUILD = HERE / "build"
-VERSION = "6.4.1"
+VERSION = (ROOT / ".swift-version").read_text().strip()
 SDK_ID = f"swift-{VERSION}-RELEASE_android"
 SDK = Path.home() / ".swiftpm/swift-sdks" / (SDK_ID + ".artifactbundle/swift-android")
 ANDROID = Path(os.environ.get("ANDROID_HOME", Path.home() / "Library/Android/sdk"))

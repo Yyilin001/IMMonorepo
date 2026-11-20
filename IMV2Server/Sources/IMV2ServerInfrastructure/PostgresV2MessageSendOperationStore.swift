@@ -544,7 +544,9 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 copy.postCommitWork = finalization
                 copy.messageConnectionGate = gate
                 let pinned = copy
-                return .init(finalize: { await finalization.finish() }, execute: { prepared, capacity, identifiers, now in
+                return .init(executeGroup: { handles, capacity, identifiers, now in
+                    try await pinned.executeCrossRoom(handles, capacity: capacity, identifiers: identifiers, now: now)
+                }, finalize: { await finalization.finish() }, execute: { prepared, capacity, identifiers, now in
                     guard isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
                     return try await pinned.executePreparedRoomSend(prepared,
                         capacityProfile: capacity, identifiers: identifiers, now: now)
@@ -578,12 +580,58 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         guard let connection = pinnedOwnerConnection,
               (connection.borrowed as? any V2RoomSQLSessionDefaults)?.roomSQLSessionTimeouts == .default,
               !prepared.commands.isEmpty else { return nil }
+        guard let plan = try await preparePlainWrite(prepared, capacityProfile: capacityProfile,
+            identifiers: identifiers, now: now) else { return nil }
+        sendOperationMetrics?.recordOwnerCohortStarted(handleCount: 1, commandCount: prepared.commands.count)
+        do {
+            try await observeOwnerTransaction(sql: connection.sql, scalar: false, handles: 1)
+            let commits = try await V2SendSuccessMetadata.$current.withValue(plan.metadata) {
+                try await V2RoomWriteDirectBatchPath(strangerMessagePolicy: writes.strangerMessagePolicy)
+                    .completeSingleStatement(plan.appends, connection: connection, combinedWrite: plan.combined,
+                        metrics: sendOperationMetrics)
+            }
+            let outcomes = commits.map { $0.commit.outcome }
+            await afterCommit { [preparationMemory, roomAcceptance, sendOperationMetrics, committedMessageObserver] in
+                preparationMemory.remember(commands: prepared.commands, results: plan.values)
+                roomAcceptance.committed(commands: prepared.commands, results: plan.values, token: prepared.token)
+                sendOperationMetrics?.recordOwnerCohortCommitted(acceptedCommandCount: plan.values.count, replayedCommandCount: 0)
+                committedMessageObserver?.observeCommittedMessages(outcomes, activation: prepared.token)
+            }
+            return plan.values
+        } catch {
+            roomAcceptance.invalidate(prepared.token)
+            if case PostgresIndependentQueryError.notSubmitted = error { return nil }
+            // The runner exposes raw constraint failures only after an idle
+            // confirmation proved the failed statement has settled. A stale
+            // cursor is eligible only when all durable mutation counts were zero.
+            if durableOwnerConstraintFailure(error) || error is V2RoomWriteStoreError {
+                guard connection.isUsable() else { throw error }
+                sendOperationMetrics?.recordOwnerCohortIsolation()
+                return nil
+            }
+            throw error
+        }
+    }
+
+    private struct PlainWrite: Sendable {
+        let appends: [PreparedDirectRoomLogAppend]
+        let combined: V2DurableOwnerCombinedWrite
+        let receipts: [V2DurableSendBatchPermanentReceipt]
+        let values: [V2RoomMessagingResult]
+        let metadata: [V2SendSuccessMetadata.Entry]
+    }
+
+    private func preparePlainWrite(_ prepared: V2PreparedMessageSendBatch,
+        capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIDFactory,
+        now: @escaping @Sendable () -> Date
+    ) async throws -> PlainWrite? {
         let plan = try prepared.commandPlan ?? commandPlan(prepared)
         let resolvedAt = now(), milliseconds = try timestamp(resolvedAt)
         var items: [V2RoomWriteDurableOwnerBatchPath.Item] = []
         var policyInputs: [(execution: V2RoomPolicyExecution, command: V2SendMessageCommand)] = []
         var rows: [PlainDirectRoomLogBatchPreflightRow] = []
-        for ordinal in plan.ordered {
+        // Receipt lookup order is independent of the FIFO supplied by the room actor.
+        for ordinal in prepared.commands.indices {
             let command = prepared.commands[ordinal]
             guard command.firstSubmissionDeadlineMilliseconds > milliseconds,
                   command.firstSubmissionDeadlineMilliseconds - milliseconds <= 86_400_000,
@@ -613,46 +661,107 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                     controlScopeRoomKinds: store.controlScopeRoomKinds), leasedPolicy: policy, accepted: accepted))
         }
         try await V2RoomPolicyExecution.validateActive(policyInputs)
-        let path = V2RoomWriteDurableOwnerBatchPath(strangerMessagePolicy: writes.strangerMessagePolicy)
+        let path = V2RoomWriteDurableOwnerBatchPath(profileDatabase: writes.controlDatabase as? any SQLDatabase, strangerMessagePolicy: writes.strangerMessagePolicy)
         let appends = try path.reduce(items, rows: rows, usesPreloadedRows: true, metrics: sendOperationMetrics)
         guard V2RoomWriteDirectBatchPath.supportsSingleStatement(appends) else { return nil }
         let combined = V2DurableOwnerCombinedWrite(commands: Dictionary(uniqueKeysWithValues:
-            plan.ordered.map { ($0, prepared.commands[$0]) }), resolvedAtMilliseconds: milliseconds)
+            prepared.commands.indices.map { ($0, prepared.commands[$0]) }), resolvedAtMilliseconds: milliseconds)
         let receipts = try combined.receipts(for: appends)
         let byIndex = Dictionary(uniqueKeysWithValues: zip(appends, receipts).map { ($0.0.originalIndex, $0.1.receipt) })
         let values = try prepared.commands.indices.map { ordinal -> V2RoomMessagingResult in
             guard let receipt = byIndex[ordinal] else { throw V2MessageOperationValidationError.invalidReceipt }
             return .sendOperation(.receipt(receipt))
         }
-        let metadata = try plan.ordered.map { try V2SendSuccessMetadata.Entry(plan.successMetadata[$0], now: resolvedAt) }
-        sendOperationMetrics?.recordOwnerCohortStarted(handleCount: 1, commandCount: prepared.commands.count)
-        do {
-            try await observeOwnerTransaction(sql: connection.sql, scalar: false, handles: 1)
-            let commits = try await V2SendSuccessMetadata.$current.withValue(metadata) {
-                try await V2RoomWriteDirectBatchPath(strangerMessagePolicy: writes.strangerMessagePolicy)
-                    .completeSingleStatement(appends, connection: connection, combinedWrite: combined,
-                        metrics: sendOperationMetrics)
+        let metadata = try prepared.commands.indices.map { try V2SendSuccessMetadata.Entry(plan.successMetadata[$0], now: resolvedAt) }
+        return PlainWrite(appends: appends, combined: combined, receipts: receipts, values: values, metadata: metadata)
+    }
+
+    /// All promoted policy lifetimes surround the same physical transaction. A
+    /// nil result is safe to isolate by room; uncertain commits always throw.
+    private func executeCrossRoom(_ handles: [V2PreparedMessageSendBatch], capacity: V2CapacityProfile,
+        identifiers: V2AcceptanceIDFactory, now: @escaping @Sendable () -> Date
+    ) async throws -> [V2ScheduledSendOutcome]? {
+        guard let connection = pinnedOwnerConnection, !writes.contentReviewMode.enqueuesJobs,
+              (2...4).contains(handles.count), handles.reduce(0, { $0 + $1.commands.count }) <= 4,
+              handles.allSatisfy({ self.ownsPreparedBatch($0) && $0.canCombineRoomTurn })
+        else { return nil }
+        guard let scope = try? V2RoomActivationWriteScope(tokens: handles.map(\.token)),
+              let earliest = handles.map(\.deadline).min() else { return nil }
+        let deadline = min(earliest, V2RoomSQLDeadline.boundedTransactionDeadline())
+        @Sendable func promote(_ plans: [PlainWrite]) async throws -> [V2ScheduledSendOutcome]? {
+            if plans.count < handles.count {
+                return try await self.withPreparedPolicies(handles[plans.count]) { upgraded in
+                    guard let plan = try await self.preparePlainWrite(upgraded, capacityProfile: capacity,
+                        identifiers: identifiers, now: now) else { return nil }
+                    return try await promote(plans + [plan])
+                }
             }
-            let outcomes = commits.map { $0.commit.outcome }
-            await afterCommit { [preparationMemory, roomAcceptance, sendOperationMetrics, committedMessageObserver] in
-                preparationMemory.remember(commands: prepared.commands, results: values)
-                roomAcceptance.committed(commands: prepared.commands, results: values, token: prepared.token)
-                sendOperationMetrics?.recordOwnerCohortCommitted(acceptedCommandCount: values.count, replayedCommandCount: 0)
-                committedMessageObserver?.observeCommittedMessages(outcomes, activation: prepared.token)
-            }
-            return values
-        } catch {
-            roomAcceptance.invalidate(prepared.token)
-            if case PostgresIndependentQueryError.notSubmitted = error { return nil }
-            // The runner exposes raw constraint failures only after an idle
-            // confirmation proved the failed statement has settled. A stale
-            // cursor is eligible only when all durable mutation counts were zero.
-            if durableOwnerConstraintFailure(error) || error is V2RoomWriteStoreError {
-                guard connection.isUsable() else { throw error }
+            return try await self.commitCrossRoom(plans, handles: handles, scope: scope, connection: connection, deadline: deadline)
+        }
+        do { return try await promote([]) }
+        catch {
+            for handle in handles { roomAcceptance.invalidate(handle.token) }
+            guard connection.isUsable() else { throw error }
+            if case V2RoomActorStateError.outcomeUnknown = error { throw error }
+            if case V2RoomCallFailure.notAccepted(.deadlineExceeded) = error { return nil }
+            if error is V2RoomPolicyExecutionFailure || error is V2PolicyAuthorizationLifecycleError
+                || error is V2RoomActorStateError || error is V2RoomOwnerFenceError
+                || error is V2AtomicRoomWriteBatchError || error is V2RoomWriteStoreError || durableOwnerConstraintFailure(error) {
                 sendOperationMetrics?.recordOwnerCohortIsolation()
                 return nil
             }
             throw error
+        }
+    }
+
+    private func commitCrossRoom(_ plans: [PlainWrite], handles: [V2PreparedMessageSendBatch],
+        scope: V2RoomActivationWriteScope, connection: V2BorrowedRoomConnection, deadline: ContinuousClock.Instant
+    ) async throws -> [V2ScheduledSendOutcome] {
+        let roomIDs = handles.compactMap { $0.token.roomID.uuidValue }
+        guard roomIDs.count == handles.count else { throw V2RoomActorStateError.activationChanged }
+        let inputs = plans.flatMap(\.appends).enumerated().map { $1.input.withOrdinal($0) }
+        let receipts = plans.flatMap(\.receipts)
+        @Sendable func commit() async throws {
+            guard connection.isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+            guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            try await v2WithRoomActivationTransactionWithContext(database: self.database, deadline: deadline,
+                sendOperationMetrics: self.sendOperationMetrics, measureConnectionAcquire: false,
+                pinnedConnection: connection) { db, context in
+                guard let sql = db as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                try await context.requireSelectedOwnersAndActivations(roomIDs: roomIDs, expectedRoutes: nil,
+                    expectedKinds: Dictionary(uniqueKeysWithValues: roomIDs.map { ($0, "direct") }), scope: scope)
+                try await self.observeOwnerTransaction(sql: sql, scalar: false, handles: handles.count)
+                self.sendOperationMetrics?.recordOwnerCohortStarted(handleCount: plans.count, commandCount: inputs.count)
+                try await V2SendSuccessMetadata.$current.withValue(plans.flatMap(\.metadata)) {
+                    try await V2RoomWriteDirectBatchPath.persistMessages(inputs: inputs, sql: sql,
+                        operationReceipts: receipts, prevalidatedDirectMemberships: true, metrics: self.sendOperationMetrics)
+                }
+            }
+        }
+        if let gate = self.messageConnectionGate {
+            try await gate.withAccess(shared: false) {
+                do { try await commit() }
+                catch {
+                    let failure = error
+                    do {
+                        guard try await connection.physical.confirmReadyForQuery().get() == .idle else {
+                            throw V2RoomTransactionOutcomeUnknown()
+                        }
+                    } catch { try? await connection.physical.close().get() }
+                    throw failure
+                }
+            }
+        } else { try await commit() }
+        self.sendOperationMetrics?.recordOwnerCohortCommitted(acceptedCommandCount: inputs.count, replayedCommandCount: 0, roomCount: plans.count)
+        return zip(handles, plans).map { handle, plan in
+            let values = plan.values, commands = handle.commands, token = handle.token
+            let outcomes = plan.appends.map { $0.commit.outcome }
+            return V2ScheduledSendOutcome(result: .success(values), finalize: {
+                [preparationMemory, roomAcceptance, committedMessageObserver] in
+                preparationMemory.remember(commands: commands, results: values)
+                roomAcceptance.committed(commands: commands, results: values, token: token)
+                committedMessageObserver?.observeCommittedMessages(outcomes, activation: token)
+            })
         }
     }
 
@@ -803,7 +912,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 }
                 results.merge(replay) { _, newer in newer }
                 let items = fresh
-                let appended = try await V2RoomWriteDurableOwnerBatchPath(strangerMessagePolicy: writes.strangerMessagePolicy)
+                let appended = try await V2RoomWriteDurableOwnerBatchPath(profileDatabase: writes.controlDatabase as? any SQLDatabase, strangerMessagePolicy: writes.strangerMessagePolicy)
                     .append(items, sql: sql, sendOperationMetrics: sendOperationMetrics,
                         preloadedRows: preparedRead?.rooms,
                         combinedWrite: combinesCurrentDirect ? .init(commands: Dictionary(uniqueKeysWithValues: ordered.map { ($0, operations[$0]) }),
@@ -1131,6 +1240,11 @@ package struct V2OwnerMessageSendPreparationInput: Sendable {
 /// It cannot be constructed or retargeted by callers. It conveys no authority
 /// beyond the commands and exact runtime execution token.
 public struct V2PreparedMessageSendBatch: Sendable {
+    var canCombineRoomTurn: Bool {
+        !commands.isEmpty && acceptedDirect.count == commands.count && preparationSnapshot.isEmpty
+            && commands.allSatisfy { $0.command.media.isEmpty && $0.command.mentions.isEmpty
+                && $0.command.replyTo == nil && $0.command.forwardedFrom == nil }
+    }
     package var activationToken: V2RoomActivationToken { token }
     package var commandPayload: [V2MessageSendOperationCommand] { commands }
     package var originalDeadline: ContinuousClock.Instant { deadline }

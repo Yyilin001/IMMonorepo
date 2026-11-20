@@ -284,7 +284,7 @@ public final class V2ActorSessionAuthenticator: Sendable {
             guard pair.actorUserID.uuidValue != nil, pair.operationID.uuidValue != nil,
                   pair.source.roomID.uuidValue != nil, pair.source.messageID.uuidValue != nil,
                   pair.targetRoomID.uuidValue != nil else { throw V2ActorAuthenticationError.invalidRequest }
-        case .mutatePolicy:
+        case .mutatePolicy, .policyPressure:
             guard call.principal == .service, peer.permissions.contains(.policyMutation) else {
                 throw V2ActorAuthenticationError.forbidden
             }

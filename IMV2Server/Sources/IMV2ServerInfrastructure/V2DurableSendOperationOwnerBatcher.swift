@@ -24,6 +24,8 @@ public final class V2DurableSendOperationOwnerBatcher: V2SendOperationOwnerMetri
             resourceDemandLimit: capacity,
             scheduledConnection: { deadline, body in
                 try await store.withMessageWriteConnection(deadline: deadline, pipelineDepth: configuration.pipelineDepth, body)
+            }, scheduledGroup: { turn, handles in
+                try await turn.executeGroup?(handles, capacityProfile, identifiers, now)
             }, scheduledExecute: { executor, prepared in
                 try await executor.execute(prepared, capacityProfile, identifiers, now)
             })
@@ -34,10 +36,11 @@ public final class V2DurableSendOperationOwnerBatcher: V2SendOperationOwnerMetri
         configuration: V2SendOperationSchedulingConfiguration,
         maximumRetainedBytes: Int, resourceDemandLimit: Int,
         scheduledConnection: @escaping V2ScheduledSendConnection,
+        scheduledGroup: V2ScheduledGroupExecution? = nil,
         scheduledExecute: @escaping V2ScheduledSendExecution) {
         dispatcher = V2PhysicalSendDispatcher(store: store, configuration: configuration,
             maximumRetainedBytes: maximumRetainedBytes, capacity: resourceDemandLimit,
-            borrow: scheduledConnection, execute: scheduledExecute)
+            borrow: scheduledConnection, executeGroup: scheduledGroup, execute: scheduledExecute)
     }
 
     public func execute(_ prepared: V2PreparedMessageSendBatch) async throws -> [V2RoomMessagingResult] {

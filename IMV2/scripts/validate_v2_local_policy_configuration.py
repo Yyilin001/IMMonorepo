@@ -54,7 +54,7 @@ def validate_placement(root: Path, documents: dict) -> None:
     if ({item.get("serviceID") for item in voters} != set(names)
             or len({item.get("hostID") for item in voters}) != 3
             or any(not item.get("hostID") or item.get("address") != item.get("serviceID")
-                   or item.get("port") != 7336 or item.get("shardIDs") != ["rooms-primary"] for item in voters)):
+                   or item.get("port") != 7336 or set(item.get("shardIDs", [])) != {"rooms-primary", "rooms-01"} for item in voters)):
         raise ValueError("placement voter identities, endpoints or shards are inconsistent")
     identities = {item["serviceID"]: item["hostID"] for item in voters}
     for name in names:
@@ -70,7 +70,8 @@ def validate_placement(root: Path, documents: dict) -> None:
             raise ValueError(f"{name} uses a different placement quorum")
         if name in names:
             if (control.get("localVoterID") != identities[name] or control.get("port") != 7336
-                    or control.get("storagePaths") != {"rooms-primary": "/run/im-v2-room-actor/placement/0.pb"}):
+                    or control.get("storagePaths") != {"rooms-primary": "/run/im-v2-room-actor/placement/0.pb",
+                                                       "rooms-01": "/run/im-v2-room-actor/placement/1.pb"}):
                 raise ValueError(f"{name} has inconsistent durable voter configuration")
         elif control.get("localVoterID") is not None or control.get("storagePaths") != {}:
             raise ValueError("room applications must not own voting files")

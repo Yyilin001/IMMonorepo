@@ -1,6 +1,6 @@
 # 原生房间 Actor 的 Host 监督
 
-日常水平扩容以[用户增长验证流程](../09-capacity/horizontal-user-growth.md)为入口，已完成固定规模 1/2/4/8 节点及在线 1→2→4→8 节点的用户增长验证。最新结果与适用范围以该入口为准；本页的故障接管与历史诊断供专项使用。
+部署目标为固定业务节点名单，增删节点采用停机维护窗口。以往的[在线扩容测量](../09-capacity/horizontal-user-growth.md)记录既有实现。持久 Placement 记录在重启时继续生效；仅从配置删除 Host 会留下指向旧 Host 的分区。停机增删流程需先完成归属调整并核对策略分区，再开放业务入口。
 
 房间执行资格来自三个独立 Placement 投票节点的已提交归属。消息路径不使用数据库房间租约、逐房间续租或 SQL 执行围栏。Host 网络不可达不会自动产生后继 Owner；崩溃接管必须先准确排除旧进程，再结束其数据库会话。
 
@@ -54,95 +54,17 @@ Docker 部署使用独立的 `IMV2RoomHostSupervisorApp` 管理本节点容器�
 
 所有节点的 Actor 配置必须使用同一个 `placementControl.clusterID` UUID。每个分片的持久控制组身份由这个部署 ID 和分片名派生，新增或移除房间宿主不会改变控制组 ID。首次生成配置时保存 `topology.json` 的 `placementClusterID`；后续生成同一部署的配置时，通过 `--placement-cluster-id` 明确复用它。测试专用 `--identity-seed` 在未指定部署 ID 时会派生可重复的值。
 
-部署 ID 不代替节点身份、凭据或成员准入。扩容仍需保留现有可信身份，并通过成员管理和已提交分区迁移接纳新宿主；仅重新生成一套配置不能完成在线扩容。启动读取现有多数派历史，不使用新宿主名单覆盖已提交的分区归属。此配置版本不提供旧版按宿主名单派生控制组 ID 的历史兼容。
+所有进程使用同一部署 ID 和相同固定名单。启动读取原有多数派历史，房间分区的调整需要提交到控制日志。
 
-### 新逻辑宿主准入与当前在线扩容限制
+### 停机调整固定业务节点
 
-已受信任但尚未出现在已提交宿主表中的 Host 启动时，先提交 `admitHost`，建立不持有分区的退役占位，再提交实际 incarnation 的 `registerHost`。准入端校验调用服务准确拥有该 Host，并具有目标分片的配置访问权；准入不授予分区，也不替换活动实例。宿主表最多容纳 64 个逻辑 Host。响应丢失时保留原请求身份，过期后仅在多数派读取仍确认 Host 不存在时更新准入请求。归档滚动期间，尚未被实际注册替代的准入收据继续保留。
+关闭用户入口和生产流量，保持控制和数据库可用。变更名单须重启相关进程。配置生成器以 `--extend-from` 读取上次私有部署，在新目录输出完整配置；传入目标 Host 全集，沿用调用方、三个投票节点、部署身份、各分片数据库和原有控制日志。
 
-该路径解决 Placement 已提交宿主表不能增加新 Host 的问题，目前尚不能单独完成运行中新增服务器。当前剩余边界：
+增加 Host 时，先部署新名单并在维护窗口启动，待新增 Host 注册。要分配负载，可用固定名单中预设的 placement-controller 通过 `--transfer-room-partition` 提交分区转移。移除 Host 时，先在当前名单内把其房间分区转给保留的 Host；如需同时替换节点，先使用包含新旧 Host 的过渡配置。以 `--inspect` 核对每个分片没有指向待移除 Host 的 owner 或待接管引用，再排空停机、安装最终配置。保留投票文件和数据库。如果移除了策略分区负责人，在业务进程全部停止后，用 `IMV2PlacementControlApp --prepare-offline-policy-change old/topology.json new/topology.json` 生成 SQL，在原控制库通过 `psql -v ON_ERROR_STOP=1` 执行。该语句核对旧版摘要，只更新部署映射，重复执行会核对目标版本。确认房间读取、写入和实时路由后再开放入口。
 
-- 签名授权文件已支持跨机器原子发布，但文件落盘回执尚不代表运行时已接纳身份。
-- 实时成员状态已支持持久提交和运行中更新；房间发现、迁移目标校验及 Account/Operator 调用方已接入同一授权状态，仍需完整部署验证。
-- 持续消息流下的新节点加入、分区迁移和旧节点退出尚未完成整体验证。
+托管部署先完成所有未结恢复与回收，再停止 Supervisor，更新部署文档中的启动代次及固定节点配置。保留原恢复日志，执行 `IMV2RoomHostSupervisorApp --reconfigure-hosts` 写入新的监督范围并准备启动记录。未完成的恢复意图会阻止变更。
 
-不能以预声明未来节点、降低多数派门槛或只重写配置文件作为在线扩容验收。联合阶段继续要求新旧集合各自达到多数派，并保留网络分区时的授权边界。
-
-服务资格计算已具备成员版本及 `stable → joint → stable` 过渡：联合阶段分别计算新旧集合的多数派，本地票只计入包含本地节点的集合，资格期限取两个多数派期限的较小值。安装新版本立即撤销旧资格代次，旧版本探测不能授予或撤销新版本的资格；被移出的节点不能重新获得资格。分区控制器读取当前成员集合，并拒绝旧资格发出的迟到续租结果。
-
-最终名单可以移除正在应用变更的本地节点。传输保留启动时绑定的本地地址，用于校验后续版本和准确重试；本地退出后不再参与发现轮询，不再把自己报告为可达成员，拒绝发布非空分区租约，但允许清空发布以完成收尾。启用成员控制分片的 Gateway 可以用已受信任的本地身份待命启动；本地不在已提交名单时没有服务资格，不能发布分区租约。待命端点取自本地启动配置，不把它补入已提交路由或投票名单。加入仍必须经过授权的成员变更。
-
-Placement 控制快照新增独立的 `serviceMembership` 记录，包含成员版本、当前/下一集合、明确的节点服务身份和端点，以及 `roomPeers` 房间路由。每条房间路由绑定成员中的服务端点、唯一宿主、分片范围和容量上限；控制端校验该宿主的可信归属及授权范围。联合阶段保留原路由，最终阶段移除退出成员的路由；保留宿主不能夹带改变端点、分片范围或容量。`installServiceMembership` 通过原有三投票节点日志和 CAS 提交；成员版本与房间归属 revision 分开，房间生命周期命令保留成员记录，成员命令不修改分区归属。首次安装必须是稳定版本 1，后续严格遵守连续的 `stable → joint → stable`，保留节点的身份和端点不能夹带改写。联合阶段为最终提交预留归档容量，当前成员命令收据随快照归档保留。
-
-远程提交同时要求已有 `placementWrite` 分片访问权和专用 `placementMembership` 权限；普通房间宿主不能修改名单。拟加入名单中的实时服务必须已通过信任配置或签名授权接纳。
-
-配置 `serviceMembershipShard` 指定唯一成员控制分片；生成器参数为 `--service-membership-shard`，扩展已有部署时保持原选择。Gateway 在房间宿主启动前重新读取该分片的已提交成员记录，用它创建共享服务资格并向实时传输传入已提交 peer 名单。记录缺失、读取失败或名单中存在未受信任身份时拒绝启动，不退回静态名单。本地尚未入选时允许待命启动，但保持不具备服务资格，直到当前已提交名单包含本地且获得对应多数派见证。新节点若处于联合版本，则从该版本启动，必须获得相应的新旧多数派见证。应先由控制端提交初始名单，再启动启用此配置的 Gateway；成员管理命令入口见下文；完整扩容仍需验收。
-
-这一计算接口只接受控制平面已授权的成员状态，不能由可达节点集合自行生成成员变更。签名发现请求和响应已绑定成员版本；摘要同时覆盖当前集合、下一集合及节点与服务身份映射，避免同一节点集合的不同过渡阶段混用证据。发现传输使用创建时捕获的版本更新资格，不会把旧证据重新标记为最新版本。未配置成员控制分片的静态部署仍使用初始版本 1。传输层已支持接收授权后的成员变更：撤销旧资格与缓存、等待旧发现任务结束、切换发布端和 peer 名单，再通过新版本签名发现恢复资格。旧版本租约发布被拒绝，移除路由不直接将物理节点判为故障。该入口要求节点身份已通过配置或签名授权接纳。启用成员控制分片时，应用在实时组件和资格观察器装配完成后再次读取名单，然后每秒持续读取并安装已提交状态；暂停期间错过的中间版本可通过经多数派确认的最新快照追上，不能通过发现结果跳过版本。读取或安装失败会暂停资格、清空发现缓存和租约发布，普通发现回复不能解除暂停；恢复可信读取后才重新等待当前版本见证。停机先停止监听并等待实际读取/安装结束，再排空实时组件。房间发现由独立的同生命周期监听器读取相同控制记录；完整多服务器验证仍未完成。
-
-房间发现层提供包内 `installAuthorizedPeers(_:revision:)` 入口，要求调用者提供控制平面授权的宿主、端点、分片范围和容量上限。入口校验唯一可信宿主身份、拒绝回退版本和保留节点的配置改写，支持相同版本准确重试。更新期间暂停新轮询，等待旧轮询及其路由发布结束；移除节点关闭新请求入口，已有授权操作继续结算，不对仍存活的物理节点执行 down。Gateway 和 Account/Operator 启动时从已提交记录构建房间发现配置，无静态回退；宿主自身的端点、分片及容量必须匹配记录。运行中每秒读取并更新路由，读取或安装失败时暂停发现和新请求，普通发现回复不能解除暂停；重新确认相同版本后允许恢复。分区迁移在执行目标授权时读取当前已确认名单，避免捕获旧静态配置。停机等待房间与实时两个监听器的实际工作结束。
-
-应用提供 `roomMembershipStatus()` 作为运行时应用确认：返回已应用版本、当前是否获得控制确认、配置宿主集合及健康宿主集合。控制提交回执不能替代这一运行时确认；`confirmed` 为 false 时，应用 readiness 同样为 false。健康路由仍需等待签名发现，不应把 `configuredHosts` 当作已可服务节点。
-
-集成验证已覆盖真实磁盘与 mTLS 的三控制节点，以及完整 Account 房间应用：拒绝缺失成员记录的启动、运行中应用联合/最终名单、丢失多数派后撤销 readiness、控制节点以新 incarnation 恢复、Account 重启读取最终名单。验证未运行消息负载，也未证明多 VM 在线扩容性能。停机回归另覆盖 RPC 在 EventLoop 关闭后才返回的情况；回复入队和传输关闭使用同一互斥检查，关闭后不再写通道。
-
-Gateway 的现有指标接口提供 `im_v2_room_membership_` 前缀的 `revision`、`confirmed`、`configured_hosts`、`healthy_hosts`、`realtime_revision`、`realtime_qualified`。实时版本与资格在同一锁内采样；未配置动态成员或没有实时资格来源时，不伪造零值。指标无节点 ID 标签。
-
-`python3 IMV2/scripts/wait_v2_gateway_membership.py --server-deployment deployment.json --gateway 0 --gateway 1 --metrics-port 20200 --revision 2 --hosts 2` 会通过既有测试 VM 管理通道读取指标，要求连续三轮匹配版本、宿主数量和资格。使用 `--retired-gateway N` 校验退出成员已应用最终版本并失去实时资格。超时返回非零状态和最后观测；缺失、重复、旧版本或格式错误不会通过。它是运行时确认步骤，不能独立证明消息完整性、完成迁移或授权直接提交最终名单。Account 的进程内状态接口已存在，但此脚本仅采集 Gateway。
-
-### 成员控制命令
-
-生成部署时通过 `--caller membership-controller=DNS:PORT --membership-controller membership-controller --service-membership-shard rooms-primary` 建立专用调用方。该身份仅有 `placementRead`、`placementWrite` 和 `placementMembership`，不运行房间宿主、策略服务或实时投票。扩展部署必须保留原控制身份。
-
-使用其配置设置 `IMV2_ROOM_ACTOR_CONFIGURATION_FILE` 和 `IMV2_PLACEMENT_SHARD_IDS`，运行 `IMV2PlacementControlApp --inspect` 获取目标分片的控制 revision。保存 JSON 请求，字段为 `deploymentID`（配置中的 `placementControl.clusterID`）、`shardID`、固定 `requestID` UUID、首次读取的 `originRevision`，以及 `membership`。后者包含 `revision`、`current`、可选 `next`、`peers` 和必填 `roomPeers`；实时 peer 字段为 `nodeID`、`serviceID`、`address`、`port`。房间 peer 字段为 `hostID`、`serviceID`、`address`、`port`、`accessibleShardIDs` 和 `maximumRooms`。房间范围、容量取自已批准部署配置，不能由发现通告补全；空房间名单不能启动启用动态成员的业务应用。
-
-运行 `IMV2PlacementControlApp --install-membership request.json` 提交并输出已提交控制 revision 与成员记录。初始化提交稳定版本 1；扩容依次提交保留原 current 的联合版本、以原 next 为 current 的最终版本。每一阶段使用独立保存的请求；该阶段响应丢失时重试同一文件，保留 requestID 与 originRevision。冲突不会改写名单，过期请求也不会自动换 ID 重新提交。该命令只提交控制记录；操作流程仍需确认节点接纳、资格恢复和分区迁移，不能连续盲发名单后就宣称扩容成功。
-
-成员请求可用 `v2_benchmark_membership_commands.py --configuration configuration.json --origin-revision REV --target gateway-0 --output request.json` 生成；后续阶段传入上一阶段的 `--previous-receipt`，联合阶段重复 `--target` 指定完整目标集合，最终阶段省略 `--target`。输出文件只允许首次创建，未知结果时重用原文件。部署配置的 `shardIDs` 会转换为请求中的 `accessibleShardIDs`；房间 peer 的 `hostID`、`serviceID` 使用 `{ "rawValue": "..." }` 对象，不能直接复制配置中的字符串。实时 peer 的两个 ID 仍是字符串。
-
-正常关闭会等待已接纳的 RPC 实际结算，再用调用方签名的准确会话凭据请求释放配额。接收方核对服务、宿主、进程代次及握手 ID；重复关闭已删除会话不会删除新会话。远端不可达时关闭调用有界结束，服务端会话仍按原 TTL 失效；会话数量上限不变。连续短命令的配额回收已通过真实远程生命周期验证；此结果只覆盖会话配额与关闭，不替代业务扩容验收。
-
-### 计划分区迁移命令
-
-生成部署时添加 `--caller partition-operator=DNS:PORT --placement-controller partition-operator --service-membership-shard rooms-primary`。该专用身份只有 `placementRead`、`placementWrite` 和 `roomCoordination`；不运行房间、策略或实时服务，也不能提交成员变更。迁移权限来自该身份的控制写入分片范围，不再误用仅宿主具备的本地 `allowedShards`。
-
-使用操作者配置运行 `IMV2PlacementControlApp --inspect`，保存不可变 JSON 请求，字段为：`deploymentID`（配置的部署 ID）、`shardID`、`partition`、`expectedHost`、`expectedEpoch`、`successor`、`transferID` UUID 和首次读取的 `originRevision`。两个宿主对象都包含对象形式的 `hostID: { "rawValue": "宿主 UUID" }` 和字符串形式的精确 `incarnationID`；旧宿主与 epoch 取自该分区的已提交所有者，目标宿主必须已注册、已授权且能被签名发现。
-
-执行 `IMV2PlacementControlApp --transfer-room-partition request.json`。命令通过原有协调器先提交撤回状态，向旧宿主取得真实排空证明，再校验目标资格并提交新所有者。超时不会充当排空证明，也不会自动选替代目标。暂时不可用或 CAS 冲突只重试原请求；响应丢失时重新执行同一文件，不修改 transfer ID、原始 revision、旧所有者或 epoch。成功输出 `status: completed` 及完整原请求；失败或未确认时返回非零状态。默认操作截止时间为 60 秒，之后还会等待资源关闭。
-
-集成测试使用三个真实磁盘/mTLS 控制节点、两个房间宿主和独立操作者，验证活动房间在旧宿主关闭、所有者及 epoch 变化、准确重试不重复排空、新宿主可以激活同一房间，以及越权/错误绑定请求被拒绝。房间执行器是合成测试实现；该结果不能代替业务消息流和多 VM 扩容验收。
-
-### 新身份的签名授权
-
-Actor 配置可通过 `trustAdmissionAuthorityServiceID` 指定已列在 `services` 中的独立授权服务。它必须没有普通服务权限、Host 或 gateway 归属；授权绑定 `placementControl.clusterID`。不配置此字段时，运行中新增信任的入口关闭。
-
-创建部署时可传入 `prepare_v2_room_actor_configuration.py --trust-admission-authority admission-authority`。生成器在部署根目录的 `.trust-admission/signing.pem` 保存专用 Ed25519 私钥，并在各节点配置中固定其公钥及空权限。该目录属于部署工具，不能挂载到业务节点。`--extend-from` 自动继承授权身份并复用已有授权私钥，拒绝替换授权身份或与业务节点共用身份；原部署没有授权身份时不能靠扩展配置给运行中的节点补设信任根。此参数只准备签名身份，不发布授权文件。
-
-信任表由已创建的认证组件共享。`admitAuthorizedServices` 验证指定服务的签名、部署 ID 和整批身份约束后原子加入新身份；完全相同的授权可重放，已有公钥、权限、Host、gateway 归属和逻辑分片范围不能改写。普通业务服务不能签发授权，冲突批次不会留下部分新增身份。授权服务本身不能打开普通 Actor 会话。
-
-配置 `trustAdmissionDirectory` 后，控制运行时在打开传输前重放目录中的 `.pb` 签名授权，并每秒读取新增文件；房间服务调用方、监督调用方和独立投票节点共用这一生命周期。目录必须为绝对路径，并同时配置授权服务。部署工具应保留已发布文件，以临时文件加原子重命名发布完整报文；文件内容是 `V2ActorProtobuf` 编码的 `V2ActorSignedPacket`，不包含私钥。读取在独立线程池执行，退出等待实际读取完成。启动时无效授权阻止启动，运行中无效扫描记录错误并保留已有信任。删除授权文件不是撤销，不能移除进程已经接纳的身份。
-
-生成器启用专用授权身份时，会为每个进程创建权限为 `0700` 的 `trust-admissions` 目录并设置 `trustAdmissionDirectory`，路径遵循 `--mount-root`。扩展部署保留已有接收目录路径，并将节点目录内已发布的 `.pb` 文件复制到新暂存目录；已有自定义外部接收目录仍需保留原挂载。只给已运行进程改写配置不会动态打开扫描器，必须在它启动时完成此配置。
-
-签名服务记录中的 `sourceIDs` 指定可访问的逻辑数据源（房间分片名、`user:` 前缀的用户桶及显式 `control` 别名）。Placement 读写与宿主准入、房间调用、实时发布与订阅回调已接入新增身份的签名范围，并保留各操作的角色校验和接收端范围校验。已有静态访问条目优先，签名授权不能扩大它们；没有静态条目的启动身份也不会自动获得动态访问权。
-
-身份及分片授权不授予成员资格或分区所有权。跨机器文件发布、成员发布及应用组合仍需接入，不能据此宣称新服务器已经可以在线扩容。
-
-部署端使用 `IMV2TrustAdmissionTool PREVIOUS_CONFIGURATION EXPANDED_CONFIGURATION AUTHORITY_PEM OUTPUT_PB` 生成授权文件。配置参数分别指向旧部署与扩展部署的某个节点 `configuration.json`，私钥参数指向旧部署的 `.trust-admission/signing.pem`。工具要求部署 ID、授权身份及全部旧服务记录保持一致，只签发新增服务，并通过生产信任验证器自检；没有新增服务或目标文件已经存在时失败。
-
-输出是离线暂存文件。发布时只传输 `.pb` 报文，在每个接收节点的授权目录中先写临时文件，再原子重命名；不要让扫描器读取正在写入的目标文件。必须持久保留已发布报文以供重启重放。签名工具不分发私钥，也不修改成员版本或分区归属；跨机器发布和确认接纳仍需由部署流程完成。
-
-测试部署可使用 `python3 IMV2/scripts/publish_v2_trust_admission.py --packet <授权文件> --target imv2-growth-node0:/absolute/admissions --target imv2-growth-control-a:/absolute/admissions`，本机使用 `--local-directory /absolute/admissions`。目标目录须已存在并与接收进程的 `trustAdmissionDirectory` 一致。发布器只读取报文，通过管理通道传输到各 VM 自己的文件系统；先同步临时文件，再以原子硬链接创建内容摘要命名的 `.pb`，不会替换已有文件，最后同步目录。相同报文重试会验证已有文件的完整内容；冲突、符号链接或不完整文件会拒绝。
-
-回执中的 `published` / `already_published` 只证明文件持久发布，`runtimeAcceptance` 始终明确为 `unconfirmed`。连接中断时结果同样为未确认，可以用相同报文重试，不能删除旧文件或重新生成身份。进程接纳确认和成员版本切换仍是独立步骤。
-
-### 扩展已有部署配置
-
-`prepare_v2_room_actor_configuration.py --extend-from <已有私有部署目录> --output-dir <新目录>` 支持为新增节点准备配置。仍需传入完整的旧节点和新增节点参数，以及原分片、用户桶和策略分区数。工具复用原部署 ID、CA、已有节点身份与密钥、控制端口及投票节点持久数据路径；新增节点使用新密钥及原 CA 签发的证书。已有策略分区归属保持不变，新节点不会因配置生成而取得分区。
-
-源目录保持不变，输出目录必须不存在。输出中的旧投票节点配置继续引用原持久路径，部署时必须保留对应存储挂载；不能把空目录作为旧集群的数据目录。CA 私钥仅用于部署端签发，不应挂载到业务进程。独立身份授权服务及其无业务权限的信任记录会被保留。
-
-这一步只准备配置，不向运行中的进程发布身份或成员变更，也不启动服务器。输出中的扩展 peer 名单不能直接替换在线节点的配置作为扩容流程；必须由已提交的成员变更驱动发现版本和资格切换。
+故障接管使用名单内已注册且可访问原房间数据库的 Host。只有 Host 失效而数据分片仍可用时，新 Host 才能恢复已提交的房间状态。数据分片不可用时须先恢复数据库服务。
 
 ## 初始化与运行
 
@@ -185,4 +107,4 @@ Host 先发布包含本次实际 incarnation 的启动握手，监督端持久�
 
 隔离 Linux 虚拟机内已演练 Host 强杀、数据库暂停、Supervisor 重启和旧代次回收。复跑条件与机器结果见[原生 Host 故障记录](../../../docs/verification/native-host-crash-20261101.json)。生产多机分区、物理主机失效、部分启动后排空失败，以及客户端 TLS 丢失发送 ACK 的端到端恢复仍待验证。[Actor 开放问题](../../../docs/reviews/virtual-actor/README.md#尚未闭环)
 
-正常在线扩容的阶段、均衡检查和测量结果见[用户增长与在线扩容](../09-capacity/horizontal-user-growth.md)。另一次双节点暂停约 12 秒的故障负载中，399 个前台视图缺失，存活的 9,601 个视图追平；乱序缓冲溢出与重试耗尽的关系仍待核验。原始对照在 `~/Desktop/IMV2-Archive/IMV2-Retirement-Fix-20261019`，逐轮记录可从[清理前的手册](https://github.com/Yyilin001/IMMonorepo/blob/9e31ff0c82a7b239b43f5a6efe2eb2cafb607b93/IMV2/docs/10-operations/room-host-supervision.md)追溯。
+历史在线扩容的阶段、均衡检查和测量结果见[用户增长与在线扩容](../09-capacity/horizontal-user-growth.md)。另一次双节点暂停约 12 秒的故障负载中，399 个前台视图缺失，存活的 9,601 个视图追平；乱序缓冲溢出与重试耗尽的关系仍待核验。原始对照在 `~/Desktop/IMV2-Archive/IMV2-Retirement-Fix-20261019`，逐轮记录可从[清理前的手册](https://github.com/Yyilin001/IMMonorepo/blob/9e31ff0c82a7b239b43f5a6efe2eb2cafb607b93/IMV2/docs/10-operations/room-host-supervision.md)追溯。

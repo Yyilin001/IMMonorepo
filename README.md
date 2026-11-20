@@ -2,6 +2,8 @@
 
 IM V2 是使用 Swift 构建的即时通信项目，包含 iOS 客户端、客户端 SDK、TLS 消息网关、账户服务和 PostgreSQL 持久化实现。当前运行链路使用下列 V2 模块，不依赖历史协议、数据存储、凭据或本地缓存。
 
+项目工具链固定为 Swift 6.4.2。Apple 平台使用 Xcode 27.2，Linux 服务端和 Android 使用同版本的开源编译器及各自的 SDK。
+
 ## 项目组成
 
 | 路径 | 职责 |
@@ -12,6 +14,7 @@ IM V2 是使用 Swift 构建的即时通信项目，包含 iOS 客户端、客�
 | `ConversationListKit/` | 独立的 Swift 包，提供会话排序索引和 iOS 固定位置列表渲染器。 |
 | `IMV2Core/` | 领域类型、帧与命令规则，以及准入、扇出和同步约束。 |
 | `IMV2ClientKit/` | 设备 Keychain 会话、SQLite 同步投影、持久化客户端发件箱，以及 TLS/HTTPS 传输。 |
+| `IMAdminWeb/` | Web 管理后台：管理员登录、用户查询、账户禁用与操作审计；配置见其 README。 |
 | `IMV2Server/` | TLS 网关、PostgreSQL 存储、账户与设备服务，以及仅监听回环地址的运维服务。 |
 | `IMV2/` | PostgreSQL 权威结构、隔离测试与本地服务的 Compose 配置、脚本、告警规则，以及设计和运维文档。 |
 

@@ -3,14 +3,21 @@ import IMV2ServerContracts
 import Foundation
 import Vapor
 import HTTPTypes
+import Logging
 
 public struct V2VaporResourceByteRoutes: Sendable {
     let delivery: any V2ResourceByteServing
-    public init(delivery: any V2ResourceByteServing) { self.delivery = delivery }
+    private let logger: Logger
+    public init(delivery: any V2ResourceByteServing, logger: Logger = Logger(label: "im.v2.resource-bytes")) {
+        self.delivery = delivery
+        self.logger = logger
+    }
     public func register(on routes: RoutesBuilder) {
         routes.get("v2", "resource-bytes", ":placementID") { request async throws -> Response in
             guard let raw = request.parameters.get("placementID"), let id = UUID(uuidString: raw),
-                  let cap = request.query[String.self, at: "cap"] else { throw Abort(.notFound) }
+                  let cap = request.query[String.self, at: "cap"] else {
+                throw Abort(.notFound, headers: [.cacheControl: "private, no-store"])
+            }
             do {
                 // Authorization and the immutable storage facts are checked before any
                 // range response, including 416. Never derive an ETag from modification time.
@@ -60,6 +67,10 @@ public struct V2VaporResourceByteRoutes: Sendable {
                         } catch {
                             // Awaited reads have ended before releasing their physical slot.
                             await stream.close()
+                            if !(error is CancellationError), !Task.isCancelled {
+                                logger.warning("Resource byte stream failed",
+                                    metadata: V2SafeLogMetadata.failure(error, stage: "resource_stream_bytes"))
+                            }
                             throw error
                         }
                     }, count: Int(end-start)))
@@ -67,9 +78,27 @@ public struct V2VaporResourceByteRoutes: Sendable {
                     await stream.close()
                     throw error
                 }
-            } catch V2ResourceProviderError.throttled { throw Abort(.tooManyRequests)
-            } catch is CancellationError { throw CancellationError()
-            } catch { throw Abort(.notFound) }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch V2ResourceProviderError.notFound {
+                throw Abort(.notFound, headers: [.cacheControl: "private, no-store"])
+            } catch V2ResourceProviderError.throttled(let retryAfter) {
+                let seconds = Int(min(60, max(1, retryAfter.isFinite ? retryAfter : 1)).rounded(.up))
+                throw Abort(.tooManyRequests, headers: [.cacheControl: "private, no-store", .retryAfter: String(seconds)])
+            } catch {
+                logger.warning("Resource byte stream could not be opened",
+                    metadata: V2SafeLogMetadata.failure(error, stage: "resource_open_stream"))
+                let status: HTTPResponse.Status
+                switch error {
+                case V2ResourceProviderError.temporarilyUnavailable, V2ResourceProviderError.operationOutcomeUnknown:
+                    status = .serviceUnavailable
+                case V2ResourceProviderError.integrityMismatch:
+                    status = .badGateway
+                default:
+                    status = .internalServerError
+                }
+                throw Abort(status, headers: [.cacheControl: "private, no-store"])
+            }
         }
     }
 }

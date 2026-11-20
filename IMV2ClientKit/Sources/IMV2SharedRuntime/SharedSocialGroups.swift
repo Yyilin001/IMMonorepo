@@ -32,12 +32,14 @@ actor SharedSocialGroups {
     private let account: UserID
     private let store: GRDBV2LocalSyncStore
     private let transport: V2ProtobufSyncTransport
-    private let directory: V2HTTPPublicIdentityDirectory
-    private let social: V2SocialOperationService
-    private let direct: V2DirectRoomOperationService
-    private let creation: V2GroupCreationOperationService
-    private let membership: V2MembershipOperationService
-    private let capability: V2GroupCapabilityOperationService
+    let contacts: V2ContactService
+    let groups: V2GroupService
+    private let directory: V2ContactService
+    private let social: V2RelationshipService
+    private let direct: V2DirectConversationService
+    private let creation: V2GroupCreationService
+    private let membership: V2GroupMembershipService
+    private let capability: V2GroupCapabilityService
     private var tasks: [Task<Void, Never>] = []
     private var groupTasks: [Task<Void, Never>] = []
     private var socialRows: [SharedWork] = [], directRows: [SharedWork] = [], memberRows: [SharedWork] = [], capabilityRows: [SharedWork] = []
@@ -48,33 +50,43 @@ actor SharedSocialGroups {
     private var groupCursor: V2ClientGroupDirectoryCursor?, nextGroup: V2ClientGroupDirectoryCursor?
     private var failure: SharedFailure?
 
-    init(storageScope: V2AccountStorageScope, installation: String, account: UserID, device: DeviceID, store: GRDBV2LocalSyncStore, transport: V2ProtobufSyncTransport, base: URL, http: V2SessionHTTPAuthorization, platform: SharedPlatform) async throws {
+    init(session: V2SharedSession, storageScope: V2AccountStorageScope, installation: String, account: UserID, device: DeviceID, store: GRDBV2LocalSyncStore, transport: V2ProtobufSyncTransport, base: URL, http: V2SessionHTTPAuthorization, platform: SharedPlatform) async throws {
         self.account = account; self.store = store; self.transport = transport
-        people = try SharedPeople(account: account, device: device, store: store, base: base, http: http, imageHTTP: platform.imageHTTP)
-        community = try SharedCommunity(account: account, store: store, base: base, http: http, installation: installation, persistence: platform.securePersistence)
         let activation = UUID()
-        directory = try .init(endpoint: base.appendingPathComponent("v2/public-identities/resolve"), actorUserID: account, credentials: http, transport: http)
-        social = .init(accountID: account, store: store, client: try V2HTTPSocialOperationClient(baseURL: base, credentials: http, transport: http))
-        direct = .init(accountID: account, store: store, client: try V2HTTPDirectRoomOperationClient(baseURL: base, credentials: http, transport: http))
-        creation = .init(accountID: account, store: store, client: try V2HTTPGroupCreationOperationClient(baseURL: base, credentials: http, transport: http))
-        membership = .init(accountID: account, activationID: activation, store: store, client: try V2HTTPMembershipOperationClient(baseURL: base, credentials: http, transport: http))
-        capability = .init(accountID: account, activationID: activation, store: store, client: try V2HTTPGroupCapabilityOperationClient(baseURL: base, credentials: http, transport: http))
+        contacts = try await session.contacts(for: store, accountID: account,
+            social: .init(accountID: account, store: store, client: try V2HTTPSocialOperationClient(baseURL: base, credentials: http, transport: http)),
+            direct: .init(accountID: account, store: store, client: try V2HTTPDirectRoomOperationClient(baseURL: base, credentials: http, transport: http)),
+            directory: try V2HTTPPublicIdentityDirectory(endpoint: base.appendingPathComponent("v2/public-identities/resolve"), actorUserID: account, credentials: http, transport: http))
+        groups = try await session.groups(for: store, accountID: account, transport: transport,
+            invitationReader: try V2HTTPGroupInvitationClient(baseURL: base, credentials: http, transport: http),
+            creation: .init(accountID: account, store: store, client: try V2HTTPGroupCreationOperationClient(baseURL: base, credentials: http, transport: http)),
+            membership: .init(accountID: account, activationID: activation, store: store, client: try V2HTTPMembershipOperationClient(baseURL: base, credentials: http, transport: http)),
+            capabilities: .init(accountID: account, activationID: activation, store: store, client: try V2HTTPGroupCapabilityOperationClient(baseURL: base, credentials: http, transport: http)),
+            invitations: .init(accountID: account, activationID: activation, store: store,
+                client: try V2HTTPInvitationOperationClient(baseURL: base, credentials: http, transport: http),
+                secrets: SharedInvitationSecrets(installation: installation, persistence: platform.securePersistence)),
+            administration: .init(accountID: account, activationID: activation, store: store, client: try V2HTTPMemberAdministrationClient(baseURL: base, credentials: http, transport: http)))
+        directory = contacts; social = contacts.relationships; direct = contacts.directConversations
+        creation = groups.creation; membership = groups.membership; capability = groups.capabilities
+        community = SharedCommunity(store: store, groups: groups)
+        let presentations = V2ProfilePresentationRepository(actorUserID: account, deviceID: device,
+            reader: try V2HTTPProfilePresentationClient(endpoint: base.appendingPathComponent("v2/profile-presentations/batch"), credentials: http, transport: http),
+            nicknameRevisions: { try await store.groupNicknameRevisions(keys: $0) }, aliasRevisions: { try await store.contactAliasRevisions(keys: $0) })
+        let profiles = try await session.profiles(for: store, accountID: account, presentations: presentations,
+            names: V2NameOperationService(accountID: account, store: store,
+                client: try V2HTTPNameOperationClient(endpoint: base.appendingPathComponent("v2/profile-presentations"), credentials: http, transport: http),
+                didCommit: { await presentations.invalidateEditedName($0) }))
         let resources = try await V2ResourceCenter.make(scope: storageScope, store: store)
-        do { avatars = try SharedAvatars(account: account, device: device, store: store, resources: resources, base: base, http: http, imageHTTP: platform.imageHTTP, uploader: platform.uploader)
+        do { avatars = try await SharedAvatars(session: session, profiles: profiles, account: account, device: device, store: store, resources: resources, base: base, http: http, uploader: platform.uploader, rangeTransport: platform.rangeTransport)
              try await avatars.start() }
         catch { await resources.close(); throw error }
+        people = SharedPeople(store: store, profiles: profiles, resources: avatars.business)
 
     }
     func handlers() async -> [V2OperationWorkDispatcher.Handler] {
-        return [.init(kind: .relationship) { [social] in try await social.execute($0) },
-         .init(kind: .userBlock) { [social] in try await social.execute($0) },
-         .init(kind: .directRoom) { [direct] in try await direct.execute($0) },
-         .init(kind: .groupRoom) { [creation] in try await creation.execute($0) },
-         .init(kind: .membership) { [membership] in try await membership.execute($0) }]
-        + [V2OperationKind.pinnedMessage, .groupAnnouncement, .groupPermission, .groupRole, .groupOwnership, .groupDissolution].map { kind in
-            .init(kind: kind) { [capability] in try await capability.execute($0) }
-        } + (await people.handlers()) + (await community.handlers()) + (await avatars.handlers())
+        contacts.handlers() + groups.handlers() + (await people.handlers()) + (await avatars.handlers())
     }
+
     func start() async {
         guard tasks.isEmpty else { return }
         await community.start()
@@ -92,6 +104,7 @@ actor SharedSocialGroups {
                  } } catch is CancellationError {} catch { failure = sharedFailure(error) } }]
     }
     func stop() async {
+        await contacts.close(); await groups.close()
         await avatars.close(); await people.close(); await community.close()
         let all = tasks + groupTasks
         all.forEach { $0.cancel() }; for task in all { await task.value }
@@ -162,7 +175,7 @@ actor SharedSocialGroups {
             let room = try RoomID(raw)
             guard try await store.roomAllowsLocalRead(roomID: room) else { throw SharedFailure.invalidInput }
             let cursor = request.operation == .groupMembersNext && memberPage?.roomID == room ? memberPage?.nextCursor : nil
-            let page = try await transport.listRoomMembers(roomID: room, cursor: cursor, pageSize: 50)
+            let page = try await groups.listRoomMembers(roomID: room, cursor: cursor, pageSize: 50)
             try Task.checkCancellation()
             if memberPage?.roomID != room { await observeGroup(room) }
             memberPage = page
@@ -215,20 +228,18 @@ actor SharedSocialGroups {
     func snapshot() async throws -> SharedDirectory {
         let contacts: [SharedContact]
         if scope == "blocked" {
-            // Block directory is bounded at the bridge; pagination uses the same stable target cursor.
-            let rows = try await store.blocks().filter(\.isBlocked).sorted { $0.targetUserID.rawValue < $1.targetUserID.rawValue }
-                .filter { contactCursor == nil || $0.targetUserID.rawValue > contactCursor!.targetUserID.rawValue }
-            contacts = rows.prefix(50).map { .init(userID: $0.targetUserID.rawValue, state: "blocked") }
-            nextContact = rows.count > 50 ? rows[49].mapCursor : nil
+            let page = try await self.contacts.blocked(before: contactCursor)
+            contacts = page.items.map { .init(userID: $0.targetUserID.rawValue, state: "blocked") }
+            nextContact = page.nextCursor
         } else {
-            let page = try await store.relationshipPage(scope: scope == "incoming" ? .incomingRequests(currentUserID: account) : scope == "outgoing" ? .outgoingRequests(currentUserID: account) : .accepted, before: contactCursor, limit: 50)
+            let page = try await self.contacts.page(scope: scope == "incoming" ? .incomingRequests : scope == "outgoing" ? .outgoingRequests : .friends, before: contactCursor, limit: 50)
             contacts = page.relationships.map { .init(userID: $0.targetUserID.rawValue, state: $0.state.rawValue) }; nextContact = page.nextCursor
         }
-        let groups = try await store.groupDirectoryPage(after: groupCursor, limit: 50); nextGroup = groups.nextCursor
+        let groups = try await self.groups.page(after: groupCursor, limit: 50); nextGroup = groups.nextCursor
         var group: SharedGroup?
         if let page = memberPage, try await store.roomAllowsLocalRead(roomID: page.roomID) {
-            let policy = try await store.groupRolePolicyState(roomID: page.roomID)
-            let announcement = try await store.groupAnnouncement(roomID: page.roomID)
+            let policy = try await self.groups.rolePolicy(in: page.roomID)
+            let announcement = try await self.groups.announcement(in: page.roomID)
             let ready = policy.recovery == .ready
             let permissions = ready ? V2GroupPermission.allCases.filter { V2GroupPermissionDefaults.allows(role: page.actorRole, permission: $0, configured: policy.policies.first { $0.role == page.actorRole }?.permissions) }.map(\.rawValue) : []
             group = .init(roomID: page.roomID.rawValue, actorRole: page.actorRole.rawValue, revision: page.membershipRevision,
@@ -255,7 +266,4 @@ actor SharedSocialGroups {
             groups: groups.items.map { .init(id: $0.roomID.rawValue, title: $0.title, preview: "") }, hasMoreGroups: nextGroup != nil, firstGroups: groupCursor == nil,
             avatarEditor: try await avatars.snapshot(), profiles: profiles.0, selectedProfile: await people.selected?.rawValue, community: communitySnapshot, identity: lookup.map { .init(userID: $0.identity.userID.rawValue, handle: $0.identity.handle.rawValue, name: $0.identity.displayName) }, group: group, works: works, failure: failure?.rawValue)
     }
-}
-private extension V2ClientUserBlockProjection {
-    var mapCursor: V2ClientRelationshipCursor { .init(updatedAt: updatedAt, targetUserID: targetUserID) }
 }

@@ -64,8 +64,11 @@ struct V2RoomClusterBridgeTests {
             == "authentication_sessionExpired")
         #expect(V2RoomClusterPeer.sendFailureReason(V2ActorAuthenticationError.replay)
             == "authentication_replay")
-        #expect(V2RoomClusterPeer.sendFailureReason(IMActorError.remoteFailure) == "remote_call")
+        #expect(V2RoomClusterPeer.sendFailureReason(IMActorError.remoteFailure) == "remote_failure")
         #expect(V2RoomClusterPeer.sendFailureReason(V2RoomCallFailure.outcomeUnknown) == "outcome_unknown")
+        #expect(V2RoomClusterPeer.sendFailureReason(IMActorError.overloaded) == "overloaded")
+        #expect(V2RoomClusterPeer.sendFailureReason(IMActorError.deadlineExceeded) == "deadline_exceeded")
+        #expect(V2RoomClusterPeer.sendFailureReason(IMActorError.connectionLost) == "connection_lost")
         #expect(V2RoomClusterPeer.sendFailureReason(CancellationError()) == "cancelled")
     }
 

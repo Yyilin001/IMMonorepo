@@ -23,7 +23,15 @@ data class SharedEndpoint(val accountURL: String, val gatewayHost: String, val g
     }
 }
 enum class SharedSessionState { SignedOut, SigningOut, Ready, Connecting, Connected, Offline, Closed }
-enum class SharedError { InvalidConfiguration, InvalidInput, Busy, Closed, AuthenticationRequired, NetworkUnavailable, StorageUnavailable, OperationFailed, Cancelled }
+enum class SharedError {
+    InvalidConfiguration, InvalidInput, Busy, Closed, AuthenticationRequired,
+    CredentialsUnavailable, CredentialIssueRecoveryPending, LocalStoreCloseFailed,
+    MalformedCredentials, DeviceMismatch, SessionInvalidated,
+    NetworkUnavailable, StorageUnavailable, OperationFailed, Cancelled
+}
+internal fun decodeSharedError(value: String): SharedError =
+    SharedError.entries.firstOrNull { it.name.equals(value, ignoreCase = true) } ?: SharedError.OperationFailed
+
 class SharedSdkException(val reason: SharedError) : Exception(reason.name)
 data class SharedConversation(
     val id: String, val title: String, val preview: String,
@@ -285,7 +293,7 @@ class SharedClient private constructor(private val handle: Long) {
         }
         try {
             val result = awaitResult(operation)
-            if (result.has("error")) throw SharedSdkException(error(result.getString("error")))
+            if (result.has("error")) throw SharedSdkException(decodeSharedError(result.getString("error")))
             decode(result.getJSONObject("snapshot"), startedAt)
         } finally {
             withContext(NonCancellable) {
@@ -301,13 +309,12 @@ class SharedClient private constructor(private val handle: Long) {
     private suspend fun awaitResult(operation: Long): JSONObject {
         while (true) { NativeSharedSDK.poll(operation)?.let { return JSONObject(it.toString(Charsets.UTF_8)) }; delay(10) }
     }
-    private fun error(value: String): SharedError = SharedError.entries.firstOrNull { it.name.equals(value, true) } ?: SharedError.OperationFailed
     private fun decode(value: JSONObject, startedAt: Long): SharedSnapshot {
         val rows = value.getJSONArray("conversations")
         return SharedSnapshot(SharedSessionState.entries.first { it.name.equals(value.getString("state"), true) },
             value.optString("userID").takeIf { it.isNotEmpty() }, if (value.has("allowsStrangerMessages")) value.getBoolean("allowsStrangerMessages") else null, value.getLong("appliedSequence"), value.getLong("acknowledgedSequence"),
             value.getLong("connections"), (0 until rows.length()).map { index -> rows.getJSONObject(index).conversation() }.toPersistentList(),
-            value.optString("failure").takeIf { it.isNotEmpty() }?.let(::error), value.getBoolean("hasMoreConversations"), value.getBoolean("isFirstConversationPage"),
+            value.optString("failure").takeIf { it.isNotEmpty() }?.let(::decodeSharedError), value.getBoolean("hasMoreConversations"), value.getBoolean("isFirstConversationPage"),
             value.optJSONObject("chat")?.let { chat ->
                 val messages = chat.getJSONArray("messages"); val pending = chat.getJSONArray("pending")
                 SharedChat(chat.getString("roomID"), (0 until messages.length()).map { index -> messages.getJSONObject(index).let {

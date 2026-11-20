@@ -6,12 +6,28 @@ import IMV2Core
 
 // Each family owns protobuf conversion for its commands. The outer handler owns
 // dispatch, the common error map, telemetry and Gateway admission.
-/// Only constructed after decoding and authenticating a durable operation.
-/// The typed failure proves admission was refused or the turn rolled back.
-struct V2GatewayMessageOverloadFailure: Error {
+/// This attempt was refused or rolled back, so the client can keep its current action.
+struct V2GatewayMessageDeferredFailure: Error {
     let identity: V2OperationIdentity
     let fingerprint: V2OperationFingerprint
-    let failure: V2RoomCallFailure
+    let disposition: V2MessageSendFailureDisposition
+    let reason: V2RoomFailureReason
+
+    init?(identity: V2OperationIdentity, fingerprint: V2OperationFingerprint, failure: V2RoomCallFailure) {
+        switch failure {
+        case .notAccepted(let reason): self.reason = reason; disposition = .notAccepted
+        case .rolledBack(let reason): self.reason = reason; disposition = .rolledBack
+        case .outcomeUnknown: return nil
+        }
+        switch reason {
+        case .staleActivation, .notReady, .retired, .authorityLost, .unavailable,
+             .overloaded, .roomCapacityExhausted, .deadlineExceeded:
+            self.identity = identity
+            self.fingerprint = fingerprint
+        case .cancelled, .notFound, .forbidden, .invalidRequest, .unsupportedVersion, .idempotencyConflict:
+            return nil
+        }
+    }
 }
 
 struct V2GatewayMessageCommands: Sendable {
@@ -32,12 +48,11 @@ struct V2GatewayMessageCommands: Sendable {
         let result: V2MessageSendOperationRecoveryResult
         do { result = try await messageSendOperations.sendOperation(command) }
         catch let failure as V2RoomCallFailure {
-            switch failure {
-            case .notAccepted(.overloaded), .rolledBack(.overloaded):
-                throw V2GatewayMessageOverloadFailure(identity: operationIdentity,
-                    fingerprint: operationFingerprint, failure: failure)
-            default: throw failure
+            if let deferred = V2GatewayMessageDeferredFailure(identity: operationIdentity,
+                fingerprint: operationFingerprint, failure: failure) {
+                throw deferred
             }
+            throw failure
         }
         var response = IMV2Envelope()
         response.messageSendOperationResult = V2MessageSendOperationWireCodec.encode(result: result)
@@ -51,12 +66,11 @@ struct V2GatewayMessageCommands: Sendable {
         let result: V2MessageSendOperationRecoveryResult
         do { result = try await messageSendOperations.recoverSendOperation(request) }
         catch let failure as V2RoomCallFailure {
-            switch failure {
-            case .notAccepted(.overloaded), .rolledBack(.overloaded):
-                throw V2GatewayMessageOverloadFailure(identity: request.identity,
-                    fingerprint: request.fingerprint, failure: failure)
-            default: throw failure
+            if let deferred = V2GatewayMessageDeferredFailure(identity: request.identity,
+                fingerprint: request.fingerprint, failure: failure) {
+                throw deferred
             }
+            throw failure
         }
         var response = IMV2Envelope()
         response.messageSendOperationResult = V2MessageSendOperationWireCodec.encode(result: result)

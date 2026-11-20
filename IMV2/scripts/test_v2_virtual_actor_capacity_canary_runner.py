@@ -326,7 +326,7 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
             build_result.write_text(json.dumps({
                 "sourceSHA": source_sha,
                 "lockfileSHA256": hashlib.sha256((source / "IMV2Server/Package.resolved").read_bytes()).hexdigest(),
-                "image": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
+                "image": "swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144",
                 "passed": True, "exitCode": 0, "products": products,
             }))
             command = [sys.executable, str(RUNNER), "--source-checkout", str(source),
@@ -353,7 +353,7 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
             corrected_result = root / "corrected-result.json"
             corrected_result.write_text(json.dumps({
                 "sourceSHA": "a" * 40, "lockfileSHA256": "b" * 64,
-                "image": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
+                "image": "swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144",
                 "passed": True, "exitCode": 0,
                 "products": {"IMV2GatewayLoadGenerator": hashlib.sha256(corrected_binary.read_bytes()).hexdigest()},
             }))

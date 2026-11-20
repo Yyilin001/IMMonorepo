@@ -237,10 +237,10 @@ struct V2ActorAuthenticationTests {
         let grant = try await fixture.open()
         let request = try V2PolicyMutationWire(endpoint: "owner", scope: .init(account: UUID()),
             operationKey: "operation", fingerprint: Data(repeating: 1, count: 32), command: .disable(.init(userID: UUID(), operationID: UUID(), reason: "user_requested", operatorPrincipal: "test")))
-        func call(_ principal: V2ActorCallPrincipal, sequence: UInt64) throws -> V2ActorAuthenticatedCall {
+        func call(_ principal: V2ActorCallPrincipal, sequence: UInt64, pressure: Bool = false) throws -> V2ActorAuthenticatedCall {
             .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: fixture.token.host,
                 sessionID: grant.sessionID, sequence: sequence, attemptID: UUID(), traceID: UUID(),
-                remainingBudget: try .init(5_000), principal: principal, request: .mutatePolicy(request))
+                remainingBudget: try .init(5_000), principal: principal, request: pressure ? .policyPressure(endpoint: request.endpoint) : .mutatePolicy(request))
         }
         await failure(.forbidden) {
             _ = try fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000))
@@ -257,6 +257,15 @@ struct V2ActorAuthenticationTests {
                 _ = try fixture.auth.accept(fixture.client.sign(activation, maximumBytes: 10_000))
             }
         } else { await failure(.forbidden) { _ = try fixture.auth.accept(packet) } }
+        await failure(.forbidden) {
+            _ = try fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 4, pressure: true), maximumBytes: 10_000))
+        }
+        let query = try fixture.client.sign(call(.service, sequence: 5, pressure: true), maximumBytes: 10_000)
+        if allowed {
+            #expect(try fixture.auth.accept(query).call.request == .policyPressure(endpoint: request.endpoint))
+        } else {
+            await failure(.forbidden) { _ = try fixture.auth.accept(query) }
+        }
         let receipt = try V2PolicyMutationReceiptWire(scope: request.scope, operationKey: request.operationKey,
             fingerprint: request.fingerprint, receipt: .disable(.init(kind: .disabled, disabledAt: Date())), replayed: false)
         #expect(receipt.matches(request))

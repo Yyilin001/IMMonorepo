@@ -16,6 +16,7 @@ protocol V2ReadReceiptPreferenceReading: Sendable { func readReceiptPreference()
 @MainActor
 @Observable
 final class V2UserBlockSettingsStore {
+    private let contacts: V2ContactService?
     private let localStore: GRDBV2LocalSyncStore?
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     private(set) var blockedUsers: [V2ClientUserBlockProjection] = []
@@ -34,8 +35,10 @@ final class V2UserBlockSettingsStore {
         changer: any V2UserBlockChanging,
         currentUserID: UserID,
         localStore: GRDBV2LocalSyncStore? = nil,
+        contacts: V2ContactService? = nil,
         projectionChangeNotifier: V2ProjectionChangeNotifier? = nil
     ) {
+        self.contacts = contacts
         self.localStore = localStore
         self.projectionChangeNotifier = projectionChangeNotifier
         self.resolver = resolver
@@ -52,7 +55,10 @@ final class V2UserBlockSettingsStore {
     }
     func loadBlockedUsers() async {
         guard let localStore else { return }
-        do { blockedUsers = try await localStore.blocks() }
+        do {
+            if let contacts { blockedUsers = try await contacts.blockProjections() }
+            else { blockedUsers = try await localStore.blocks() }
+        }
         catch { feedback = "暂时无法读取已屏蔽用户。" }
     }
     func unblockKnownUser(_ user: UserID) async {

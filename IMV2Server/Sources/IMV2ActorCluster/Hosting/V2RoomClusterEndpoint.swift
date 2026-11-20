@@ -11,6 +11,7 @@ import IMV2Core
 public enum V2PolicyMutationServiceError: Error, Sendable { case identityConflict }
 
 public protocol V2PolicyMutationServing: Sendable {
+    func pressure(endpoint: String) async throws -> V2PolicyDirectoryPressure
     func mutatePolicy(_ request: V2PolicyMutationWire, deadline: ContinuousClock.Instant) async throws -> V2PolicyMutationReceiptWire
 }
 
@@ -464,6 +465,9 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
                 throw V2RoomCallFailure.outcomeUnknown
             }
             return .forwardPair(result)
+        case .policyPressure(let endpoint):
+            guard let policyMutations else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+            return .policyPressure(try await policyMutations.pressure(endpoint: endpoint))
         case .mutatePolicy(let mutation):
             guard let policyMutations else { throw V2RoomCallFailure.notAccepted(.unavailable) }
             let receipt: V2PolicyMutationReceiptWire
@@ -535,7 +539,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
 
     private nonisolated func requestToken(_ request: V2ActorRPCRequest) -> V2RoomActivationToken? {
         switch request {
-        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .recoveryBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .releasePolicyInterests: nil
+        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .recoveryBatch, .policyPressure, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .releasePolicyInterests: nil
         case .lookup(let token), .invoke(let token, _), .reserve(let token, _): token
         case .forwardPair(let token, _): token
         case .markDispatched(let grant), .abortReservation(let grant), .finishReservation(let grant, _): grant.token
@@ -550,6 +554,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         case .updatePolicySnapshot(let request): request.endpoint
         case .releasePolicyInterests(let request): request.endpoint
         case .forwardPair(let token, _): token.owner.shardID
+        case .policyPressure(let endpoint): endpoint
         case .mutatePolicy(let mutation): mutation.endpoint
         case .activate(_, let owner): owner.shardID
         case .recoveryBatch: "" // Handled as the complete shard set before dispatch.
@@ -561,7 +566,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
 
     private nonisolated func isHostOnly(_ request: V2ActorRPCRequest) -> Bool {
         switch request {
-        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .lookup, .recoveryBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .releasePolicyInterests, .forwardPair: true
+        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .lookup, .recoveryBatch, .policyPressure, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .releasePolicyInterests, .forwardPair: true
         default: false
         }
     }

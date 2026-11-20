@@ -12,7 +12,7 @@ jobs:
   swift-and-postgres:
     name: Swift packages and PostgreSQL integration
     runs-on: ubuntu-latest
-    container: swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6
+    container: swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144
     services:
       postgres:
         image: postgres:16-alpine
@@ -156,13 +156,12 @@ jobs:
 
   ios-build-for-testing:
     name: iOS build-for-testing
-    runs-on: macos-26
-    # The app deployment target is iOS 26.2. Pin both the hosted image and the
-    # selected toolchain/runtime instead of inheriting moving `latest` aliases.
+    runs-on: xcode-27
+    # Xcode 27.2 ships Swift 6.4.2 and the iOS 27.2 simulator.
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
-      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
     steps:
       - uses: actions/checkout@v4
       - name: Build app and test bundles without signing
@@ -170,11 +169,11 @@ jobs:
 
   ios-unit-tests:
     name: iOS unit tests
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
-      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
     steps:
       - uses: actions/checkout@v4
       - name: Run deterministic App store and projection tests
@@ -182,11 +181,11 @@ jobs:
 
   ios-ui-tests:
     name: iOS signed-out UI tests
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
-      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
     steps:
       - uses: actions/checkout@v4
       - name: Run deterministic signed-out accessibility UI tests

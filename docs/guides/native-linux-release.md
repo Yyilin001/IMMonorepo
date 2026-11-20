@@ -4,9 +4,9 @@
 
 ## 固定环境
 
-- 开源 Swift **6.4.0** arm64 工具链，安装到 `~/Library/Developer/Toolchains/swift-6.4.0-RELEASE.xctoolchain`。不能替换为 Xcode Swift。
-- SDK：`im-resource-swift64-jammy-x86_64`，目标 `x86_64-unknown-linux-gnu`。
-- SDK 来源、生成器 revision、运行镜像 digest 和三个关键 Swift 运行库的校验值位于 [toolchain.json](../../scripts/linux-sdk/toolchain.json)。编译前会检查已安装 SDK 的运行库哈希。
+- 开源 Swift **6.4.2** arm64 工具链，安装到 `~/Library/Developer/Toolchains/swift-6.4.2-RELEASE.xctoolchain`。不能替换为 Xcode Swift。
+- SDK：`im-resource-swift642-jammy-x86_64`，目标 `x86_64-unknown-linux-gnu`。
+- SDK 来源镜像 digest、生成器 revision 和三个关键 Swift 运行库的校验值位于 [toolchain.json](../../scripts/linux-sdk/toolchain.json)。编译前会检查已安装 SDK 的运行库哈希。发布镜像使用同版本的 Jammy slim，打包后复核镜像里的运行库哈希。
 - 选择 glibc SDK，使 Swift/Distributed/Foundation 与现有部署镜像一致。Static Linux SDK 的 musl 路线当前因 actor 的 `decodeNextArgument` 分发 thunk 缺失而不能通过完整链接；不向 SDK 注入伪造符号，也不降低并发检查来绕过构建错误。
 
 一次性准备 SDK：
@@ -24,7 +24,7 @@ python3 scripts/build_v2_linux_release.py --check
 python3 scripts/build_v2_linux_release.py
 ```
 
-默认构建七个部署程序，使用 8 个 SwiftPM 并发任务，持久缓存位于仓库 `.build-linux-glibc-6.4.0`。Swift 优化器内部还可能使用额外线程；`--jobs` 不是进程的硬性 CPU 上限。
+默认构建八个部署程序，使用 8 个 SwiftPM 并发任务，持久缓存位于仓库 `.build-linux-glibc-6.4.2`。Swift 优化器内部还可能使用额外线程；`--jobs` 不是进程的硬性 CPU 上限。
 
 脚本不会清理缓存或删除旧产物。每次输出到 `build/native-linux-release/runs/<run>`，只有全部程序成功且源码未发生变化才更新 `current.json`。同一缓存禁止并发启动两个发布驱动。不要在同一份缓存中混用 `/tmp/...` 与 `/private/tmp/...` 两种路径：Clang PCM 中保存的绝对路径可能造成模块重复定义。默认缓存路径固定且规范化。
 
@@ -54,9 +54,9 @@ python3 scripts/verify_v2_linux_release.py "$release_context" \
   --runtime-image imv2localaccount-v2server
 ```
 
-Dockerfile 不运行 `swift build`，保留现有镜像内程序路径、ImageMagick 限制和运行环境。打包时检查七个 ELF 的动态库，并运行图片 worker 自检。
+Dockerfile 不运行 `swift build`，保留现有镜像内程序路径、ImageMagick 限制和运行环境。打包时检查八个 ELF 的动态库，并运行图片 worker 自检。
 
-独立验证脚本复核产物哈希，在无网络的临时 Linux amd64 容器内检查运行库、七个程序的加载依赖，并实际生成 320/1280 两档 PNG 预览和源尺寸信息。它只清理自己创建的临时容器，不操作数据库或线上服务。结果写入产物目录的 `runtime-verification.json`。这证明 Linux 加载与 worker 路径可运行，不代替数据库、选举、鉴权和消息收发的完整验收。
+独立验证脚本复核产物哈希，在无网络的临时 Linux amd64 容器内检查运行库、八个程序的加载依赖，并实际生成 320/1280 两档 PNG 预览和源尺寸信息。它只清理自己创建的临时容器，不操作数据库或线上服务。结果写入产物目录的 `runtime-verification.json`。这证明 Linux 加载与 worker 路径可运行，不代替数据库、选举、鉴权和消息收发的完整验收。
 
 Apple Silicon 上的 `IMV2/scripts/run_v2_local_account_stack.sh` 已接入相同构建脚本；其他宿主机保留原有 Linux 容器构建路径。该脚本会启动本地环境，单纯编译请使用上面的 Python 构建命令。
 

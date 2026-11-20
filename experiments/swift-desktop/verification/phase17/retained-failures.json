@@ -1,0 +1,25 @@
+{
+  "resolved": true,
+  "entries": [
+    {
+      "area": "unit fixtures",
+      "failure": "accepted relationship requester constraint; missing group authorization projection",
+      "resolution": "Corrected fixtures to real schema and authorization semantics; all final tests pass."
+    },
+    {
+      "area": "iOS UI harness compile",
+      "failure": "unsupported timeout argument to existing wait helper",
+      "resolution": "Kept helper signature unchanged."
+    },
+    {
+      "area": "iOS UI locator",
+      "failure": "invitation action outside initial visible settings cells",
+      "resolution": "Bounded scrolling in the real group settings page; full flow passed."
+    },
+    {
+      "area": "native backend host",
+      "failure": "one timeout before first completed contact stage; exact wait unknown",
+      "resolution": "Added bounded offline reconnect handling consistent with existing host test; final rerun passed without needing reconnect. Earlier two full native runs also passed."
+    }
+  ]
+}

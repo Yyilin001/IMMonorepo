@@ -312,6 +312,12 @@ String _errorText(Object error) {
     'authenticationRequired' => '登录失败，请检查账号和密码',
     'networkUnavailable' => '无法连接服务器，请检查网络后重试',
     'storageUnavailable' => '本地存储暂不可用',
+    'credentialsUnavailable' => '暂时无法读取本地凭据，请稍后重试',
+    'credentialIssueRecoveryPending' => '凭据签发结果正在确认，请稍后重试',
+    'localStoreCloseFailed' => '本地会话暂时无法关闭，请重试',
+    'malformedCredentials' => '本地凭据格式异常',
+    'deviceMismatch' => '设备身份与当前会话不匹配',
+    'sessionInvalidated' => '会话已变更，请刷新后重试',
     'busy' => '当前会话正忙，请重试',
     _ =>
       error is FormatException ||

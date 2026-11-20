@@ -70,6 +70,11 @@ func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String
         ("recovery_batch_caller_cancellations", transport.batchCallerCancellations),
         ("recovery_batch_rejected_global", transport.batchRejectedGlobal),
         ("recovery_batch_rejected_peer", transport.batchRejectedPeer),
+        ("send_local_dispatches", transport.localSendDispatches),
+        ("send_remote_dispatches", transport.remoteSendDispatches),
+        ("unsent_message_submits", transport.unsentMessageSubmits),
+        ("unsent_message_recoveries", transport.unsentMessageRecoveries),
+        ("send_transport_reference_evictions", transport.sendReferenceEvictions),
         ("cached_local_calls", transport.cachedLocalCalls),
         ("cached_remote_calls", transport.cachedRemoteCalls),
         ("physical_lookups", transport.roomLookups),
@@ -82,6 +87,18 @@ func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String
         let name = "im_v2_room_actor_" + suffix + "_total"
         lines += ["# HELP \(name) Process-local \(suffix) since startup.",
                   "# TYPE \(name) counter", "\(name) \(value)"]
+    }
+    let creditWaitMetric = "im_v2_actor_transport_rpc_message_credit_waits_total"
+    lines += ["# HELP \(creditWaitMetric) Bounded outbound message credit queue events.",
+              "# TYPE \(creditWaitMetric) counter"]
+    for (event, count) in transport.messageCreditWaits.sorted(by: { $0.key < $1.key }) {
+        lines.append("\(creditWaitMetric){event=\"\(event)\"} \(count)")
+    }
+    let rpcMetric = "im_v2_actor_transport_rpc_rejections_total"
+    lines += ["# HELP \(rpcMetric) Native RPC admission rejections by first failing check.",
+              "# TYPE \(rpcMetric) counter"]
+    for (reason, count) in transport.rpcAdmissionRejections.sorted(by: { $0.key < $1.key }) {
+        lines.append("\(rpcMetric){reason=\"\(reason)\"} \(count)")
     }
     for (suffix, value) in [("recovering_rooms", directory.recoveringRooms),
                             ("active_host_recoveries", transport.activeHostRecoveries)] {

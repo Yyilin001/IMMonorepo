@@ -24,12 +24,15 @@ v2_seed_local_admission_pool() {
 
   # shellcheck source=local_compose.sh
   source "${v2_local_admission_pool_script_dir}/local_compose.sh"
-  v2_local_compose "${admission_env_file}" --project-name "${admission_compose_project}" --file "${admission_compose_file}" \
-    exec -T postgres psql --quiet --set=ON_ERROR_STOP=1 --username im_v2 --dbname im_v2 <<SQL
+  local shard target
+  for shard in rooms-primary rooms-01; do
+    target="imv2_${shard/-/_}"
+    v2_local_compose "${admission_env_file}" --project-name "${admission_compose_project}" --file "${admission_compose_file}" \
+    exec -T postgres psql --quiet --set=ON_ERROR_STOP=1 --username im_v2 --dbname "${target}" <<SQL
 INSERT INTO im_v2.shard_admission_pools AS pool
     (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
 VALUES
-    ('rooms-primary', 'standard', '${replacement_lease_id}', 1, CURRENT_TIMESTAMP + INTERVAL '24 hours', 1000)
+    ('${shard}', 'standard', '${replacement_lease_id}', 1, CURRENT_TIMESTAMP + INTERVAL '24 hours', 1000)
 ON CONFLICT (room_shard_id, capacity_profile_id) DO UPDATE
 SET lease_id = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.lease_id ELSE pool.lease_id END,
     generation = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN pool.generation + 1 ELSE pool.generation END,
@@ -37,4 +40,5 @@ SET lease_id = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.lea
     command_window_limit = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.command_window_limit ELSE pool.command_window_limit END,
     command_window_used = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN 0 ELSE pool.command_window_used END;
 SQL
+  done
 }

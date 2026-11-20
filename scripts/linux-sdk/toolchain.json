@@ -1,14 +1,14 @@
 {
-  "swiftVersion": "6.4.0",
-  "sdk": "im-resource-swift64-jammy-x86_64",
+  "swiftVersion": "6.4.2",
+  "sdk": "im-resource-swift642-jammy-x86_64",
   "triple": "x86_64-unknown-linux-gnu",
   "generatorRepository": "https://github.com/swiftlang/swift-sdk-generator.git",
   "generatorRevision": "bac62b856ac8bcbdc4fc515bc4b4a538043aa242",
-  "runtimeBase": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
-  "sdkRootRelativePath": "im-resource-swift64-jammy-x86_64/x86_64-unknown-linux-gnu/ubuntu-jammy.sdk",
+  "runtimeBase": "swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144",
+  "sdkRootRelativePath": "im-resource-swift642-jammy-x86_64/x86_64-unknown-linux-gnu/ubuntu-jammy.sdk",
   "runtimeLibrarySHA256": {
-    "usr/lib/swift/linux/libswiftCore.so": "be484af1b4c2d3d3cb4c1bdb5256a1ef5a4df079e78695ecab8cbe9e9114b05e",
-    "usr/lib/swift/linux/libswiftDistributed.so": "2775157f161dffaee8d71dcbf692e209f497a1b0aee7bebb81fdf614df601423",
-    "usr/lib/swift/linux/libFoundation.so": "28db6fd6739b4368764cf355f503e8a61c714b6fd85875d9a92e65822796a5f4"
+    "usr/lib/swift/linux/libswiftCore.so": "e6b81a05a009e9c1f8e19ee0f198a5f6666d8e01f3fb475f6db2136bb7d67cfa",
+    "usr/lib/swift/linux/libswiftDistributed.so": "452a45d15158a715c7fce2d58a563151b38961e8a147542d09f6a31b0334e61e",
+    "usr/lib/swift/linux/libFoundation.so": "ab2be27b73f55f1d13e0756c8cdd39920d5ae3779d3921b595e9b2aab348269b"
   }
 }

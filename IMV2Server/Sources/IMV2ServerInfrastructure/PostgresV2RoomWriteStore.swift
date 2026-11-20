@@ -14,7 +14,7 @@ import SQLKit
 /// 其他业务入口保留各自的持久状态校验。
 public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private var database: any Database
-    private var controlDatabase: (any Database)?
+    private(set) var controlDatabase: (any Database)?
     private var policyAuthorizations: V2RoomPolicyAuthorizationService?
     var currentPolicyAuthorizations: V2RoomPolicyAuthorizationService? { policyAuthorizations }
     private var controlResolution: V2RoomWriteControlResolution = .unresolved
@@ -158,7 +158,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     }
 
     private var scalarAcceptancePath: V2RoomWriteScalarAcceptancePath {
-        .init(ownerGuard: selectedOwnerGuard, policyContext: directPolicyContext,
+        .init(ownerGuard: selectedOwnerGuard, policyContext: directPolicyContext, profileDatabase: controlDatabase as? any SQLDatabase,
               strangerMessagePolicy: strangerMessagePolicy, contentReviewMode: contentReviewMode)
     }
 

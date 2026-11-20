@@ -1,6 +1,7 @@
 import HTTPTypes
 import Foundation
 import IMV2ServerHTTP
+import IMV2ServerApplication
 import Logging
 import Testing
 import Vapor
@@ -8,6 +9,32 @@ import VaporTesting
 
 @Suite("V2 redacted HTTP middleware")
 struct V2RedactedHTTPMiddlewareTests {
+    @Test func resourceByteFailuresKeepHTTPStatusAndSafeDiagnostics() async throws {
+        let cases: [(V2ResourceProviderError, HTTPResponse.Status, String?)] = [
+            (.notFound, .notFound, nil),
+            (.throttled(retryAfter: 2.5), .tooManyRequests, nil),
+            (.temporarilyUnavailable, .serviceUnavailable, "resource_temporarily_unavailable"),
+            (.integrityMismatch, .badGateway, "resource_integrity_mismatch"),
+            (.configurationInvalid, .internalServerError, "resource_configuration_invalid")
+        ]
+        for (failure, status, errorCode) in cases {
+            let capture = CapturedHTTPLogs()
+            let logger = Logger(label: "resource-byte-failure") { _ in CapturingHTTPLogHandler(capture: capture) }
+            try await withApp(logger: logger) { app in
+                V2RedactedHTTPMiddlewareConfiguration.install(on: app)
+                V2VaporResourceByteRoutes(delivery: FailingByteServing(error: failure), logger: logger).register(on: app)
+                try await app.testing { client in
+                    let response = try await client.send(.get, to: "/v2/resource-bytes/\(UUID())?cap=secret-cap")
+                    #expect(response.status == status)
+                    #expect(response.headers[.cacheControl] == "no-store")
+                    if status == .tooManyRequests { #expect(response.headers[.retryAfter] == "3") }
+                }
+            }
+            if let errorCode { #expect(capture.rendered().contains(errorCode)) }
+            #expect(!capture.rendered().contains("secret-cap"))
+        }
+    }
+
     @Test("logs only route templates and never query capabilities, path identifiers, or error descriptions")
     func redactsCallerAndErrorData() async throws {
         let capture = CapturedHTTPLogs()
@@ -61,7 +88,7 @@ private struct SensitiveTestFailure: Error, CustomStringConvertible {
     var description: String { Self.secret }
 }
 
-private final class CapturedHTTPLogs: @unchecked Sendable {
+final class CapturedHTTPLogs: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [String] = []
 
@@ -78,7 +105,7 @@ private final class CapturedHTTPLogs: @unchecked Sendable {
     }
 }
 
-private struct CapturingHTTPLogHandler: LogHandler {
+struct CapturingHTTPLogHandler: LogHandler {
     let capture: CapturedHTTPLogs
     var metadataProvider: Logger.MetadataProvider?
     var metadata: Logger.Metadata = [:]
@@ -97,5 +124,13 @@ private struct CapturingHTTPLogHandler: LogHandler {
     func log(event: LogEvent) {
         let combined = metadata.merging(event.metadata ?? [:]) { _, explicit in explicit }
         capture.append(message: event.message, metadata: combined)
+    }
+}
+
+private struct FailingByteServing: V2ResourceByteServing {
+    let error: V2ResourceProviderError
+    func stream(placementID: UUID, capability: String) async throws
+        -> (byteCount: Int64, etag: String, bytes: V2ResourceByteStream, close: @Sendable () async -> Void) {
+        throw error
     }
 }

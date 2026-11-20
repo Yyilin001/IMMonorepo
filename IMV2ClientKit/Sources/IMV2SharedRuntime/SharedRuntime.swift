@@ -83,7 +83,12 @@ package struct SharedSnapshot: Encodable, Sendable {
     let messaging: SharedMessagingView?
     var windowID: String? = nil
 }
-package enum SharedFailure: String, Error { case invalidConfiguration, invalidInput, busy, closed, authenticationRequired, networkUnavailable, storageUnavailable, operationFailed, cancelled }
+package enum SharedFailure: String, Error {
+    case invalidConfiguration, invalidInput, busy, closed, authenticationRequired
+    case credentialsUnavailable, credentialIssueRecoveryPending, localStoreCloseFailed
+    case malformedCredentials, deviceMismatch, sessionInvalidated
+    case networkUnavailable, storageUnavailable, operationFailed, cancelled
+}
 package func sharedFailure(_ error: any Error) -> SharedFailure {
     if let error = error as? V2ReadReceiptServiceError { switch error { case .closed: return .closed; case .invalidInput: return .invalidInput } }
     if let error = error as? V2MessageServiceError { switch error { case .closed: return .closed; case .invalidInput: return .invalidInput } }
@@ -98,7 +103,23 @@ package func sharedFailure(_ error: any Error) -> SharedFailure {
     }
     if error is V2CredentialStoreError || error is V2InstallationBindingStoreError { return .storageUnavailable }
     if let error = error as? V2AccountAuthenticationError, error == .authenticationRejected { return .authenticationRequired }
-    if error is V2AuthSessionError || error is V2ClientSessionBootstrapError { return .authenticationRequired }
+    if let error = error as? V2AuthSessionError {
+        switch error {
+        case .unauthenticated: return .authenticationRequired
+        case .credentialsUnavailable: return .credentialsUnavailable
+        case .malformedCredentials: return .malformedCredentials
+        case .deviceMismatch: return .deviceMismatch
+        case .sessionInvalidated: return .sessionInvalidated
+        }
+    }
+    if let error = error as? V2ClientSessionBootstrapError {
+        switch error {
+        case .authenticationRequired: return .authenticationRequired
+        case .credentialsUnavailable: return .credentialsUnavailable
+        case .credentialIssueRecoveryPending: return .credentialIssueRecoveryPending
+        case .localStoreCloseFailed: return .localStoreCloseFailed
+        }
+    }
     if error is V2TLSFrameConnectionError || error is URLError { return .networkUnavailable }
     return .operationFailed
 }
@@ -136,6 +157,10 @@ package actor SharedRuntime {
     private var media: SharedMedia?
     private var messaging: SharedMessaging?
     var searchBusiness: V2SearchService?
+    var profileBusiness: V2ProfileService?
+    var resourceBusiness: V2ResourceService?
+    var contactBusiness: V2ContactService?
+    var groupBusiness: V2GroupService?
     var receiptBusiness: V2ReadReceiptService?
     var messageBusiness: V2MessageService?
     private var sender: V2MessageSendOperationService?
@@ -317,6 +342,8 @@ package actor SharedRuntime {
         for window in windows { await window.close() }
         await conversationBusiness?.close(); conversationBusiness = nil
         dispatcher?.cancel()
+        await contactBusiness?.close(); contactBusiness = nil
+        await groupBusiness?.close(); groupBusiness = nil
         await receiptBusiness?.close(); receiptBusiness = nil
         await searchBusiness?.stopIndexing(); searchBusiness = nil
         await messageBusiness?.close(); messageBusiness = nil
@@ -324,6 +351,7 @@ package actor SharedRuntime {
         await media?.close(); media = nil
         await socialGroups?.stop()
         socialGroups = nil
+        profileBusiness = nil; resourceBusiness = nil
         await runtime?.stop()
         await dispatcher?.value
         dispatcher = nil; sender = nil; roomRecovery = nil
@@ -373,11 +401,13 @@ package actor SharedRuntime {
         messageBusiness = business
         let installation = try await store.boundInstallationBinding().value.uuidString
         guard let scope = try await bootstrap.storageScope(for: store) else { throw SharedFailure.storageUnavailable }
-        let socialGroups = try await SharedSocialGroups(storageScope: scope, installation: installation, account: identity.userID, device: identity.deviceID, store: store, transport: transport, base: base, http: accountHTTP, platform: platform)
+        let socialGroups = try await SharedSocialGroups(session: session, storageScope: scope, installation: installation, account: identity.userID, device: identity.deviceID, store: store, transport: transport, base: base, http: accountHTTP, platform: platform)
         self.socialGroups = socialGroups
+        contactBusiness = socialGroups.contacts; groupBusiness = socialGroups.groups
         await socialGroups.start()
-        let avatars = await socialGroups.avatars
-        let media = try await SharedMedia(account: identity.userID, store: store, resources: avatars.resources, uploads: avatars.transfers, base: base, http: accountHTTP, rangeTransport: platform.rangeTransport, createStagingFile: platform.createStagingFile, messages: business)
+        let avatars = socialGroups.avatars
+        profileBusiness = avatars.profiles; resourceBusiness = avatars.business
+        let media = try await SharedMedia(business: avatars.business, resolver: avatars.resolver, account: identity.userID, store: store, resources: avatars.resources, uploads: avatars.transfers, base: base, http: accountHTTP, rangeTransport: platform.rangeTransport, createStagingFile: platform.createStagingFile, messages: business)
         self.media = media; await media.start()
         let search = try await session.search(for: store)
         searchBusiness = search

@@ -7,6 +7,41 @@ import NIOPosix
 /// The three fixed voters run as independent processes. Room applications are
 /// clients and can all retire without removing the control quorum underneath.
 public actor V2PlacementControlService {
+    /// Produce an offline compare-and-swap for the control database, using the
+    /// same normalized digest as Gateway startup. No database connection here.
+    public static func offlinePolicyChange(from oldData: Data, to newData: Data) throws -> String {
+        struct Topology: Decodable {
+            let placementClusterID: UUID
+            let policyPlacement: V2PolicyOwnerPlacementConfiguration
+        }
+        let decoder = JSONDecoder()
+        let old = try decoder.decode(Topology.self, from: oldData)
+        let new = try decoder.decode(Topology.self, from: newData)
+        guard old.placementClusterID == new.placementClusterID,
+              old.policyPlacement.partitionCount == new.policyPlacement.partitionCount,
+              old.policyPlacement.revision < Int64.max,
+              new.policyPlacement.revision == old.policyPlacement.revision + 1 else {
+            throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+        }
+        let previous = try V2PolicyOwnerPlacement(old.policyPlacement).digest.map { String(format: "%02x", $0) }.joined()
+        let next = try V2PolicyOwnerPlacement(new.policyPlacement).digest.map { String(format: "%02x", $0) }.joined()
+        return """
+        DO $maintenance$
+        BEGIN
+          UPDATE im_v2.policy_owner_deployment
+             SET revision = \(new.policyPlacement.revision), snapshot_digest = decode('\(next)', 'hex')
+           WHERE deployment_id = 'active' AND revision = \(old.policyPlacement.revision)
+             AND snapshot_digest = decode('\(previous)', 'hex');
+          IF NOT FOUND AND NOT EXISTS (SELECT 1 FROM im_v2.policy_owner_deployment
+             WHERE deployment_id = 'active' AND revision = \(new.policyPlacement.revision)
+               AND snapshot_digest = decode('\(next)', 'hex')) THEN
+            RAISE EXCEPTION 'unexpected policy placement';
+          END IF;
+        END
+        $maintenance$;
+        """
+    }
+
     private let runtime: V2PlacementControlRuntime
     public init(configuration: V2RoomActorApplicationConfiguration) throws {
         guard configuration.hostIdentity == nil, configuration.placementControl.identity != nil,

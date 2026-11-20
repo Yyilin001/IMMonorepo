@@ -6,7 +6,7 @@ import IMV2ClientKit
 @MainActor @Observable
 final class V2NameEditorStore {
     let target: V2NameTarget
-    private let service: V2NameOperationService
+    private let service: V2ProfileNameService
     private(set) var baseline: V2NameSnapshot?
     private(set) var pending: V2NameIntentSnapshot?
     private(set) var isSaving = false
@@ -17,7 +17,8 @@ final class V2NameEditorStore {
     private var awaitingIntentID: UUID?
     private var rebasedConflictID: UUID?
     var text = ""
-    init(target: V2NameTarget, service: V2NameOperationService) { self.target = target; self.service = service }
+    init(target: V2NameTarget, service: V2ProfileNameService) { self.target = target; self.service = service }
+    convenience init(target: V2NameTarget, service: V2NameOperationService) { self.init(target: target, service: .init(service: service)) }
     var title: String { switch target { case .contact: "联系人备注"; case .group: "我的群昵称" } }
     var canSave: Bool {
         baseline != nil && !isSaving && !isRefreshing && awaitingIntentID == nil &&

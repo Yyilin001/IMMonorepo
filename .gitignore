@@ -51,3 +51,6 @@ id_ed25519*
 *.bundle
 monorepo-backups/
 dist/
+
+# 本地管理演示数据库、管理员凭据与日志
+/IMV2/local-admin/

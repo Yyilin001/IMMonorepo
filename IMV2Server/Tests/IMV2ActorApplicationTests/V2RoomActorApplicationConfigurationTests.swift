@@ -142,40 +142,21 @@ struct V2RoomActorApplicationConfigurationTests {
         #expect(throws: V2RoomActorApplicationConfigurationError.invalidConfiguration) { try load(changed) }
     }
 
-    @Test("Generated deployment pins admission signer to the placement deployment identity",
+    @Test("Fixed deployment rejects runtime membership configuration",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ROOM_ACTOR_TEST_DEPLOYMENT_DIRECTORY"] != nil))
-    func signedAdmissionConfiguration() throws {
+    func rejectsDynamicMembership() throws {
         let root = try #require(ProcessInfo.processInfo.environment["IMV2_ROOM_ACTOR_TEST_DEPLOYMENT_DIRECTORY"])
         let bytes = try Data(contentsOf: URL(fileURLWithPath: root + "/gateway/configuration.json"))
         var object = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
-        let key = Curve25519.Signing.PrivateKey(), id = try V2ActorServiceID("membership-authority")
-        let signer = try V2ActorSigningIdentity(serviceID: id, privateKey: key.rawRepresentation)
-        var services = try #require(object["services"] as? [[String: Any]])
-        services.append(["id": id.rawValue, "publicKeyBase64": key.publicKey.rawRepresentation.base64EncodedString(),
-                         "permissions": [], "hostIDs": [], "gatewayNodeIDs": [], "shardIDs": []])
-        object["services"] = services; object["trustAdmissionAuthorityServiceID"] = id.rawValue
-        let document = try JSONDecoder().decode(V2RoomActorApplicationConfiguration.Document.self,
-            from: JSONSerialization.data(withJSONObject: object))
-        let configuration = try V2RoomActorApplicationConfiguration(document: document, hostsRooms: true,
-            configuredShardIDs: ["rooms-primary"])
-        #expect(try configuration.trust.configuredService(id).sourceIDs.isEmpty)
-        var unpinned = object
-        unpinned.removeValue(forKey: "trustAdmissionAuthorityServiceID")
-        let unpinnedDocument = try JSONDecoder().decode(V2RoomActorApplicationConfiguration.Document.self,
-            from: JSONSerialization.data(withJSONObject: unpinned))
-        #expect(throws: V2RoomActorApplicationConfigurationError.invalidConfiguration) {
-            try V2RoomActorApplicationConfiguration(document: unpinnedDocument, hostsRooms: true,
-                configuredShardIDs: ["rooms-primary"])
-        }
-        let newKey = Curve25519.Signing.PrivateKey()
-        let newcomer = try V2ActorTrustedService(serviceID: V2ActorServiceID("new-host"),
-            publicKey: newKey.publicKey.rawRepresentation, permissions: [.roomCoordination])
-        let authorization = V2ActorTrustAdmission(deploymentID: configuration.placementControl.clusterID, services: [newcomer])
-        try configuration.trust.admitAuthorizedServices(signer.sign(authorization, maximumBytes: 262_144))
-        #expect(try configuration.trust.configuredService(newcomer.serviceID).permissions == [.roomCoordination])
-        let wrongDeployment = V2ActorTrustAdmission(deploymentID: UUID(), services: [newcomer])
-        #expect(throws: V2ActorAuthenticationError.invalidRequest) {
-            try configuration.trust.admitAuthorizedServices(signer.sign(wrongDeployment, maximumBytes: 262_144))
+        for field in ["serviceMembershipShard", "trustAdmissionAuthorityServiceID", "trustAdmissionDirectory"] {
+            var legacy = object
+            legacy[field] = "deprecated"
+            let document = try JSONDecoder().decode(V2RoomActorApplicationConfiguration.Document.self,
+                from: JSONSerialization.data(withJSONObject: legacy))
+            #expect(throws: V2RoomActorApplicationConfigurationError.invalidConfiguration) {
+                try V2RoomActorApplicationConfiguration(document: document, hostsRooms: true,
+                    configuredShardIDs: ["rooms-primary"])
+            }
         }
     }
 

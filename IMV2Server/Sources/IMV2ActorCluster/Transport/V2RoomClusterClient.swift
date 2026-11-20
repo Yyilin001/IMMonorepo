@@ -31,6 +31,7 @@ public struct V2RoomClusterHostDescriptor: Sendable {
 
 /// Immutable directory reads and synchronous Peer selection never enter a global RPC Actor.
 public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering, Sendable {
+    private let system: IMActorSystem
     private let directory: V2RoomClusterDirectory
     private let control: V2RoomClusterDirectoryControl
     public let callerIncarnation: UUID
@@ -45,6 +46,7 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         trust: V2ActorTrustStore, limits: V2ActorAuthenticationLimits,
         configuration: V2RoomRuntimeConfiguration, callerIncarnation: UUID = UUID(),
         localPort: V2RoomLocalPort?) {
+        self.system = system
         self.callerIncarnation = callerIncarnation
         let directory = V2RoomClusterDirectory()
         self.directory = directory
@@ -110,6 +112,11 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         deadline: ContinuousClock.Instant) async throws -> V2ActorForwardMessageResultWire {
         let peer = try directory.peer(for: token.host)
         return try await peer.forwardPair(pair, token: token, deadline: deadline)
+    }
+
+    package func policyPressure(endpoint: String, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2PolicyDirectoryPressure {
+        try await directory.peer(for: host).policyPressure(endpoint: endpoint, on: host, deadline: deadline)
     }
 
     package func mutatePolicy(_ mutation: V2PolicyMutationWire, on host: V2ActorHostIdentity,
@@ -289,7 +296,7 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         let batchCallerCancellations: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.batchCallerCancellations }
         let batchRejectedGlobal: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.batchRejectedGlobal }
         let batchRejectedPeer: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.batchRejectedPeer }
-        return V2RoomTransportCallMetricsSnapshot(
+        var result = V2RoomTransportCallMetricsSnapshot(
             cachedLocalCalls: cachedLocalCalls,
             cachedRemoteCalls: cachedRemoteCalls,
             roomLookups: roomLookups,
@@ -303,6 +310,16 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
             batchCallerCancellations: batchCallerCancellations,
             batchRejectedGlobal: batchRejectedGlobal,
             batchRejectedPeer: batchRejectedPeer)
+        result.localSendDispatches = snapshots.reduce(0) { $0 &+ $1.localSendDispatches }
+        result.remoteSendDispatches = snapshots.reduce(0) { $0 &+ $1.remoteSendDispatches }
+        result.unsentMessageSubmits = snapshots.reduce(0) { $0 &+ $1.unsentMessageSubmits }
+        result.unsentMessageRecoveries = snapshots.reduce(0) { $0 &+ $1.unsentMessageRecoveries }
+        result.sendReferenceEvictions = snapshots.reduce(0) { $0 &+ $1.sendReferenceEvictions }
+        if let metrics = system.transportMetrics {
+            result.messageCreditWaits = Dictionary(uniqueKeysWithValues: metrics.messageCreditWaits.map { ($0.key.rawValue, $0.value) })
+            result.rpcAdmissionRejections = Dictionary(uniqueKeysWithValues: metrics.rpcRejections.map { ($0.key.rawValue, $0.value) })
+        }
+        return result
     }
     static func recoveryProbeDeadline(for deadline: ContinuousClock.Instant,
         now: ContinuousClock.Instant = .now) -> ContinuousClock.Instant {

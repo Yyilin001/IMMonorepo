@@ -38,12 +38,15 @@ package final class V2PhysicalSendDispatcher: Sendable {
         var busySince: ContinuousClock.Instant?
     }
     private let state: Mutex<State>
+    private let executeGroup: V2ScheduledGroupExecution?
     private let preparationStore: PostgresV2MessageSendOperationStore
     init(store: PostgresV2MessageSendOperationStore,
         configuration: V2SendOperationSchedulingConfiguration,
         maximumRetainedBytes: Int, capacity: Int,
         borrow: @escaping V2ScheduledSendConnection,
+        executeGroup: V2ScheduledGroupExecution? = nil,
         execute: @escaping V2ScheduledSendExecution) {
+        self.executeGroup = configuration.maximumCrossRoomMessages > 1 ? executeGroup : nil
         preparationStore = store
         state = Mutex(State(store: store, configuration: configuration,
             maximumRetainedBytes: maximumRetainedBytes, capacity: capacity,
@@ -116,33 +119,45 @@ package final class V2PhysicalSendDispatcher: Sendable {
     private func runLane(workerID: UUID, laneID: UUID, executor: V2OwnerConnectionExecutor,
         execute: @escaping V2ScheduledSendExecution) async -> Bool {
         while let selection = await nextTurn(workerID: workerID, laneID: laneID) {
-            let pending = selection.pending
-            let timeline = V2OwnerConnectionTimeline()
-            timeline.configure(self.preparationStore.scheduledSendMetrics)
-            let selectedAt = ContinuousClock.now
-            if let idle = selection.idleSince { timeline.record(.ownerWorkerIdle, from: idle, to: selectedAt) }
-            if let ready = selection.readySince { timeline.record(.ownerWorkerDispatchGap, from: ready, to: selectedAt) }
-            timeline.mark("driver_entered", at: selectedAt)
-            timeline.record(.ownerReadyWait, from: pending.enqueuedAt, to: selectedAt)
-            timeline.attach(trace: pending.trace, enqueuedAt: pending.enqueuedAt)
-            let turn = executor.makeTurn()
-            let result: Result<[V2RoomMessagingResult], any Error>
-            do {
-                result = .success(try await V2SendPathTrace.$current.withValue(pending.trace) {
-                    try await V2OwnerConnectionTimeline.$current.withValue(timeline) {
-                        try await V2RoomSQLDeadline.withDeadline(pending.deadline) {
-                            guard executor.isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
-                            return try await execute(turn, pending.prepared)
+            var reusable: Bool
+            if let executeGroup, selection.pending.prepared.canCombineRoomTurn,
+               let group = update({ $0.selectGroup(starting: selection, workerID: workerID) }) {
+                let selectedAt = ContinuousClock.now
+                let timelines = group.map { timeline(for: $0) }
+                let outcomes: [V2ScheduledSendOutcome]?
+                do {
+                    let deadline = group.map { $0.pending.deadline }.min()!
+                    outcomes = try await V2RoomSQLDeadline.withDeadline(deadline) {
+                        guard executor.isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                        return try await V2OwnerConnectionTimeline.$current.withValue(timelines[0]) {
+                            try await executeGroup(executor.makeTurn(), group.map { $0.pending.prepared })
                         }
                     }
-                })
-            } catch { result = .failure(error) }
-            // ReadyForQuery is a local driver barrier, not another SQL
-            // round trip. Only an idle confirmed connection is reusable.
-            let reusable = executor.independentlySettledTurns ? executor.isUsable() : await executor.confirmIdle()
-            self.update { value in
-                value.turnExecuted(workerID: workerID, pending: pending,
-                    outcome: .init(result: result, finalize: turn.finalize), timeline: timeline)
+                } catch {
+                    outcomes = group.map { _ in .init(result: .failure(error), finalize: {}) }
+                }
+                if let outcomes {
+                    reusable = executor.independentlySettledTurns ? executor.isUsable() : await executor.confirmIdle()
+                    precondition(outcomes.count == group.count)
+                    if let first = outcomes.first, case .success = first.result {
+                        let committed = ContinuousClock.now
+                        timelines[0].record(.ownerCrossRoomHeadToCommit, from: selection.pending.enqueuedAt, to: committed)
+                        timelines[0].record(.ownerCrossRoomExecute, from: selectedAt, to: committed)
+                    }
+                    update { state in
+                        for index in group.indices {
+                            state.turnExecuted(workerID: workerID, pending: group[index].pending, outcome: outcomes[index], timeline: timelines[index])
+                        }
+                    }
+                } else {
+                    // Only ineligible work or a proven rollback can return here.
+                    reusable = true
+                    for (item, timeline) in zip(group, timelines) {
+                        reusable = await runSingle(item, timeline: timeline, workerID: workerID, executor: executor, execute: execute) && reusable
+                    }
+                }
+            } else {
+                reusable = await runSingle(selection, timeline: timeline(for: selection), workerID: workerID, executor: executor, execute: execute)
             }
             if !reusable {
                 self.update { value in
@@ -156,6 +171,40 @@ package final class V2PhysicalSendDispatcher: Sendable {
             }
         }
         return true
+    }
+    private func timeline(for selection: Selection) -> V2OwnerConnectionTimeline {
+        let pending = selection.pending
+        let timeline = V2OwnerConnectionTimeline()
+        timeline.configure(self.preparationStore.scheduledSendMetrics)
+        let selectedAt = ContinuousClock.now
+        if let idle = selection.idleSince { timeline.record(.ownerWorkerIdle, from: idle, to: selectedAt) }
+        if let ready = selection.readySince { timeline.record(.ownerWorkerDispatchGap, from: ready, to: selectedAt) }
+        timeline.mark("driver_entered", at: selectedAt)
+        timeline.record(.ownerReadyWait, from: pending.enqueuedAt, to: selectedAt)
+        timeline.attach(trace: pending.trace, enqueuedAt: pending.enqueuedAt)
+        return timeline
+    }
+    private func runSingle(_ selection: Selection, timeline: V2OwnerConnectionTimeline, workerID: UUID,
+        executor: V2OwnerConnectionExecutor, execute: @escaping V2ScheduledSendExecution) async -> Bool {
+        let pending = selection.pending
+        let turn = executor.makeTurn()
+        let result: Result<[V2RoomMessagingResult], any Error>
+        do {
+            result = .success(try await V2SendPathTrace.$current.withValue(pending.trace) {
+                try await V2OwnerConnectionTimeline.$current.withValue(timeline) {
+                    try await V2RoomSQLDeadline.withDeadline(pending.deadline) {
+                        guard executor.isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                        return try await execute(turn, pending.prepared)
+                    }
+                }
+            })
+        } catch { result = .failure(error) }
+        let reusable = executor.independentlySettledTurns ? executor.isUsable() : await executor.confirmIdle()
+        self.update { value in
+            value.turnExecuted(workerID: workerID, pending: pending,
+                outcome: .init(result: result, finalize: turn.finalize), timeline: timeline)
+        }
+        return reusable
     }
     private func runWorker(_ id: UUID) async {
         let (borrow, execute) = update { ($0.borrow, $0.execute) }
@@ -305,9 +354,9 @@ package final class V2PhysicalSendDispatcher: Sendable {
             }
             schedule()
         }
-        func take(_ id: UUID) -> Read {
+        func take(_ id: UUID, prune: Bool = true) -> Read {
             guard !closed, let worker = workers[id], !worker.connectionClosed else { return .closed }
-            _ = pruneExpiredQueued(now: .now)
+            if prune { _ = pruneExpiredQueued(now: .now) }
             guard let room = nextReadyRoom(), var queue = queues.removeValue(forKey: room),
                 let pending = queue.removeFirst() else { return .wait }
             worker.phase = .executing
@@ -324,6 +373,27 @@ package final class V2PhysicalSendDispatcher: Sendable {
             let selection = Selection(pending: pending, idleSince: worker.idleSince, readySince: worker.readySince)
             worker.idleSince = nil; worker.readySince = nil
             return .turn(selection)
+        }
+        func selectGroup(starting first: Selection, workerID: UUID) -> [Selection]? {
+            let limit = configuration.maximumCrossRoomMessages
+            let byteLimit = V2SendOperationSchedulingConfiguration.maximumCrossRoomBytes
+            let cutoff = ContinuousClock.now + .milliseconds(5)
+            var items = first.pending.items
+            var bytes = first.pending.bytes
+            guard items < limit, bytes < byteLimit, first.pending.deadline > cutoff else { return nil }
+            var group = [first]
+            while let room = readyRooms.first, let head = queues[room]?.first,
+                  head.items <= limit - items, head.bytes <= byteLimit - bytes,
+                  head.deadline > cutoff, head.prepared.canCombineRoomTurn,
+                  head.prepared.activationToken.owner.shardID == first.pending.prepared.activationToken.owner.shardID {
+                // Eligible heads cost at most 4 commands + 16 byte credits,
+                // below the 32-credit fair quantum. Claim exactly this head.
+                guard case .turn(let next) = take(workerID, prune: false) else { break }
+                group.append(next)
+                items += next.pending.items
+                bytes += next.pending.bytes
+            }
+            return group.count > 1 ? group : nil
         }
         private func wakeReaders() {
             let now = ContinuousClock.now

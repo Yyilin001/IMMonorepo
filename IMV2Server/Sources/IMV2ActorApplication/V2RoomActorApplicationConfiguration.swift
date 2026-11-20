@@ -25,8 +25,6 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
     public let hostIdentity: V2ActorHostIdentity?
     public let signer: V2ActorSigningIdentity
     public let trust: V2ActorTrustStore
-    package let trustAdmissionDirectory: String?
-    package let serviceMembershipShard: String?
     public let tls: TLSConfiguration
     public let discovery: V2RoomDiscoveryConfiguration
     public let allowedShards: Set<String>
@@ -207,21 +205,12 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         self.name = document.name; self.address = document.address; self.port = document.port
         self.threadPoolSize = document.threadPoolSize; self.hostIdentity = identity
         self.signer = try .init(serviceID: signingID, privateKey: key)
-        let admissionAuthority = try document.trustAdmissionAuthorityServiceID.map {
-            V2ActorTrustAdmissionAuthority(deploymentID: document.placementControl.clusterID,
-                serviceID: try V2ActorServiceID($0))
-        }
-        self.trust = try .init(services: trusted, admissionAuthority: admissionAuthority); self.tls = tls
-        if let directory = document.trustAdmissionDirectory {
-            guard admissionAuthority != nil, directory.hasPrefix("/"), !directory.contains("\0") else {
-                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
-            }
-        }
-        self.trustAdmissionDirectory = document.trustAdmissionDirectory
-        if let shard = document.serviceMembershipShard, !configuredShardIDs.contains(shard) {
+        guard document.serviceMembershipShard == nil, document.trustAdmissionDirectory == nil,
+              document.trustAdmissionAuthorityServiceID == nil else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
-        self.serviceMembershipShard = document.serviceMembershipShard
+        self.trust = try .init(services: trusted)
+        self.tls = tls
         self.placementControl = try .init(document: document.placementControl, name: document.name,
             address: document.address, roomPort: document.port, tls: tls, signer: self.signer, trust: self.trust,
             processIncarnation: processIncarnation, shards: configuredShardIDs, roomPeers: peers, serviceAccess: access)
@@ -251,7 +240,10 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
             (callerPermissions == Set([.placementRead, .placementWrite, .placementExclude]) ||
              callerPermissions == Set([.placementRead, .placementWrite, .placementMembership]) ||
              callerPermissions == Set([.placementRead, .placementWrite, .roomCoordination]))
-        guard exclusionOnly || realtimePeers.contains(where: { $0.serviceID == document.serviceID && $0.address == document.address && $0.port == document.port }) else {
+        // The admin process calls the Policy Owner and never installs a realtime endpoint.
+        let policyCallerOnly = identity == nil && self.placementControl.identity == nil &&
+            document.policyPlacement != nil && callerPermissions == Set([.policyMutation, .placementRead])
+        guard exclusionOnly || policyCallerOnly || realtimePeers.contains(where: { $0.serviceID == document.serviceID && $0.address == document.address && $0.port == document.port }) else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
         self.realtimePeers = realtimePeers.sorted { $0.nodeID < $1.nodeID }

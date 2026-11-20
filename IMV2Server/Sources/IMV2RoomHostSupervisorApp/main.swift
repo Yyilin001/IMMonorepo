@@ -45,7 +45,7 @@ enum IMV2RoomHostSupervisorApp {
     }
     private static func execute() async throws {
         let arguments = Array(CommandLine.arguments.dropFirst())
-        guard arguments.isEmpty || arguments == ["--provision"] || arguments == ["--provision-launches"],
+        guard arguments.isEmpty || arguments == ["--provision"] || arguments == ["--provision-launches"] || arguments == ["--reconfigure-hosts"],
               let path = ProcessInfo.processInfo.environment["IMV2_HOST_SUPERVISOR_CONFIGURATION_FILE"] else {
             throw V2DockerRoomHostLaunchError.invalidIntent
         }
@@ -94,8 +94,12 @@ enum IMV2RoomHostSupervisorApp {
             guard try await store.load() == document else { throw V2DockerRoomHostLaunchError.invalidIntent }
             if !arguments.isEmpty {
                 guard document.retiredLaunches.isEmpty else { throw V2DockerRoomHostLaunchError.invalidIntent }
-                let append = arguments == ["--provision-launches"]
-                if append {
+                let changeRoster = arguments == ["--reconfigure-hosts"]
+                let append = changeRoster || arguments == ["--provision-launches"]
+                if changeRoster {
+                    recovery = try await .reconfigure(at: URL(fileURLWithPath: document.recoveryJournalPath),
+                        supervisorID: configuration.signer.serviceID, hostIDs: hostIDs, pool: pool)
+                } else if append {
                     recovery = try await .open(at: URL(fileURLWithPath: document.recoveryJournalPath),
                         supervisorID: configuration.signer.serviceID, hostIDs: hostIDs, pool: pool)
                 } else {

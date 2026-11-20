@@ -25,7 +25,7 @@ class LocalPolicyConfigurationTests(unittest.TestCase):
                        "--placement-voter", "placement-a=placement-a:7336",
                        "--placement-voter", "placement-b=placement-b:7336",
                        "--placement-voter", "placement-c=placement-c:7336",
-                       "--shards", "rooms-primary", "--user-buckets", "users-primary",
+                       "--shards", "rooms-primary,rooms-01", "--user-buckets", "users-primary,users-01",
                        "--mount-root", "/run/im-v2-room-actor", "--policy-partitions", "16"]
         subprocess.run(cls.command, check=True, capture_output=True)
         cls.documents = {name: json.loads((cls.generated / name / "configuration.json").read_text())

@@ -166,3 +166,28 @@ swift test --package-path IMV2ClientKit
 新增独立产品 `IMV2ClientAndroid`，提供 Keystore 凭据/安装绑定/恢复账本存储，以及 `V2TLSFrameConnection(androidEndpoint:frameLimits:...)` 的 Android TLS 1.3 接线。它只依赖共享 Runtime 和 JNI 平台边界；原 `IMV2ClientKit` 门面继续导出 Apple 实现，现有 iOS 调用和默认行为不变。
 
 Android 宿主先加载包含本产品的 native library，再安装 `AndroidRuntimePlatform`。JNI 及 Kotlin 模块的安全条件、生命周期和接入示例见 [`IMAndroid/swiftplatform/README.md`](../IMAndroid/swiftplatform/README.md)；设备和 iOS 回归证据见 [`第三阶段结果`](../experiments/swift-android/verification/phase3/RESULTS.md)。本阶段不包含完整 Kotlin 业务 facade 或正式 App 迁移。
+
+
+## 统一联系人和群组业务门面（第十七阶段）
+
+`V2SharedSession.contacts(...)` 和 `groups(...)` 按已打开的账号数据库缓存 `V2ContactService` / `V2GroupService`。iOS 使用原生 Swift 接口，Android 的 `SharedSocialGroups` / `SharedCommunity` 只持有页面状态并转换绑定值，查询和持久化命令调用同一组服务。
+
+- 联系人：好友/收发申请的分页与定位窗口、黑名单、精确账号解析、关系提案/确认/重试、持久化私聊创建和建房前的本地消息。
+- 群组：独立群目录、成员分页、建群与取消恢复、加入/移除/退出、公告、角色/权限、转让/解散、置顶、邀请与审批、禁言和管理员移除。
+- 子服务保留原命令身份、修订、确认期限和持久化恢复算法；共享门面统一安排执行器、准备任务和观察生命周期，不改变 HTTP/TLS 协议。
+- 每个调用者独立持有游标和观察订阅。关闭一个订阅不会关闭其他窗口；账号关闭后旧门面拒绝调用，取消并等待查询、准备任务、订阅生产者及注入的查询协调器清理完成，再释放数据库。
+
+生产 iOS 的联系人数据源、群目录/设置和业务适配器均注入这些门面；内部旧构造入口继续支持既有测试。原有五个 SDK 模块的公开符号保持兼容，尚未执行底层公开 API 收窄。资料展示/备注、头像、资源传输和偏好服务仍有独立业务入口，本阶段未将它们全部并入联系人/群组门面。
+
+真实后端与设备范围见 [第十七阶段验收](../experiments/swift-desktop/verification/phase17/RESULTS.md)。macOS 的原生宿主验收不代表桌面 App 或分发验收，Windows 平台缺口保持不变。
+
+## 统一资料、头像和资源业务门面（第十八阶段）
+
+`V2SharedSession.profiles(for:accountID:presentations:names:)` 与 `resources(for:accountID:library:uploads:downloads:groupAvatars:)` 按账号数据库持有服务；这些参数属于平台组合入口，页面从已组合的服务取业务能力。iOS 使用原生 Swift，Android 的 Swift 绑定转换请求与值，Kotlin 不实现业务规则。
+
+- `V2ProfileService` 统一资料授权展示、投影查询、联系人备注和群昵称；`ownProfile()` 提供自身资料及头像持久化命令。每个页面持有独立 activation，关闭一个页面不会结束其他页面。原有修订冲突、展示租约和头像授权失效规则保留。
+- `V2ResourceService` 统一上传准备、附件消息冻结、准备完成后的发送交接、取消发送、下载和授权头像字节读取。`library`、`uploads`、`downloads` 是复用现有实现的业务子服务，负责资源目录、存储策略、传输恢复和缓存；没有重复实现网络或文件持久化。
+- `resources.groupAvatars` 将原 iOS 群头像的授权、修订、资源复用、持久化命令及失败处理迁入共享层。iOS 适配器只转换页面值；Android 调用同一服务。
+- iOS 的 URLSession 后台上传下载协调器、文件选择和图片处理仍由平台层注入，原有账号恢复循环继续驱动任务。账号关闭会取消并排空业务操作及观察者，然后关闭传输、缓存和数据库；旧服务句柄不能跨账号复用。
+
+既有 SDK 五个模块的 6,079 条公开符号记录继续保持兼容；这不是新增 6,079 个业务接口。新增共享门面清单独立记录。本阶段没有收窄旧公开符号，也没有宣称所有业务已完成迁移。验收与平台边界见 [第十八阶段记录](../experiments/swift-desktop/verification/phase18/RESULTS.md)。

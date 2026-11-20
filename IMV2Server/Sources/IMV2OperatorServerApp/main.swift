@@ -156,6 +156,8 @@ enum IMV2OperatorServerApp {
                 forwardReplayStores[storage.shardID] = PostgresV2ForwardWorkReplayStore(database: ownerDatabase)
                 roomDatabases[storage.shardID] = ownerDatabase
             }
+            try await V2FixedShardSources.verify(control: database, rooms: configuration.roomShardStorage,
+                users: configuration.userShardStorage) { shardDatabasesByURL[$0] }
             // Queue replay remains local; policy changes use the authenticated
             // caller only when owner authorization is configured.
             stage = "operator_policy_caller"

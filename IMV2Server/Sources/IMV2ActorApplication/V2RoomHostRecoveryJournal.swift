@@ -40,6 +40,33 @@ package final class V2RoomHostRecoveryJournal: Sendable {
             validate: { _ = try decode($0, supervisorID: supervisorID, hostIDs: hostIDs) })
         return .init(file: file, supervisorID: supervisorID, hostIDs: hostIDs)
     }
+    /// Explicit maintenance command. Normal startup always checks the exact roster.
+    package static func reconfigure(at path: URL, supervisorID: V2ActorServiceID,
+                                    hostIDs: Set<V2ActorHostID>, pool: NIOThreadPool) async throws -> V2RoomHostRecoveryJournal {
+        guard !hostIDs.isEmpty, hostIDs.count <= maximumHosts else { throw V2RoomHostRecoveryJournalError.invalidState }
+        let file = try await V2ActorDurableFileStorage.open(at: path, maximumBytes: maximumBytes, pool: pool,
+            validate: { _ in }) // The locked update validates the previous scope and checksum before writing.
+        do {
+            try await file.update { bytes in
+                let envelope = try Im_Actor_V1_RoomHostRecoveryJournalFile(serializedBytes: bytes)
+                let payload = try Im_Actor_V1_RoomHostRecoveryJournal(serializedBytes: envelope.journal)
+                let prior = Set(try payload.hostIds.map { try V2ActorHostID($0) })
+                var journal = try decode(bytes, supervisorID: supervisorID, hostIDs: prior)
+                guard journal.operations.allSatisfy({ $0.completed }) else {
+                    throw V2RoomHostRecoveryJournalError.pendingIncarnation
+                }
+                if prior == hostIDs { return (nil, ()) }
+                let retained = Set(hostIDs.map(\.rawValue))
+                journal.operations.removeAll { !retained.contains($0.hostID) }
+                journal.hostIds = retained.sorted()
+                return (try encode(journal), ())
+            }
+            return .init(file: file, supervisorID: supervisorID, hostIDs: hostIDs)
+        } catch {
+            try await file.close()
+            throw error
+        }
+    }
     package func existingOperation(for host: V2ActorHostIdentity) async throws -> UUID? {
         try await file.update { [supervisorID, hostIDs] bytes in
             guard hostIDs.contains(host.hostID) else { throw V2RoomHostRecoveryJournalError.invalidState }

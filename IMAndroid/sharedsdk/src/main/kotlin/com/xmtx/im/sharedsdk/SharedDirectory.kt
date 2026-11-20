@@ -39,5 +39,5 @@ internal fun decodeDirectory(value: JSONObject, startedAt: Long): SharedDirector
             SharedRolePolicy(role(it.getString("role")), permissions(it.getJSONArray("permissions")), it.getLong("revision"))
         }, permissions(group.getJSONArray("permissions")), group.getBoolean("policiesReady")) },
     value.getJSONArray("works").rows { SharedWork(it.getString("id"), it.getString("kind"), it.getString("target"), it.getString("status"), it.getBoolean("retryable"), it.optString("roomID").takeIf(String::isNotEmpty)) },
-    value.optString("failure").takeIf(String::isNotEmpty)?.let { raw -> SharedError.entries.firstOrNull { it.name.equals(raw, true) } ?: SharedError.OperationFailed },
+    value.optString("failure").takeIf(String::isNotEmpty)?.let(::decodeSharedError),
     decodeProfiles(value.getJSONArray("profiles"), startedAt), value.optString("selectedProfile").takeIf(String::isNotEmpty), value.optJSONObject("community")?.let(::decodeCommunity), value.optJSONObject("avatarEditor")?.let { decodeAvatarEditor(it, startedAt) })

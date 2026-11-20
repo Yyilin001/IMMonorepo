@@ -94,17 +94,19 @@ assert_scalar() {
 # remote-device security metadata. Counts include views and application-only
 # triggers; retired ledgers must remain absent rather than be recreated.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '176'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '177'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '377'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '383'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '65'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '66'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '42'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '43'
 
 # A same-named trigger function is not enough: replacing its body must fail
 # readiness, as must a nullable ready-variant constraint or a weakened replay key.
 for drift in \
+  "DROP TABLE im_v2.deployment_shard_sources;" \
+  "ALTER TABLE im_v2.user_shard_router_configuration DROP COLUMN fixed_buckets CASCADE;" \
   "ALTER TABLE im_v2.group_join_requests DISABLE TRIGGER group_join_review_authority;" \
   'CREATE OR REPLACE FUNCTION im_v2.advance_group_join_review_authority() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$;' \
   "DROP TABLE im_v2.author_presentation_control_changes;" \
@@ -119,7 +121,7 @@ for drift in \
   "ALTER TABLE im_v2.public_profile_update_outbox ALTER COLUMN publication_sequence DROP NOT NULL;" \
   "ALTER TABLE im_v2.public_profile_update_outbox DROP CONSTRAINT public_profile_update_outbox_publication_sequence_key;" \
   'CREATE OR REPLACE FUNCTION im_v2.sequence_public_profile_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;' \
-  "DROP TABLE im_v2.mention_push_wake_intents;" \
+  "CREATE TABLE im_v2.mention_push_wake_intents (obsolete boolean);" \
   "ALTER TABLE im_v2.push_wake_outbox ADD FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);" \
   "DROP INDEX im_v2.account_password_login_rate_limits_cleanup_idx;" \
   "DROP TABLE im_v2.message_edit_visibility;" \

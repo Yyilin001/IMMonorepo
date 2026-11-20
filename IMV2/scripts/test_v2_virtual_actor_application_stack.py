@@ -29,7 +29,7 @@ from v2_native_placement_inspection import inspect_placement, room_placement, re
 
 PROBE_SEND_DEADLINE_MS = str(int(time.time() * 1000) + 86_400_000)
 ROOT = Path(__file__).resolve().parents[2]
-IMAGE = "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6"
+IMAGE = "swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144"
 PRODUCTS = ["IMV2AccountServerApp", "IMV2ServerApp", "IMV2OperatorServerApp", "IMV2LocalGatewayProbe", "IMV2PlacementControlApp"]
 PLACEMENT_VOTERS = ["placement-a", "placement-b", "placement-c"]
 PRODUCT_INPUTS = ["IMV2Server/Sources", "IMV2Server/Vendor", "IMV2Server/Package.swift",

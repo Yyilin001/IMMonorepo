@@ -37,7 +37,7 @@ final class V2ConversationDetailStore {
     private let messageForwarder: (any V2MessageForwarding)?
     let forwardTargets: [V2ConversationForwardTarget]
     private let groupAvatarManager: (any V2GroupAvatarManaging)?
-    private let nameOperations: V2NameOperationService?
+    private let nameOperations: V2ProfileNameService?
     private let userID: String
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let resourceSender: (any V2DurableConversationSending)?

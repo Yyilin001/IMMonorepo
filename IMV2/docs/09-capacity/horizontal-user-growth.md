@@ -27,7 +27,9 @@ python3 IMV2/scripts/run_v2_multiserver_capacity.py \
 
 这里确认的是指定活跃度下的已测用户规模，不能将用户配置增加 8 倍写成容量增加 8 倍。用户容量上限需要逐档提高 `--users-per-node`，并始终保持相同 `--rate-per-node / --users-per-node` 比值。共享物理宿主机的 VM 结果单独注明；真实服务器的容量增长需在独立机器上复测。
 
-## 在线扩容
+## 历史在线扩容记录
+
+以下命令对应历史版本。当前版本采用停机调整固定名单，操作见[节点管理手册](../10-operations/room-host-supervision.md)。
 
 在线扩容另用 `run_v2_multiserver_case.py` 已有的连续增长流程：
 
@@ -68,7 +70,7 @@ python3 IMV2/scripts/run_v2_multiserver_case.py \
 | 1 | 1200 | 150 | 44 / 42 ms | 44 / 43 ms | 两轮均通过 |
 | 2 | 2400 | 300 | 39 / 40 ms | 41 / 41 ms | 两轮均通过 |
 
-四轮全部消息确认、前台视图追平，无业务失败。双节点首轮实测各有 1200 个连接，活跃房间为 1211/1189；新增服务器实际承担了连接和房间工作。四轮独立完整性检查及冻结输入摘要核对通过。证据位于工作区外 `/Users/yyl/Desktop/IMV2-Retirement-Fix-20261019/horizontal-user-growth-smoke-1`，包括 `user-growth.md`、`independent-campaign-validation.json` 和各轮 `horizontal-growth-distribution.json`。
+四轮全部消息确认、前台视图追平，无业务失败。双节点首轮实测各有 1200 个连接，活跃房间为 1211/1189；新增服务器实际承担了连接和房间工作。四轮独立完整性检查及冻结输入摘要核对通过。证据位于工作区外 `/Users/yyl/Desktop/IMV2-Archive/IMV2-Retirement-Fix-20261019/horizontal-user-growth-smoke-1`，包括 `user-growth.md`、`independent-campaign-validation.json` 和各轮 `horizontal-growth-distribution.json`。
 
 这是新入口的短周期运行验证，不替代默认 600 秒系列、容量上限搜索或真实独立服务器上的扩容效率测量。
 
@@ -85,7 +87,7 @@ python3 IMV2/scripts/run_v2_multiserver_case.py \
 
 合计 2700000 条测量消息全部确认并被接收端应用，八轮均无业务失败、漏心跳、缺失或落后视图。每台实测均有 1200 个连接，新增业务节点实际承担房间工作。八轮原始报告、完整运行包清单及冻结输入摘要已独立核验通过；业务程序保持同一版本，迁移脚本精简在本系列完成并核验之后才应用。
 
-证据位于 `/Users/yyl/Desktop/IMV2-Retirement-Fix-20261019/horizontal-user-growth-confirmation-1` 的 `user-growth.md`、`independent-campaign-validation.json` 和各轮原始报告。以上仅证明共享物理宿主机上这些已测负载，尚未测出用户容量上限或容量扩展效率；在线扩容结果见下文。
+证据位于 `/Users/yyl/Desktop/IMV2-Archive/IMV2-Retirement-Fix-20261019/horizontal-user-growth-confirmation-1` 的 `user-growth.md`、`independent-campaign-validation.json` 和各轮原始报告。以上仅证明共享物理宿主机上这些已测负载，尚未测出用户容量上限或容量扩展效率；在线扩容结果见下文。
 
 ## 优化后的在线增长结果
 
@@ -101,4 +103,4 @@ python3 IMV2/scripts/run_v2_multiserver_case.py \
 
 八组用户的共同正式测量窗口为 3230.624 秒。5880150 条测量消息全部确认并被对端应用，9600 个最终前台视图全部追平数据库消息头，无业务失败或漏心跳。对端应用延迟 P99 为 70 毫秒，最大值为 13254.17 毫秒，本轮仍存在接收长尾；该指标测量模拟客户端连续应用消息正文，不包含 UI 渲染。816 个远程进程正常退出，无强制终止或退出失败。
 
-原始报告、三阶段成员与迁移证据、最终视图、2439 个冻结输入及完整运行包清单已独立核验通过。证据位于 `/Users/yyl/Desktop/IMV2-Retirement-Fix-20261019/horizontal-online-growth-optimized-3` 的 `independent-online-growth-validation.json`、`assessment.json` 和 `run/candidate`。各 VM 共享同一物理宿主机；本轮证明正常在线扩容和这些已测负载，用户容量上限、独立物理服务器的容量扩展效率仍需另行测量。
+原始报告、三阶段成员与迁移证据、最终视图、2439 个冻结输入及完整运行包清单已独立核验通过。证据位于 `/Users/yyl/Desktop/IMV2-Archive/IMV2-Retirement-Fix-20261019/horizontal-online-growth-optimized-3` 的 `independent-online-growth-validation.json`、`assessment.json` 和 `run/candidate`。各 VM 共享同一物理宿主机；本轮证明正常在线扩容和这些已测负载，用户容量上限、独立物理服务器的容量扩展效率仍需另行测量。

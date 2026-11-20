@@ -98,6 +98,7 @@ public struct V2ProtobufMessageSendOperationClient: V2MessageSendRealtimeClient 
                 throw V2MessageSendTransportError.retryAfter(Date().addingTimeInterval(max(0.5, TimeInterval(error.retryAfterSeconds))))
             }
             if error.code == "UNAUTHENTICATED" { throw V2MessageSendTransportError.authenticationRequired }
+            if error.code == "UNSUPPORTED_VERSION" { throw V2MessageSendTransportError.unsupportedCapability }
             throw V2MessageSendTransportError.invalidResponse
         }
         guard case .messageSendOperationResult(let wire)? = response.body else {

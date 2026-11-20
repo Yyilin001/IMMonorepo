@@ -72,8 +72,10 @@ actor V2GRDBContactsDataSource: V2ContactsReading, V2ContactsWindowReading {
     private let localStore: GRDBV2LocalSyncStore
     private let profiles: V2ProfileRepository
     private let currentUserID: UserID
+    private let business: V2ContactService?
 
-    init(localStore: GRDBV2LocalSyncStore, profiles: V2ProfileRepository, currentUserID: UserID) {
+    init(localStore: GRDBV2LocalSyncStore, profiles: V2ProfileRepository, currentUserID: UserID, business: V2ContactService? = nil) {
+        self.business = business
         self.localStore = localStore
         self.profiles = profiles
         self.currentUserID = currentUserID
@@ -86,6 +88,10 @@ actor V2GRDBContactsDataSource: V2ContactsReading, V2ContactsWindowReading {
         limit: Int,
         includeTotalCount: Bool
     ) async throws -> V2ContactProjectionPage {
+        if let business {
+            return try await projectionPage(business.page(scope: sharedScope(scope), matching: query,
+                before: cursor, limit: limit, includeTotalCount: includeTotalCount))
+        }
         let clientScope: V2ClientRelationshipPageScope = switch scope {
         case .friends: .accepted
         case .incomingRequests: .incomingRequests(currentUserID: currentUserID)
@@ -102,6 +108,12 @@ actor V2GRDBContactsDataSource: V2ContactsReading, V2ContactsWindowReading {
     }
 
     func contactProjectionWindow(scope: V2ContactProjectionPageScope, matching query: String?, around anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow {
+        if let business {
+            let window = try await business.window(scope: sharedScope(scope), matching: query, around: anchor, limit: limit, precedingCount: precedingCount)
+            let page = try await projectionPage(window.page)
+            let total = includeTotalCount ? try await business.page(scope: sharedScope(scope), matching: query, limit: 1, includeTotalCount: true).totalCount : nil
+            return .init(page: .init(projections: page.projections, nextCursor: page.nextCursor, totalCount: total), anchorID: window.anchor?.targetUserID.rawValue, hasEarlier: window.hasEarlier)
+        }
         let clientScope: V2ClientRelationshipPageScope = switch scope {
         case .friends: .accepted
         case .incomingRequests: .incomingRequests(currentUserID: currentUserID)
@@ -111,6 +123,10 @@ actor V2GRDBContactsDataSource: V2ContactsReading, V2ContactsWindowReading {
         let page = try await projectionPage(window.page)
         let total = includeTotalCount ? try await localStore.relationshipPage(scope: clientScope, matching: query, limit: 1, includeTotalCount: true).totalCount : nil
         return .init(page: .init(projections: page.projections, nextCursor: page.nextCursor, totalCount: total), anchorID: window.anchor?.targetUserID.rawValue, hasEarlier: window.hasEarlier)
+    }
+
+    private func sharedScope(_ scope: V2ContactProjectionPageScope) -> V2ContactListScope {
+        switch scope { case .friends: .friends; case .incomingRequests: .incomingRequests; case .outgoingRequests: .outgoingRequests }
     }
 
     private func projectionPage(_ page: V2ClientRelationshipPage) async throws -> V2ContactProjectionPage {
@@ -226,7 +242,8 @@ final class V2ContactsStore {
         directConversationOpener: any V2DirectConversationOpening,
         currentUserID: UserID,
         projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
-        nameOperations: V2NameOperationService? = nil
+        nameOperations: V2NameOperationService? = nil,
+        profileNames: V2ProfileNameService? = nil
     ) {
         self.dataSource = dataSource
         windowReader = dataSource as? any V2ContactsWindowReading
@@ -236,10 +253,10 @@ final class V2ContactsStore {
         self.directConversationOpener = directConversationOpener
         self.currentUserID = currentUserID
         self.projectionChangeNotifier = projectionChangeNotifier
-        self.nameOperations = nameOperations
+        self.nameOperations = profileNames ?? nameOperations.map { V2ProfileNameService(service: $0) }
     }
 
-    private let nameOperations: V2NameOperationService?
+    private let nameOperations: V2ProfileNameService?
     func nameEditor(for item: V2ContactListItem) -> V2NameEditorStore? {
         guard canUseContactActions, item.relationship == .friend, let nameOperations else { return nil }
         return .init(target: .contact(item.userID), service: nameOperations)

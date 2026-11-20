@@ -67,6 +67,17 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
         return result
     }
+    package func policyPressure(endpoint: String, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2PolicyDirectoryPressure {
+        let response = try await exchange(.policyPressure(endpoint: endpoint), on: host,
+            principal: .service, deadline: deadline, roomToken: nil)
+        if case .failure(let failure) = response { throw failure }
+        guard case .policyPressure(let value) = response, value.owners >= 0, value.inFlight >= 0 else {
+            throw V2ActorAuthenticationError.invalidRequest
+        }
+        return value
+    }
+
     package func mutatePolicy(_ mutation: V2PolicyMutationWire, on host: V2ActorHostIdentity,
         deadline: ContinuousClock.Instant) async throws -> V2PolicyMutationReceiptWire {
         let response = try await exchange(.mutatePolicy(mutation), on: host,
@@ -146,6 +157,11 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     private var pendingReservationHosts: [UUID: V2ActorHostIdentity] = [:]
     private var uncertainReservationSlots: [UUID: ContinuousClock.Instant] = [:]
     private var dispatchedCalls: [UUID: DispatchedCall] = [:]
+    private var localSendDispatches: UInt64 = 0
+    private var remoteSendDispatches: UInt64 = 0
+    private var sendReferenceEvictions: UInt64 = 0
+    private var unsentMessageSubmits: UInt64 = 0
+    private var unsentMessageRecoveries: UInt64 = 0
     private var cachedLocalCalls: UInt64 = 0
     private var cachedRemoteCalls: UInt64 = 0
     private var roomLookups: UInt64 = 0
@@ -348,13 +364,19 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     }
 
     public func callMetricsSnapshot() -> V2RoomTransportCallMetricsSnapshot {
-        .init(cachedLocalCalls: cachedLocalCalls, cachedRemoteCalls: cachedRemoteCalls,
+        var result = V2RoomTransportCallMetricsSnapshot(cachedLocalCalls: cachedLocalCalls, cachedRemoteCalls: cachedRemoteCalls,
               roomLookups: roomLookups, roomInvocations: roomInvocations,
               referenceMisses: referenceMisses, hostRecoveryProbes: hostRecoveryProbes,
               hostRecoveryWaits: hostRecoveryWaits, activeHostRecoveries: recoveryProbes.count,
               recoveryStages: recoveryStageSnapshots(), batchCallerTimeouts: batchCallerTimeouts,
               batchCallerCancellations: batchCallerCancellations, batchRejectedGlobal: batchRejectedGlobal,
               batchRejectedPeer: batchRejectedPeer)
+        result.localSendDispatches = localSendDispatches
+        result.remoteSendDispatches = remoteSendDispatches
+        result.sendReferenceEvictions = sendReferenceEvictions
+        result.unsentMessageSubmits = unsentMessageSubmits
+        result.unsentMessageRecoveries = unsentMessageRecoveries
+        return result
     }
 
     public func sessionCount() -> Int { sessions.count }
@@ -863,6 +885,10 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
               !suspendedHosts.contains(host) || permittedSuspendedCleanup else {
             throw V2RoomCallFailure.notAccepted(.staleActivation)
         }
+        let messageOperation: Bool = switch request {
+        case .invoke(_, .messaging(.sendOperation)), .invoke(_, .messaging(.recoverSendOperation)): true
+        default: false
+        }
         let transportReply: TransportReply
         sendTrace?.mark("rpc_transport_dispatch")
         sendTrace?.mark(isLocal ? "rpc_transport_local" : "rpc_transport_remote")
@@ -907,7 +933,9 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                 }
                 transportReply = try await boundedDispatch(deadline: deadline, request: request,
                                                            host: host, cached: requireCachedReference || requireCachedLocal, local: isLocal) {
-                    let reply = try await IMRemoteCall.with(timeout: timeout) { try await actor.exchange(packet) }
+                    let reply = try await IMRPCAdmission.$usesMessageWindow.withValue(messageOperation) {
+                        try await IMRemoteCall.with(timeout: timeout) { try await actor.exchange(packet) }
+                    }
                     sendTrace?.mark("rpc_remote_return")
                     return .signed(reply)
                 }
@@ -927,13 +955,17 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                     return .signed(reply)
                 }
             }
+        } catch let refusal as IMRPCAdmission.Refusal {
+            if case .invoke(_, .messaging(.sendOperation)) = request { unsentMessageSubmits &+= 1 }
+            if case .invoke(_, .messaging(.recoverSendOperation)) = request { unsentMessageRecoveries &+= 1 }
+            throw V2RoomCallFailure.notAccepted(refusal.reason == .peerFrame ? .invalidRequest : .overloaded)
         } catch let failure as V2RoomCallFailure {
             if failure == .outcomeUnknown {
                 logSendFailure(failure, request: request, stage: "dispatch", local: isLocal,
                                deadline: deadline)
             }
             if failure == .outcomeUnknown, !Task.isCancelled {
-                noteTransportFailure(reference: reference, host: host,
+                noteTransportFailure(request: request, reference: reference, host: host,
                     descriptorGeneration: generation, recoveryRevision: recoveryRevision)
             }
             throw failure
@@ -951,8 +983,13 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
             }
             // 激活也会写入租约。任一可写 RPC 开始后，
             // 网络故障都不能证明它没有提交。
+            // A busy actor connection gives no evidence that the cached room moved.
+            if reference != nil, messageOperation,
+               underlying as? IMActorError == .overloaded {
+                throw transportFailure(for: request)
+            }
             if !(underlying is V2ActorAuthenticationError), !Task.isCancelled {
-                noteTransportFailure(reference: reference, host: host,
+                noteTransportFailure(request: request, reference: reference, host: host,
                     descriptorGeneration: generation, recoveryRevision: recoveryRevision)
             }
             throw transportFailure(for: request)
@@ -1014,8 +1051,24 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         if let authentication = underlying as? V2ActorAuthenticationError {
             return "authentication_" + String(describing: authentication)
         }
-        if underlying as? IMActorError == .unknownActor { return "unknown_actor" }
-        if underlying is IMActorError { return "remote_call" }
+        if let actorError = underlying as? IMActorError {
+            switch actorError {
+            case .malformed: return "malformed"
+            case .incompatibleProtocol: return "incompatible_protocol"
+            case .unknownMethod: return "unknown_method"
+            case .unknownActor: return "unknown_actor"
+            case .staleIncarnation: return "stale_incarnation"
+            case .overloaded: return "overloaded"
+            case .deadlineExceeded: return "deadline_exceeded"
+            case .cancelled: return "actor_cancelled"
+            case .connectionLost: return "connection_lost"
+            case .shuttingDown: return "shutting_down"
+            case .remoteFailure: return "remote_failure"
+            case .forbidden: return "forbidden"
+            case .invalidConfiguration: return "invalid_configuration"
+            case .registrationComplete: return "registration_complete"
+            }
+        }
         if underlying is CancellationError { return "cancelled" }
         if let failure = underlying as? V2RoomCallFailure {
             switch failure {
@@ -1089,6 +1142,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         let tracePrefix: String
         switch request {
         case .invoke(_, .messaging(.sendOperation(_))):
+            if local { localSendDispatches &+= 1 } else { remoteSendDispatches &+= 1 }
             sendTrace = V2SendPathTrace.current; tracePrefix = "rpc"
         case .policySnapshots:
             sendTrace = V2SendPathTrace.current; tracePrefix = "policy_rpc"
@@ -1613,13 +1667,16 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         physicalReferences.remove(snapshot.token)
     }
 
-    private func noteTransportFailure(reference: ReferenceSnapshot?, host: V2ActorHostIdentity,
+    private func noteTransportFailure(request: V2ActorRPCRequest, reference: ReferenceSnapshot?, host: V2ActorHostIdentity,
                                       descriptorGeneration: UInt64, recoveryRevision: UInt64) {
         if let reference {
             // A room proxy failure says nothing about other rooms on its host.
             // This is routing eviction, not revocation of already captured calls.
             guard referenceGenerations[reference.token] == reference.generation else { return }
-            physicalReferences.remove(reference.token)
+            let removed = physicalReferences.remove(reference.token)
+            if removed, case .invoke(_, .messaging(.sendOperation)) = request {
+                sendReferenceEvictions &+= 1
+            }
             if pendingReferenceInstalls[reference.token] != nil { advanceReferenceGeneration(reference.token) }
             else { referenceGenerations.removeValue(forKey: reference.token) }
         } else {

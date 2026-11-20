@@ -91,7 +91,7 @@ if [[ ! -d "${actor_configuration_directory}" ]]; then
     --placement-voter placement-a=placement-a:7336 \
     --placement-voter placement-b=placement-b:7336 \
     --placement-voter placement-c=placement-c:7336 \
-    --shards rooms-primary --user-buckets users-primary --mount-root /run/im-v2-room-actor \
+    --shards rooms-primary,rooms-01 --user-buckets users-primary,users-01 --mount-root /run/im-v2-room-actor \
     --policy-partitions 16
 fi
 python3 "${script_dir}/validate_v2_local_policy_configuration.py" "${actor_configuration_directory}"
@@ -184,14 +184,16 @@ v2_seed_local_admission_pool
 # be recovered explicitly; restarting must never erase a voter's history.
 placement_files=0
 for voter in placement-a placement-b placement-c; do
-  [[ ! -e "${actor_configuration_directory}/${voter}/placement/0.pb" ]] || placement_files=$((placement_files + 1))
+  for slot in 0 1; do
+    [[ ! -e "${actor_configuration_directory}/${voter}/placement/${slot}.pb" ]] || placement_files=$((placement_files + 1))
+  done
 done
 if [[ "${placement_files}" == 0 ]]; then
   for voter in placement-a placement-b placement-c; do
     compose run --rm --no-deps "${voter}" \
       /workspace/IMV2Server/.build/release/IMV2PlacementControlApp --provision
   done
-elif [[ "${placement_files}" != 3 ]]; then
+elif [[ "${placement_files}" != 6 ]]; then
   printf 'Incomplete placement control history; restore the missing voter before starting this stack.\n' >&2
   exit 1
 fi

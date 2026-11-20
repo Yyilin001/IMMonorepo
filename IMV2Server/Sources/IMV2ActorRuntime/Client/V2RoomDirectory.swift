@@ -388,10 +388,11 @@ public actor V2RoomDirectory {
                                       deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
         var lastFailure: V2RoomCallFailure = .notAccepted(.unavailable)
         var forceRecovery = false
+        var sendOutcomeUnknown = false
         for attempt in 0..<configuration.maximumResolveAttempts {
-            try checkDeadline(deadline)
             var installed = cache[request.roomID]
             do {
+                try checkDeadline(deadline)
                 if !forceRecovery, let cached = installed, cached.admission() {
                     cache.record(.cachedCall)
                     V2SendPathTrace.current?.mark("directory_cached_dispatch")
@@ -425,9 +426,13 @@ public actor V2RoomDirectory {
                 }
             } catch {
                 let failure = error as? V2RoomCallFailure ?? .outcomeUnknown
-                lastFailure = failure
+                if case .messaging(.sendOperation) = request, failure == .outcomeUnknown {
+                    sendOutcomeUnknown = true
+                }
+                // A later refusal only establishes what happened to that single attempt.
+                lastFailure = sendOutcomeUnknown ? .outcomeUnknown : failure
                 switch failure.retryAction(policy: request.replayPolicy, hasStableOperationID: request.hasStableOperationID) {
-                case .returnFailure, .reconcile: throw failure
+                case .returnFailure, .reconcile: throw lastFailure
                 case .refreshLocation:
                     forceRecovery = true
                     switch failure {
@@ -442,7 +447,8 @@ public actor V2RoomDirectory {
                 }
                 if attempt + 1 < configuration.maximumResolveAttempts {
                     cache.record(.recoveryWait)
-                    try await clock.sleep(until: min(deadline, clock.now + .milliseconds(100)))
+                    do { try await clock.sleep(until: min(deadline, clock.now + .milliseconds(100))) }
+                    catch where sendOutcomeUnknown { throw V2RoomCallFailure.outcomeUnknown }
                 }
             }
         }

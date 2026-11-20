@@ -257,7 +257,6 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
         let publisher = V2ActorRealtimePublisher(interests: coordinator, fanout: fanout, topic: topic)
         let userInterests = V2SharedGroupEventWakeInterests(underlying: UserInterests(publisher: publisher))
         let stop: @Sendable () async -> Bool = {
-            guard await actors.stopMembershipUpdates(deadline: .now + .seconds(60)) else { return false }
             var success = true
             shutdownLogger.notice("Realtime component drain started", metadata: ["stage": "room_delivery"])
             await actorFactory?.shutdownRoomSubscriptionDelivery()
@@ -284,7 +283,6 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             await journal.start()
             try await control.start()
             try await coordinator.start()
-            try await actors.startMembershipUpdates()
         } catch {
             await userInterests.shutdown(); await coordinator.shutdown()
             await fanout.shutdown(); await ingress.shutdown()

@@ -33,7 +33,8 @@ struct GatewayProjectionAssembly {
         let deliveryUserShardStorage = topology.deliveryUserShardStorage
         let maintenanceUserShardStorage = topology.maintenanceUserShardStorage
         let userShardRouter = V2PostgresUserShardRouter(database: database)
-        try await userShardRouter.bootstrap(defaultRoute: configuration.userShardRoute)
+        try await userShardRouter.bootstrap(defaultRoute: configuration.userShardRoute,
+            fixedBuckets: configuration.userShardStorage.count > 1 ? configuration.userShardStorage.map(\.bucket) : [])
         let deploymentUserRouter = try await V2StaticUserShardRouter.load(database: database)
         let deliveryUserShardRouter = V2PostgresUserShardRouter(database: deliveryDatabase)
         let maintenanceUserShardRouter = V2PostgresUserShardRouter(

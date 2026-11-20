@@ -60,13 +60,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     private let placement: V2RoomActorPlacementRuntime
     private let placementShards: Set<String>
     private let transferShards: Set<String>
-    private var placementPeers: [V2RoomDiscoveryPeer]
-    private let configuredRoomScopes: [V2ActorHostID: Set<String>]
-    private var roomMembershipSource: V2ActorMembershipSource?
-    private var roomMembershipConfirmed = true
-    private var roomMembershipRevision: UInt64?
-    private let serviceMembershipShard: String?
-    private var membershipSource: V2ActorMembershipSource?
+    private let placementPeers: [V2RoomDiscoveryPeer]
     private var creatingRealtimeTransport = false
     private let placementRefresh: Task<Void, Never>
     private let qualificationChanged: @Sendable () async -> Void
@@ -82,7 +76,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                  qualificationChanged: @escaping @Sendable () async -> Void,
                  serviceQualification: V2ActorServiceQualification?,
                  realtimeDiscoveryPeers: [V2RealtimeShardDiscoveryPeer],
-                 serviceMembershipShard: String?, configuredRoomScopes: [V2ActorHostID: Set<String>],
                  metrics: @escaping @Sendable () async -> V2RoomRuntimeMetricsSnapshot) {
         self.policyPlacement = policyPlacement
         self.forwardPairs = forwardPairs
@@ -98,7 +91,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         self.placementShards = placementShards
         self.transferShards = transferShards
         self.placementPeers = placementPeers
-        self.configuredRoomScopes = configuredRoomScopes
         self.placementRefresh = Task {
             while !Task.isCancelled {
                 do {
@@ -115,8 +107,34 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         self.qualificationChanged = qualificationChanged
         self.serviceQualification = serviceQualification
         self.realtimeDiscoveryPeers = realtimeDiscoveryPeers
-        self.serviceMembershipShard = serviceMembershipShard
         self.metrics = metrics
+    }
+
+    package func probePolicyOwners(deadline: ContinuousClock.Instant) async throws -> V2AdminPolicyObservation {
+        guard let policyPlacement else { throw V2RoomActorApplicationError.invalidRole }
+        var closed = false, owners = 0, operations = 0
+        for target in policyPlacement.configuration.owners {
+            let host = try client.resolvePolicyHost(hostID: .init(uuid: target.hostID), endpoint: target.endpoint)
+            let pressure = try await client.policyPressure(endpoint: target.endpoint, on: host, deadline: deadline)
+            let (totalOwners, ownerOverflow) = owners.addingReportingOverflow(pressure.owners)
+            let (totalOperations, operationOverflow) = operations.addingReportingOverflow(pressure.inFlight)
+            guard !ownerOverflow, !operationOverflow else { throw V2RoomActorApplicationError.invalidRole }
+            owners = totalOwners; operations = totalOperations; closed = closed || pressure.closed
+        }
+        return .init(closed: closed, owners: owners, inFlight: operations)
+    }
+
+    package func probePlacement(deadline: ContinuousClock.Instant) async throws -> (shards: Int, healthy: Int, expected: Int) {
+        let committed = try await placement.committedInspections(deadline: deadline)
+        let routes = client.routingSnapshot()
+        let healthy = placementPeers.filter { peer in
+            peer.accessibleShardIDs.allSatisfy { shard in
+                guard let discovered = try? routes.resolvePolicyHost(hostID: peer.hostID, endpoint: shard),
+                      let snapshot = committed[shard]?.snapshot else { return false }
+                return snapshot.hosts.contains { !$0.retired && $0.host == discovered }
+            }
+        }
+        return (committed.count, healthy.count, placementPeers.count)
     }
 
     package func policyMutationExecutor() throws -> PostgresV2RemotePolicyMutations {
@@ -159,38 +177,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         let control = V2PlacementControlRuntime(configuration: configuration)
         do {
         let placement = try await control.start()
-        var qualification = qualification
-        var realtimePeers = configuration.realtimePeers
-        var roomDiscovery = configuration.discovery
-        let roomScopes = Dictionary(uniqueKeysWithValues: configuration.discovery.peers.map { ($0.hostID, $0.accessibleShardIDs) })
-        if let shard = configuration.serviceMembershipShard {
-            let committed = try await placement.loadServiceMembership(shard: shard)
-            try configuration.trust.validateRoomRoster(committed.roomPeers, configured: roomScopes)
-            // No static fallback: all callers start from the same certified routes.
-            roomDiscovery = try .init(peers: committed.roomPeers,
-                pollInterval: roomDiscovery.pollInterval, probeTimeout: roomDiscovery.probeTimeout,
-                failedHostGrace: roomDiscovery.failedHostGrace,
-                maximumCandidatesPerHost: roomDiscovery.maximumCandidatesPerHost,
-                maximumConcurrentProbes: roomDiscovery.maximumConcurrentProbes)
-            if let identity = configuration.hostIdentity {
-                // An authorized joining host may warm its listeners and control
-                // connection before admission. Its qualification remains nil
-                // until committed membership includes it; no static routes are
-                // installed into the shared discovery list.
-                let proposedOwn = committed.roomPeers.first(where: { $0.hostID == identity.hostID })
-                    ?? configuration.discovery.peers.first(where: { $0.hostID == identity.hostID })
-                guard let own = proposedOwn,
-                      own.serviceID == configuration.signer.serviceID, own.address == configuration.address,
-                      own.port == configuration.port, own.accessibleShardIDs == configuration.allowedShards,
-                      own.maximumRooms == configuration.runtime.maximumActiveRooms else {
-                    throw V2RoomActorApplicationConfigurationError.invalidConfiguration
-                }
-            }
-            if qualification != nil {
-                qualification = try V2ActorMembershipBootstrap.qualification(record: committed, configuration: configuration)
-            }
-            realtimePeers = committed.peers
-        }
+        let roomDiscovery = configuration.discovery
         let client: V2RoomClusterClient
         let node: Node
         let runtimeHost: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>?
@@ -272,8 +259,8 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         }
         let application = V2RoomActorApplication(policyPlacement: policyPlacement, forwardPairs: policyServices?.forwardPairs, client: client, trust: configuration.trust, callerIncarnation: client.callerIncarnation, directory: directory, reservations: reservations,
                      configuration: configuration.runtime, node: node, control: control, placement: placement, placementShards: configuration.allowedShards, transferShards: configuration.transferShardIDs, placementPeers: roomDiscovery.peers, qualificationChanged: { await runtimeHost?.qualificationDidChange() },
-                     serviceQualification: qualification, realtimeDiscoveryPeers: realtimePeers,
-                     serviceMembershipShard: configuration.serviceMembershipShard, configuredRoomScopes: roomScopes, metrics: {
+                     serviceQualification: qualification, realtimeDiscoveryPeers: configuration.realtimePeers,
+                     metrics: {
                          let location = await directory.snapshot()
                          return await .init(host: runtimeHost?.snapshot(), commands: runtimeBudget?.snapshot(),
                              cachedLocations: location.cached, pendingResolutions: location.pending,
@@ -281,14 +268,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                              directoryCalls: directory.callMetricsSnapshot(),
                              transportCalls: client.callMetricsSnapshot())
                      })
-        do { try await application.startRoomMembershipUpdates() }
-        catch {
-            let startupError = error
-            guard try await application.stop(deadline: .now + configuration.runtime.drainTimeout.duration) else {
-                throw V2RoomActorApplicationError.incompleteShutdown
-            }
-            throw startupError
-        }
         return application
         } catch {
             let startupError = error
@@ -306,7 +285,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     public func transferRoomPartition(shardID: String, partition: Int,
         expectedHost: V2ActorHostIdentity, expectedEpoch: UInt64,
         successor: V2ActorHostIdentity, transferID: UUID, originRevision: UInt64, deadline: ContinuousClock.Instant) async throws {
-        guard roomMembershipConfirmed else { throw V2RoomCallFailure.notAccepted(.unavailable) }
         guard transferShards.contains(shardID), expectedEpoch > 0, originRevision > 0,
               expectedEpoch <= V2RoomActorPlacementGrant.maximumEpoch else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
@@ -352,45 +330,15 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
 
     public func roomMembershipStatus() -> V2RoomMembershipStatus {
         let routes = client.routingSnapshot()
-        return .init(revision: roomMembershipRevision, confirmed: roomMembershipConfirmed,
+        return .init(revision: nil, confirmed: true,
             configuredHosts: Set(placementPeers.map(\.hostID)),
             healthyHosts: routes.healthyHostIDs())
     }
 
     private func authorizeRoomSuccessor(_ identity: V2ActorHostIdentity, shardID: String) throws {
-        guard roomMembershipConfirmed,
-              placementPeers.contains(where: { $0.hostID == identity.hostID && $0.accessibleShardIDs.contains(shardID) }),
+        guard placementPeers.contains(where: { $0.hostID == identity.hostID && $0.accessibleShardIDs.contains(shardID) }),
               try client.resolvePolicyHost(hostID: identity.hostID, endpoint: shardID) == identity else {
             throw V2RoomCallFailure.notAccepted(.unavailable)
-        }
-    }
-
-    private func startRoomMembershipUpdates() async throws {
-        guard let shard = serviceMembershipShard else { return }
-        let placement = placement
-        let source = V2ActorMembershipSource(load: { try await placement.loadServiceMembership(shard: shard) },
-            install: { [weak self] record in try await self?.installRoomMembership(record) },
-            suspend: { [weak self] in await self?.suspendRoomMembership() })
-        roomMembershipSource = source
-        try await source.refresh()
-        try await source.start()
-    }
-    private func installRoomMembership(_ record: V2ActorServiceMembershipRecord) async throws {
-        try trust.validateRoomRoster(record.roomPeers, configured: configuredRoomScopes)
-        roomMembershipConfirmed = false
-        switch node {
-        case .host(let host): try await host.installRoomPeers(record.roomPeers, revision: record.revision)
-        case .caller(let caller): try await caller.installRoomPeers(record.roomPeers, revision: record.revision)
-        }
-        placementPeers = record.roomPeers
-        roomMembershipRevision = record.revision
-        roomMembershipConfirmed = true
-    }
-    private func suspendRoomMembership() async {
-        roomMembershipConfirmed = false
-        switch node {
-        case .host(let host): await host.suspendRoomDiscovery()
-        case .caller(let caller): await caller.suspendRoomDiscovery()
         }
     }
 
@@ -401,7 +349,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         discoveryPeers: [V2RealtimeShardDiscoveryPeer],
         limits: V2RealtimeTransportLimits = .init(),
         serviceQualification: V2ActorServiceQualification? = nil) async throws -> V2RealtimeShardTransportHandle {
-        guard !creatingRealtimeTransport, membershipSource == nil else { throw V2RoomActorApplicationError.invalidRole }
+        guard !creatingRealtimeTransport else { throw V2RoomActorApplicationError.invalidRole }
         creatingRealtimeTransport = true
         defer { creatingRealtimeTransport = false }
         let handle: V2RealtimeShardTransportHandle
@@ -415,32 +363,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                 serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits,
                 serviceQualification: serviceQualification)
         }
-        if let shard = serviceMembershipShard {
-            let placement = placement
-            let source = V2ActorMembershipSource(load: { try await placement.loadServiceMembership(shard: shard) },
-                install: { try await handle.installCommittedMembership($0) },
-                suspend: { await handle.suspendMembershipConfirmation() })
-            membershipSource = source
-        }
         return handle
-    }
-
-    /// Activate only after the transport observer and partition controller are
-    /// installed, so a concurrent commit cannot race startup roster checks.
-    public func startMembershipUpdates() async throws {
-        guard let membershipSource else { return }
-        try await membershipSource.refresh()
-        try await membershipSource.start()
-    }
-    public func stopMembershipUpdates(deadline: ContinuousClock.Instant) async -> Bool {
-        if let roomMembershipSource {
-            guard await roomMembershipSource.stop(deadline: deadline) else { return false }
-            self.roomMembershipSource = nil
-        }
-        guard let membershipSource else { return true }
-        guard await membershipSource.stop(deadline: deadline) else { return false }
-        self.membershipSource = nil
-        return true
     }
 
     public func makeRealtimeTransport(identity: V2GatewayRealtimeIdentity,
@@ -463,16 +386,10 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
 
     public func roomRuntimeMetricsSnapshot() async -> V2RoomRuntimeMetricsSnapshot {
         let base = await metrics()
-        let room = roomMembershipStatus()
-        let realtime = serviceQualification?.membershipObservation()
-        let membership: V2RoomMembershipMetricsSnapshot? = serviceMembershipShard == nil ? nil : .init(
-            revision: room.revision, confirmed: room.confirmed,
-            configuredHosts: room.configuredHosts.count, healthyHosts: room.healthyHosts.count,
-            realtimeRevision: realtime?.revision, realtimeQualified: realtime?.qualified)
         return .init(host: base.host, commands: base.commands, cachedLocations: base.cachedLocations,
             pendingResolutions: base.pendingResolutions, activeResolutions: base.activeResolutions,
             resolutionWaiters: base.resolutionWaiters, directoryCalls: base.directoryCalls,
-            transportCalls: base.transportCalls, membership: membership)
+            transportCalls: base.transportCalls, membership: nil)
     }
 
     public func roomAuthorityInvalidations() async -> AsyncStream<Void> {
@@ -483,7 +400,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     }
 
     public func readiness() async -> Bool {
-        guard roomMembershipConfirmed else { return false }
         return switch node {
         case .host(let host): await host.readiness()
         case .caller(let caller): await caller.readiness()
@@ -493,7 +409,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     /// 返回 false 表示共享数据库和传输资源仍须保持存活。
     /// 实际操作结束后，调用方可用更晚的期限重试。
     public func stop(deadline: ContinuousClock.Instant) async throws -> Bool {
-        guard await stopMembershipUpdates(deadline: deadline) else { return false }
         await directory.drain()
         async let directoryStopped = directory.quiesce(deadline: deadline)
         let nodeStopped: Bool

@@ -8,10 +8,12 @@ import IMV2Core
 /// Business transactions still use V2UserShardRouteFencing where required.
 public struct V2StaticUserShardRouter: V2UserShardRouter {
     public let defaultRoute: V2UserShardRoute
+    private let fixedBuckets: [String]
     private let overrides: [UserID: V2UserShardRoute]
 
-    private init(defaultRoute: V2UserShardRoute, overrides: [UserID: V2UserShardRoute]) {
+    private init(defaultRoute: V2UserShardRoute, fixedBuckets: [String], overrides: [UserID: V2UserShardRoute]) {
         self.defaultRoute = defaultRoute
+        self.fixedBuckets = fixedBuckets
         self.overrides = overrides
     }
 
@@ -21,7 +23,7 @@ public struct V2StaticUserShardRouter: V2UserShardRouter {
         // A single statement gives one snapshot for both config and overrides.
         // Static deployment config changes require an explicit restart/reload.
         let rows = try await sql.raw("""
-            SELECT config.default_write_bucket AS default_bucket, config.router_epoch AS default_epoch,
+            SELECT config.default_write_bucket AS default_bucket, config.router_epoch AS default_epoch, config.fixed_buckets,
                    route.user_id::text AS user_id, route.write_bucket, route.router_epoch
             FROM im_v2.user_shard_router_configuration AS config
             LEFT JOIN im_v2.user_shard_route_overrides AS route ON TRUE
@@ -49,20 +51,28 @@ public struct V2StaticUserShardRouter: V2UserShardRouter {
             overrides[user] = try .init(bucket: row.writeBucket ?? defaultRoute.bucket,
                                         observedRouterEpoch: row.routerEpoch ?? defaultRoute.observedRouterEpoch)
         }
-        return .init(defaultRoute: defaultRoute, overrides: overrides)
+        return .init(defaultRoute: defaultRoute, fixedBuckets: first.fixedBuckets, overrides: overrides)
     }
 
     public func routes(for users: [UserID]) async throws -> [V2UserShardRoute] {
-        users.map { overrides[$0] ?? defaultRoute }
+        try users.map { user in
+            if let route = overrides[user] { return route }
+            guard !fixedBuckets.isEmpty else { return defaultRoute }
+            guard let id = UUID(uuidString: user.rawValue) else { throw V2UserShardRouterError.invalidRoute }
+            return try .init(bucket: fixedBuckets[Int(id.uuid.15) % fixedBuckets.count],
+                             observedRouterEpoch: defaultRoute.observedRouterEpoch)
+        }
     }
 
     private struct Row: Decodable {
+        let fixedBuckets: [String]
         let defaultBucket: String
         let defaultEpoch: Int64
         let userID: String?
         let writeBucket: String?
         let routerEpoch: Int64?
         enum CodingKeys: String, CodingKey {
+            case fixedBuckets = "fixed_buckets"
             case defaultBucket = "default_bucket", defaultEpoch = "default_epoch"
             case userID = "user_id", writeBucket = "write_bucket", routerEpoch = "router_epoch"
         }

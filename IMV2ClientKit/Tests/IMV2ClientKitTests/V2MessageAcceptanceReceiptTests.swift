@@ -24,6 +24,23 @@ struct V2MessageAcceptanceReceiptTests {
         let command = try command()
         #expect(throws: V2MessageSendTransportError.invalidResponse) { try decoded(command: command, fault: fault) }
     }
+    @Test func distinguishesUnsupportedVersionFromUnknownSendOutcome() throws {
+        let command = try command()
+        var response = IMV2Envelope()
+        response.error.code = "UNSUPPORTED_VERSION"
+        #expect(throws: V2MessageSendTransportError.unsupportedCapability) {
+            try V2ProtobufMessageSendOperationClient.decodeCorrelatedResponse(response,
+                identity: command.identity, fingerprint: command.fingerprint)
+        }
+        response.error.code = "UNAVAILABLE"
+        response.error.retryable = true
+        do {
+            _ = try V2ProtobufMessageSendOperationClient.decodeCorrelatedResponse(response,
+                identity: command.identity, fingerprint: command.fingerprint)
+            Issue.record("expected outcome recovery")
+        } catch V2MessageSendTransportError.retryAfter { }
+    }
+
     private func decoded(command: V2MessageSendOperationCommand, fault: String? = nil) throws -> V2MessageSendOperationRecoveryResult {
         let receipt = try V2MessageSendOperationReceipt(identity: command.identity, fingerprint: command.fingerprint,
             outcome: .accepted(.init(messageID: .init(uuid: UUID()), roomSequence: 7)), resolvedAtMilliseconds: 1_000_000)

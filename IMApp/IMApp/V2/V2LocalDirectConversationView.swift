@@ -7,7 +7,7 @@ import SwiftUI
 @MainActor @Observable
 final class V2LocalDirectConversationStore {
     let operationID: UUID
-    let service: V2DirectRoomOperationService
+    let service: V2DirectConversationService
     private let conversations: V2ConversationListStore
     private(set) var detail: V2ConversationDetailStore?
     private(set) var publicIdentity: V2PublicIdentity?
@@ -18,11 +18,14 @@ final class V2LocalDirectConversationStore {
     private var hasLoadedMessages = false
     var draft = ""
 
-    init(operationID: UUID, service: V2DirectRoomOperationService, conversations: V2ConversationListStore) {
+    init(operationID: UUID, service: V2DirectConversationService, conversations: V2ConversationListStore) {
         self.operationID = operationID
         self.service = service
         self.conversations = conversations
         publicIdentity = conversations.localDirectIdentity(for: operationID)
+    }
+    convenience init(operationID: UUID, service: V2DirectRoomOperationService, conversations: V2ConversationListStore) {
+        self.init(operationID: operationID, service: .init(service: service), conversations: conversations)
     }
     var roomID: String? {
         guard hasLoadedMessages, messages.isEmpty, case .opened(let room, _)? = request?.receipt?.outcome else { return nil }
@@ -85,7 +88,7 @@ struct V2LocalDirectConversationView: View {
     let groupInvitations: V2GroupInvitationStore?
     @Environment(\.v2UserInteractionContext) private var context
 
-    init(operationID: UUID, service: V2DirectRoomOperationService,
+    init(operationID: UUID, service: V2DirectConversationService,
          conversations: V2ConversationListStore, groupInvitations: V2GroupInvitationStore?) {
         _store = State(initialValue: .init(operationID: operationID, service: service, conversations: conversations))
         self.conversations = conversations

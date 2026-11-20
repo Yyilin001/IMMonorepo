@@ -147,6 +147,7 @@ private struct LoadConfiguration: Sendable {
     let caPath: String
     let credentialsPath: String
     let reportPath: String
+    let messageAuditMaximumRows: Int
     let connections: Int
     let localBindAddress: String?
     let bindInterfaceIndex: UInt32?
@@ -227,6 +228,7 @@ private struct LoadConfiguration: Sendable {
         self.accountBaseURL=accountBaseURL
         self.caPath = caPath
         self.credentialsPath = credentialsPath
+        self.messageAuditMaximumRows = try Self.integer(values["--message-audit-max-rows"] ?? "0", range: 0...Int.max)
         self.reportPath = reportPath
         port = try Self.integer(values["--port"] ?? "443", range: 1...65_535)
         if let expected = try? SocketAddress(ipAddress: serverName, port: port) {
@@ -403,7 +405,7 @@ private struct LoadConfiguration: Sendable {
             && maximumInFlightMessagesPerConnection == 1
             && scenario?.sendDispatch == .boundedClientQueue
             && (scenario?.maximumQueuedMessagesPerConnection ?? 0) >= 1) else { throw LoadError.invalidArguments }
-        recoveryBurstWorkers = try Self.integer(values["--recovery-burst-workers"] ?? "128", range: 1...connections)
+        recoveryBurstWorkers = try Self.integer(values["--recovery-burst-workers"] ?? String(min(128, connections)), range: 1...connections)
         recoveryBurstMaximumAttempts = try Self.integer(values["--recovery-burst-max-attempts"] ?? "1", range: 1...3)
         recoveryBurstOfflineSeconds = try Self.integer(values["--recovery-burst-offline-seconds"] ?? "0", range: 0...300)
         recoveryBurstOfflineMessagesPerRoom = try Self.integer(values["--recovery-burst-offline-messages-per-room"] ?? "0", range: 0...16)
@@ -638,7 +640,42 @@ private struct MessageSendCohortReport: Encodable {
     let messageEndToEndLatency: Percentiles
 }
 
+/// Optional fixed-budget identity ledger. All file I/O happens after the measured run.
+private final class LoadMessageAudit: @unchecked Sendable {
+    private let lock = NIOLock()
+    private let maximumRows: Int
+    private var rows = 0
+    private var incomplete = false
+    private var csv = Data("room_id,sender_user_id,client_message_id,message_id,room_sequence,outcome\n".utf8)
+
+    init(maximumRows: Int) { self.maximumRows = maximumRows }
+
+    func record(_ operation: V2MessageSendOperationCommand, accepted: V2MessageOperationAcceptance? = nil, outcome: String) {
+        let command = operation.command
+        guard let room = command.roomID.uuidValue, let sender = command.senderUserID.uuidValue,
+              let client = command.clientMessageID.uuidValue else {
+            lock.withLock { incomplete = true }
+            return
+        }
+        let line = "\(room),\(sender),\(client),\(accepted?.messageID.rawValue ?? ""),\(accepted?.roomSequence ?? 0),\(outcome)\n"
+        lock.withLock {
+            guard rows < maximumRows else { incomplete = true; return }
+            csv.append(contentsOf: line.utf8)
+            rows += 1
+        }
+    }
+
+    func write(nextTo reportPath: String) throws {
+        let data = try lock.withLock {
+            guard !incomplete else { throw LoadError.incompleteMessageAudit }
+            return csv
+        }
+        try data.write(to: URL(fileURLWithPath: reportPath + ".messages.csv"), options: .atomic)
+    }
+}
+
 private final class LoadStatistics: @unchecked Sendable {
+    let messageAudit: LoadMessageAudit?
     let visibilityRunID: UUID?
     let visibilityClockDomain: UUID?
     private let visibilityAllowedCohorts: Set<String>
@@ -649,6 +686,7 @@ private final class LoadStatistics: @unchecked Sendable {
     private var visibilityCohorts: [String: VisibilityCohort] = [:]
     private var visibilityEvents: [String: Int] = [:]
     init(configuration: LoadConfiguration) {
+        messageAudit = configuration.messageAuditMaximumRows > 0 ? LoadMessageAudit(maximumRows: configuration.messageAuditMaximumRows) : nil
         visibilityRunID = configuration.visibilityRunID
         visibilityClockDomain = configuration.visibilityClockDomain
         visibilityAllowedCohorts = Set(configuration.scenario?.phases.map(\.name) ?? [])
@@ -1570,6 +1608,7 @@ private struct LoadRun: Sendable {
         let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
         let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, messageSendCohorts: statistics.messageSendCohorts(), receiverVisibility: statistics.visibilityReport(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, receiverDrain: receiverDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
+        try statistics.messageAudit?.write(nextTo: configuration.reportPath)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -3070,6 +3109,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             operation.timer?.cancel()
             if let requestID = operation.wireRequestID { pendingRequests.removeValue(forKey: requestID) }
             messageRequestIDs.remove(operationID)
+            statistics.messageAudit?.record(operation.command, outcome: "unknown")
             statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN_CONNECTION_CLOSED")
             statistics.recordWorkloadFailure(kind: "message", code: "TCP_OUTCOME_UNKNOWN_CONNECTION_CLOSED")
         }
@@ -4074,7 +4114,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private func emitMessageAttempt(operationID: UInt64, action: MessageWireAction, context: ChannelHandlerContext) throws {
         guard let operation = messageOperations[operationID] else { return }
         guard context.channel.isActive, operation.attempts < Self.maximumMessageWireAttempts, NIODeadline.now() < operation.deadline else {
-            try finishMessage(operationID, failure: "TCP_OUTCOME_UNKNOWN_RETRY_EXHAUSTED", context: context); return
+            try finishMessage(operationID, failure: .unknown("RETRY_EXHAUSTED"), context: context); return
         }
         let requestID = takeRequestID()
         var request = IMV2Envelope()
@@ -4102,7 +4142,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
         do { try write(request, frameVersion: UInt8(benchmarkWireVersion), context: context) }
         catch {
-            try finishMessage(operationID, failure: "TCP_OUTCOME_UNKNOWN_WRITE_FAILURE", drain: false, context: context)
+            try finishMessage(operationID, failure: .unknown("WRITE_FAILURE"), drain: false, context: context)
             throw error
         }
     }
@@ -4123,6 +4163,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 let acknowledgedAt = NIODeadline.now()
                 statistics.recordMessageAcknowledged(milliseconds: (acknowledgedAt - operation.sent).millisecondsDouble,
                     endToEndMilliseconds: (acknowledgedAt - operation.scheduledAt).millisecondsDouble, scheduledAt: operation.scheduledAt)
+                statistics.messageAudit?.record(operation.command, accepted: accepted, outcome: "accepted")
                 statistics.recordMessageTransportEvent("ACCEPTED")
                 if operation.restoredAfterReconnect { statistics.recordMessageTransportEvent("RECOVERED_AFTER_RECONNECT") }
                 let roomID = operation.command.command.roomID.rawValue
@@ -4155,11 +4196,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 try drainQueuedScenarioMessages(context: context)
             case .rejected(let reason):
                 statistics.recordMessageTransportEvent("TERMINAL_REJECTED_" + reason.rawValue)
-                try finishMessage(operationID, failure: "TCP_REJECTED_" + reason.rawValue, context: context)
+                try finishMessage(operationID, failure: .failed("TCP_REJECTED_" + reason.rawValue), context: context)
             }
         case .fingerprintConflict:
             statistics.recordMessageTransportEvent("FINGERPRINT_CONFLICT")
-            try finishMessage(operationID, failure: "TCP_FINGERPRINT_CONFLICT", context: context)
+            try finishMessage(operationID, failure: .failed("TCP_FINGERPRINT_CONFLICT"), context: context)
         case .unresolved:
             statistics.recordMessageTransportEvent("UNRESOLVED")
             let expired = Date().timeIntervalSince1970 * 1_000 >= Double(operation.command.firstSubmissionDeadlineMilliseconds)
@@ -4181,8 +4222,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let now = NIODeadline.now()
         let base = now + .milliseconds(max(0, delayMilliseconds))
         let remaining = (operation.deadline - base).nanoseconds
+        // The next planned action is not proof about previous submissions. Only a
+        // permanent receipt can settle an operation whose retry budget ran out.
         guard operation.attempts < Self.maximumMessageWireAttempts, remaining > 0 else {
-            try finishMessage(operationID, failure: action == .submit ? "TCP_DEFERRED_RETRY_EXHAUSTED" : "TCP_OUTCOME_UNKNOWN_UNRESOLVED", context: context)
+            try finishMessage(operationID, failure: .retryBudgetExhausted(resubmitting: action == .submit), context: context)
             return
         }
         // Match the production policy: the server floor is the base, then
@@ -4192,7 +4235,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let window = min(ceilingNanoseconds, Double(remaining))
         let next = base + .nanoseconds(Int64(window * Double.random(in: 0...1)))
         guard next < operation.deadline else {
-            try finishMessage(operationID, failure: action == .submit ? "TCP_DEFERRED_RETRY_EXHAUSTED" : "TCP_OUTCOME_UNKNOWN_UNRESOLVED", context: context)
+            try finishMessage(operationID, failure: .retryBudgetExhausted(resubmitting: action == .submit), context: context)
             return
         }
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
@@ -4204,14 +4247,15 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    private func finishMessage(_ operationID: UInt64, failure: String?, drain: Bool = true, context: ChannelHandlerContext) throws {
+    private func finishMessage(_ operationID: UInt64, failure: V2LoadMessageFailure?, drain: Bool = true, context: ChannelHandlerContext) throws {
         guard let operation = messageOperations.removeValue(forKey: operationID) else { return }
         operation.timer?.cancel()
         if let requestID = operation.wireRequestID { pendingRequests.removeValue(forKey: requestID) }
         messageRequestIDs.remove(operationID)
         if let failure {
-            if failure.hasPrefix("TCP_OUTCOME_UNKNOWN") { statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN") }
-            statistics.recordWorkloadFailure(kind: "message", code: failure)
+            statistics.messageAudit?.record(operation.command, outcome: failure.auditOutcome)
+            if case .unknown = failure { statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN") }
+            statistics.recordWorkloadFailure(kind: "message", code: failure.code)
         }
         if drain { try drainQueuedScenarioMessages(context: context) }
     }
@@ -4701,7 +4745,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 try scheduleMessageAttempt(operationID: operationID,
                     action: code == "SERVER_BUSY" ? operation.lastWireAction : .query,
                     delayMilliseconds: max(1_000, Int64(retryAfterSeconds) * 1_000), context: context)
-            } else { try finishMessage(operationID, failure: "TCP_SERVER_" + code, context: context) }
+            } else { try finishMessage(operationID, failure: .failed("TCP_SERVER_" + code), context: context) }
         case .syncPull, .syncAck:
             // Every rejected wire action retains the original failure count.
             statistics.recordWorkloadFailure(kind: "sync", code: code, retryable: retryable)
@@ -5384,6 +5428,7 @@ private struct Percentiles: Encodable {
 }
 
 private enum LoadError: Error, CustomStringConvertible {
+    case incompleteMessageAudit
     case invalidArguments
     case messageSendNegotiationFailed
     case localSourcePortRangeExhausted
@@ -5407,6 +5452,7 @@ private enum LoadError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
+        case .incompleteMessageAudit: return "message audit exceeded its configured row budget or encountered an invalid identity"
         case .invalidArguments:
             return "invalid arguments; required: --host --ca-path --credentials --report"
         case .messageSendNegotiationFailed: return "TCP message send operation capability or payload limit was not negotiated"

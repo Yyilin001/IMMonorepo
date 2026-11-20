@@ -2,7 +2,6 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import Crypto
 import IMV2Core
 import IMV2ClientRuntime
 
@@ -14,7 +13,7 @@ struct SharedProfile: Encodable, Sendable {
 /// account credentials never cross it; decoded pixels retain the original grant's deadline.
 actor SharedPeople {
     private let repository: V2ProfilePresentationRepository
-    private let names: V2NameOperationService
+    private let names: V2ProfileNameService
     private let store: GRDBV2LocalSyncStore
     private var activation: V2ProfilePageActivation?
     private var keys: [V2ProfileViewLookupKey] = []
@@ -22,29 +21,20 @@ actor SharedPeople {
     private var observer: Task<Void, Never>?
     private var image: (V2AvatarReadGrant, Data)?
     private var work: SharedWork?
-    private let imageHTTP: any V2AuthHTTPTransport
+    private let resources: V2ResourceService
     private var failure: SharedFailure?
     private(set) var selected: UserID?
-    init(account: UserID, device: DeviceID, store: GRDBV2LocalSyncStore, base: URL, http: V2SessionHTTPAuthorization, imageHTTP: any V2AuthHTTPTransport) throws {
-        self.imageHTTP = imageHTTP
-        self.store = store
-        repository = V2ProfilePresentationRepository(actorUserID: account, deviceID: device,
-            reader: try V2HTTPProfilePresentationClient(endpoint: base.appendingPathComponent("v2/profile-presentations/batch"), credentials: http, transport: http),
-            nicknameRevisions: { try await store.groupNicknameRevisions(keys: $0) },
-            aliasRevisions: { try await store.contactAliasRevisions(keys: $0) })
-        names = V2NameOperationService(accountID: account, store: store,
-            client: try V2HTTPNameOperationClient(endpoint: base.appendingPathComponent("v2/profile-presentations"), credentials: http, transport: http))
+    init(store: GRDBV2LocalSyncStore, profiles: V2ProfileService, resources: V2ResourceService) {
+        self.store = store; repository = profiles.presentations; names = profiles.names; self.resources = resources
     }
-    func handlers() -> [V2OperationWorkDispatcher.Handler] {
-        [.init(kind: .contactAlias) { [names] in try await names.execute($0) }]
-    }
+    func handlers() -> [V2OperationWorkDispatcher.Handler] { names.handlers() }
     func clear() async {
         let old = activation; activation = nil; keys = []; selected = nil; image = nil; work = nil
         loader?.cancel(); observer?.cancel()
         if let old { await repository.deactivate(old) }
         await loader?.value; await observer?.value; loader = nil; observer = nil
     }
-    func close() async { await clear(); await repository.close() }
+    func close() async { await clear() }
     func showContacts(_ ids: [String]) async throws {
         let next = try ids.prefix(50).map { V2ProfileViewLookupKey(userID: try UserID($0), context: .relationship) }
         guard next != keys || selected != nil else { return }
@@ -69,7 +59,6 @@ actor SharedPeople {
                     status: $0.work.execution.isTerminal ? $0.work.execution.rawValue : $0.work.scheduling.rawValue,
                     retryable: !$0.work.execution.isTerminal && $0.work.scheduling == .needsAttention, roomID: nil) }
                 if row?.work.execution == .committed {
-                    await repository.invalidateEditedName(.contact(id))
                     _ = try await repository.presentation(for: key, activation: page)
                     try await loadAvatar(key, page: page)
                 }
@@ -83,18 +72,9 @@ actor SharedPeople {
     private func loadAvatar(_ key: V2ProfileViewLookupKey, page: V2ProfilePageActivation) async throws {
         guard let snapshot = await repository.cachedSnapshot(for: key, activation: page),
               let end = snapshot.avatarDeadline, end > .now,
-              let grant = await repository.avatarReadGrant(for: key, activation: page),
-              let plan = grant.avatar.plan else { return }
-        try await grant.requireValid()
-        guard plan.mode == .httpGet, (1...2_097_152).contains(plan.expectedByteCount) else { throw SharedFailure.invalidInput }
-        var request = URLRequest(url: plan.url); request.httpMethod = "GET"
-        for header in plan.headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
-        // This transport receives only object capability headers; no account authorization wrapper.
-        let (data, response) = try await imageHTTP.data(for: request)
-        try await grant.requireValid()
-        guard activation == page, end > .now, response.statusCode == 200,
-              data.count == grant.avatar.byteCount,
-              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == grant.avatar.checksum.value else { throw SharedFailure.operationFailed }
+              let grant = await repository.avatarReadGrant(for: key, activation: page) else { return }
+        let data = try await resources.avatarBytes(grant)
+        guard activation == page, end > .now else { throw CancellationError() }
         image = (grant, data)
     }
     func save(_ request: SharedRequest) async throws {

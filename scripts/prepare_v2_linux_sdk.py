@@ -26,8 +26,8 @@ def main():
     toolchain = Path.home() / "Library/Developer/Toolchains" / f"swift-{VERSION}-RELEASE.xctoolchain/usr/bin"
     swift = toolchain / "swift"
     version = subprocess.check_output([str(swift), "--version"], text=True)
-    if "swift-6.4-RELEASE" not in version or "Target: arm64-apple-macosx" not in version:
-        parser.error("Install the matching open-source Swift 6.4.0 arm64 toolchain first")
+    if f"(swift-{VERSION}-RELEASE)" not in version or "Target: arm64-apple-macosx" not in version:
+        parser.error(f"Install the matching open-source Swift {VERSION} arm64 toolchain first")
     metadata = json.loads(SDK_LOCK.read_text())
     args.cache.mkdir(parents=True, exist_ok=True)
     checkout = args.cache.resolve() / "generator"
@@ -46,7 +46,7 @@ def main():
         parser.error("SDK generator differs from the pinned source; use a fresh --cache directory")
     subprocess.run([str(swift), "run", "--scratch-path", str(args.cache.resolve() / "build"),
         "--configuration", "release", "--jobs", "8", "swift-sdk-generator", "make-linux-sdk",
-        "--no-host-toolchain", "--swift-version", "6.4.0-RELEASE", "--with-docker",
+        "--no-host-toolchain", "--swift-version", f"{VERSION}-RELEASE", "--with-docker",
         "--from-container-image", metadata["runtimeBase"], "--distribution-name", "ubuntu",
         "--distribution-version", "22.04", "--target", metadata["triple"], "--sdk-name", SDK],
         cwd=checkout, env=env, check=True)

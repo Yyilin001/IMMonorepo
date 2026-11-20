@@ -1,0 +1,44 @@
+{
+  "iosOwnedDevices": [
+    {
+      "id": "D3E26926-5526-4479-8C1F-9155D3D9AB54",
+      "name": "Phase18 iOS Receiver",
+      "deleted": true
+    },
+    {
+      "id": "B4EAF736-7DA7-4791-847D-30B1FBBD9210",
+      "name": "Phase18 iOS Sender",
+      "deleted": true
+    },
+    {
+      "id": "4704AD2D-A3E8-4008-8AB8-CD40D0E1C755",
+      "name": "Phase18 iOS Receiver Final",
+      "deleted": true
+    },
+    {
+      "id": "95851E26-2781-4799-ADB1-70144935651A",
+      "name": "Phase18 iOS 27 Receiver",
+      "deleted": true
+    }
+  ],
+  "androidOwnedAVDDeleted": true,
+  "backendsStopped": {
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-pcn3m4rj": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-kknrfmq7": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-pwa9pj4v": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-waci9oo0": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-i300u8o8": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-aplhlqtq": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-3uxqjzub": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-rt3ja11d": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-3no_xe1h": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-dmixp969": true,
+    "/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-k2p2grvb": true
+  },
+  "backendTemporaryDiagnosticsRetained": true,
+  "userDevicesPreserved": [
+    "E0283730-5ED7-4EB4-ADA9-630F3125AE49",
+    "CDC0C2CF-21C3-48B2-9E23-A7CE4729D192"
+  ],
+  "applicationScopeCleanupPassed": true
+}

@@ -20,15 +20,16 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "6.4.0"
-SDK = "im-resource-swift64-jammy-x86_64"
-TRIPLE = "x86_64-unknown-linux-gnu"
 PATCH = ROOT / "scripts/linux-sdk/swift-nio-2.104.0-imports.json"
 SDK_LOCK = ROOT / "scripts/linux-sdk/toolchain.json"
+SDK_CONFIG = json.loads(SDK_LOCK.read_text())
+VERSION = SDK_CONFIG["swiftVersion"]
+SDK = SDK_CONFIG["sdk"]
+TRIPLE = SDK_CONFIG["triple"]
 PRODUCTS = (
     "IMV2AccountServerApp", "IMV2ServerApp", "IMV2OperatorServerApp",
     "IMV2PlacementControlApp", "IMV2RoomHostSupervisorApp",
-    "IMV2ResourceImageWorker", "IMV2LocalGatewayProbe",
+    "IMV2ResourceImageWorker", "IMV2LocalGatewayProbe", "IMV2AdminServerApp",
 )
 
 
@@ -189,7 +190,7 @@ def main():
         env.pop(key, None)
     env["PATH"] = str(swift.parent) + os.pathsep + env.get("PATH", "")
     version = subprocess.check_output([str(swift), "--version"], env=env, text=True)
-    if "swift-6.4-RELEASE" not in version or "Target: arm64-apple-macosx" not in version:
+    if f"(swift-{VERSION}-RELEASE)" not in version or "Target: arm64-apple-macosx" not in version:
         parser.error("Use the matching open-source arm64 Swift toolchain, not Xcode Swift")
     sdks = subprocess.check_output([str(swift), "sdk", "list"], env=env, text=True).splitlines()
     if SDK not in sdks or not objcopy.is_file():
