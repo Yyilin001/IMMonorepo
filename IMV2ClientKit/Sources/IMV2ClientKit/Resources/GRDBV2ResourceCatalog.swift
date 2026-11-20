@@ -199,16 +199,19 @@ public struct V2ResourceFileJournal: Sendable {
         roomID.map { "message:\($0.rawValue):\(mediaID.rawValue)" } ?? "message:\(mediaID.rawValue)"
     }
 
-    func cachedMessageOriginal(mediaID: MediaID, roomID: RoomID) throws -> V2ResourceFileRecord? {
-        let family = Self.messageDownloadFamily(mediaID: mediaID, roomID: roomID)
-        return try databasePool.read { db in
-            try Row.fetchOne(db, sql: Self.fileSelectSQL + """
+    static func publishedMessageOriginal(mediaID: MediaID, message: V2MediaMessageLocation, db: Database) throws -> V2ResourceFileRecord? {
+        let family = messageDownloadFamily(mediaID: mediaID, roomID: message.roomID)
+        // A transfer can finish after publishing bytes but before binding them to the cache family.
+        return try Row.fetchOne(db, sql: fileSelectSQL + """
 
-                WHERE f.state='published' AND f.file_id IN (
-                    SELECT file_id FROM v2_resource_cached_versions WHERE media_id=? AND family=?
-                )
-                """, arguments: [mediaID.rawValue, family]).map(Self.decode)
-        }
+            WHERE f.state='published' AND (
+                f.file_id IN (SELECT file_id FROM v2_resource_cached_versions WHERE media_id=? AND family=?)
+                OR EXISTS (SELECT 1 FROM v2_resource_download_jobs j
+                    WHERE j.room_id=? AND j.message_id=? AND j.media_id=? AND j.state='completed'
+                      AND j.sha256=f.checksum AND j.byte_count=f.byte_count)
+            )
+            ORDER BY f.last_access_at DESC, f.file_id LIMIT 1
+            """, arguments: [mediaID.rawValue, family, message.roomID.rawValue, message.messageID.rawValue, mediaID.rawValue]).map(decode)
     }
 
     func bindCache(identity: String, family: String, mediaID: MediaID, fileID: V2LocalResourceFileID,

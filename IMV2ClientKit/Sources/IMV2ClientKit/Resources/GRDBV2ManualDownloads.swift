@@ -5,21 +5,25 @@ import IMV2Core
 extension V2ResourceFileJournal {
     /// The request has a business source, but no trusted byte version yet.
     /// Its logical identity is never used to authorize or deduplicate bytes.
-    func enqueueUnresolvedDownload(mediaID: MediaID, message: V2MediaMessageLocation, now: Date = Date()) throws -> UUID {
+    func prepareUnresolvedDownload(mediaID: MediaID, message: V2MediaMessageLocation,
+                                   canReuse: ((V2ResourceFileRecord) throws -> Bool)?, now: Date = Date()) throws -> V2ResourceReadPreparation {
         guard now.timeIntervalSince1970.isFinite, now.timeIntervalSince1970 >= 0 else { throw V2ResourceStorageError.invalidRecord }
         return try databasePool.write { db in
             guard try Self.messageMayResolve(message, mediaID: mediaID, db: db) else { throw V2ResourceStorageError.unavailable }
+            if let canReuse, let published = try Self.publishedMessageOriginal(mediaID: mediaID, message: message, db: db), try canReuse(published) {
+                return .local
+            }
             if let row = try Row.fetchOne(db, sql: "SELECT job_id,control FROM v2_resource_download_jobs WHERE media_id=? AND room_id=? AND message_id=? AND finished_at IS NULL ORDER BY created_at,job_id LIMIT 1",
                 arguments: [mediaID.rawValue,message.roomID.rawValue,message.messageID.rawValue]) {
                 if row["control"] as String == "pause" { throw V2ResourceDownloadControlError.paused }
                 guard row["control"] as String == "run", let id = UUID(uuidString: row["job_id"]) else { throw V2ResourceTransferManagementError.actionUnavailable }
-                return id
+                return .queued(.download(id))
             }
             guard try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_resource_download_jobs WHERE finished_at IS NULL") ?? 0 < 16 else { throw V2ResourceStorageError.capacityExceeded }
             let id = UUID()
             try db.execute(sql: "INSERT INTO v2_resource_download_jobs(job_id,media_id,room_id,message_id,transport,identity,work_priority,resume_requested,state,created_at) VALUES(?,?,?,?,'foreground',?,?,1,'paused',?)",
                 arguments: [id.uuidString,mediaID.rawValue,message.roomID.rawValue,message.messageID.rawValue,"demand:" + id.uuidString,V2NetworkWorkPriority.interactive.rawValue,now.timeIntervalSince1970])
-            return id
+            return .queued(.download(id))
         }
     }
 

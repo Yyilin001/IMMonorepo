@@ -383,10 +383,19 @@ public actor V2ResourceFileStore {
     func hasPublishedBytes(checksum: V2ResourceChecksum, bytes: Int64) throws -> Bool {
         try prepare()
         guard let record = try journal.matchingFile(checksum: checksum, byteCount: bytes) else { return false }
+        return try hasPublishedBytes(record)
+    }
+
+    func prepareUnresolvedMessageDownload(mediaID: MediaID, message: V2MediaMessageLocation, allowCached: Bool) throws -> V2ResourceReadPreparation {
+        try prepare()
+        return try journal.prepareUnresolvedDownload(mediaID: mediaID, message: message, canReuse: allowCached ? hasPublishedBytes : nil)
+    }
+
+    private func hasPublishedBytes(_ record: V2ResourceFileRecord) throws -> Bool {
         do {
             let values = try fileURL(record.id, storage: record.storage).resourceValues(
                 forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-            return values.isRegularFile == true && values.isSymbolicLink == false && values.fileSize == Int(exactly: bytes)
+            return values.isRegularFile == true && values.isSymbolicLink == false && values.fileSize == Int(exactly: record.byteCount)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return false }
     }
 

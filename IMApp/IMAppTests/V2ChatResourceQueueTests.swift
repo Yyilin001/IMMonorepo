@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import GRDB
 import IMV2Core
 import Testing
 @testable import IMV2ClientKit
@@ -38,12 +39,16 @@ struct V2ChatResourceQueueTests {
         }
         let completed = try #require(try await restored.store.managedResourceTransfers(.init()).entries.first)
         #expect(completed.id == queued.id && completed.createdAt == queued.createdAt && completed.confirmedBytes == 4)
+        recovery.cancel(); _ = await recovery.result
+        if !knownMetadata {
+            // Model a restart after completion and before the separate cache index write.
+            try await restored.store.databasePool.write { try $0.execute(sql: "DELETE FROM v2_resource_cached_versions") }
+        }
         let cached = try await restored.download(media, message: location), lease = try await cached.borrowFile()
         #expect(try Data(contentsOf: lease.fileURL) == ChatReadBytes.payload)
         await lease.release()
         #expect(await bytes.calls == 1)
         #expect(try await restored.store.managedResourceTransfers(.init()).entries.map(\.id) == [queued.id])
-        recovery.cancel(); _ = await recovery.result
         try await restored.close()
     }
 
