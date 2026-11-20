@@ -51,6 +51,8 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let entry = app.buttons["v2.conversation.performance.open"]
         XCTAssertTrue(entry.waitForExistence(timeout: 10))
         entry.tap()
+        app.buttons["v2.performance.duration"].tap()
+        app.buttons["60 秒"].tap()
         let start = app.buttons["v2.performance.start"]
         XCTAssertTrue(start.waitForExistence(timeout: 5))
         start.tap()

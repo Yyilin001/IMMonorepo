@@ -44,31 +44,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install native verification dependencies
-        run: apt-get update && apt-get install --yes --no-install-recommends curl gcc libc6-dev libsqlite3-dev ripgrep postgresql-client python3 imagemagick openssl
+        run: apt-get update && apt-get install --yes --no-install-recommends ripgrep postgresql-client python3 imagemagick openssl
       - name: Run package tests
-        shell: bash
         env:
           # This job runs inside a Swift container and cannot launch sibling
           # Docker containers. The following service-backed integration step
           # installs the canonical schema into a clean PostgreSQL database.
           V2_SCHEMA_BOOTSTRAP_COVERED_BY_POSTGRES_INTEGRATION: "1"
-        run: |
-          # Match the Android SDK's SQLite build. Jammy's system SQLite lacks
-          # the subsecond timestamps used by existing ClientKit databases.
-          sqlite_dir="$(mktemp -d "$RUNNER_TEMP/client-sqlite.XXXXXX")"
-          trap 'rm -rf -- "$sqlite_dir"' EXIT
-          sqlite_archive="$sqlite_dir/source.zip"
-          curl -fL --retry 2 --connect-timeout 20 \
-            https://www.sqlite.org/2026/sqlite-amalgamation-3510200.zip -o "$sqlite_archive"
-          printf '%s  %s\n' '6e2a845a493026bdbad0618b2b5a0cf48584faab47384480ed9f592d912f23ec' \
-            "$sqlite_archive" | sha256sum --check
-          python3 -m zipfile --extract "$sqlite_archive" "$sqlite_dir"
-          cc -O2 -fPIC -shared -Wl,-soname,libsqlite3.so.0 \
-            -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_SNAPSHOT -DSQLITE_THREADSAFE=1 \
-            "$sqlite_dir/sqlite-amalgamation-3510200/sqlite3.c" \
-            -o "$sqlite_dir/libsqlite3.so.0" -ldl -lm -lpthread
-          LD_LIBRARY_PATH="$sqlite_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-            bash ./scripts/run_v2_swift_tests.sh
+        run: bash ./scripts/run_v2_swift_tests.sh --server-packages
       - name: Build Linux release products
         run: |
           for product in IMV2AccountServerApp IMV2OperatorServerApp IMV2ServerApp IMV2ResourceImageWorker IMV2LocalGatewayProbe IMV2GatewayLoadGenerator; do
@@ -124,6 +107,16 @@ jobs:
         # The helper requires connection settings, provisions canonical schemas,
         # and enables both resource opt-ins using separate disposable databases.
         run: bash ./scripts/test_v2_server_native_postgres.sh --skip-build --filter 'V2Resource|V2MediaScan'
+
+  swift-clientkit:
+    name: Swift ClientKit tests on macOS
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      # The full suite includes URLProtocol request copying and Apple backup metadata.
+      - run: bash ./scripts/run_v2_clientkit_native_tests.sh --disable-automatic-resolution --no-parallel
 
   room-actor-process-recovery:
     name: Linux room actor process recovery
@@ -245,7 +238,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
-      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_UI_TEST_RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-27-2
       IMAPP_CI_VERIFICATION_SCRIPT: ./IMApp/Scripts/verify_ui_tests.sh
     steps:
       - uses: actions/checkout@v4
