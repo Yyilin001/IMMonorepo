@@ -1053,6 +1053,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
+            let controlPool = DatabaseID(string: "stranger-policy-control")
+            resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4), as: controlPool)
+            let control = resources.database(controlPool)
             guard let sql = resources.database(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let schemaExists = try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self)
             guard schemaExists?.exists == false else { throw TestConfigurationError.schemaAlreadyExists }
@@ -1062,7 +1065,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let leaseID = UUID(uuidString: "00000000-0000-0000-0000-000000000071")!
             try await sql.raw("INSERT INTO im_v2.shard_admission_pools (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit) VALUES ('rooms-primary', 'standard', \(bind: leaseID), 1, \(bind: now.addingTimeInterval(600)), 100)").run()
             try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: senderUUID), 'sender012', '发送者', 1, \(bind: now), \(bind: now)), (\(bind: memberTwoUUID), 'member015', '成员二', 1, \(bind: now), \(bind: now)), (\(bind: memberThreeUUID), 'member016', '成员三', 1, \(bind: now), \(bind: now))").run()
-            let directStore = PostgresV2DirectMessagingStore(database: resources.database(.psql), identityReader: PostgresV2DirectRoomIdentityReader(database: resources.database(.psql)), projectionDelivery: SuccessfulProjectionDelivery())
+            let directStore = PostgresV2DirectMessagingStore(database: resources.database(.psql), identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery())
             let directService = try V2DirectRoomOperationTestFixture(store: directStore, capacityProfile: profile, roomShardID: "rooms-primary", now: { now })
             let recipient = try UserID(memberTwoUUID.uuidString)
             let openingOperation = try DirectRoomOperationID("00000000-0000-0000-0000-000000000072")
@@ -1071,8 +1074,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let replayed = try await directService.openedReceipt(actorUserID: senderID, operationID: openingOperation,
                 targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             #expect(replayed == room.receipt)
-            try await withFixturePolicyOwners(database: resources.database(.psql), projectionDelivery: SuccessfulProjectionDelivery()) { owners in
-            let accountPreferences = PostgresV2AccountPreferenceOperationStore(database: resources.database(.psql),
+            try await withFixturePolicyOwners(database: control, projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+            let accountPreferences = PostgresV2AccountPreferenceOperationStore(database: control,
                 projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
             // This fixture co-locates the user owner. Materialize the durable
             // opening event explicitly before asserting its user snapshot.
@@ -1248,7 +1251,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400),
                 contentReviewMode: .enabled)
-            let messages = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(.psql),
+            let messages = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: control,
                 store: writer, shardID: "rooms-primary", epoch: 0, activationScope: activationScope, policyOwners: owners), capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             await #expect(throws: V2SendOperationResponseError.directPolicyDenied) {
                 try await messages.send(.init(roomID: room.roomID, actorUserID: senderID,
@@ -1291,6 +1294,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         } catch V2RoomWriteStoreError.strangerMessageLimitReached {
                             return .limited
                         } catch {
+                            Issue.record("Unexpected stranger send failure: \(error)")
                             return .unexpectedFailure
                         }
                     }
