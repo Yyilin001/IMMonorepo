@@ -16,7 +16,8 @@ import VaporTesting
 
 @Suite("管理后台完整流程", .serialized)
 struct V2AdminFlowTests {
-    @Test("真实 PostgreSQL 与 Policy Owner：认证、查询、禁用、丢失响应恢复、审计和撤销")
+    @Test("真实 PostgreSQL 与 Policy Owner：认证、查询、禁用、丢失响应恢复、审计和撤销",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ADMIN_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func completeFlow() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["IMV2_ADMIN_TEST_DATABASE_IS_DISPOSABLE"] == "1",

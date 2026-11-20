@@ -44,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install native verification dependencies
-        run: apt-get update && apt-get install --yes --no-install-recommends ripgrep postgresql-client protobuf-compiler python3 imagemagick openssl
+        run: apt-get update && apt-get install --yes --no-install-recommends ripgrep postgresql-client protobuf-compiler python3 imagemagick ffmpeg openssl
       - name: Run package tests
         env:
           # This job runs inside a Swift container and cannot launch sibling
@@ -107,6 +107,19 @@ jobs:
         # The helper requires connection settings, provisions canonical schemas,
         # and enables both resource opt-ins using separate disposable databases.
         run: bash ./scripts/test_v2_server_native_postgres.sh --skip-build --filter 'V2Resource|V2MediaScan'
+
+      - name: Run admin PostgreSQL integration tests
+        env:
+          PGHOST: postgres
+          PGPORT: "5432"
+          PGUSER: im_v2_test
+          PGPASSWORD: im_v2_test
+          IMV2_ADMIN_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_admin_test
+          IMV2_ADMIN_TEST_DATABASE_IS_DISPOSABLE: "1"
+        run: |
+          createdb --template=template0 im_v2_admin_test
+          psql -Xq -v ON_ERROR_STOP=1 -d im_v2_admin_test -f ./IMV2/sql/schema.sql -f ./IMV2/sql/admin-schema.sql
+          swift test --disable-automatic-resolution --skip-build --no-parallel --package-path IMV2Server --filter IMV2AdminTests
 
   swift-clientkit:
     name: Swift ClientKit tests on macOS
