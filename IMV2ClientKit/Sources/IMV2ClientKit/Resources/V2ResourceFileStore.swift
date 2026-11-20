@@ -1043,7 +1043,7 @@ extension V2ResourceFileStore {
         .init(root: backgroundDirectory, sessionID: session, protection: protection)
     }
     func reserveBackgroundDownload(mapping: UUID, session: UUID, target: V2ClientMediaTransferTarget) throws -> V2ResourceTransferStaging {
-        _ = try V2BackgroundDownloadRequest.make(target: target)
+        try V2BackgroundDownloadRequest.validate(target: target)
         guard let grant = target.backgroundDownloadAuthorization, let origin = V2BackgroundResultInbox.originDigest(target.url) else { throw V2BackgroundTransferError.invalidAuthorization }
         let reservation = try reserveTransient(identity: "background-download:\(mapping.uuidString)", bytes: target.expectedByteCount,
             location: .backgroundDownload(session: session, mapping: mapping))
