@@ -252,7 +252,7 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["v2.conversation.group-feedback"].exists)
         app.buttons["通过公开 ID 添加"].tap()
         let handle = app.textFields["v2.conversation.group-members"]
-        XCTAssertTrue(handle.waitForExistence(timeout: 5)); handle.tap(); handle.typeText("@alice")
+        XCTAssertTrue(handle.waitForExistence(timeout: 5)); handle.tap(); handle.typeText("@alice\n")
         app.buttons["添加成员"].tap()
         let remove = app.buttons["移除 @alice"]
         XCTAssertTrue(remove.waitForExistence(timeout: 5)); remove.tap()

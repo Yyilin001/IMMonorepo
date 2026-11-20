@@ -834,7 +834,10 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(resource.waitForExistence(timeout: 5)); resource.tap()
         let download = app.buttons["v2.resources.download"]
         XCTAssertTrue(download.waitForExistence(timeout: 5)); download.tap()
-        XCTAssertTrue(app.staticTexts["已保存下载请求，可在传输任务中查看状态或继续处理。"].waitForExistence(timeout: 5))
+        let saved = app.staticTexts["已保存下载请求，可在传输任务中查看状态或继续处理。"]
+        reveal(saved, in: app)
+        XCTAssertTrue(saved.exists)
+        reveal(app.buttons["v2.resources.download.tasks"], in: app)
         app.buttons["v2.resources.download.tasks"].tap()
         let queued = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "已排队")).firstMatch
         XCTAssertTrue(queued.waitForExistence(timeout: 5))
@@ -1220,7 +1223,8 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(filter.waitForExistence(timeout: 5)); filter.buttons["已结束"].tap()
         let originalTask = app.staticTexts["v2.resources.transfers.item." + taskID]
         XCTAssertTrue(originalTask.waitForExistence(timeout: 10))
-        XCTAssertEqual(originalTask.label, "下载中断图片.png")
+        XCTAssertEqual(originalTask.label, "文件名称")
+        XCTAssertEqual(originalTask.value as? String, "下载中断图片.png")
         attach(app, name: "Retried download completed under original task identity")
         app.terminate()
         app.launchArguments += ["-v2-ui-testing-resource-center-cleanup"]
