@@ -185,6 +185,11 @@ public actor V2ResourceCenter {
             let original = try await self.files.variantSnapshots(for: key).first(where: { $0.descriptor.key.rendition == .original })
             if let original {
                 if try await self.files.hasPublishedBytes(checksum: original.descriptor.checksum, bytes: original.descriptor.byteCount) { return .local }
+            } else if let cached = try journal.cachedMessageOriginal(mediaID: mediaID, roomID: message.roomID),
+                      try await self.files.hasPublishedBytes(checksum: cached.checksum, bytes: cached.byteCount) {
+                // A recovered download can publish verified bytes before catalog metadata arrives.
+                // The download cache still requires fresh message authorization before reading.
+                return .local
             }
             let job: UUID
             if let source, original != nil { job = try journal.enqueueManualDownload(key, source: source) }

@@ -195,6 +195,22 @@ public struct V2ResourceFileJournal: Sendable {
         }
     }
 
+    static func messageDownloadFamily(mediaID: MediaID, roomID: RoomID?) -> String {
+        roomID.map { "message:\($0.rawValue):\(mediaID.rawValue)" } ?? "message:\(mediaID.rawValue)"
+    }
+
+    func cachedMessageOriginal(mediaID: MediaID, roomID: RoomID) throws -> V2ResourceFileRecord? {
+        let family = Self.messageDownloadFamily(mediaID: mediaID, roomID: roomID)
+        return try databasePool.read { db in
+            try Row.fetchOne(db, sql: Self.fileSelectSQL + """
+
+                WHERE f.state='published' AND f.file_id IN (
+                    SELECT file_id FROM v2_resource_cached_versions WHERE media_id=? AND family=?
+                )
+                """, arguments: [mediaID.rawValue, family]).map(Self.decode)
+        }
+    }
+
     func bindCache(identity: String, family: String, mediaID: MediaID, fileID: V2LocalResourceFileID,
                    variant: V2ResourceVariantDescriptor? = nil) throws -> [V2LocalResourceFileID] {
         guard !identity.isEmpty, identity.utf8.count <= 1024 else { throw V2ResourceStorageError.invalidRecord }

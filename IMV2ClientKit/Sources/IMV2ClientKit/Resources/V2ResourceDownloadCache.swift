@@ -142,7 +142,7 @@ public actor V2ResourceDownloadCache {
     private func performCachedFile(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2ResourceCachedFile? {
         guard let cached = try await acquireCachedRead(media, message: message) else { return nil }
         do {
-            let family = message.map { "message:\($0.roomID.rawValue):\(media.mediaID.rawValue)" } ?? "message:\(media.mediaID.rawValue)"
+            let family = V2ResourceFileJournal.messageDownloadFamily(mediaID: media.mediaID, roomID: message?.roomID)
             let identity = "\(family):\(cached.target.checksum.value):\(cached.target.expectedByteCount)"
             self.identities[family] = identity
             let handle = try await self.handle(fileID: cached.fileID, mediaID: media.mediaID, message: message,
@@ -223,7 +223,7 @@ public actor V2ResourceDownloadCache {
             }
         }
         let hasForegroundDemand = try journal.resolveDownloadDemand(mediaID: media.mediaID, message: message, bytes: target.expectedByteCount, checksum: target.checksum)
-        let family = message.map { "message:\($0.roomID.rawValue):\(media.mediaID.rawValue)" } ?? "message:\(media.mediaID.rawValue)"
+        let family = V2ResourceFileJournal.messageDownloadFamily(mediaID: media.mediaID, roomID: message?.roomID)
         let identity = "\(family):\(target.checksum.value):\(target.expectedByteCount)"
         identities[family] = identity
         identityUsers[family, default: 0] += 1
