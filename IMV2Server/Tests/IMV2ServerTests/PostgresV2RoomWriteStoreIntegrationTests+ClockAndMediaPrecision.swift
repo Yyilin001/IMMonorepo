@@ -1188,13 +1188,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         #expect(try await targetSQL.raw("SELECT count(*) AS value FROM im_v2.user_sync_log WHERE user_id=\(bind: recipient) AND user_sync_sequence>\(bind: Int64.max - needed)").first(decoding: CountRow.self)?.value == needed)
                         #expect(try await sql.raw("SELECT next_sequence AS value FROM im_v2.user_sync_sequences WHERE user_id=\(bind: recipient)").first(decoding: CountRow.self)?.value == Int64.max)
                         #expect(try await count("im_v2.messages", on: sql) == (denied ? 0 : 1))
-                        #expect(try await count("im_v2.message_send_completions", on: sql) == (denied ? 0 : 1))
+                        #expect(try await count("im_v2.message_send_completions", on: sql) == 1)
                         #expect(try await retiredDirectDenialTableIsAbsent(on: sql))
                         let committed = try await snapshot()
-                        // Accepted sends recover exactly; a rejection has no durable result.
-                        // Repeated attempts still deduplicate the independent private hint.
+                        // Replaying either kind of receipt leaves the private hint unchanged.
                         for _ in 0..<2 {
-                            #expect(try await replayWriter.recover(query, token: token) == (denied ? .unresolved : outcome))
+                            #expect(try await replayWriter.recover(query, token: token) == outcome)
                             #expect(try await replayWriter.send(request, token: token, capacityProfile: profile,
                                 identifiers: V2AcceptanceIDFactory().make(at: now)) == outcome)
                             #expect(try await snapshot() == committed)
