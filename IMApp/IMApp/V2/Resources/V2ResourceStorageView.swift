@@ -88,7 +88,7 @@ struct V2ResourceStorageView: View {
             NavigationStack {
                 List {
                     Section {
-                        LabeledContent("本次处理资源版本", value: plan.count.formatted())
+                        V2ResourceMetadataRow(title: "本次处理资源版本", value: plan.count.formatted())
                         Text("本次最多处理 \(plan.count) 项当前不可访问的资源版本。不展示失效内容；执行时恢复访问的资源会跳过。")
                             .foregroundStyle(Color.primary)
                         if plan.hasMore { Text("仍有更多，可完成后再次处理。").foregroundStyle(Color.primary) }
@@ -104,6 +104,9 @@ struct V2ResourceStorageView: View {
                 .accessibilityIdentifier("v2.resources.retention.unavailable.sheet")
                 .v2GroupedPageSurface().listRowSpacing(0)
                 .navigationTitle("失效资源保留").navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(Color(uiColor: .systemGroupedBackground), for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbarColorScheme(colorScheme, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("取消", systemImage: "xmark") { store.dismissUnavailableRetention() }

@@ -36,6 +36,7 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
 
     @MainActor func testNativeDocumentExportCanOpenLocalDestinationBrowser() {
         continueAfterFailure = false
+        openLocalFilesBrowserForTesting().terminate()
         let app = XCUIApplication(), scope = UUID().uuidString
         let arguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-media-scope", scope,
             "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]

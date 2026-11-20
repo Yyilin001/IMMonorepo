@@ -706,7 +706,10 @@ final class IMAppResourceCenterUITests: XCTestCase {
     @MainActor private func auditStorage(_ app: XCUIApplication, name: String) throws {
         attach(app, name: name)
         try app.performAccessibilityAudit(for: .all) { issue in
-            let report = XCTAttachment(string: "\(issue.compactDescription)\n\(issue.detailedDescription)\n\(issue.element?.debugDescription ?? app.debugDescription)")
+            let details = "\(issue.compactDescription)\n\(issue.detailedDescription)"
+            let element = issue.element?.debugDescription
+            print("Accessibility audit \(name): \(details)\n\(element ?? "No accessibility element identified")")
+            let report = XCTAttachment(string: "\(details)\n\(element ?? app.debugDescription)")
             report.name = name + " accessibility issue"; report.lifetime = .keepAlways; self.add(report)
             return false
         }

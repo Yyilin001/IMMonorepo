@@ -13,7 +13,7 @@ struct V2SearchField: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.body).foregroundStyle(.secondary).accessibilityHidden(true)
-            TextField(title, text: $text, prompt: Text(title).foregroundStyle(.secondary))
+            TextField(title, text: $text, prompt: Text(title).foregroundStyle(Color.clear))
                 .focused($isFocused)
                 .textFieldStyle(.plain)
                 .font(.body).foregroundStyle(.primary).lineLimit(1)
@@ -23,6 +23,14 @@ struct V2SearchField: View {
                 .accessibilityLabel(title)
                 .accessibilityHint(hint)
                 .accessibilityIdentifier(identifier)
+                .overlay(alignment: .leading) {
+                    if text.isEmpty {
+                        // Keep the accessible prompt and draw it at the same
+                        // contrast as the search icon in either appearance.
+                        Text(title).font(.body).foregroundStyle(.secondary).lineLimit(1)
+                            .allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                }
             if !text.isEmpty {
                 Button { text = ""; isFocused = true } label: {
                     Image(systemName: "xmark.circle.fill").font(.body)
