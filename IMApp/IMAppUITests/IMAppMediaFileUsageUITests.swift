@@ -3,6 +3,7 @@ import XCTest
 final class IMAppMediaFileUsageUITests: XCTestCase {
     @MainActor func testProductionShareSavesNamedAudioCopyToFiles() {
         continueAfterFailure = false
+        openLocalFilesBrowserForTesting().terminate()
         let app = XCUIApplication(), scope = UUID().uuidString
         // The paired host verifier checks these exact synthetic bytes after
         // this App has terminated, then removes only this UUID-named export.
@@ -17,8 +18,7 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
         app.launch()
         let share = app.buttons["v2.file-use.share"]
         XCTAssertTrue(share.waitForExistence(timeout: 15)); share.tap()
-        let save = app.cells.matching(NSPredicate(format: "label == %@", "保存到“文件”")).firstMatch
-        XCTAssertTrue(save.waitForExistence(timeout: 10)); save.tap()
+        app.tapSaveToFilesForTesting()
         let filename = app.textFields["DOCPicker.filenameTextField"]
         XCTAssertTrue(filename.waitForExistence(timeout: 15))
         XCTAssertTrue([exportName, (exportName as NSString).deletingPathExtension].contains(filename.value as? String ?? ""))
@@ -59,6 +59,7 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
 
     @MainActor func testURLShareCanOpenSystemFileExport() {
         continueAfterFailure = false
+        openLocalFilesBrowserForTesting().terminate()
         let app = XCUIApplication(), scope = UUID().uuidString
         let arguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-media-scope", scope,
             "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
@@ -70,8 +71,7 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
         app.launch()
         let share = app.buttons["v2.file-use.url-share"]
         XCTAssertTrue(share.waitForExistence(timeout: 15)); share.tap()
-        let save = app.cells.matching(NSPredicate(format: "label == %@", "保存到“文件”")).firstMatch
-        XCTAssertTrue(save.waitForExistence(timeout: 10)); save.tap()
+        app.tapSaveToFilesForTesting()
         let filename = app.textFields["DOCPicker.filenameTextField"]
         let ready = filename.waitForExistence(timeout: 30)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
@@ -121,5 +121,35 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
         let close = app.buttons["v2.file-use.close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10)); close.tap()
         XCTAssertTrue(app.staticTexts["关闭完成"].waitForExistence(timeout: 10))
+    }
+}
+
+extension XCTestCase {
+    @MainActor func openLocalFilesBrowserForTesting() -> XCUIApplication {
+        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        files.launchArguments = ["-AppleLanguages", "(zh-Hans)"]
+        files.launch()
+        let welcome = files.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "欢迎", "文件")).firstMatch
+        if welcome.waitForExistence(timeout: 3) {
+            let next = files.buttons["继续"]
+            XCTAssertTrue(next.waitForExistence(timeout: 5))
+            next.tap()
+        }
+        let browse = files.buttons.matching(NSPredicate(format: "label IN %@", ["浏览", "Browse"])).firstMatch
+        XCTAssertTrue(browse.waitForExistence(timeout: 30))
+        browse.tap()
+        return files
+    }
+}
+
+extension XCUIApplication {
+    @MainActor func tapSaveToFilesForTesting() {
+        let labels = ["保存到“文件”", "存储到“文件”", "Save to Files"]
+        let action = descendants(matching: .any).matching(NSPredicate(
+            format: "elementType IN %@ AND label IN[c] %@",
+            [XCUIElement.ElementType.cell.rawValue, XCUIElement.ElementType.button.rawValue], labels
+        )).firstMatch
+        XCTAssertTrue(action.waitForExistence(timeout: 20))
+        action.tap()
     }
 }

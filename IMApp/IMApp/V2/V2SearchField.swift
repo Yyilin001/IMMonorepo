@@ -13,7 +13,7 @@ struct V2SearchField: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.body).foregroundStyle(.secondary).accessibilityHidden(true)
-            TextField(title, text: $text)
+            TextField(title, text: $text, prompt: Text(title).foregroundStyle(.secondary))
                 .focused($isFocused)
                 .textFieldStyle(.plain)
                 .font(.body).foregroundStyle(.primary).lineLimit(1)

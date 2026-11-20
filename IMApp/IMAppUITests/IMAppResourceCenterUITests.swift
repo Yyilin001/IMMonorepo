@@ -1237,18 +1237,9 @@ final class IMAppResourceCenterUITests: XCTestCase {
     func testAccountEntryDetailRetentionPreviewAndCleanup() {
         // Initialize the dedicated simulator's local document browser before
         // invoking its Save to Files activity for the first time.
-        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
-        files.launchArguments = ["-AppleLanguages", "(zh-Hans)"]
-        files.launch()
-        let welcome = files.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "欢迎", "文件")).firstMatch
-        if welcome.waitForExistence(timeout: 3) {
-            let next = files.buttons["继续"]
-            XCTAssertTrue(next.waitForExistence(timeout: 5)); next.tap()
-        }
-        let browseFiles = files.buttons["浏览"].firstMatch
+        let files = openLocalFilesBrowserForTesting()
         let browser = XCTAttachment(string: files.debugDescription)
         browser.name = "System Files browser initialization"; browser.lifetime = .keepAlways; add(browser)
-        XCTAssertTrue(browseFiles.waitForExistence(timeout: 30)); browseFiles.tap()
         attach(files, name: "Dedicated simulator local file browser")
         files.terminate()
         let app = XCUIApplication(), scope = UUID().uuidString
@@ -1297,8 +1288,7 @@ final class IMAppResourceCenterUITests: XCTestCase {
         let hierarchy = XCTAttachment(string: app.debugDescription)
         hierarchy.name = "System local file share hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
         attach(app, name: "System share receives a local resource file")
-        let saveToFiles = app.cells.matching(NSPredicate(format: "label == %@", "保存到“文件”")).firstMatch
-        XCTAssertTrue(saveToFiles.waitForExistence(timeout: 5)); saveToFiles.tap()
+        app.tapSaveToFilesForTesting()
         let name = app.textFields.matching(NSPredicate(format: "value IN %@", ["设计说明与产品界面方案.png", "设计说明与产品界面方案"])).firstMatch
         XCTAssertTrue(name.waitForExistence(timeout: 60))
         attach(app, name: "Files export preserves the original filename before cancellation")
