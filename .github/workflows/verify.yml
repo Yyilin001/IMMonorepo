@@ -125,7 +125,7 @@ jobs:
             VirtualActorBusinessProbe IMV2PlacementControlApp IMV2RoomHostSupervisorApp
       - name: Exercise Host crash recovery and network loss
         run: |
-          release="$RUNNER_TEMP/actor-swiftpm/IMV2Server-release/x86_64-unknown-linux-gnu/release"
+          release="$RUNNER_TEMP/actor-swiftpm/IMV2Server-release/out/Products/Release-linux-x86_64"
           build_result="$RUNNER_TEMP/actor-recovery-build.json"
           PYTHONPATH=IMV2/scripts python3 - "$release" "$build_result" <<'PY'
           import hashlib
