@@ -54,3 +54,6 @@ dist/
 
 # 本地管理演示数据库、管理员凭据与日志
 /IMV2/local-admin/
+
+# Flutter build output kept outside the synced workspace
+/FlutterIM/build

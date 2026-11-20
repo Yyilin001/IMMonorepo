@@ -76,16 +76,17 @@ public final class V2ResourceService: Sendable {
     }
     public func cancelSend(_ id: UUID) async throws {
         try await lifetime.run { [store, uploads] in
-            guard let intent = try await store.preparingSendIntent(id: id) else {
+            if let intent = try await store.preparingSendIntent(id: id) {
+                try await store.cancelSendIntent(id)
+                for job in intent.attachmentJobIDs {
+                    try Task.checkCancellation()
+                    if try await store.resourceImport(id: job) != nil { try await store.requestImportCancellation(id: job) }
+                    else { try await uploads.cancel(id: job) }
+                }
+            } else {
                 try await store.abandonProvenUnsentSendIntent(id)
-                try await uploads.releaseFinishedSources(); return
             }
-            try await store.cancelSendIntent(id)
-            for job in intent.attachmentJobIDs {
-                try Task.checkCancellation()
-                if try await store.resourceImport(id: job) != nil { try await store.requestImportCancellation(id: job) }
-                else { try await uploads.cancel(id: job) }
-            }
+            try await uploads.releaseFinishedSources()
         }
     }
     public func avatarBytes(_ grant: V2AvatarReadGrant) async throws -> Data {

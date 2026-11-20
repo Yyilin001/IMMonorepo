@@ -7,13 +7,23 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart' show ImageSource;
+import 'package:file_selector/file_selector.dart' show openFiles;
+import 'package:cross_file/cross_file.dart';
+import 'package:flutter_file_dialog/flutter_file_dialog.dart';
+import 'package:mime/mime.dart' show lookupMimeType;
+import 'package:image/image.dart' as img;
+import 'package:image_picker/image_picker.dart' show ImagePicker, ImageSource;
 import 'package:material_ui/material_ui.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
+import 'package:open_filex/open_filex.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/im_providers.dart';
 import '../state/photo_library.dart';
+import '../state/attachment_export.dart';
 import '../state/recent_searches.dart';
 import '../core/models.dart';
 import '../core/history.dart';
@@ -22,7 +32,12 @@ import '../mock/group_members.dart';
 
 part 'mobile_workspace.dart';
 part 'sdk_workspace.dart';
+part 'sdk_avatars.dart';
+part 'sdk_community.dart';
+part 'sdk_account.dart';
 part 'sdk_chat.dart';
+part 'sdk_transfers.dart';
+part 'sdk_create_group.dart';
 part 'reading_viewport.dart';
 part 'directory_search.dart';
 part 'people_pages.dart';
@@ -596,6 +611,7 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
     final rows = sdk.rooms
         .where(
           (row) =>
+              !row.isArchived &&
               (!unreadOnly || row.unread > 0) &&
               (row.title.toLowerCase().contains(query) ||
                   row.id.toLowerCase().contains(query)),
@@ -613,11 +629,13 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
         ),
       );
     }
-    return ListView.builder(
+    final rowsView = RefreshIndicator(
+      onRefresh: sdk.syncNow,
+      child: ListView.builder(
       key: const Key('conversation-list'),
       controller: scroll,
+      physics: const AlwaysScrollableScrollPhysics(),
       itemCount: rows.length,
-      itemExtent: 82,
       itemBuilder: (_, index) {
         final row = rows[index];
         final item = Conversation(
@@ -626,6 +644,10 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
           preview: row.preview,
           unread: row.unread,
           isGroup: row.isGroup,
+          pinned: row.isPinned,
+          muted:
+              row.muteUntil != null &&
+              row.muteUntil! > DateTime.now().millisecondsSinceEpoch,
           updatedAt: DateTime.fromMillisecondsSinceEpoch(row.updatedAt ?? 0),
         );
         return InkWell(
@@ -634,9 +656,91 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
             _rememberSearch();
             widget.onSdkOpen?.call(row);
           },
-          child: _ConversationRow(item: item, selected: false, mobile: true),
+          onLongPress: () => _showSdkConversationMenu(context, ref, row),
+          child: Dismissible(
+            key: ValueKey('swipe-${row.id}'),
+            background: Container(
+              color: green,
+              alignment: Alignment.centerLeft,
+              padding: const EdgeInsets.only(left: 20),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    row.isPinned
+                        ? Icons.push_pin_outlined
+                        : Icons.push_pin_rounded,
+                    color: Colors.white,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    row.isPinned ? '取消置顶' : '置顶',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+            secondaryBackground: Container(
+              color: const Color(0xFF3F51B5),
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.only(right: 20),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('隐藏', style: TextStyle(color: Colors.white)),
+                  SizedBox(width: 6),
+                  Icon(Icons.visibility_off_outlined, color: Colors.white),
+                ],
+              ),
+            ),
+            confirmDismiss: (direction) async {
+              if (direction == DismissDirection.startToEnd) {
+                await sdk.applyConversationState(row, pinned: !row.isPinned);
+              } else {
+                await sdk.applyConversationState(row, archived: true);
+              }
+              return false;
+            },
+            child: _ConversationRow(
+              item: item,
+              selected: false,
+              mobile: true,
+              avatar: row.isGroup
+                  ? SdkGroupAvatar(
+                      roomId: row.id,
+                      name: item.displayName,
+                      size: 50,
+                    )
+                  : row.peerId != null
+                  ? SdkAvatar(
+                      userId: row.peerId!,
+                      name: item.displayName,
+                      context: 'direct',
+                      size: 50,
+                    )
+                  : null,
+            ),
+          ),
         );
       },
+      ),
+    );
+    if (sdk.client?.session.state != ImSessionState.offlineReadOnly) {
+      return rowsView;
+    }
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          color: const Color(0xFFFFF3D6),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: const Text(
+            '离线只读：当前展示已同步的会话，发送和修改需恢复网络后重试。',
+            style: TextStyle(fontSize: 12, color: Color(0xFF7A5A12)),
+          ),
+        ),
+        Expanded(child: rowsView),
+      ],
     );
   }
 
@@ -762,6 +866,28 @@ class _ConversationPaneState extends ConsumerState<ConversationPane> {
                   },
                 ),
                 const Spacer(),
+                if (sdk?.client != null && sdk!.userId != null)
+                  IconButton(
+                    key: const Key('open-archived-conversations'),
+                    tooltip: '隐藏的聊天',
+                    icon: const Icon(Icons.visibility_off_outlined),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const _ArchivedConversationsPage(),
+                      ),
+                    ),
+                  ),
+                if (sdk?.client != null && sdk!.userId != null)
+                  IconButton(
+                    tooltip: '搜索全部聊天记录',
+                    icon: const Icon(Icons.manage_search),
+                    onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => _MessageSearchPage(
+                        client: sdk.client!,
+                        roomTitles: {for (final room in sdk.rooms) if (room.title.isNotEmpty) room.id: room.title},
+                      ),
+                    )),
+                  ),
                 const Icon(Icons.swap_vert_rounded, size: 17, color: muted),
               ],
             ),
@@ -881,12 +1007,22 @@ class _ConversationRow extends ConsumerWidget {
     this.mobile = false,
     required this.item,
     required this.selected,
+    this.avatar,
   });
   final bool mobile;
   final Conversation item;
   final bool selected;
+  final Widget? avatar;
   @override
-  Widget build(BuildContext context, WidgetRef ref) => Container(
+  Widget build(BuildContext context, WidgetRef ref) => Semantics(
+    label: [
+      item.displayName,
+      if (item.unread > 0) '${item.unread} 条未读',
+      if (item.pinned) '已置顶',
+      if (item.muted) '已静音',
+    ].join('，'),
+    hint: '长按打开会话菜单',
+    child: Container(
     decoration: BoxDecoration(
       border: Border(
         bottom: BorderSide(
@@ -902,12 +1038,13 @@ class _ConversationRow extends ConsumerWidget {
     padding: EdgeInsets.fromLTRB(mobile ? 20 : 14, 15, 20, 15),
     child: Row(
       children: [
-        ChatAvatar(
-          id: item.id,
-          name: item.displayName,
-          group: item.isGroup,
-          size: mobile ? 50 : 43,
-        ),
+        avatar ??
+            ChatAvatar(
+              id: item.id,
+              name: item.displayName,
+              group: item.isGroup,
+              size: mobile ? 50 : 43,
+            ),
         const SizedBox(width: 12),
         Expanded(
           child: Column(
@@ -961,15 +1098,18 @@ class _ConversationRow extends ConsumerWidget {
                   ),
                   const SizedBox(width: 6),
                   if (item.muted) ...[
-                    const Icon(
-                      Icons.notifications_off_outlined,
-                      size: 13,
-                      color: muted,
+                    const ExcludeSemantics(
+                      child: Icon(
+                        Icons.notifications_off_outlined,
+                        size: 13,
+                        color: muted,
+                      ),
                     ),
                     const SizedBox(width: 4),
                   ],
                   if (item.unread > 0)
-                    Container(
+                    ExcludeSemantics(
+                      child: Container(
                       constraints: const BoxConstraints(minWidth: 18),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 5,
@@ -987,15 +1127,23 @@ class _ConversationRow extends ConsumerWidget {
                           color: Colors.white,
                         ),
                       ),
+                    ),
                     )
                   else if (item.pinned)
-                    const Icon(Icons.push_pin_rounded, size: 12, color: muted),
+                    const ExcludeSemantics(
+                      child: Icon(
+                        Icons.push_pin_rounded,
+                        size: 12,
+                        color: muted,
+                      ),
+                    ),
                 ],
               ),
             ],
           ),
         ),
       ],
+    ),
     ),
   );
 }
@@ -1007,11 +1155,13 @@ class ChatAvatar extends StatelessWidget {
     required this.name,
     this.group = false,
     this.size = 43,
+    this.avatar,
   });
   final int id;
   final String name;
   final bool group;
   final double size;
+  final Uint8List? avatar;
   @override
   Widget build(BuildContext context) {
     const backgrounds = [
@@ -1028,7 +1178,12 @@ class ChatAvatar extends StatelessWidget {
       Color(0xFF8C6D94),
       Color(0xFFA37F61),
     ];
-    return Container(
+    return Semantics(
+      container: true,
+      excludeSemantics: true,
+      image: true,
+      label: group ? '群头像：$name' : '头像：$name',
+      child: Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
@@ -1036,20 +1191,31 @@ class ChatAvatar extends StatelessWidget {
         borderRadius: BorderRadius.circular(size * .3),
       ),
       alignment: Alignment.center,
-      child: group
-          ? Icon(
-              Icons.forum_rounded,
-              size: size * .47,
-              color: foregrounds[id % foregrounds.length],
-            )
-          : Text(
-              name.characters.first,
-              style: TextStyle(
-                fontSize: size * .38,
-                color: foregrounds[id % foregrounds.length],
-                fontWeight: FontWeight.w600,
-              ),
+      clipBehavior: Clip.antiAlias,
+      child: avatar == null
+          ? group
+                ? Icon(
+                    Icons.forum_rounded,
+                    size: size * .47,
+                    color: foregrounds[id % foregrounds.length],
+                  )
+                : Text(
+                    name.characters.first,
+                    style: TextStyle(
+                      fontSize: size * .38,
+                      color: foregrounds[id % foregrounds.length],
+                      fontWeight: FontWeight.w600,
+                    ),
+                  )
+          : Image.memory(
+              avatar!,
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              cacheWidth: (size * MediaQuery.devicePixelRatioOf(context)).round(),
+              gaplessPlayback: true,
             ),
+    ),
     );
   }
 }
@@ -1464,11 +1630,13 @@ class _ChatHeading extends StatelessWidget {
     required this.onProfile,
     required this.onHistory,
     required this.onSettings,
+    this.avatar,
   });
   final int id;
   final String displayName, subtitle;
   final bool group, mobile;
   final VoidCallback onProfile, onHistory, onSettings;
+  final Widget? avatar;
   @override
   Widget build(BuildContext context) => Row(
     children: [
@@ -1480,12 +1648,14 @@ class _ChatHeading extends StatelessWidget {
           onTap: onProfile,
           child: Padding(
             padding: const EdgeInsets.all(6),
-            child: ChatAvatar(
-              id: id,
-              name: displayName,
-              group: group,
-              size: mobile ? 32 : 38,
-            ),
+            child:
+                avatar ??
+                ChatAvatar(
+                  id: id,
+                  name: displayName,
+                  group: group,
+                  size: mobile ? 32 : 38,
+                ),
           ),
         ),
       ),
@@ -1539,9 +1709,42 @@ class _MessageBubble extends ConsumerWidget {
     required this.conversation,
     this.sdkSender,
     this.sdkStatus,
+    this.attachmentList,
+    this.replyPreview,
+    this.onOpenReply,
+    this.onReply,
+    this.onForward,
+    this.recovery,
+    this.onCancelSend,
+    this.onEdit,
+    this.onWithdraw,
+    this.onReaders,
+    this.onFavorite,
+    this.onEnterSelection,
+    this.mentionSummary,
+    this.entities = const [],
+    this.isPinned = false,
+    this.onPin,
+    this.onCopyAttachments,
+    this.onModerateRemove,
+    this.selecting = false,
+    this.selected = false,
+    this.onToggleSelect,
+    this.isForwarded = false,
     this.showTime = true,
   });
-  final String? sdkSender, sdkStatus;
+  final String? sdkSender, sdkStatus, replyPreview;
+  final bool isForwarded;
+  final Widget? attachmentList;
+  final ({String label, VoidCallback action})? recovery;
+  final VoidCallback? onCancelSend, onOpenReply;
+  final VoidCallback? onReply, onForward, onEdit, onWithdraw, onReaders;
+  final VoidCallback? onFavorite, onEnterSelection, onToggleSelect;
+  final bool selecting, selected;
+  final String? mentionSummary;
+  final List<ImEntity> entities;
+  final bool isPinned;
+  final VoidCallback? onPin, onCopyAttachments, onModerateRemove;
   final bool showTime;
   final ChatMessage message;
   final Conversation conversation;
@@ -1597,16 +1800,44 @@ class _MessageBubble extends ConsumerWidget {
                 bottomRight: const Radius.circular(12),
               ),
             ),
-            child: Text(
-              message.text,
-              style: TextStyle(
-                fontSize: (mobile ? 16 : 12) + fontDelta,
-                height: mobile ? 1.4 : 1.6,
-                color: mobile && mine ? Colors.white : ink,
-              ),
-            ),
+            child: entities.isEmpty
+                ? Text(
+                    message.text,
+                    style: TextStyle(
+                      fontSize: (mobile ? 16 : 12) + fontDelta,
+                      height: mobile ? 1.4 : 1.6,
+                      color: mobile && mine ? Colors.white : ink,
+                    ),
+                  )
+                : Text.rich(
+                    TextSpan(
+                      style: TextStyle(
+                        fontSize: (mobile ? 16 : 12) + fontDelta,
+                        height: mobile ? 1.4 : 1.6,
+                        color: mobile && mine ? Colors.white : ink,
+                      ),
+                      children: _richMessageSpans(
+                        message.text,
+                        entities,
+                        TextStyle(
+                          fontSize: (mobile ? 16 : 12) + fontDelta,
+                          height: mobile ? 1.4 : 1.6,
+                          color: mobile && mine ? Colors.white : ink,
+                        ),
+                      ),
+                    ),
+                  ),
           );
-    return Padding(
+    return Semantics(
+      container: true,
+      label:
+          '${mine ? '我' : displayName}：${message.text.isEmpty ? '[附件消息]' : message.text}',
+      hint: selecting ? '轻点选择消息' : '长按打开消息菜单',
+      selected: selecting ? selected : null,
+      child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: selecting ? onToggleSelect : null,
+      child: Padding(
       padding: const EdgeInsets.only(bottom: 18),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1614,6 +1845,16 @@ class _MessageBubble extends ConsumerWidget {
             ? MainAxisAlignment.end
             : MainAxisAlignment.start,
         children: [
+          if (selecting)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, right: 6),
+              child: Checkbox(
+                value: selected,
+                onChanged: onToggleSelect == null
+                    ? null
+                    : (_) => onToggleSelect!(),
+              ),
+            ),
           if (!mine) ...[avatar, const SizedBox(width: 10)],
           Flexible(
             child: Column(
@@ -1640,6 +1881,85 @@ class _MessageBubble extends ConsumerWidget {
                           ),
                         ),
                       ),
+                      if (onModerateRemove != null ||
+                          onCopyAttachments != null ||
+                          onPin != null ||
+                          onEnterSelection != null ||
+                          onCancelSend != null ||
+                          recovery != null ||
+                          onReply != null ||
+                          onForward != null ||
+                          onEdit != null ||
+                          onWithdraw != null)
+                        PopupMenuButton<VoidCallback>(
+                          tooltip: '消息操作',
+                          onSelected: (action) => action(),
+                          itemBuilder: (_) => [
+                            if (recovery case final recovery?)
+                              PopupMenuItem(
+                                value: recovery.action,
+                                child: Text(recovery.label),
+                              ),
+                            if (onCancelSend != null)
+                              PopupMenuItem(
+                                value: onCancelSend,
+                                child: const Text('取消发送'),
+                              ),
+                            if (onReply != null)
+                              PopupMenuItem(
+                                value: onReply,
+                                child: const Text('回复'),
+                              ),
+                            if (onForward != null)
+                              PopupMenuItem(
+                                value: onForward,
+                                child: const Text('转发'),
+                              ),
+                            if (onReaders != null)
+                              PopupMenuItem(
+                                value: onReaders,
+                                child: const Text('查看已读'),
+                              ),
+                            if (onFavorite != null)
+                              PopupMenuItem(
+                                value: onFavorite,
+                                child: const Text('收藏'),
+                              ),
+                            if (onModerateRemove != null)
+                              PopupMenuItem(
+                                value: onModerateRemove,
+                                child: const Text(
+                                  '移除消息',
+                                  style: TextStyle(color: Color(0xFFB3261E)),
+                                ),
+                              ),
+                            if (onCopyAttachments != null)
+                              PopupMenuItem(
+                                value: onCopyAttachments,
+                                child: const Text('复制附件到会话'),
+                              ),
+                            if (onPin != null)
+                              PopupMenuItem(
+                                value: onPin,
+                                child: Text(isPinned ? '取消置顶' : '置顶消息'),
+                              ),
+                            if (onEnterSelection != null)
+                              PopupMenuItem(
+                                value: onEnterSelection,
+                                child: const Text('多选'),
+                              ),
+                            if (onEdit != null)
+                              PopupMenuItem(
+                                value: onEdit,
+                                child: const Text('编辑'),
+                              ),
+                            if (onWithdraw != null)
+                              PopupMenuItem(
+                                value: onWithdraw,
+                                child: const Text('撤回'),
+                              ),
+                          ],
+                        ),
                       const SizedBox(width: 8),
                       if (showTime)
                         Text(
@@ -1652,16 +1972,66 @@ class _MessageBubble extends ConsumerWidget {
                     ],
                   ),
                 ),
+                if (isForwarded) const Text('转发的消息'),
+                if (isPinned)
+                  const Text(
+                    '已置顶',
+                    style: TextStyle(fontSize: 11, color: Color(0xFFD79A2B)),
+                  ),
+                for (final link in {
+                  for (final entity in entities)
+                    if (entity.kind == 'link' && entity.url != null) entity.url!,
+                })
+                  InkWell(
+                    onTap: () => launchUrl(
+                      Uri.parse(link),
+                      mode: LaunchMode.externalApplication,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        '打开链接：${Uri.tryParse(link)?.host ?? link}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF1D6FD8),
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (mentionSummary case final summary?)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      summary,
+                      style: const TextStyle(fontSize: 11, color: muted),
+                    ),
+                  ),
+                if (replyPreview case final preview?)
+                  InkWell(
+                    onTap: onOpenReply,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text('回复 · $preview', maxLines: 2, overflow: TextOverflow.ellipsis),
+                    ),
+                  ),
                 if (sdkSender == null)
                   _MessageActionsRegion(message: message, child: content)
-                else
+                else if (message.text.isNotEmpty || attachmentList == null)
                   SelectionArea(child: content),
+                ?attachmentList,
                 if (mine)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      sdkStatus ?? (mobile ? '已送达' : '已送达 · Mock ✓'),
-                      style: const TextStyle(fontSize: 9, color: muted),
+                    child: Semantics(
+                      liveRegion: true,
+                      label: sdkStatus ?? (mobile ? '已送达' : '已送达 · Mock ✓'),
+                      child: ExcludeSemantics(
+                        child: Text(
+                          sdkStatus ?? (mobile ? '已送达' : '已送达 · Mock ✓'),
+                          style: const TextStyle(fontSize: 9, color: muted),
+                        ),
+                      ),
                     ),
                   ),
               ],
@@ -1673,6 +2043,8 @@ class _MessageBubble extends ConsumerWidget {
           ] else
             SizedBox(width: mine ? 4 : 16),
         ],
+      ),
+      ),
       ),
     );
   }
@@ -2748,4 +3120,59 @@ class _MessageItem extends ConsumerWidget {
             child: bubble,
           );
   }
+}
+
+
+List<InlineSpan> _richMessageSpans(
+  String text,
+  List<ImEntity> entities,
+  TextStyle base,
+) {
+  if (entities.isEmpty || text.isEmpty) {
+    return [TextSpan(text: text, style: base)];
+  }
+  final boundaries = <int>{0, text.length};
+  for (final entity in entities) {
+    final start = entity.offset.clamp(0, text.length);
+    final end = (entity.offset + entity.length).clamp(0, text.length);
+    if (start < end) boundaries.addAll([start, end]);
+  }
+  final points = boundaries.toList()..sort();
+  final spans = <InlineSpan>[];
+  for (var i = 0; i + 1 < points.length; i++) {
+    final start = points[i], end = points[i + 1];
+    if (start == end) continue;
+    var style = base;
+    for (final entity in entities) {
+      final entityStart = entity.offset.clamp(0, text.length);
+      final entityEnd = (entity.offset + entity.length).clamp(0, text.length);
+      if (start < entityStart || end > entityEnd) continue;
+      switch (entity.kind) {
+        case 'bold':
+          style = style.copyWith(fontWeight: FontWeight.w700);
+        case 'italic':
+          style = style.copyWith(fontStyle: FontStyle.italic);
+        case 'code':
+        case 'preformatted':
+          style = style.copyWith(
+            fontFamily: 'Menlo',
+            fontFamilyFallback: const ['Courier'],
+            backgroundColor: base.color == Colors.white
+                ? const Color(0x1A000000)
+                : const Color(0x33FFFFFF),
+          );
+        case 'link':
+          style = style.copyWith(
+            color: base.color == Colors.white
+                ? const Color(0xFFCDE9FF)
+                : const Color(0xFF1D6FD8),
+            decoration: TextDecoration.underline,
+          );
+      }
+    }
+    spans.add(
+      TextSpan(text: text.substring(start, end), style: style),
+    );
+  }
+  return spans;
 }

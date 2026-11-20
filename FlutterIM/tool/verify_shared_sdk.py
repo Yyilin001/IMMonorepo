@@ -49,11 +49,18 @@ def accounts(config, origin):
                              'issueBeforeMilliseconds': int((time.time() + 600) * 1000)}})
 
     sender, peer = register('a'), register('b')
-    result = post('direct-room-operations/submit', {
-        'actorUserID': {'rawValue': sender['userID']}, 'targetUserID': {'rawValue': peer['userID']},
-        'operationID': {'rawValue': new_id()}, 'firstSubmissionDeadlineMilliseconds': int((time.time() + 60) * 1000)}, sender)
+    first, second = register('c'), register('d')
+
+    def direct(actor, target):
+        result = post('direct-room-operations/submit', {
+            'actorUserID': {'rawValue': actor['userID']}, 'targetUserID': {'rawValue': target['userID']},
+            'operationID': {'rawValue': new_id()}, 'firstSubmissionDeadlineMilliseconds': int((time.time() + 60) * 1000)}, actor)
+        return result['receipt']['_0']['outcome']['opened']['roomID']['rawValue']
+
     return dict(IM_ACCOUNT_URL=origin, IM_GATEWAY_HOST='localhost', IM_GATEWAY_PORT=str(config['gatewayPort']),
-                IM_E2E_ROOM=result['receipt']['_0']['outcome']['opened']['roomID']['rawValue'],
+                IM_E2E_ROOM=direct(sender, peer),
+                IM_ANDROID_FORWARD_FIRST=direct(sender, first), IM_ANDROID_FORWARD_SECOND=direct(sender, second),
+                IM_IOS_FORWARD_FIRST=direct(peer, first), IM_IOS_FORWARD_SECOND=direct(peer, second),
                 IM_E2E_RUN=run, IM_E2E_PASSWORD=password)
 
 
@@ -99,7 +106,7 @@ def main():
                 subprocess.run(command, cwd=APP, env=env, check=True, timeout=540)
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 list(pool.map(test, [args.android, simulator]))
-            print('PASS Flutter Android ↔ iOS: login, conversation, send, receive, reopen, sign out')
+            print('PASS Flutter Android ↔ iOS: login, text, attachment upload/download/export byte equality in both directions, room and cross-room message search, multi-room forward, reopen, sign out')
         finally:
             subprocess.run(adb + ['uninstall', 'com.xmtx.im.flutterexample.verification'], check=False, stdout=subprocess.DEVNULL)
             for local in reverses:

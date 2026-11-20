@@ -176,6 +176,7 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
         widget.searchPage ||
         (!mobile && (searchFocus.hasFocus || filter.query.isNotEmpty));
     final directory = ref.watch(contactDirectoryProvider);
+    final owner = _SdkScope.of(context);
     return _SearchScope(
       active: searching && !widget.searchPage,
       onPageExit: widget.searchPage ? _rememberSearch : null,
@@ -204,7 +205,7 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          '${number(directory.friends.length)} 位好友 · ${number(directory.groups.length)} 个群聊',
+                          '${number(directory.friends.length)} ${owner != null && owner.contactScope != ImContactScope.accepted ? '条关系记录' : '位好友'} · ${number(directory.groups.length)} 个群聊',
                           style: const TextStyle(fontSize: 13, color: muted),
                         ),
                       ],
@@ -236,7 +237,9 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                     children: [
                       _Filter(
                         mobile: true,
-                        label: '好友',
+                        label: owner == null
+                            ? '好友'
+                            : _scopeLabel(owner.contactScope),
                         selected: !groups,
                         onTap: () {
                           searchFocus.unfocus();
@@ -253,11 +256,84 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                           _filter(groups: true);
                         },
                       ),
+                      if (owner?.userId != null && groups)
+                        IconButton(
+                          tooltip: '新建群聊',
+                          icon: const Icon(Icons.group_add_outlined),
+                          onPressed: owner!.loadingDirectory
+                              ? null
+                              : () async {
+                                  if (owner.contactScope !=
+                                      ImContactScope.accepted) {
+                                    await owner.refreshDirectory(
+                                      scope: ImContactScope.accepted,
+                                    );
+                                  }
+                                  if (!context.mounted) return;
+                                  final created = await Navigator.of(context)
+                                      .push<bool>(
+                                        MaterialPageRoute(
+                                          builder: (_) =>
+                                              const _CreateGroupPage(),
+                                        ),
+                                      );
+                                  if (created == true && context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('已提交建群请求')),
+                                    );
+                                    await owner.refreshDirectory();
+                                  }
+                                },
+                        ),
+                      if (owner?.userId != null && groups)
+                        IconButton(
+                          tooltip: '加入群聊',
+                          icon: const Icon(Icons.qr_code_scanner_rounded),
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const _JoinGroupPage(),
+                            ),
+                          ),
+                        ),
+                      if (owner?.userId != null && !groups)
+                        IconButton(
+                          tooltip: '添加好友',
+                          icon: const Icon(Icons.person_add_outlined),
+                          onPressed: () async {
+                            final requested = await showDialog<bool>(
+                              context: context,
+                              builder: (_) =>
+                                  _RequestContactDialog(client: owner!.client!),
+                            );
+                            if (requested == true && context.mounted) {
+                              _filter(groups: false);
+                              await owner!.refreshDirectory(
+                                scope: ImContactScope.outgoing,
+                              );
+                            }
+                          },
+                        ),
+                      if (owner?.userId != null)
+                        PopupMenuButton<ImContactScope>(
+                          tooltip: '切换联系人分类',
+                          enabled: !owner!.loadingDirectory,
+                          onSelected: (scope) {
+                            _filter(groups: false);
+                            unawaited(owner.refreshDirectory(scope: scope));
+                          },
+                          itemBuilder: (_) => [
+                            for (final scope in ImContactScope.values)
+                              PopupMenuItem(
+                                value: scope,
+                                child: Text(_scopeLabel(scope)),
+                              ),
+                          ],
+                        ),
                     ],
                   ),
                 ),
                 if (searching && filter.query.isNotEmpty)
-                  _SearchResultsLabel(groups ? '群聊搜索结果' : '好友搜索结果'),
+                  _SearchResultsLabel(groups ? '群聊搜索结果' : '联系人搜索结果'),
                 Expanded(
                   child: searching && filter.query.isEmpty
                       ? _RecentSearchPanel(
@@ -278,7 +354,8 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                                 ),
                               );
                             }
-                            if (sdk?.loadingDirectory == true) {
+                            if (sdk?.loadingDirectory == true &&
+                                sdk!.entries.isEmpty) {
                               return const Center(
                                 child: CircularProgressIndicator(),
                               );
@@ -292,7 +369,10 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                               );
                             }
                             final index = ref.watch(contactIndexProvider);
-                            if (index.rows.isEmpty) {
+                            final more =
+                                sdk != null &&
+                                (groups ? sdk.moreGroups : sdk.moreContacts);
+                            if (index.rows.isEmpty && !more) {
                               return const Center(
                                 child: Text(
                                   '没有找到联系人',
@@ -311,9 +391,28 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                                         ScrollViewKeyboardDismissBehavior
                                             .onDrag,
                                     itemExtentBuilder: (row, _) =>
-                                        index.rows[row].extent,
-                                    itemCount: index.rows.length,
+                                        row == index.rows.length
+                                        ? 52
+                                        : index.rows[row].extent,
+                                    itemCount:
+                                        index.rows.length + (more ? 1 : 0),
                                     itemBuilder: (_, row) {
+                                      if (row == index.rows.length) {
+                                        return TextButton(
+                                          onPressed: sdk!.loadingDirectory
+                                              ? null
+                                              : () => sdk.refreshDirectory(
+                                                  nextGroups: groups,
+                                                ),
+                                          child: Text(
+                                            sdk.loadingDirectory
+                                                ? '正在加载…'
+                                                : groups
+                                                ? '加载更多群聊'
+                                                : '加载更多${_scopeLabel(sdk.contactScope)}',
+                                          ),
+                                        );
+                                      }
                                       final entry = index.rows[row];
                                       final c = entry.contact;
                                       if (c == null) {
@@ -342,11 +441,9 @@ class _ContactsPaneState extends ConsumerState<ContactsPane> {
                                               horizontal: 20,
                                               vertical: 6,
                                             ),
-                                        leading: ChatAvatar(
-                                          id: c.id,
-                                          name: c.name,
-                                          group: c.isGroup,
-                                          size: 48,
+                                        leading: _contactListAvatar(
+                                          context,
+                                          c,
                                         ),
                                         title: Text(
                                           c.name,
@@ -512,16 +609,7 @@ class PersonalPane extends ConsumerWidget {
                       ? () => _openSdkLogin(context)
                       : () => Navigator.of(context).push(
                           MaterialPageRoute<void>(
-                            builder: (_) => _ProfileScaffold(
-                              title: '个人资料',
-                              children: [
-                                _ProfileHeader(
-                                  id: MyProfile.avatarId,
-                                  name: profile.name,
-                                  handle: sdk.userId!,
-                                ),
-                              ],
-                            ),
+                            builder: (_) => const _SdkMyProfilePage(),
                           ),
                         ),
                   child: Padding(
@@ -602,6 +690,72 @@ class PersonalPane extends ConsumerWidget {
               const SizedBox(height: 18),
               _InfoCard(
                 children: [
+                  if (sdk?.userId != null)
+                    ListTile(
+                      key: const Key('connection-status'),
+                      leading: const Icon(Icons.wifi_rounded, color: green),
+                      title: const Text('连接与同步'),
+                      subtitle: Text(
+                        sdk!.client!.session.state == ImSessionState.connected
+                            ? '已连接'
+                            : '等待连接',
+                      ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => _openConnectionSheet(context),
+                    ),
+                  if (sdk?.userId != null) const _TransfersLink(),
+                  if (sdk?.userId != null)
+                    ListTile(
+                      key: const Key('favorites'),
+                      leading: const Icon(Icons.star_outline_rounded, color: green),
+                      title: const Text('收藏'),
+                      subtitle: const Text('已收藏的消息'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const _FavoritesPage(),
+                        ),
+                      ),
+                    ),
+                  if (sdk?.userId != null)
+                    ListTile(
+                      key: const Key('privacy-settings'),
+                      leading: const Icon(Icons.lock_person_outlined, color: green),
+                      title: const Text('消息接收设置'),
+                      subtitle: const Text('陌生人消息、添加权限、已读回执与状态'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const _PrivacySettingsPage(),
+                        ),
+                      ),
+                    ),
+                  if (sdk?.userId != null)
+                    ListTile(
+                      key: const Key('device-sessions'),
+                      leading: const Icon(Icons.devices_outlined, color: green),
+                      title: const Text('登录设备'),
+                      subtitle: const Text('查看当前账号的登录设备'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const _DeviceSessionsPage(),
+                        ),
+                      ),
+                    ),
+                  if (sdk?.userId != null)
+                    ListTile(
+                      key: const Key('account-security'),
+                      leading: const Icon(Icons.shield_outlined, color: green),
+                      title: const Text('账号安全'),
+                      subtitle: const Text('修改密码、设置或使用恢复码'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const _AccountSecurityPage(),
+                        ),
+                      ),
+                    ),
                   if (sdk != null)
                     ListTile(
                       key: const Key('account-action'),
@@ -705,16 +859,27 @@ class _ProfileHeader extends StatelessWidget {
     required this.name,
     required this.handle,
     this.group = false,
+    this.avatar,
+    this.avatarWidget,
   });
   final int id;
   final String name, handle;
   final bool group;
+  final Uint8List? avatar;
+  final Widget? avatarWidget;
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 28),
     child: Column(
       children: [
-        ChatAvatar(id: id, name: name, group: group, size: 80),
+        avatarWidget ??
+            ChatAvatar(
+              id: id,
+              name: name,
+              group: group,
+              size: 80,
+              avatar: avatar,
+            ),
         const SizedBox(height: 16),
         Text(
           name,
@@ -1206,5 +1371,179 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
         borderSide: const BorderSide(color: line),
       ),
     ),
+  );
+}
+
+String _scopeLabel(ImContactScope scope) => switch (scope) {
+  ImContactScope.accepted => '好友',
+  ImContactScope.incoming => '收到的申请',
+  ImContactScope.outgoing => '发出的申请',
+  ImContactScope.blocked => '黑名单',
+};
+
+class _ContactRelationshipActions extends StatefulWidget {
+  const _ContactRelationshipActions({
+    required this.userId,
+    required this.name,
+    required this.scope,
+  });
+  final String userId, name;
+  final ImContactScope scope;
+
+  @override
+  State<_ContactRelationshipActions> createState() =>
+      _ContactRelationshipActionsState();
+}
+
+class _ContactRelationshipActionsState
+    extends State<_ContactRelationshipActions> {
+  bool busy = false;
+  String? error;
+
+  Future<void> submit(ImSocialAction action, String label) async {
+    if (busy) return;
+    final sdk = _SdkScope.of(context)!;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: Text('确认$label？'),
+          content: Text(widget.name),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialog, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog, true),
+              child: Text(label),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      await sdk.client!.socialAction(widget.userId, action);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已提交「$label」')));
+      unawaited(sdk.refreshDirectory());
+      Navigator.pop(context);
+    } catch (failure) {
+      if (mounted) setState(() => error = _errorText(failure));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final actions = switch (widget.scope) {
+      ImContactScope.accepted => {
+        ImSocialAction.remove: '删除好友',
+        ImSocialAction.block: '加入黑名单',
+      },
+      ImContactScope.incoming => {
+        ImSocialAction.accept: '接受申请',
+        ImSocialAction.reject: '拒绝申请',
+        ImSocialAction.block: '加入黑名单',
+      },
+      ImContactScope.outgoing => {ImSocialAction.block: '加入黑名单'},
+      ImContactScope.blocked => {ImSocialAction.unblock: '移出黑名单'},
+    };
+    return Column(
+      children: [
+        if (widget.scope == ImContactScope.outgoing) const Text('等待对方处理'),
+        for (final entry in actions.entries)
+          TextButton(
+            onPressed: busy ? null : () => submit(entry.key, entry.value),
+            child: Text(entry.value),
+          ),
+        if (error != null) Text(error!),
+      ],
+    );
+  }
+}
+
+class _RequestContactDialog extends StatefulWidget {
+  const _RequestContactDialog({required this.client});
+  final ImClient client;
+
+  @override
+  State<_RequestContactDialog> createState() => _RequestContactDialogState();
+}
+
+class _RequestContactDialogState extends State<_RequestContactDialog> {
+  String handle = '';
+  String? error;
+  bool busy = false;
+
+  Future<void> submit() async {
+    if (busy || handle.isEmpty) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      await widget.client.requestContact(handle);
+      if (mounted) Navigator.pop(context, true);
+    } catch (failure) {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          error = _errorText(failure);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('添加好友'),
+    content: TextField(
+      enabled: !busy,
+      autofocus: true,
+      autocorrect: false,
+      decoration: InputDecoration(labelText: '对方的公开账号', errorText: error),
+      onChanged: (value) => setState(() => handle = value.trim()),
+    ),
+    actions: [
+      TextButton(
+        onPressed: busy ? null : () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      FilledButton(
+        onPressed: busy || handle.isEmpty ? null : submit,
+        child: const Text('发送申请'),
+      ),
+    ],
+  );
+}
+
+Widget _contactListAvatar(BuildContext context, ContactSummary contact) {
+  final sdk = _SdkScope.of(context);
+  if (sdk != null && contact.isGroup && contact.accountId != null) {
+    return SdkGroupAvatar(
+      roomId: contact.accountId!,
+      name: contact.name,
+      size: 48,
+    );
+  }
+  if (sdk != null && !contact.isGroup && contact.accountId != null) {
+    return SdkAvatar(
+      userId: contact.accountId!,
+      name: contact.name,
+      context: 'relationship',
+      size: 48,
+    );
+  }
+  return ChatAvatar(
+    id: contact.id,
+    name: contact.name,
+    group: contact.isGroup,
+    size: 48,
   );
 }

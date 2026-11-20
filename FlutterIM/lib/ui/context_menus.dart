@@ -578,3 +578,195 @@ class _MessageActionsRegionState extends ConsumerState<_MessageActionsRegion> {
     ),
   );
 }
+
+/// Mute windows follow the native “持续免打扰” option so the toggle has a
+/// durable end state rather than an in-memory flag.
+const _sdkMuteHorizon = Duration(days: 3650);
+
+bool _sdkMuted(int? muteUntil) =>
+    muteUntil != null && muteUntil > DateTime.now().millisecondsSinceEpoch;
+
+Future<void> _showSdkConversationMenu(
+  BuildContext context,
+  WidgetRef ref,
+  ImConversation room,
+) async {
+  final sdk = _SdkScope.of(context);
+  if (sdk == null) return;
+  if (ref.read(appSettingsProvider).haptics &&
+      _usesMobileWorkspace(MediaQuery.sizeOf(context).width)) {
+    unawaited(HapticFeedback.selectionClick());
+  }
+  final action = await showModalBottomSheet<String>(
+    context: context,
+    useRootNavigator: true,
+    isScrollControlled: true,
+    useSafeArea: true,
+    backgroundColor: Colors.transparent,
+    barrierColor: const Color(0x4D10271F),
+    elevation: 0,
+    builder: (_) => _SdkConversationActionSheet(
+      room: room,
+      avatarId: sdk.keyFor(room.id),
+    ),
+  );
+  if (action == null) return;
+  switch (action) {
+    case 'pin':
+      await sdk.applyConversationState(room, pinned: !room.isPinned);
+    case 'mute':
+      await sdk.applyConversationState(
+        room,
+        muteUntil: _sdkMuted(room.muteUntil)
+            ? 0
+            : DateTime.now().add(_sdkMuteHorizon).millisecondsSinceEpoch,
+      );
+    case 'archive':
+      await sdk.applyConversationState(room, archived: !room.isArchived);
+  }
+}
+
+class _SdkConversationActionSheet extends StatelessWidget {
+  const _SdkConversationActionSheet({
+    required this.room,
+    required this.avatarId,
+  });
+  final ImConversation room;
+  final int avatarId;
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    top: false,
+    minimum: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+    child: Align(
+      alignment: Alignment.bottomCenter,
+      heightFactor: 1,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 480),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Material(
+                key: const Key('sdk-conversation-action-sheet'),
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(26),
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(height: 10),
+                    Container(
+                      width: 32,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: line,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+                      child: Row(
+                        children: [
+                          ChatAvatar(
+                            id: avatarId,
+                            name: room.title,
+                            group: room.isGroup,
+                            size: 40,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              room.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: ink,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    _SdkMenuRow(
+                      key: const Key('sdk-conversation-menu-pin'),
+                      icon: room.isPinned
+                          ? Icons.push_pin_rounded
+                          : Icons.push_pin_outlined,
+                      label: room.isPinned ? '取消置顶' : '置顶聊天',
+                      onTap: () => Navigator.pop(context, 'pin'),
+                    ),
+                    _SdkMenuRow(
+                      key: const Key('sdk-conversation-menu-mute'),
+                      icon: _sdkMuted(room.muteUntil)
+                          ? Icons.notifications_active_outlined
+                          : Icons.notifications_off_outlined,
+                      label: _sdkMuted(room.muteUntil) ? '关闭免打扰' : '消息免打扰',
+                      onTap: () => Navigator.pop(context, 'mute'),
+                    ),
+                    _SdkMenuRow(
+                      key: const Key('sdk-conversation-menu-archive'),
+                      icon: room.isArchived
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                      label: room.isArchived ? '取消隐藏' : '隐藏聊天',
+                      onTap: () => Navigator.pop(context, 'archive'),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class _SdkMenuRow extends StatelessWidget {
+  const _SdkMenuRow({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: mint,
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(icon, size: 20, color: green),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 16,
+                color: ink,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}

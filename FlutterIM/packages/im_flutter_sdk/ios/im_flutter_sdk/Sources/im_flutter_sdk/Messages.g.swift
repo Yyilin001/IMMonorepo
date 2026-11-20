@@ -231,8 +231,11 @@ struct ImConversation: Hashable, CustomStringConvertible {
   var preview: String
   var unread: Int64
   var isGroup: Bool
+  var isPinned: Bool
+  var isArchived: Bool
   var updatedAt: Int64? = nil
   var peerId: String? = nil
+  var muteUntil: Int64? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -242,8 +245,11 @@ struct ImConversation: Hashable, CustomStringConvertible {
     let preview = pigeonVar_list[2] as! String
     let unread = pigeonVar_list[3] as! Int64
     let isGroup = pigeonVar_list[4] as! Bool
-    let updatedAt: Int64? = nilOrValue(pigeonVar_list[5])
-    let peerId: String? = nilOrValue(pigeonVar_list[6])
+    let isPinned = pigeonVar_list[5] as! Bool
+    let isArchived = pigeonVar_list[6] as! Bool
+    let updatedAt: Int64? = nilOrValue(pigeonVar_list[7])
+    let peerId: String? = nilOrValue(pigeonVar_list[8])
+    let muteUntil: Int64? = nilOrValue(pigeonVar_list[9])
 
     return ImConversation(
       id: id,
@@ -251,8 +257,11 @@ struct ImConversation: Hashable, CustomStringConvertible {
       preview: preview,
       unread: unread,
       isGroup: isGroup,
+      isPinned: isPinned,
+      isArchived: isArchived,
       updatedAt: updatedAt,
-      peerId: peerId
+      peerId: peerId,
+      muteUntil: muteUntil
     )
   }
   func toList() -> [Any?] {
@@ -262,15 +271,18 @@ struct ImConversation: Hashable, CustomStringConvertible {
       preview,
       unread,
       isGroup,
+      isPinned,
+      isArchived,
       updatedAt,
       peerId,
+      muteUntil,
     ]
   }
   static func == (lhs: ImConversation, rhs: ImConversation) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.title, rhs.title) && MessagesPigeonInternal.deepEquals(lhs.preview, rhs.preview) && MessagesPigeonInternal.deepEquals(lhs.unread, rhs.unread) && MessagesPigeonInternal.deepEquals(lhs.isGroup, rhs.isGroup) && MessagesPigeonInternal.deepEquals(lhs.updatedAt, rhs.updatedAt) && MessagesPigeonInternal.deepEquals(lhs.peerId, rhs.peerId)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.title, rhs.title) && MessagesPigeonInternal.deepEquals(lhs.preview, rhs.preview) && MessagesPigeonInternal.deepEquals(lhs.unread, rhs.unread) && MessagesPigeonInternal.deepEquals(lhs.isGroup, rhs.isGroup) && MessagesPigeonInternal.deepEquals(lhs.isPinned, rhs.isPinned) && MessagesPigeonInternal.deepEquals(lhs.isArchived, rhs.isArchived) && MessagesPigeonInternal.deepEquals(lhs.updatedAt, rhs.updatedAt) && MessagesPigeonInternal.deepEquals(lhs.peerId, rhs.peerId) && MessagesPigeonInternal.deepEquals(lhs.muteUntil, rhs.muteUntil)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -280,12 +292,220 @@ struct ImConversation: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: preview, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: unread, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: isGroup, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isPinned, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isArchived, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: updatedAt, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: peerId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: muteUntil, hasher: &hasher)
   }
 
   public var description: String {
-    return "ImConversation(id: \(String(describing: id)), title: \(String(describing: title)), preview: \(String(describing: preview)), unread: \(String(describing: unread)), isGroup: \(String(describing: isGroup)), updatedAt: \(String(describing: updatedAt)), peerId: \(String(describing: peerId)))"
+    return "ImConversation(id: \(String(describing: id)), title: \(String(describing: title)), preview: \(String(describing: preview)), unread: \(String(describing: unread)), isGroup: \(String(describing: isGroup)), isPinned: \(String(describing: isPinned)), isArchived: \(String(describing: isArchived)), updatedAt: \(String(describing: updatedAt)), peerId: \(String(describing: peerId)), muteUntil: \(String(describing: muteUntil)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct Transfer: Hashable, CustomStringConvertible {
+  var id: String
+  var name: String
+  var kind: String
+  var phase: String
+  var total: Int64? = nil
+  var confirmed: Int64? = nil
+  var actions: [String]
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> Transfer? {
+    let id = pigeonVar_list[0] as! String
+    let name = pigeonVar_list[1] as! String
+    let kind = pigeonVar_list[2] as! String
+    let phase = pigeonVar_list[3] as! String
+    let total: Int64? = nilOrValue(pigeonVar_list[4])
+    let confirmed: Int64? = nilOrValue(pigeonVar_list[5])
+    let actions = pigeonVar_list[6] as! [String]
+
+    return Transfer(
+      id: id,
+      name: name,
+      kind: kind,
+      phase: phase,
+      total: total,
+      confirmed: confirmed,
+      actions: actions
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      name,
+      kind,
+      phase,
+      total,
+      confirmed,
+      actions,
+    ]
+  }
+  static func == (lhs: Transfer, rhs: Transfer) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.name, rhs.name) && MessagesPigeonInternal.deepEquals(lhs.kind, rhs.kind) && MessagesPigeonInternal.deepEquals(lhs.phase, rhs.phase) && MessagesPigeonInternal.deepEquals(lhs.total, rhs.total) && MessagesPigeonInternal.deepEquals(lhs.confirmed, rhs.confirmed) && MessagesPigeonInternal.deepEquals(lhs.actions, rhs.actions)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("Transfer")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: name, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: kind, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: phase, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: total, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: confirmed, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: actions, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "Transfer(id: \(String(describing: id)), name: \(String(describing: name)), kind: \(String(describing: kind)), phase: \(String(describing: phase)), total: \(String(describing: total)), confirmed: \(String(describing: confirmed)), actions: \(String(describing: actions)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct AttachmentPreview: Hashable, CustomStringConvertible {
+  var bytes: FlutterStandardTypedData
+  var remainingMilliseconds: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> AttachmentPreview? {
+    let bytes = pigeonVar_list[0] as! FlutterStandardTypedData
+    let remainingMilliseconds = pigeonVar_list[1] as! Int64
+
+    return AttachmentPreview(
+      bytes: bytes,
+      remainingMilliseconds: remainingMilliseconds
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      bytes,
+      remainingMilliseconds,
+    ]
+  }
+  static func == (lhs: AttachmentPreview, rhs: AttachmentPreview) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.bytes, rhs.bytes) && MessagesPigeonInternal.deepEquals(lhs.remainingMilliseconds, rhs.remainingMilliseconds)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("AttachmentPreview")
+    MessagesPigeonInternal.deepHash(value: bytes, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: remainingMilliseconds, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "AttachmentPreview(bytes: \(String(describing: bytes)), remainingMilliseconds: \(String(describing: remainingMilliseconds)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct Attachment: Hashable, CustomStringConvertible {
+  var id: String
+  var name: String
+  var contentType: String
+  var bytes: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> Attachment? {
+    let id = pigeonVar_list[0] as! String
+    let name = pigeonVar_list[1] as! String
+    let contentType = pigeonVar_list[2] as! String
+    let bytes = pigeonVar_list[3] as! Int64
+
+    return Attachment(
+      id: id,
+      name: name,
+      contentType: contentType,
+      bytes: bytes
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      name,
+      contentType,
+      bytes,
+    ]
+  }
+  static func == (lhs: Attachment, rhs: Attachment) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.name, rhs.name) && MessagesPigeonInternal.deepEquals(lhs.contentType, rhs.contentType) && MessagesPigeonInternal.deepEquals(lhs.bytes, rhs.bytes)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("Attachment")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: name, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: contentType, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: bytes, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "Attachment(id: \(String(describing: id)), name: \(String(describing: name)), contentType: \(String(describing: contentType)), bytes: \(String(describing: bytes)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImEntity: Hashable, CustomStringConvertible {
+  var kind: String
+  var offset: Int64
+  var length: Int64
+  var url: String? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImEntity? {
+    let kind = pigeonVar_list[0] as! String
+    let offset = pigeonVar_list[1] as! Int64
+    let length = pigeonVar_list[2] as! Int64
+    let url: String? = nilOrValue(pigeonVar_list[3])
+
+    return ImEntity(
+      kind: kind,
+      offset: offset,
+      length: length,
+      url: url
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      kind,
+      offset,
+      length,
+      url,
+    ]
+  }
+  static func == (lhs: ImEntity, rhs: ImEntity) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.kind, rhs.kind) && MessagesPigeonInternal.deepEquals(lhs.offset, rhs.offset) && MessagesPigeonInternal.deepEquals(lhs.length, rhs.length) && MessagesPigeonInternal.deepEquals(lhs.url, rhs.url)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImEntity")
+    MessagesPigeonInternal.deepHash(value: kind, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: offset, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: length, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: url, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImEntity(kind: \(String(describing: kind)), offset: \(String(describing: offset)), length: \(String(describing: length)), url: \(String(describing: url)))"
   }
 }
 
@@ -296,8 +516,21 @@ struct ImMessage: Hashable, CustomStringConvertible {
   var text: String
   var withdrawn: Bool
   var hasMedia: Bool
+  var attachments: [Attachment]
+  var readByPeer: Bool
+  var isForwarded: Bool
+  var revision: Int64? = nil
+  var mutableRevision: Int64? = nil
+  var replyPreview: String? = nil
   var pendingStatus: String? = nil
   var createdAt: Int64? = nil
+  var preparedAttachments: Int64? = nil
+  var totalAttachments: Int64? = nil
+  var replyToId: String? = nil
+  var mentionSummary: String? = nil
+  var entities: [ImEntity]? = nil
+  var roomSequence: Int64? = nil
+  var isPinned: Bool? = nil
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -307,8 +540,21 @@ struct ImMessage: Hashable, CustomStringConvertible {
     let text = pigeonVar_list[2] as! String
     let withdrawn = pigeonVar_list[3] as! Bool
     let hasMedia = pigeonVar_list[4] as! Bool
-    let pendingStatus: String? = nilOrValue(pigeonVar_list[5])
-    let createdAt: Int64? = nilOrValue(pigeonVar_list[6])
+    let attachments = pigeonVar_list[5] as! [Attachment]
+    let readByPeer = pigeonVar_list[6] as! Bool
+    let isForwarded = pigeonVar_list[7] as! Bool
+    let revision: Int64? = nilOrValue(pigeonVar_list[8])
+    let mutableRevision: Int64? = nilOrValue(pigeonVar_list[9])
+    let replyPreview: String? = nilOrValue(pigeonVar_list[10])
+    let pendingStatus: String? = nilOrValue(pigeonVar_list[11])
+    let createdAt: Int64? = nilOrValue(pigeonVar_list[12])
+    let preparedAttachments: Int64? = nilOrValue(pigeonVar_list[13])
+    let totalAttachments: Int64? = nilOrValue(pigeonVar_list[14])
+    let replyToId: String? = nilOrValue(pigeonVar_list[15])
+    let mentionSummary: String? = nilOrValue(pigeonVar_list[16])
+    let entities: [ImEntity]? = nilOrValue(pigeonVar_list[17])
+    let roomSequence: Int64? = nilOrValue(pigeonVar_list[18])
+    let isPinned: Bool? = nilOrValue(pigeonVar_list[19])
 
     return ImMessage(
       id: id,
@@ -316,8 +562,21 @@ struct ImMessage: Hashable, CustomStringConvertible {
       text: text,
       withdrawn: withdrawn,
       hasMedia: hasMedia,
+      attachments: attachments,
+      readByPeer: readByPeer,
+      isForwarded: isForwarded,
+      revision: revision,
+      mutableRevision: mutableRevision,
+      replyPreview: replyPreview,
       pendingStatus: pendingStatus,
-      createdAt: createdAt
+      createdAt: createdAt,
+      preparedAttachments: preparedAttachments,
+      totalAttachments: totalAttachments,
+      replyToId: replyToId,
+      mentionSummary: mentionSummary,
+      entities: entities,
+      roomSequence: roomSequence,
+      isPinned: isPinned
     )
   }
   func toList() -> [Any?] {
@@ -327,15 +586,28 @@ struct ImMessage: Hashable, CustomStringConvertible {
       text,
       withdrawn,
       hasMedia,
+      attachments,
+      readByPeer,
+      isForwarded,
+      revision,
+      mutableRevision,
+      replyPreview,
       pendingStatus,
       createdAt,
+      preparedAttachments,
+      totalAttachments,
+      replyToId,
+      mentionSummary,
+      entities,
+      roomSequence,
+      isPinned,
     ]
   }
   static func == (lhs: ImMessage, rhs: ImMessage) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt)
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.withdrawn, rhs.withdrawn) && MessagesPigeonInternal.deepEquals(lhs.hasMedia, rhs.hasMedia) && MessagesPigeonInternal.deepEquals(lhs.attachments, rhs.attachments) && MessagesPigeonInternal.deepEquals(lhs.readByPeer, rhs.readByPeer) && MessagesPigeonInternal.deepEquals(lhs.isForwarded, rhs.isForwarded) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.mutableRevision, rhs.mutableRevision) && MessagesPigeonInternal.deepEquals(lhs.replyPreview, rhs.replyPreview) && MessagesPigeonInternal.deepEquals(lhs.pendingStatus, rhs.pendingStatus) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.preparedAttachments, rhs.preparedAttachments) && MessagesPigeonInternal.deepEquals(lhs.totalAttachments, rhs.totalAttachments) && MessagesPigeonInternal.deepEquals(lhs.replyToId, rhs.replyToId) && MessagesPigeonInternal.deepEquals(lhs.mentionSummary, rhs.mentionSummary) && MessagesPigeonInternal.deepEquals(lhs.entities, rhs.entities) && MessagesPigeonInternal.deepEquals(lhs.roomSequence, rhs.roomSequence) && MessagesPigeonInternal.deepEquals(lhs.isPinned, rhs.isPinned)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -345,12 +617,215 @@ struct ImMessage: Hashable, CustomStringConvertible {
     MessagesPigeonInternal.deepHash(value: text, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: withdrawn, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: hasMedia, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: attachments, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: readByPeer, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isForwarded, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: revision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: mutableRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: replyPreview, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: pendingStatus, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: createdAt, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: preparedAttachments, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: totalAttachments, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: replyToId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: mentionSummary, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: entities, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: roomSequence, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isPinned, hasher: &hasher)
   }
 
   public var description: String {
-    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)))"
+    return "ImMessage(id: \(String(describing: id)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), withdrawn: \(String(describing: withdrawn)), hasMedia: \(String(describing: hasMedia)), attachments: \(String(describing: attachments)), readByPeer: \(String(describing: readByPeer)), isForwarded: \(String(describing: isForwarded)), revision: \(String(describing: revision)), mutableRevision: \(String(describing: mutableRevision)), replyPreview: \(String(describing: replyPreview)), pendingStatus: \(String(describing: pendingStatus)), createdAt: \(String(describing: createdAt)), preparedAttachments: \(String(describing: preparedAttachments)), totalAttachments: \(String(describing: totalAttachments)), replyToId: \(String(describing: replyToId)), mentionSummary: \(String(describing: mentionSummary)), entities: \(String(describing: entities)), roomSequence: \(String(describing: roomSequence)), isPinned: \(String(describing: isPinned)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImProfile: Hashable, CustomStringConvertible {
+  var page: String
+  var userId: String
+  var name: String
+  var handle: String
+  var alias: String? = nil
+  var aliasRevision: Int64? = nil
+  var groupNickname: String? = nil
+  var groupNicknameRevision: Int64? = nil
+  var remainingMilliseconds: Int64
+  var avatar: FlutterStandardTypedData? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImProfile? {
+    let page = pigeonVar_list[0] as! String
+    let userId = pigeonVar_list[1] as! String
+    let name = pigeonVar_list[2] as! String
+    let handle = pigeonVar_list[3] as! String
+    let alias: String? = nilOrValue(pigeonVar_list[4])
+    let aliasRevision: Int64? = nilOrValue(pigeonVar_list[5])
+    let groupNickname: String? = nilOrValue(pigeonVar_list[6])
+    let groupNicknameRevision: Int64? = nilOrValue(pigeonVar_list[7])
+    let remainingMilliseconds = pigeonVar_list[8] as! Int64
+    let avatar: FlutterStandardTypedData? = nilOrValue(pigeonVar_list[9])
+
+    return ImProfile(
+      page: page,
+      userId: userId,
+      name: name,
+      handle: handle,
+      alias: alias,
+      aliasRevision: aliasRevision,
+      groupNickname: groupNickname,
+      groupNicknameRevision: groupNicknameRevision,
+      remainingMilliseconds: remainingMilliseconds,
+      avatar: avatar
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      page,
+      userId,
+      name,
+      handle,
+      alias,
+      aliasRevision,
+      groupNickname,
+      groupNicknameRevision,
+      remainingMilliseconds,
+      avatar,
+    ]
+  }
+  static func == (lhs: ImProfile, rhs: ImProfile) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.page, rhs.page) && MessagesPigeonInternal.deepEquals(lhs.userId, rhs.userId) && MessagesPigeonInternal.deepEquals(lhs.name, rhs.name) && MessagesPigeonInternal.deepEquals(lhs.handle, rhs.handle) && MessagesPigeonInternal.deepEquals(lhs.alias, rhs.alias) && MessagesPigeonInternal.deepEquals(lhs.aliasRevision, rhs.aliasRevision) && MessagesPigeonInternal.deepEquals(lhs.groupNickname, rhs.groupNickname) && MessagesPigeonInternal.deepEquals(lhs.groupNicknameRevision, rhs.groupNicknameRevision) && MessagesPigeonInternal.deepEquals(lhs.remainingMilliseconds, rhs.remainingMilliseconds) && MessagesPigeonInternal.deepEquals(lhs.avatar, rhs.avatar)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImProfile")
+    MessagesPigeonInternal.deepHash(value: page, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: userId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: name, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: handle, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: alias, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: aliasRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: groupNickname, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: groupNicknameRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: remainingMilliseconds, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: avatar, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImProfile(page: \(String(describing: page)), userId: \(String(describing: userId)), name: \(String(describing: name)), handle: \(String(describing: handle)), alias: \(String(describing: alias)), aliasRevision: \(String(describing: aliasRevision)), groupNickname: \(String(describing: groupNickname)), groupNicknameRevision: \(String(describing: groupNicknameRevision)), remainingMilliseconds: \(String(describing: remainingMilliseconds)), avatar: \(String(describing: avatar)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImAvatarEditor: Hashable, CustomStringConvertible {
+  var roomId: String? = nil
+  var revision: Int64
+  var canManage: Bool
+  var remainingMilliseconds: Int64
+  var hasAvatar: Bool
+  var name: String? = nil
+  var handle: String? = nil
+  var image: FlutterStandardTypedData? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImAvatarEditor? {
+    let roomId: String? = nilOrValue(pigeonVar_list[0])
+    let revision = pigeonVar_list[1] as! Int64
+    let canManage = pigeonVar_list[2] as! Bool
+    let remainingMilliseconds = pigeonVar_list[3] as! Int64
+    let hasAvatar = pigeonVar_list[4] as! Bool
+    let name: String? = nilOrValue(pigeonVar_list[5])
+    let handle: String? = nilOrValue(pigeonVar_list[6])
+    let image: FlutterStandardTypedData? = nilOrValue(pigeonVar_list[7])
+
+    return ImAvatarEditor(
+      roomId: roomId,
+      revision: revision,
+      canManage: canManage,
+      remainingMilliseconds: remainingMilliseconds,
+      hasAvatar: hasAvatar,
+      name: name,
+      handle: handle,
+      image: image
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      roomId,
+      revision,
+      canManage,
+      remainingMilliseconds,
+      hasAvatar,
+      name,
+      handle,
+      image,
+    ]
+  }
+  static func == (lhs: ImAvatarEditor, rhs: ImAvatarEditor) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision) && MessagesPigeonInternal.deepEquals(lhs.canManage, rhs.canManage) && MessagesPigeonInternal.deepEquals(lhs.remainingMilliseconds, rhs.remainingMilliseconds) && MessagesPigeonInternal.deepEquals(lhs.hasAvatar, rhs.hasAvatar) && MessagesPigeonInternal.deepEquals(lhs.name, rhs.name) && MessagesPigeonInternal.deepEquals(lhs.handle, rhs.handle) && MessagesPigeonInternal.deepEquals(lhs.image, rhs.image)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImAvatarEditor")
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: revision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: canManage, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: remainingMilliseconds, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasAvatar, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: name, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: handle, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: image, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImAvatarEditor(roomId: \(String(describing: roomId)), revision: \(String(describing: revision)), canManage: \(String(describing: canManage)), remainingMilliseconds: \(String(describing: remainingMilliseconds)), hasAvatar: \(String(describing: hasAvatar)), name: \(String(describing: name)), handle: \(String(describing: handle)), image: \(String(describing: image)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImAvatarImage: Hashable, CustomStringConvertible {
+  var bytes: FlutterStandardTypedData
+  var remainingMilliseconds: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImAvatarImage? {
+    let bytes = pigeonVar_list[0] as! FlutterStandardTypedData
+    let remainingMilliseconds = pigeonVar_list[1] as! Int64
+
+    return ImAvatarImage(
+      bytes: bytes,
+      remainingMilliseconds: remainingMilliseconds
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      bytes,
+      remainingMilliseconds,
+    ]
+  }
+  static func == (lhs: ImAvatarImage, rhs: ImAvatarImage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.bytes, rhs.bytes) && MessagesPigeonInternal.deepEquals(lhs.remainingMilliseconds, rhs.remainingMilliseconds)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImAvatarImage")
+    MessagesPigeonInternal.deepHash(value: bytes, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: remainingMilliseconds, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImAvatarImage(bytes: \(String(describing: bytes)), remainingMilliseconds: \(String(describing: remainingMilliseconds)))"
   }
 }
 
@@ -400,42 +875,1057 @@ struct DirectoryEntry: Hashable, CustomStringConvertible {
 }
 
 /// Generated class from Pigeon that represents data sent in messages.
+struct SearchHit: Hashable, CustomStringConvertible {
+  var id: String
+  var roomId: String
+  var text: String
+  var senderId: String
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> SearchHit? {
+    let id = pigeonVar_list[0] as! String
+    let roomId = pigeonVar_list[1] as! String
+    let text = pigeonVar_list[2] as! String
+    let senderId = pigeonVar_list[3] as! String
+
+    return SearchHit(
+      id: id,
+      roomId: roomId,
+      text: text,
+      senderId: senderId
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      roomId,
+      text,
+      senderId,
+    ]
+  }
+  static func == (lhs: SearchHit, rhs: SearchHit) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("SearchHit")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: text, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: senderId, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "SearchHit(id: \(String(describing: id)), roomId: \(String(describing: roomId)), text: \(String(describing: text)), senderId: \(String(describing: senderId)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct SearchPage: Hashable, CustomStringConvertible {
+  var status: String
+  var hits: [SearchHit]
+  var hasNext: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> SearchPage? {
+    let status = pigeonVar_list[0] as! String
+    let hits = pigeonVar_list[1] as! [SearchHit]
+    let hasNext = pigeonVar_list[2] as! Bool
+
+    return SearchPage(
+      status: status,
+      hits: hits,
+      hasNext: hasNext
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      status,
+      hits,
+      hasNext,
+    ]
+  }
+  static func == (lhs: SearchPage, rhs: SearchPage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.status, rhs.status) && MessagesPigeonInternal.deepEquals(lhs.hits, rhs.hits) && MessagesPigeonInternal.deepEquals(lhs.hasNext, rhs.hasNext)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("SearchPage")
+    MessagesPigeonInternal.deepHash(value: status, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hits, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasNext, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "SearchPage(status: \(String(describing: status)), hits: \(String(describing: hits)), hasNext: \(String(describing: hasNext)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct DirectoryPage: Hashable, CustomStringConvertible {
+  var entries: [DirectoryEntry]
+  var moreContacts: Bool
+  var moreGroups: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> DirectoryPage? {
+    let entries = pigeonVar_list[0] as! [DirectoryEntry]
+    let moreContacts = pigeonVar_list[1] as! Bool
+    let moreGroups = pigeonVar_list[2] as! Bool
+
+    return DirectoryPage(
+      entries: entries,
+      moreContacts: moreContacts,
+      moreGroups: moreGroups
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      entries,
+      moreContacts,
+      moreGroups,
+    ]
+  }
+  static func == (lhs: DirectoryPage, rhs: DirectoryPage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.entries, rhs.entries) && MessagesPigeonInternal.deepEquals(lhs.moreContacts, rhs.moreContacts) && MessagesPigeonInternal.deepEquals(lhs.moreGroups, rhs.moreGroups)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("DirectoryPage")
+    MessagesPigeonInternal.deepHash(value: entries, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: moreContacts, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: moreGroups, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "DirectoryPage(entries: \(String(describing: entries)), moreContacts: \(String(describing: moreContacts)), moreGroups: \(String(describing: moreGroups)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct GroupMember: Hashable, CustomStringConvertible {
+  var userId: String
+  var role: String
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> GroupMember? {
+    let userId = pigeonVar_list[0] as! String
+    let role = pigeonVar_list[1] as! String
+
+    return GroupMember(
+      userId: userId,
+      role: role
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      userId,
+      role,
+    ]
+  }
+  static func == (lhs: GroupMember, rhs: GroupMember) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.userId, rhs.userId) && MessagesPigeonInternal.deepEquals(lhs.role, rhs.role)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("GroupMember")
+    MessagesPigeonInternal.deepHash(value: userId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: role, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "GroupMember(userId: \(String(describing: userId)), role: \(String(describing: role)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImPushState: Hashable, CustomStringConvertible {
+  var preferenceEnabled: Bool
+  var desiredEnabled: Bool
+  var waitingForToken: Bool
+  var pending: Bool
+  var pauseReason: String? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImPushState? {
+    let preferenceEnabled = pigeonVar_list[0] as! Bool
+    let desiredEnabled = pigeonVar_list[1] as! Bool
+    let waitingForToken = pigeonVar_list[2] as! Bool
+    let pending = pigeonVar_list[3] as! Bool
+    let pauseReason: String? = nilOrValue(pigeonVar_list[4])
+
+    return ImPushState(
+      preferenceEnabled: preferenceEnabled,
+      desiredEnabled: desiredEnabled,
+      waitingForToken: waitingForToken,
+      pending: pending,
+      pauseReason: pauseReason
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      preferenceEnabled,
+      desiredEnabled,
+      waitingForToken,
+      pending,
+      pauseReason,
+    ]
+  }
+  static func == (lhs: ImPushState, rhs: ImPushState) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.preferenceEnabled, rhs.preferenceEnabled) && MessagesPigeonInternal.deepEquals(lhs.desiredEnabled, rhs.desiredEnabled) && MessagesPigeonInternal.deepEquals(lhs.waitingForToken, rhs.waitingForToken) && MessagesPigeonInternal.deepEquals(lhs.pending, rhs.pending) && MessagesPigeonInternal.deepEquals(lhs.pauseReason, rhs.pauseReason)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImPushState")
+    MessagesPigeonInternal.deepHash(value: preferenceEnabled, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: desiredEnabled, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: waitingForToken, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: pending, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: pauseReason, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImPushState(preferenceEnabled: \(String(describing: preferenceEnabled)), desiredEnabled: \(String(describing: desiredEnabled)), waitingForToken: \(String(describing: waitingForToken)), pending: \(String(describing: pending)), pauseReason: \(String(describing: pauseReason)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImActivity: Hashable, CustomStringConvertible {
+  var roomId: String
+  var isGroup: Bool
+  var isOnline: Bool? = nil
+  var typingUserIds: [String]
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImActivity? {
+    let roomId = pigeonVar_list[0] as! String
+    let isGroup = pigeonVar_list[1] as! Bool
+    let isOnline: Bool? = nilOrValue(pigeonVar_list[2])
+    let typingUserIds = pigeonVar_list[3] as! [String]
+
+    return ImActivity(
+      roomId: roomId,
+      isGroup: isGroup,
+      isOnline: isOnline,
+      typingUserIds: typingUserIds
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      roomId,
+      isGroup,
+      isOnline,
+      typingUserIds,
+    ]
+  }
+  static func == (lhs: ImActivity, rhs: ImActivity) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.isGroup, rhs.isGroup) && MessagesPigeonInternal.deepEquals(lhs.isOnline, rhs.isOnline) && MessagesPigeonInternal.deepEquals(lhs.typingUserIds, rhs.typingUserIds)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImActivity")
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isGroup, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isOnline, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: typingUserIds, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImActivity(roomId: \(String(describing: roomId)), isGroup: \(String(describing: isGroup)), isOnline: \(String(describing: isOnline)), typingUserIds: \(String(describing: typingUserIds)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImPrivacy: Hashable, CustomStringConvertible {
+  var allowsStrangerMessages: Bool? = nil
+  var allowsUserAdd: Bool? = nil
+  var allowsDirectReadReceipts: Bool? = nil
+  var allowsGroupReadReceipts: Bool? = nil
+  var allowsOnlinePresence: Bool? = nil
+  var allowsTypingIndicators: Bool? = nil
+  var blockedUsers: [String]
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImPrivacy? {
+    let allowsStrangerMessages: Bool? = nilOrValue(pigeonVar_list[0])
+    let allowsUserAdd: Bool? = nilOrValue(pigeonVar_list[1])
+    let allowsDirectReadReceipts: Bool? = nilOrValue(pigeonVar_list[2])
+    let allowsGroupReadReceipts: Bool? = nilOrValue(pigeonVar_list[3])
+    let allowsOnlinePresence: Bool? = nilOrValue(pigeonVar_list[4])
+    let allowsTypingIndicators: Bool? = nilOrValue(pigeonVar_list[5])
+    let blockedUsers = pigeonVar_list[6] as! [String]
+
+    return ImPrivacy(
+      allowsStrangerMessages: allowsStrangerMessages,
+      allowsUserAdd: allowsUserAdd,
+      allowsDirectReadReceipts: allowsDirectReadReceipts,
+      allowsGroupReadReceipts: allowsGroupReadReceipts,
+      allowsOnlinePresence: allowsOnlinePresence,
+      allowsTypingIndicators: allowsTypingIndicators,
+      blockedUsers: blockedUsers
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      allowsStrangerMessages,
+      allowsUserAdd,
+      allowsDirectReadReceipts,
+      allowsGroupReadReceipts,
+      allowsOnlinePresence,
+      allowsTypingIndicators,
+      blockedUsers,
+    ]
+  }
+  static func == (lhs: ImPrivacy, rhs: ImPrivacy) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.allowsStrangerMessages, rhs.allowsStrangerMessages) && MessagesPigeonInternal.deepEquals(lhs.allowsUserAdd, rhs.allowsUserAdd) && MessagesPigeonInternal.deepEquals(lhs.allowsDirectReadReceipts, rhs.allowsDirectReadReceipts) && MessagesPigeonInternal.deepEquals(lhs.allowsGroupReadReceipts, rhs.allowsGroupReadReceipts) && MessagesPigeonInternal.deepEquals(lhs.allowsOnlinePresence, rhs.allowsOnlinePresence) && MessagesPigeonInternal.deepEquals(lhs.allowsTypingIndicators, rhs.allowsTypingIndicators) && MessagesPigeonInternal.deepEquals(lhs.blockedUsers, rhs.blockedUsers)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImPrivacy")
+    MessagesPigeonInternal.deepHash(value: allowsStrangerMessages, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: allowsUserAdd, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: allowsDirectReadReceipts, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: allowsGroupReadReceipts, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: allowsOnlinePresence, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: allowsTypingIndicators, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: blockedUsers, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImPrivacy(allowsStrangerMessages: \(String(describing: allowsStrangerMessages)), allowsUserAdd: \(String(describing: allowsUserAdd)), allowsDirectReadReceipts: \(String(describing: allowsDirectReadReceipts)), allowsGroupReadReceipts: \(String(describing: allowsGroupReadReceipts)), allowsOnlinePresence: \(String(describing: allowsOnlinePresence)), allowsTypingIndicators: \(String(describing: allowsTypingIndicators)), blockedUsers: \(String(describing: blockedUsers)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImDeviceSession: Hashable, CustomStringConvertible {
+  var deviceId: String
+  var deviceName: String
+  var platform: String
+  var createdAt: Int64
+  var lastActiveAt: Int64
+  var isCurrentDevice: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImDeviceSession? {
+    let deviceId = pigeonVar_list[0] as! String
+    let deviceName = pigeonVar_list[1] as! String
+    let platform = pigeonVar_list[2] as! String
+    let createdAt = pigeonVar_list[3] as! Int64
+    let lastActiveAt = pigeonVar_list[4] as! Int64
+    let isCurrentDevice = pigeonVar_list[5] as! Bool
+
+    return ImDeviceSession(
+      deviceId: deviceId,
+      deviceName: deviceName,
+      platform: platform,
+      createdAt: createdAt,
+      lastActiveAt: lastActiveAt,
+      isCurrentDevice: isCurrentDevice
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      deviceId,
+      deviceName,
+      platform,
+      createdAt,
+      lastActiveAt,
+      isCurrentDevice,
+    ]
+  }
+  static func == (lhs: ImDeviceSession, rhs: ImDeviceSession) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.deviceId, rhs.deviceId) && MessagesPigeonInternal.deepEquals(lhs.deviceName, rhs.deviceName) && MessagesPigeonInternal.deepEquals(lhs.platform, rhs.platform) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.lastActiveAt, rhs.lastActiveAt) && MessagesPigeonInternal.deepEquals(lhs.isCurrentDevice, rhs.isCurrentDevice)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImDeviceSession")
+    MessagesPigeonInternal.deepHash(value: deviceId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: deviceName, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: platform, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: createdAt, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: lastActiveAt, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isCurrentDevice, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImDeviceSession(deviceId: \(String(describing: deviceId)), deviceName: \(String(describing: deviceName)), platform: \(String(describing: platform)), createdAt: \(String(describing: createdAt)), lastActiveAt: \(String(describing: lastActiveAt)), isCurrentDevice: \(String(describing: isCurrentDevice)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImDeviceSessions: Hashable, CustomStringConvertible {
+  var sessions: [ImDeviceSession]
+  var nextCursor: String? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImDeviceSessions? {
+    let sessions = pigeonVar_list[0] as! [ImDeviceSession]
+    let nextCursor: String? = nilOrValue(pigeonVar_list[1])
+
+    return ImDeviceSessions(
+      sessions: sessions,
+      nextCursor: nextCursor
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      sessions,
+      nextCursor,
+    ]
+  }
+  static func == (lhs: ImDeviceSessions, rhs: ImDeviceSessions) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.sessions, rhs.sessions) && MessagesPigeonInternal.deepEquals(lhs.nextCursor, rhs.nextCursor)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImDeviceSessions")
+    MessagesPigeonInternal.deepHash(value: sessions, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: nextCursor, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImDeviceSessions(sessions: \(String(describing: sessions)), nextCursor: \(String(describing: nextCursor)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImGroupNickname: Hashable, CustomStringConvertible {
+  var roomId: String
+  var name: String? = nil
+  var revision: Int64? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImGroupNickname? {
+    let roomId = pigeonVar_list[0] as! String
+    let name: String? = nilOrValue(pigeonVar_list[1])
+    let revision: Int64? = nilOrValue(pigeonVar_list[2])
+
+    return ImGroupNickname(
+      roomId: roomId,
+      name: name,
+      revision: revision
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      roomId,
+      name,
+      revision,
+    ]
+  }
+  static func == (lhs: ImGroupNickname, rhs: ImGroupNickname) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.name, rhs.name) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImGroupNickname")
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: name, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: revision, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImGroupNickname(roomId: \(String(describing: roomId)), name: \(String(describing: name)), revision: \(String(describing: revision)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImGroupPolicy: Hashable, CustomStringConvertible {
+  var role: String
+  var permissions: [String]
+  var revision: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImGroupPolicy? {
+    let role = pigeonVar_list[0] as! String
+    let permissions = pigeonVar_list[1] as! [String]
+    let revision = pigeonVar_list[2] as! Int64
+
+    return ImGroupPolicy(
+      role: role,
+      permissions: permissions,
+      revision: revision
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      role,
+      permissions,
+      revision,
+    ]
+  }
+  static func == (lhs: ImGroupPolicy, rhs: ImGroupPolicy) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.role, rhs.role) && MessagesPigeonInternal.deepEquals(lhs.permissions, rhs.permissions) && MessagesPigeonInternal.deepEquals(lhs.revision, rhs.revision)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImGroupPolicy")
+    MessagesPigeonInternal.deepHash(value: role, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: permissions, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: revision, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImGroupPolicy(role: \(String(describing: role)), permissions: \(String(describing: permissions)), revision: \(String(describing: revision)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct GroupPage: Hashable, CustomStringConvertible {
+  var announcement: String
+  var editableAnnouncementRevision: Int64? = nil
+  var membershipRevision: Int64
+  var actorRole: String
+  var permissions: [String]
+  var members: [GroupMember]
+  var policies: [ImGroupPolicy]
+  var policiesReady: Bool
+  var hasMore: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> GroupPage? {
+    let announcement = pigeonVar_list[0] as! String
+    let editableAnnouncementRevision: Int64? = nilOrValue(pigeonVar_list[1])
+    let membershipRevision = pigeonVar_list[2] as! Int64
+    let actorRole = pigeonVar_list[3] as! String
+    let permissions = pigeonVar_list[4] as! [String]
+    let members = pigeonVar_list[5] as! [GroupMember]
+    let policies = pigeonVar_list[6] as! [ImGroupPolicy]
+    let policiesReady = pigeonVar_list[7] as! Bool
+    let hasMore = pigeonVar_list[8] as! Bool
+
+    return GroupPage(
+      announcement: announcement,
+      editableAnnouncementRevision: editableAnnouncementRevision,
+      membershipRevision: membershipRevision,
+      actorRole: actorRole,
+      permissions: permissions,
+      members: members,
+      policies: policies,
+      policiesReady: policiesReady,
+      hasMore: hasMore
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      announcement,
+      editableAnnouncementRevision,
+      membershipRevision,
+      actorRole,
+      permissions,
+      members,
+      policies,
+      policiesReady,
+      hasMore,
+    ]
+  }
+  static func == (lhs: GroupPage, rhs: GroupPage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.announcement, rhs.announcement) && MessagesPigeonInternal.deepEquals(lhs.editableAnnouncementRevision, rhs.editableAnnouncementRevision) && MessagesPigeonInternal.deepEquals(lhs.membershipRevision, rhs.membershipRevision) && MessagesPigeonInternal.deepEquals(lhs.actorRole, rhs.actorRole) && MessagesPigeonInternal.deepEquals(lhs.permissions, rhs.permissions) && MessagesPigeonInternal.deepEquals(lhs.members, rhs.members) && MessagesPigeonInternal.deepEquals(lhs.policies, rhs.policies) && MessagesPigeonInternal.deepEquals(lhs.policiesReady, rhs.policiesReady) && MessagesPigeonInternal.deepEquals(lhs.hasMore, rhs.hasMore)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("GroupPage")
+    MessagesPigeonInternal.deepHash(value: announcement, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: editableAnnouncementRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: membershipRevision, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: actorRole, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: permissions, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: members, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: policies, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: policiesReady, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasMore, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "GroupPage(announcement: \(String(describing: announcement)), editableAnnouncementRevision: \(String(describing: editableAnnouncementRevision)), membershipRevision: \(String(describing: membershipRevision)), actorRole: \(String(describing: actorRole)), permissions: \(String(describing: permissions)), members: \(String(describing: members)), policies: \(String(describing: policies)), policiesReady: \(String(describing: policiesReady)), hasMore: \(String(describing: hasMore)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImInvite: Hashable, CustomStringConvertible {
+  var id: String
+  var url: String
+  var expires: Int64
+  var used: Int64
+  var maximum: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImInvite? {
+    let id = pigeonVar_list[0] as! String
+    let url = pigeonVar_list[1] as! String
+    let expires = pigeonVar_list[2] as! Int64
+    let used = pigeonVar_list[3] as! Int64
+    let maximum = pigeonVar_list[4] as! Int64
+
+    return ImInvite(
+      id: id,
+      url: url,
+      expires: expires,
+      used: used,
+      maximum: maximum
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      url,
+      expires,
+      used,
+      maximum,
+    ]
+  }
+  static func == (lhs: ImInvite, rhs: ImInvite) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.url, rhs.url) && MessagesPigeonInternal.deepEquals(lhs.expires, rhs.expires) && MessagesPigeonInternal.deepEquals(lhs.used, rhs.used) && MessagesPigeonInternal.deepEquals(lhs.maximum, rhs.maximum)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImInvite")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: url, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: expires, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: used, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: maximum, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImInvite(id: \(String(describing: id)), url: \(String(describing: url)), expires: \(String(describing: expires)), used: \(String(describing: used)), maximum: \(String(describing: maximum)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImJoinRequest: Hashable, CustomStringConvertible {
+  var id: String
+  var userId: String
+  var note: String
+  var state: String
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImJoinRequest? {
+    let id = pigeonVar_list[0] as! String
+    let userId = pigeonVar_list[1] as! String
+    let note = pigeonVar_list[2] as! String
+    let state = pigeonVar_list[3] as! String
+
+    return ImJoinRequest(
+      id: id,
+      userId: userId,
+      note: note,
+      state: state
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      userId,
+      note,
+      state,
+    ]
+  }
+  static func == (lhs: ImJoinRequest, rhs: ImJoinRequest) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.userId, rhs.userId) && MessagesPigeonInternal.deepEquals(lhs.note, rhs.note) && MessagesPigeonInternal.deepEquals(lhs.state, rhs.state)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImJoinRequest")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: userId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: note, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: state, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImJoinRequest(id: \(String(describing: id)), userId: \(String(describing: userId)), note: \(String(describing: note)), state: \(String(describing: state)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImInvitePreview: Hashable, CustomStringConvertible {
+  var roomId: String
+  var title: String
+  var requestId: String? = nil
+  var state: String? = nil
+  var member: Bool
+  var canSubmit: Bool
+  var canCancel: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImInvitePreview? {
+    let roomId = pigeonVar_list[0] as! String
+    let title = pigeonVar_list[1] as! String
+    let requestId: String? = nilOrValue(pigeonVar_list[2])
+    let state: String? = nilOrValue(pigeonVar_list[3])
+    let member = pigeonVar_list[4] as! Bool
+    let canSubmit = pigeonVar_list[5] as! Bool
+    let canCancel = pigeonVar_list[6] as! Bool
+
+    return ImInvitePreview(
+      roomId: roomId,
+      title: title,
+      requestId: requestId,
+      state: state,
+      member: member,
+      canSubmit: canSubmit,
+      canCancel: canCancel
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      roomId,
+      title,
+      requestId,
+      state,
+      member,
+      canSubmit,
+      canCancel,
+    ]
+  }
+  static func == (lhs: ImInvitePreview, rhs: ImInvitePreview) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.title, rhs.title) && MessagesPigeonInternal.deepEquals(lhs.requestId, rhs.requestId) && MessagesPigeonInternal.deepEquals(lhs.state, rhs.state) && MessagesPigeonInternal.deepEquals(lhs.member, rhs.member) && MessagesPigeonInternal.deepEquals(lhs.canSubmit, rhs.canSubmit) && MessagesPigeonInternal.deepEquals(lhs.canCancel, rhs.canCancel)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImInvitePreview")
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: title, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: requestId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: state, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: member, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: canSubmit, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: canCancel, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImInvitePreview(roomId: \(String(describing: roomId)), title: \(String(describing: title)), requestId: \(String(describing: requestId)), state: \(String(describing: state)), member: \(String(describing: member)), canSubmit: \(String(describing: canSubmit)), canCancel: \(String(describing: canCancel)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImCommunity: Hashable, CustomStringConvertible {
+  var roomId: String? = nil
+  var invites: [ImInvite]
+  var requests: [ImJoinRequest]
+  var hasMore: Bool
+  var preview: ImInvitePreview? = nil
+  var failure: String? = nil
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImCommunity? {
+    let roomId: String? = nilOrValue(pigeonVar_list[0])
+    let invites = pigeonVar_list[1] as! [ImInvite]
+    let requests = pigeonVar_list[2] as! [ImJoinRequest]
+    let hasMore = pigeonVar_list[3] as! Bool
+    let preview: ImInvitePreview? = nilOrValue(pigeonVar_list[4])
+    let failure: String? = nilOrValue(pigeonVar_list[5])
+
+    return ImCommunity(
+      roomId: roomId,
+      invites: invites,
+      requests: requests,
+      hasMore: hasMore,
+      preview: preview,
+      failure: failure
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      roomId,
+      invites,
+      requests,
+      hasMore,
+      preview,
+      failure,
+    ]
+  }
+  static func == (lhs: ImCommunity, rhs: ImCommunity) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.invites, rhs.invites) && MessagesPigeonInternal.deepEquals(lhs.requests, rhs.requests) && MessagesPigeonInternal.deepEquals(lhs.hasMore, rhs.hasMore) && MessagesPigeonInternal.deepEquals(lhs.preview, rhs.preview) && MessagesPigeonInternal.deepEquals(lhs.failure, rhs.failure)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImCommunity")
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: invites, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: requests, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasMore, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: preview, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: failure, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImCommunity(roomId: \(String(describing: roomId)), invites: \(String(describing: invites)), requests: \(String(describing: requests)), hasMore: \(String(describing: hasMore)), preview: \(String(describing: preview)), failure: \(String(describing: failure)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImFavoriteMessage: Hashable, CustomStringConvertible {
+  var id: String
+  var roomId: String
+  var roomTitle: String
+  var senderId: String
+  var text: String
+  var createdAt: Int64? = nil
+  var attachmentNames: [String]
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImFavoriteMessage? {
+    let id = pigeonVar_list[0] as! String
+    let roomId = pigeonVar_list[1] as! String
+    let roomTitle = pigeonVar_list[2] as! String
+    let senderId = pigeonVar_list[3] as! String
+    let text = pigeonVar_list[4] as! String
+    let createdAt: Int64? = nilOrValue(pigeonVar_list[5])
+    let attachmentNames = pigeonVar_list[6] as! [String]
+
+    return ImFavoriteMessage(
+      id: id,
+      roomId: roomId,
+      roomTitle: roomTitle,
+      senderId: senderId,
+      text: text,
+      createdAt: createdAt,
+      attachmentNames: attachmentNames
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      id,
+      roomId,
+      roomTitle,
+      senderId,
+      text,
+      createdAt,
+      attachmentNames,
+    ]
+  }
+  static func == (lhs: ImFavoriteMessage, rhs: ImFavoriteMessage) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.id, rhs.id) && MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.roomTitle, rhs.roomTitle) && MessagesPigeonInternal.deepEquals(lhs.senderId, rhs.senderId) && MessagesPigeonInternal.deepEquals(lhs.text, rhs.text) && MessagesPigeonInternal.deepEquals(lhs.createdAt, rhs.createdAt) && MessagesPigeonInternal.deepEquals(lhs.attachmentNames, rhs.attachmentNames)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImFavoriteMessage")
+    MessagesPigeonInternal.deepHash(value: id, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: roomTitle, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: senderId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: text, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: createdAt, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: attachmentNames, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImFavoriteMessage(id: \(String(describing: id)), roomId: \(String(describing: roomId)), roomTitle: \(String(describing: roomTitle)), senderId: \(String(describing: senderId)), text: \(String(describing: text)), createdAt: \(String(describing: createdAt)), attachmentNames: \(String(describing: attachmentNames)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImFavorites: Hashable, CustomStringConvertible {
+  var messages: [ImFavoriteMessage]
+  var hasMore: Bool
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImFavorites? {
+    let messages = pigeonVar_list[0] as! [ImFavoriteMessage]
+    let hasMore = pigeonVar_list[1] as! Bool
+
+    return ImFavorites(
+      messages: messages,
+      hasMore: hasMore
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      messages,
+      hasMore,
+    ]
+  }
+  static func == (lhs: ImFavorites, rhs: ImFavorites) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.messages, rhs.messages) && MessagesPigeonInternal.deepEquals(lhs.hasMore, rhs.hasMore)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImFavorites")
+    MessagesPigeonInternal.deepHash(value: messages, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasMore, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImFavorites(messages: \(String(describing: messages)), hasMore: \(String(describing: hasMore)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
+struct ImReaders: Hashable, CustomStringConvertible {
+  var roomId: String
+  var messageId: String
+  var users: [String]
+  var hasNext: Bool
+  var remainingMilliseconds: Int64
+
+
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  static func fromList(_ pigeonVar_list: [Any?]) -> ImReaders? {
+    let roomId = pigeonVar_list[0] as! String
+    let messageId = pigeonVar_list[1] as! String
+    let users = pigeonVar_list[2] as! [String]
+    let hasNext = pigeonVar_list[3] as! Bool
+    let remainingMilliseconds = pigeonVar_list[4] as! Int64
+
+    return ImReaders(
+      roomId: roomId,
+      messageId: messageId,
+      users: users,
+      hasNext: hasNext,
+      remainingMilliseconds: remainingMilliseconds
+    )
+  }
+  func toList() -> [Any?] {
+    return [
+      roomId,
+      messageId,
+      users,
+      hasNext,
+      remainingMilliseconds,
+    ]
+  }
+  static func == (lhs: ImReaders, rhs: ImReaders) -> Bool {
+    if Swift.type(of: lhs) != Swift.type(of: rhs) {
+      return false
+    }
+    return MessagesPigeonInternal.deepEquals(lhs.roomId, rhs.roomId) && MessagesPigeonInternal.deepEquals(lhs.messageId, rhs.messageId) && MessagesPigeonInternal.deepEquals(lhs.users, rhs.users) && MessagesPigeonInternal.deepEquals(lhs.hasNext, rhs.hasNext) && MessagesPigeonInternal.deepEquals(lhs.remainingMilliseconds, rhs.remainingMilliseconds)
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine("ImReaders")
+    MessagesPigeonInternal.deepHash(value: roomId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: messageId, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: users, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasNext, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: remainingMilliseconds, hasher: &hasher)
+  }
+
+  public var description: String {
+    return "ImReaders(roomId: \(String(describing: roomId)), messageId: \(String(describing: messageId)), users: \(String(describing: users)), hasNext: \(String(describing: hasNext)), remainingMilliseconds: \(String(describing: remainingMilliseconds)))"
+  }
+}
+
+/// Generated class from Pigeon that represents data sent in messages.
 struct WindowView: Hashable, CustomStringConvertible {
   var conversations: [ImConversation]
   var messages: [ImMessage]
+  var hasOlder: Bool
+  var isLatest: Bool
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
   static func fromList(_ pigeonVar_list: [Any?]) -> WindowView? {
     let conversations = pigeonVar_list[0] as! [ImConversation]
     let messages = pigeonVar_list[1] as! [ImMessage]
+    let hasOlder = pigeonVar_list[2] as! Bool
+    let isLatest = pigeonVar_list[3] as! Bool
 
     return WindowView(
       conversations: conversations,
-      messages: messages
+      messages: messages,
+      hasOlder: hasOlder,
+      isLatest: isLatest
     )
   }
   func toList() -> [Any?] {
     return [
       conversations,
       messages,
+      hasOlder,
+      isLatest,
     ]
   }
   static func == (lhs: WindowView, rhs: WindowView) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return MessagesPigeonInternal.deepEquals(lhs.conversations, rhs.conversations) && MessagesPigeonInternal.deepEquals(lhs.messages, rhs.messages)
+    return MessagesPigeonInternal.deepEquals(lhs.conversations, rhs.conversations) && MessagesPigeonInternal.deepEquals(lhs.messages, rhs.messages) && MessagesPigeonInternal.deepEquals(lhs.hasOlder, rhs.hasOlder) && MessagesPigeonInternal.deepEquals(lhs.isLatest, rhs.isLatest)
   }
 
   func hash(into hasher: inout Hasher) {
     hasher.combine("WindowView")
     MessagesPigeonInternal.deepHash(value: conversations, hasher: &hasher)
     MessagesPigeonInternal.deepHash(value: messages, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: hasOlder, hasher: &hasher)
+    MessagesPigeonInternal.deepHash(value: isLatest, hasher: &hasher)
   }
 
   public var description: String {
-    return "WindowView(conversations: \(String(describing: conversations)), messages: \(String(describing: messages)))"
+    return "WindowView(conversations: \(String(describing: conversations)), messages: \(String(describing: messages)), hasOlder: \(String(describing: hasOlder)), isLatest: \(String(describing: isLatest)))"
   }
 }
 
@@ -447,10 +1937,62 @@ private class MessagesPigeonCodecReader: FlutterStandardReader {
     case 130:
       return ImConversation.fromList(self.readValue() as! [Any?])
     case 131:
-      return ImMessage.fromList(self.readValue() as! [Any?])
+      return Transfer.fromList(self.readValue() as! [Any?])
     case 132:
-      return DirectoryEntry.fromList(self.readValue() as! [Any?])
+      return AttachmentPreview.fromList(self.readValue() as! [Any?])
     case 133:
+      return Attachment.fromList(self.readValue() as! [Any?])
+    case 134:
+      return ImEntity.fromList(self.readValue() as! [Any?])
+    case 135:
+      return ImMessage.fromList(self.readValue() as! [Any?])
+    case 136:
+      return ImProfile.fromList(self.readValue() as! [Any?])
+    case 137:
+      return ImAvatarEditor.fromList(self.readValue() as! [Any?])
+    case 138:
+      return ImAvatarImage.fromList(self.readValue() as! [Any?])
+    case 139:
+      return DirectoryEntry.fromList(self.readValue() as! [Any?])
+    case 140:
+      return SearchHit.fromList(self.readValue() as! [Any?])
+    case 141:
+      return SearchPage.fromList(self.readValue() as! [Any?])
+    case 142:
+      return DirectoryPage.fromList(self.readValue() as! [Any?])
+    case 143:
+      return GroupMember.fromList(self.readValue() as! [Any?])
+    case 144:
+      return ImPushState.fromList(self.readValue() as! [Any?])
+    case 145:
+      return ImActivity.fromList(self.readValue() as! [Any?])
+    case 146:
+      return ImPrivacy.fromList(self.readValue() as! [Any?])
+    case 147:
+      return ImDeviceSession.fromList(self.readValue() as! [Any?])
+    case 148:
+      return ImDeviceSessions.fromList(self.readValue() as! [Any?])
+    case 149:
+      return ImGroupNickname.fromList(self.readValue() as! [Any?])
+    case 150:
+      return ImGroupPolicy.fromList(self.readValue() as! [Any?])
+    case 151:
+      return GroupPage.fromList(self.readValue() as! [Any?])
+    case 152:
+      return ImInvite.fromList(self.readValue() as! [Any?])
+    case 153:
+      return ImJoinRequest.fromList(self.readValue() as! [Any?])
+    case 154:
+      return ImInvitePreview.fromList(self.readValue() as! [Any?])
+    case 155:
+      return ImCommunity.fromList(self.readValue() as! [Any?])
+    case 156:
+      return ImFavoriteMessage.fromList(self.readValue() as! [Any?])
+    case 157:
+      return ImFavorites.fromList(self.readValue() as! [Any?])
+    case 158:
+      return ImReaders.fromList(self.readValue() as! [Any?])
+    case 159:
       return WindowView.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -466,14 +2008,92 @@ private class MessagesPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? ImConversation {
       super.writeByte(130)
       super.writeValue(value.toList())
-    } else if let value = value as? ImMessage {
+    } else if let value = value as? Transfer {
       super.writeByte(131)
       super.writeValue(value.toList())
-    } else if let value = value as? DirectoryEntry {
+    } else if let value = value as? AttachmentPreview {
       super.writeByte(132)
       super.writeValue(value.toList())
-    } else if let value = value as? WindowView {
+    } else if let value = value as? Attachment {
       super.writeByte(133)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImEntity {
+      super.writeByte(134)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImMessage {
+      super.writeByte(135)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImProfile {
+      super.writeByte(136)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImAvatarEditor {
+      super.writeByte(137)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImAvatarImage {
+      super.writeByte(138)
+      super.writeValue(value.toList())
+    } else if let value = value as? DirectoryEntry {
+      super.writeByte(139)
+      super.writeValue(value.toList())
+    } else if let value = value as? SearchHit {
+      super.writeByte(140)
+      super.writeValue(value.toList())
+    } else if let value = value as? SearchPage {
+      super.writeByte(141)
+      super.writeValue(value.toList())
+    } else if let value = value as? DirectoryPage {
+      super.writeByte(142)
+      super.writeValue(value.toList())
+    } else if let value = value as? GroupMember {
+      super.writeByte(143)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImPushState {
+      super.writeByte(144)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImActivity {
+      super.writeByte(145)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImPrivacy {
+      super.writeByte(146)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImDeviceSession {
+      super.writeByte(147)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImDeviceSessions {
+      super.writeByte(148)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImGroupNickname {
+      super.writeByte(149)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImGroupPolicy {
+      super.writeByte(150)
+      super.writeValue(value.toList())
+    } else if let value = value as? GroupPage {
+      super.writeByte(151)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImInvite {
+      super.writeByte(152)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImJoinRequest {
+      super.writeByte(153)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImInvitePreview {
+      super.writeByte(154)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImCommunity {
+      super.writeByte(155)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImFavoriteMessage {
+      super.writeByte(156)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImFavorites {
+      super.writeByte(157)
+      super.writeValue(value.toList())
+    } else if let value = value as? ImReaders {
+      super.writeByte(158)
+      super.writeValue(value.toList())
+    } else if let value = value as? WindowView {
+      super.writeByte(159)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -501,14 +2121,76 @@ protocol ImHost {
   func open(accountUrl: String, gatewayHost: String, gatewayPort: Int64) async throws
   func restore() async throws -> ImSession
   func signIn(account: String, password: String) async throws -> ImSession
+  func register(account: String, password: String, publicHandle: String, displayName: String) async throws -> ImSession
+  func privacy() async throws -> ImPrivacy?
+  func setPrivacy(kind: String, flag1: Bool?, flag2: Bool?) async throws -> ImPrivacy?
+  func deviceSessions(cursor: String?) async throws -> ImDeviceSessions
+  func revokeDevice(deviceId: String?, all: Bool) async throws
+  func passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?) async throws
   func connect() async throws -> ImSession
+  func synchronize() async throws
+  func pushState() async throws -> ImPushState?
+  func setPushEnabled(enabled: Bool) async throws
+  func receivePushToken(provider: String, environment: String, token: String) async throws
+  func retryPush() async throws
+  func removePushEndpoint() async throws
+  func activity(roomId: String) async throws -> ImActivity?
+  func setTyping(roomId: String, typing: Bool) async throws
+  func closeActivity() async throws
   func status() async throws -> ImSession
   func disconnect() async throws
-  func openWindow(roomId: String?) async throws -> String
+  func openWindow(roomId: String?, archived: Bool) async throws -> String
+  func setConversationState(roomId: String, isPinned: Bool?, isArchived: Bool?, muteUntil: Int64?) async throws
   func nextUpdate(windowId: String) async throws -> WindowView
-  func directory() async throws -> [DirectoryEntry]
+  func directory(nextGroups: Bool?, scope: String) async throws -> DirectoryPage
+  func profiles(page: String, context: String, roomId: String?, userIds: [String]) async throws -> [ImProfile]
+  func openProfile(userId: String, context: String, roomId: String?) async throws -> [ImProfile]
+  func saveAlias(userId: String, alias: String?, revision: Int64?) async throws
+  func clearProfiles(page: String) async throws
+  func avatar(page: String, userId: String, context: String, roomId: String?) async throws -> ImAvatarImage?
+  func openAvatarEditor(roomId: String?) async throws -> ImAvatarEditor?
+  func changeAvatar(roomId: String?, revision: Int64, jpeg: FlutterStandardTypedData?, width: Int64?, height: Int64?, displayName: String?, action: String?) async throws
+  func resolveUserId(handle: String) async throws -> String
+  func changeMembership(roomId: String, revision: Int64, action: String, target: String?, role: String?) async throws
+  func updateAnnouncement(roomId: String, revision: Int64, text: String) async throws
+  func groupNickname(roomId: String) async throws -> ImGroupNickname?
+  func saveGroupNickname(roomId: String, name: String?, revision: Int64?) async throws
+  func updateGroupPermissions(roomId: String, revision: Int64, role: String, permissions: [String]) async throws
+  func moderateMemberRemoval(roomId: String, userId: String, revision: Int64) async throws
+  func groupMembers(roomId: String, next: Bool) async throws -> GroupPage
+  func invitations(roomId: String) async throws -> ImCommunity
+  func nextInvitations(roomId: String) async throws -> ImCommunity
+  func previewInvite(text: String) async throws -> ImCommunity
+  func refreshInvite() async throws -> ImCommunity
+  func inviteAction(roomId: String, revision: Int64, action: String, intentId: String?, note: String?) async throws
+  func submitJoin(note: String) async throws
+  func cancelJoin(roomId: String) async throws
+  func muteMember(roomId: String, userId: String, revision: Int64) async throws
+  func createGroup(title: String, members: [String]) async throws
+  func requestContact(handle: String) async throws
+  func socialAction(userId: String, action: String) async throws
+  func changeWindowPage(windowId: String, latest: Bool) async throws
   func closeWindow(windowId: String) async throws
-  func sendText(roomId: String, text: String) async throws
+  func cancelPendingSend(intentId: String) async throws
+  func locateMessage(roomId: String, messageId: String) async throws -> WindowView
+  func searchMessages(roomId: String?, query: String, next: Bool, filter: String?, senderUserId: String?) async throws -> SearchPage
+  func messageReaders(roomId: String, messageId: String, next: Bool) async throws -> ImReaders
+  func favorites(next: Bool) async throws -> ImFavorites
+  func setFavorite(roomId: String, messageId: String, favorited: Bool) async throws
+  func moderateMessage(roomId: String, messageId: String) async throws
+  func pinMessage(roomId: String, messageId: String, roomSequence: Int64, isPinned: Bool) async throws
+  func clearMessageSearch() async throws
+  func recoverSend(intentId: String, resend: Bool) async throws
+  func sendText(roomId: String, text: String, replyToMessageId: String?, mentions: [String]?) async throws
+  func sendAttachment(roomId: String, path: String, name: String, contentType: String, text: String) async throws
+  func transfers() async throws -> [Transfer]
+  func transferAction(id: String, action: String) async throws
+  func exportAttachment(roomId: String, messageId: String, mediaId: String, destination: String) async throws
+  func previewAttachment(roomId: String, messageId: String, mediaId: String) async throws -> AttachmentPreview
+  func downloadAttachment(roomId: String, messageId: String, mediaId: String) async throws
+  func forwardMessage(roomId: String, messageId: String, revision: Int64, targetRoomIds: [String]) async throws
+  func editMessage(roomId: String, messageId: String, revision: Int64, text: String) async throws
+  func withdrawMessage(roomId: String, messageId: String, revision: Int64) async throws
   func signOut() async throws
   func close() async throws
 }
@@ -571,6 +2253,116 @@ class ImHostSetup {
     } else {
       signInChannel.setMessageHandler(nil)
     }
+    let registerChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.register\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      registerChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let accountArg = args[0] as! String
+        let passwordArg = args[1] as! String
+        let publicHandleArg = args[2] as! String
+        let displayNameArg = args[3] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.register(account: accountArg, password: passwordArg, publicHandle: publicHandleArg, displayName: displayNameArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      registerChannel.setMessageHandler(nil)
+    }
+    let privacyChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.privacy\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      privacyChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            let result = try await api.privacy()
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      privacyChannel.setMessageHandler(nil)
+    }
+    let setPrivacyChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setPrivacy\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setPrivacyChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let kindArg = args[0] as! String
+        let flag1Arg: Bool? = nilOrValue(args[1])
+        let flag2Arg: Bool? = nilOrValue(args[2])
+        Task { @MainActor in
+          do {
+            let result = try await api.setPrivacy(kind: kindArg, flag1: flag1Arg, flag2: flag2Arg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setPrivacyChannel.setMessageHandler(nil)
+    }
+    let deviceSessionsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.deviceSessions\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      deviceSessionsChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let cursorArg: String? = nilOrValue(args[0])
+        Task { @MainActor in
+          do {
+            let result = try await api.deviceSessions(cursor: cursorArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      deviceSessionsChannel.setMessageHandler(nil)
+    }
+    let revokeDeviceChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.revokeDevice\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      revokeDeviceChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let deviceIdArg: String? = nilOrValue(args[0])
+        let allArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.revokeDevice(deviceId: deviceIdArg, all: allArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      revokeDeviceChannel.setMessageHandler(nil)
+    }
+    let passwordLifecycleChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.passwordLifecycle\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      passwordLifecycleChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let accountArg = args[0] as! String
+        let actionArg = args[1] as! String
+        let currentPasswordArg: String? = nilOrValue(args[2])
+        let newPasswordArg: String? = nilOrValue(args[3])
+        let recoveryCodeArg: String? = nilOrValue(args[4])
+        Task { @MainActor in
+          do {
+            try await api.passwordLifecycle(account: accountArg, action: actionArg, currentPassword: currentPasswordArg, newPassword: newPasswordArg, recoveryCode: recoveryCodeArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      passwordLifecycleChannel.setMessageHandler(nil)
+    }
     let connectChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.connect\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       connectChannel.setMessageHandler { _, reply in
@@ -585,6 +2377,152 @@ class ImHostSetup {
       }
     } else {
       connectChannel.setMessageHandler(nil)
+    }
+    let synchronizeChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.synchronize\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      synchronizeChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.synchronize()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      synchronizeChannel.setMessageHandler(nil)
+    }
+    let pushStateChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.pushState\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      pushStateChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            let result = try await api.pushState()
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      pushStateChannel.setMessageHandler(nil)
+    }
+    let setPushEnabledChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setPushEnabled\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setPushEnabledChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let enabledArg = args[0] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.setPushEnabled(enabled: enabledArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setPushEnabledChannel.setMessageHandler(nil)
+    }
+    let receivePushTokenChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.receivePushToken\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      receivePushTokenChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let providerArg = args[0] as! String
+        let environmentArg = args[1] as! String
+        let tokenArg = args[2] as! String
+        Task { @MainActor in
+          do {
+            try await api.receivePushToken(provider: providerArg, environment: environmentArg, token: tokenArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      receivePushTokenChannel.setMessageHandler(nil)
+    }
+    let retryPushChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.retryPush\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      retryPushChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.retryPush()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      retryPushChannel.setMessageHandler(nil)
+    }
+    let removePushEndpointChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.removePushEndpoint\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      removePushEndpointChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.removePushEndpoint()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      removePushEndpointChannel.setMessageHandler(nil)
+    }
+    let activityChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.activity\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      activityChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.activity(roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      activityChannel.setMessageHandler(nil)
+    }
+    let setTypingChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setTyping\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setTypingChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let typingArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.setTyping(roomId: roomIdArg, typing: typingArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setTypingChannel.setMessageHandler(nil)
+    }
+    let closeActivityChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.closeActivity\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      closeActivityChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.closeActivity()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      closeActivityChannel.setMessageHandler(nil)
     }
     let statusChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.status\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
@@ -621,9 +2559,10 @@ class ImHostSetup {
       openWindowChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
         let roomIdArg: String? = nilOrValue(args[0])
+        let archivedArg = args[1] as! Bool
         Task { @MainActor in
           do {
-            let result = try await api.openWindow(roomId: roomIdArg)
+            let result = try await api.openWindow(roomId: roomIdArg, archived: archivedArg)
             reply(wrapResult(result))
           } catch {
             reply(wrapError(error))
@@ -632,6 +2571,26 @@ class ImHostSetup {
       }
     } else {
       openWindowChannel.setMessageHandler(nil)
+    }
+    let setConversationStateChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setConversationState\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setConversationStateChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let isPinnedArg: Bool? = nilOrValue(args[1])
+        let isArchivedArg: Bool? = nilOrValue(args[2])
+        let muteUntilArg: Int64? = nilOrValue(args[3])
+        Task { @MainActor in
+          do {
+            try await api.setConversationState(roomId: roomIdArg, isPinned: isPinnedArg, isArchived: isArchivedArg, muteUntil: muteUntilArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setConversationStateChannel.setMessageHandler(nil)
     }
     let nextUpdateChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.nextUpdate\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
@@ -652,10 +2611,13 @@ class ImHostSetup {
     }
     let directoryChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.directory\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
-      directoryChannel.setMessageHandler { _, reply in
+      directoryChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let nextGroupsArg: Bool? = nilOrValue(args[0])
+        let scopeArg = args[1] as! String
         Task { @MainActor in
           do {
-            let result = try await api.directory()
+            let result = try await api.directory(nextGroups: nextGroupsArg, scope: scopeArg)
             reply(wrapResult(result))
           } catch {
             reply(wrapError(error))
@@ -664,6 +2626,502 @@ class ImHostSetup {
       }
     } else {
       directoryChannel.setMessageHandler(nil)
+    }
+    let profilesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.profiles\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      profilesChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let pageArg = args[0] as! String
+        let contextArg = args[1] as! String
+        let roomIdArg: String? = nilOrValue(args[2])
+        let userIdsArg = args[3] as! [String]
+        Task { @MainActor in
+          do {
+            let result = try await api.profiles(page: pageArg, context: contextArg, roomId: roomIdArg, userIds: userIdsArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      profilesChannel.setMessageHandler(nil)
+    }
+    let openProfileChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.openProfile\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      openProfileChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let userIdArg = args[0] as! String
+        let contextArg = args[1] as! String
+        let roomIdArg: String? = nilOrValue(args[2])
+        Task { @MainActor in
+          do {
+            let result = try await api.openProfile(userId: userIdArg, context: contextArg, roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      openProfileChannel.setMessageHandler(nil)
+    }
+    let saveAliasChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.saveAlias\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      saveAliasChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let userIdArg = args[0] as! String
+        let aliasArg: String? = nilOrValue(args[1])
+        let revisionArg: Int64? = nilOrValue(args[2])
+        Task { @MainActor in
+          do {
+            try await api.saveAlias(userId: userIdArg, alias: aliasArg, revision: revisionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      saveAliasChannel.setMessageHandler(nil)
+    }
+    let clearProfilesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.clearProfiles\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      clearProfilesChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let pageArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            try await api.clearProfiles(page: pageArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      clearProfilesChannel.setMessageHandler(nil)
+    }
+    let avatarChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.avatar\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      avatarChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let pageArg = args[0] as! String
+        let userIdArg = args[1] as! String
+        let contextArg = args[2] as! String
+        let roomIdArg: String? = nilOrValue(args[3])
+        Task { @MainActor in
+          do {
+            let result = try await api.avatar(page: pageArg, userId: userIdArg, context: contextArg, roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      avatarChannel.setMessageHandler(nil)
+    }
+    let openAvatarEditorChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.openAvatarEditor\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      openAvatarEditorChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg: String? = nilOrValue(args[0])
+        Task { @MainActor in
+          do {
+            let result = try await api.openAvatarEditor(roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      openAvatarEditorChannel.setMessageHandler(nil)
+    }
+    let changeAvatarChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeAvatar\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      changeAvatarChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg: String? = nilOrValue(args[0])
+        let revisionArg = args[1] as! Int64
+        let jpegArg: FlutterStandardTypedData? = nilOrValue(args[2])
+        let widthArg: Int64? = nilOrValue(args[3])
+        let heightArg: Int64? = nilOrValue(args[4])
+        let displayNameArg: String? = nilOrValue(args[5])
+        let actionArg: String? = nilOrValue(args[6])
+        Task { @MainActor in
+          do {
+            try await api.changeAvatar(roomId: roomIdArg, revision: revisionArg, jpeg: jpegArg, width: widthArg, height: heightArg, displayName: displayNameArg, action: actionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      changeAvatarChannel.setMessageHandler(nil)
+    }
+    let resolveUserIdChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.resolveUserId\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      resolveUserIdChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let handleArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.resolveUserId(handle: handleArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      resolveUserIdChannel.setMessageHandler(nil)
+    }
+    let changeMembershipChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeMembership\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      changeMembershipChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let revisionArg = args[1] as! Int64
+        let actionArg = args[2] as! String
+        let targetArg: String? = nilOrValue(args[3])
+        let roleArg: String? = nilOrValue(args[4])
+        Task { @MainActor in
+          do {
+            try await api.changeMembership(roomId: roomIdArg, revision: revisionArg, action: actionArg, target: targetArg, role: roleArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      changeMembershipChannel.setMessageHandler(nil)
+    }
+    let updateAnnouncementChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.updateAnnouncement\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      updateAnnouncementChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let revisionArg = args[1] as! Int64
+        let textArg = args[2] as! String
+        Task { @MainActor in
+          do {
+            try await api.updateAnnouncement(roomId: roomIdArg, revision: revisionArg, text: textArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      updateAnnouncementChannel.setMessageHandler(nil)
+    }
+    let groupNicknameChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.groupNickname\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      groupNicknameChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.groupNickname(roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      groupNicknameChannel.setMessageHandler(nil)
+    }
+    let saveGroupNicknameChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.saveGroupNickname\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      saveGroupNicknameChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let nameArg: String? = nilOrValue(args[1])
+        let revisionArg: Int64? = nilOrValue(args[2])
+        Task { @MainActor in
+          do {
+            try await api.saveGroupNickname(roomId: roomIdArg, name: nameArg, revision: revisionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      saveGroupNicknameChannel.setMessageHandler(nil)
+    }
+    let updateGroupPermissionsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.updateGroupPermissions\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      updateGroupPermissionsChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let revisionArg = args[1] as! Int64
+        let roleArg = args[2] as! String
+        let permissionsArg = args[3] as! [String]
+        Task { @MainActor in
+          do {
+            try await api.updateGroupPermissions(roomId: roomIdArg, revision: revisionArg, role: roleArg, permissions: permissionsArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      updateGroupPermissionsChannel.setMessageHandler(nil)
+    }
+    let moderateMemberRemovalChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.moderateMemberRemoval\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      moderateMemberRemovalChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let userIdArg = args[1] as! String
+        let revisionArg = args[2] as! Int64
+        Task { @MainActor in
+          do {
+            try await api.moderateMemberRemoval(roomId: roomIdArg, userId: userIdArg, revision: revisionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      moderateMemberRemovalChannel.setMessageHandler(nil)
+    }
+    let groupMembersChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.groupMembers\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      groupMembersChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let nextArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            let result = try await api.groupMembers(roomId: roomIdArg, next: nextArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      groupMembersChannel.setMessageHandler(nil)
+    }
+    let invitationsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.invitations\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      invitationsChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.invitations(roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      invitationsChannel.setMessageHandler(nil)
+    }
+    let nextInvitationsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.nextInvitations\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      nextInvitationsChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.nextInvitations(roomId: roomIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      nextInvitationsChannel.setMessageHandler(nil)
+    }
+    let previewInviteChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.previewInvite\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      previewInviteChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let textArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.previewInvite(text: textArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      previewInviteChannel.setMessageHandler(nil)
+    }
+    let refreshInviteChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.refreshInvite\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      refreshInviteChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            let result = try await api.refreshInvite()
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      refreshInviteChannel.setMessageHandler(nil)
+    }
+    let inviteActionChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.inviteAction\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      inviteActionChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let revisionArg = args[1] as! Int64
+        let actionArg = args[2] as! String
+        let intentIdArg: String? = nilOrValue(args[3])
+        let noteArg: String? = nilOrValue(args[4])
+        Task { @MainActor in
+          do {
+            try await api.inviteAction(roomId: roomIdArg, revision: revisionArg, action: actionArg, intentId: intentIdArg, note: noteArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      inviteActionChannel.setMessageHandler(nil)
+    }
+    let submitJoinChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.submitJoin\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      submitJoinChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let noteArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            try await api.submitJoin(note: noteArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      submitJoinChannel.setMessageHandler(nil)
+    }
+    let cancelJoinChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.cancelJoin\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      cancelJoinChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            try await api.cancelJoin(roomId: roomIdArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      cancelJoinChannel.setMessageHandler(nil)
+    }
+    let muteMemberChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.muteMember\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      muteMemberChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let userIdArg = args[1] as! String
+        let revisionArg = args[2] as! Int64
+        Task { @MainActor in
+          do {
+            try await api.muteMember(roomId: roomIdArg, userId: userIdArg, revision: revisionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      muteMemberChannel.setMessageHandler(nil)
+    }
+    let createGroupChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.createGroup\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      createGroupChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let titleArg = args[0] as! String
+        let membersArg = args[1] as! [String]
+        Task { @MainActor in
+          do {
+            try await api.createGroup(title: titleArg, members: membersArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      createGroupChannel.setMessageHandler(nil)
+    }
+    let requestContactChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.requestContact\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      requestContactChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let handleArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            try await api.requestContact(handle: handleArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      requestContactChannel.setMessageHandler(nil)
+    }
+    let socialActionChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.socialAction\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      socialActionChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let userIdArg = args[0] as! String
+        let actionArg = args[1] as! String
+        Task { @MainActor in
+          do {
+            try await api.socialAction(userId: userIdArg, action: actionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      socialActionChannel.setMessageHandler(nil)
+    }
+    let changeWindowPageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.changeWindowPage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      changeWindowPageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let windowIdArg = args[0] as! String
+        let latestArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.changeWindowPage(windowId: windowIdArg, latest: latestArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      changeWindowPageChannel.setMessageHandler(nil)
     }
     let closeWindowChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.closeWindow\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
@@ -682,15 +3140,199 @@ class ImHostSetup {
     } else {
       closeWindowChannel.setMessageHandler(nil)
     }
+    let cancelPendingSendChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.cancelPendingSend\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      cancelPendingSendChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let intentIdArg = args[0] as! String
+        Task { @MainActor in
+          do {
+            try await api.cancelPendingSend(intentId: intentIdArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      cancelPendingSendChannel.setMessageHandler(nil)
+    }
+    let locateMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.locateMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      locateMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.locateMessage(roomId: roomIdArg, messageId: messageIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      locateMessageChannel.setMessageHandler(nil)
+    }
+    let searchMessagesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.searchMessages\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      searchMessagesChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg: String? = nilOrValue(args[0])
+        let queryArg = args[1] as! String
+        let nextArg = args[2] as! Bool
+        let filterArg: String? = nilOrValue(args[3])
+        let senderUserIdArg: String? = nilOrValue(args[4])
+        Task { @MainActor in
+          do {
+            let result = try await api.searchMessages(roomId: roomIdArg, query: queryArg, next: nextArg, filter: filterArg, senderUserId: senderUserIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      searchMessagesChannel.setMessageHandler(nil)
+    }
+    let messageReadersChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.messageReaders\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      messageReadersChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let nextArg = args[2] as! Bool
+        Task { @MainActor in
+          do {
+            let result = try await api.messageReaders(roomId: roomIdArg, messageId: messageIdArg, next: nextArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      messageReadersChannel.setMessageHandler(nil)
+    }
+    let favoritesChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.favorites\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      favoritesChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let nextArg = args[0] as! Bool
+        Task { @MainActor in
+          do {
+            let result = try await api.favorites(next: nextArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      favoritesChannel.setMessageHandler(nil)
+    }
+    let setFavoriteChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.setFavorite\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setFavoriteChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let favoritedArg = args[2] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.setFavorite(roomId: roomIdArg, messageId: messageIdArg, favorited: favoritedArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      setFavoriteChannel.setMessageHandler(nil)
+    }
+    let moderateMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.moderateMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      moderateMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        Task { @MainActor in
+          do {
+            try await api.moderateMessage(roomId: roomIdArg, messageId: messageIdArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      moderateMessageChannel.setMessageHandler(nil)
+    }
+    let pinMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.pinMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      pinMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let roomSequenceArg = args[2] as! Int64
+        let isPinnedArg = args[3] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.pinMessage(roomId: roomIdArg, messageId: messageIdArg, roomSequence: roomSequenceArg, isPinned: isPinnedArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      pinMessageChannel.setMessageHandler(nil)
+    }
+    let clearMessageSearchChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.clearMessageSearch\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      clearMessageSearchChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            try await api.clearMessageSearch()
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      clearMessageSearchChannel.setMessageHandler(nil)
+    }
+    let recoverSendChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.recoverSend\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      recoverSendChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let intentIdArg = args[0] as! String
+        let resendArg = args[1] as! Bool
+        Task { @MainActor in
+          do {
+            try await api.recoverSend(intentId: intentIdArg, resend: resendArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      recoverSendChannel.setMessageHandler(nil)
+    }
     let sendTextChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.sendText\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {
       sendTextChannel.setMessageHandler { message, reply in
         let args = message as! [Any?]
         let roomIdArg = args[0] as! String
         let textArg = args[1] as! String
+        let replyToMessageIdArg: String? = nilOrValue(args[2])
+        let mentionsArg: [String]? = nilOrValue(args[3])
         Task { @MainActor in
           do {
-            try await api.sendText(roomId: roomIdArg, text: textArg)
+            try await api.sendText(roomId: roomIdArg, text: textArg, replyToMessageId: replyToMessageIdArg, mentions: mentionsArg)
             reply(wrapResult(nil))
           } catch {
             reply(wrapError(error))
@@ -699,6 +3341,177 @@ class ImHostSetup {
       }
     } else {
       sendTextChannel.setMessageHandler(nil)
+    }
+    let sendAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.sendAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      sendAttachmentChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let pathArg = args[1] as! String
+        let nameArg = args[2] as! String
+        let contentTypeArg = args[3] as! String
+        let textArg = args[4] as! String
+        Task { @MainActor in
+          do {
+            try await api.sendAttachment(roomId: roomIdArg, path: pathArg, name: nameArg, contentType: contentTypeArg, text: textArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      sendAttachmentChannel.setMessageHandler(nil)
+    }
+    let transfersChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.transfers\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      transfersChannel.setMessageHandler { _, reply in
+        Task { @MainActor in
+          do {
+            let result = try await api.transfers()
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      transfersChannel.setMessageHandler(nil)
+    }
+    let transferActionChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.transferAction\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      transferActionChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let idArg = args[0] as! String
+        let actionArg = args[1] as! String
+        Task { @MainActor in
+          do {
+            try await api.transferAction(id: idArg, action: actionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      transferActionChannel.setMessageHandler(nil)
+    }
+    let exportAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.exportAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      exportAttachmentChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let mediaIdArg = args[2] as! String
+        let destinationArg = args[3] as! String
+        Task { @MainActor in
+          do {
+            try await api.exportAttachment(roomId: roomIdArg, messageId: messageIdArg, mediaId: mediaIdArg, destination: destinationArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      exportAttachmentChannel.setMessageHandler(nil)
+    }
+    let previewAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.previewAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      previewAttachmentChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let mediaIdArg = args[2] as! String
+        Task { @MainActor in
+          do {
+            let result = try await api.previewAttachment(roomId: roomIdArg, messageId: messageIdArg, mediaId: mediaIdArg)
+            reply(wrapResult(result))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      previewAttachmentChannel.setMessageHandler(nil)
+    }
+    let downloadAttachmentChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.downloadAttachment\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      downloadAttachmentChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let mediaIdArg = args[2] as! String
+        Task { @MainActor in
+          do {
+            try await api.downloadAttachment(roomId: roomIdArg, messageId: messageIdArg, mediaId: mediaIdArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      downloadAttachmentChannel.setMessageHandler(nil)
+    }
+    let forwardMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.forwardMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      forwardMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let revisionArg = args[2] as! Int64
+        let targetRoomIdsArg = args[3] as! [String]
+        Task { @MainActor in
+          do {
+            try await api.forwardMessage(roomId: roomIdArg, messageId: messageIdArg, revision: revisionArg, targetRoomIds: targetRoomIdsArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      forwardMessageChannel.setMessageHandler(nil)
+    }
+    let editMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.editMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      editMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let revisionArg = args[2] as! Int64
+        let textArg = args[3] as! String
+        Task { @MainActor in
+          do {
+            try await api.editMessage(roomId: roomIdArg, messageId: messageIdArg, revision: revisionArg, text: textArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      editMessageChannel.setMessageHandler(nil)
+    }
+    let withdrawMessageChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.withdrawMessage\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      withdrawMessageChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let roomIdArg = args[0] as! String
+        let messageIdArg = args[1] as! String
+        let revisionArg = args[2] as! Int64
+        Task { @MainActor in
+          do {
+            try await api.withdrawMessage(roomId: roomIdArg, messageId: messageIdArg, revision: revisionArg)
+            reply(wrapResult(nil))
+          } catch {
+            reply(wrapError(error))
+          }
+        }
+      }
+    } else {
+      withdrawMessageChannel.setMessageHandler(nil)
     }
     let signOutChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.im_flutter_sdk.ImHost.signOut\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
     if let api = api {

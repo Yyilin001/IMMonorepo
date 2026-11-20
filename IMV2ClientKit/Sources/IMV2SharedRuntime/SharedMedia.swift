@@ -23,7 +23,7 @@ actor SharedMedia {
     private let messages: V2MessageService
     private let createStagingFile: @Sendable (URL) throws -> FileHandle
     private let account: UserID; private let store: GRDBV2LocalSyncStore
-    private let resources: V2ResourceCenter; private let uploads: V2ResourceTransferEngine
+    private let resources: V2ResourceCenter
     private let cache: V2ResourceDownloadCache; private let resolver: SharedMediaResolver
     private let stagingRoot: URL
     private var tasks: [Task<Void,Never>] = []
@@ -35,10 +35,10 @@ actor SharedMedia {
     private var selected: (V2MediaMessageLocation, V2MediaPresentation)?
     private var preview: (V2ResourceCachedFile, Data, ContinuousClock.Instant)?
     private var reading: (UUID, V2ResourceCachedFile, Int64)?
-    init(business: V2ResourceService, resolver: SharedMediaResolver, account: UserID, store: GRDBV2LocalSyncStore, resources: V2ResourceCenter, uploads: V2ResourceTransferEngine, base: URL, http: V2SessionHTTPAuthorization, rangeTransport: any V2RangeDownloadTransport, createStagingFile: @escaping @Sendable (URL) throws -> FileHandle, messages: V2MessageService) async throws {
+    init(business: V2ResourceService, resolver: SharedMediaResolver, account: UserID, store: GRDBV2LocalSyncStore, createStagingFile: @escaping @Sendable (URL) throws -> FileHandle, messages: V2MessageService) async throws {
         self.business = business; self.messages = messages
         self.createStagingFile = createStagingFile
-        self.account = account; self.store = store; self.resources = resources; self.uploads = uploads
+        self.account = account; self.store = store; resources = business.library
         self.resolver = resolver; cache = business.downloads
         stagingRoot = await resources.scope.resourceFilesDirectory.resolvingSymlinksInPath().appendingPathComponent("shared-imports", isDirectory: true)
         if !FileManager.default.fileExists(atPath: stagingRoot.path) { try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
@@ -171,9 +171,7 @@ actor SharedMedia {
         }
     }
     func cancelSend(_ id: UUID) async throws {
-        guard try await store.preparingSendIntent(id: id) != nil else { throw SharedFailure.invalidInput }
         try await business.cancelSend(id)
-        try await uploads.releaseFinishedSources()
     }
     static func identity(_ id: V2ManagedResourceTransferID) -> (String,String) { switch id { case .upload(let id): ("upload",id.uuidString); case .download(let id): ("download",id.uuidString); case .serverImport(let id): ("import",id.uuidString) } }
     func snapshot(chunk: String? = nil) async -> SharedResourceView {

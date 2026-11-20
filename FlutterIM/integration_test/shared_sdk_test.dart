@@ -1,8 +1,12 @@
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:flutter/services.dart' show PlatformException;
+import 'package:im_flutter_sdk/src/messages.g.dart' as wire;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/widgets.dart';
-import 'package:material_ui/material_ui.dart' show FilledButton;
+import 'package:material_ui/material_ui.dart' show FilledButton, ListTile;
 import 'package:integration_test/integration_test.dart';
 import 'package:local_im/main.dart' as app;
 
@@ -112,8 +116,100 @@ void main() {
       await send(ack);
     } else {
       await until(bubble(hello), 'received from Android');
+      await tester.tap(find.byTooltip('消息操作').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('回复'));
+      await tester.pumpAndSettle();
       await send(reply);
       await until(bubble(ack), 'Android confirmed receipt of reply');
+    }
+    final quote = bubble('回复 · $hello');
+    await until(quote, 'reply preview contains original message');
+    await tester.tap(quote);
+    await tester.pumpAndSettle();
+    await until(find.text('消息上下文'), 'opened quoted message context');
+    final selectedQuote = find.descendant(
+      of: find.byWidgetPredicate(
+        (widget) => widget is ListTile && widget.selected,
+      ),
+      matching: find.text(hello),
+    );
+    await until(selectedQuote, 'quoted original is highlighted');
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    // Exercise the real platform binding and shared transfer services using an
+    // app-owned fixture in place of the external document picker.
+    final mediaHost = wire.ImHost();
+    for (final origin in ['android', 'ios']) {
+      final name = 'payload-$origin-$run.bin';
+      final caption = '附件 $origin $run';
+      final verified = '附件字节已校验 $origin $run';
+      final bytes = Uint8List.fromList(
+        List.generate(280001, (i) => (i * 17 + origin.length) & 255),
+      );
+      final directory = await Directory.systemTemp.createTemp(
+        'im-paired-media-',
+      );
+      try {
+        if (origin == Platform.operatingSystem) {
+          final source = File('${directory.path}/$name');
+          await source.writeAsBytes(bytes);
+          await mediaHost.sendAttachment(
+            room,
+            source.path,
+            name,
+            'application/octet-stream',
+            caption,
+          );
+          await until(
+            bubble(name),
+            'uploaded attachment reached the sender timeline',
+          );
+          await until(
+            bubble(verified),
+            'peer verified exported attachment bytes',
+          );
+        } else {
+          await until(
+            bubble(name),
+            'attachment and filename arrived at receiver',
+          );
+          final timeline = await mediaHost.openWindow(room, false);
+          late final wire.ImMessage message;
+          try {
+            final view = await mediaHost.nextUpdate(timeline);
+            message = view.messages.singleWhere(
+              (m) => m.text == caption && m.hasMedia,
+            );
+          } finally {
+            await mediaHost.closeWindow(timeline);
+          }
+          final media = message.attachments.single;
+          expect(media.name, name);
+          expect(media.bytes, bytes.length);
+          await mediaHost.downloadAttachment(room, message.id, media.id);
+          final output = File('${directory.path}/export.bin');
+          final deadline = DateTime.now().add(const Duration(minutes: 2));
+          while (true) {
+            try {
+              await mediaHost.exportAttachment(
+                room,
+                message.id,
+                media.id,
+                output.path,
+              );
+              break;
+            } on PlatformException {
+              if (DateTime.now().isAfter(deadline)) rethrow;
+              await tester.pump(const Duration(milliseconds: 500));
+            }
+          }
+          expect(await output.readAsBytes(), orderedEquals(bytes));
+          await send(verified);
+        }
+      } finally {
+        await directory.delete(recursive: true);
+      }
     }
     // Wait for the confirmed text to survive closing and reopening its watch.
     await tester.pumpAndSettle();
@@ -122,8 +218,106 @@ void main() {
     await until(tile, 'conversation list survived closing the timeline');
     await tester.tap(tile.hitTestable());
     await tester.pumpAndSettle();
-    await until(bubble(reply), 'reply visible after reopening');
+    await until(
+      bubble('附件字节已校验 ios $run'),
+      'attachment acknowledgement visible after reopening',
+    );
+    await tester.tap(find.byKey(const Key('chat-profile')));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('搜索聊天记录'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(EditableText), run);
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+    await until(find.text(hello), 'room search returned the Android message');
+    await until(find.text(reply), 'room search returned the iOS reply');
+    await tester.tap(find.text(hello));
+    await tester.pumpAndSettle();
+    await until(find.text('消息上下文'), 'opened original message context');
+    await until(find.text(hello), 'original message is visible');
+    await until(find.text(reply), 'adjacent reply is visible');
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    final destinations = sender
+        ? const [
+            String.fromEnvironment('IM_ANDROID_FORWARD_FIRST'),
+            String.fromEnvironment('IM_ANDROID_FORWARD_SECOND'),
+          ]
+        : const [
+            String.fromEnvironment('IM_IOS_FORWARD_FIRST'),
+            String.fromEnvironment('IM_IOS_FORWARD_SECOND'),
+          ];
+    // Select the newest confirmed message, then verify each server projection.
+    final timeline = await mediaHost.openWindow(room, false);
+    late final wire.ImMessage source;
+    try {
+      source = (await mediaHost.nextUpdate(timeline)).messages
+          .singleWhere((m) => m.text == '附件字节已校验 ios $run');
+    } finally {
+      await mediaHost.closeWindow(timeline);
+    }
+    final menu = find.descendant(
+      of: find.byKey(ValueKey(source.id)),
+      matching: find.byTooltip('消息操作'),
+    );
+    await tester.ensureVisible(menu);
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('转发'));
+    await tester.pumpAndSettle();
+    for (final id in destinations) {
+      final choice = find.byKey(ValueKey('forward-target-$id'));
+      await tester.ensureVisible(choice);
+      await tester.tap(choice);
+      await tester.pump();
+    }
+    await tester.tap(find.text('转发（2/10）'));
+    await tester.pumpAndSettle();
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    for (final id in destinations) {
+      final destination = find.byKey(ValueKey(id));
+      await until(destination, 'forward destination in conversation list');
+      await tester.ensureVisible(destination);
+      await tester.tap(destination);
+      await until(bubble(source.text), 'forward delivered to destination');
+      await until(bubble('转发的消息'), 'destination retained forward attribution');
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.byTooltip('搜索全部聊天记录'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(EditableText), source.text);
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+    for (final expectedRoom in [room, ...destinations]) {
+      final row = find.byWidgetPredicate((widget) {
+        final key = widget.key;
+        return key is ValueKey<(String, String, String)> &&
+            key.value.$1 == 'search-hit' &&
+            key.value.$2 == expectedRoom;
+      });
+      await until(row, 'global search found message in expected room');
+      if (expectedRoom == destinations.first) {
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+        await until(
+          find.text('消息上下文'),
+          'opened forwarded message in its destination',
+        );
+        await until(
+          find.text(source.text),
+          'destination context shows original hit text',
+        );
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+      }
+    }
     await tester.pageBack();
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('nav-contacts')));

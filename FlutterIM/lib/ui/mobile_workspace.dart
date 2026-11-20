@@ -141,34 +141,48 @@ class _MobileWorkspaceState extends ConsumerState<_MobileWorkspace> {
         .where((r) => entry.isGroup ? r.id == entry.id : r.peerId == entry.id)
         .firstOrNull;
     final title = room?.title ?? entry.title;
+    if (!entry.isGroup) {
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (pageContext) => _SdkContactProfilePage(
+            entry: entry,
+            room: room,
+            fallbackName: title,
+            avatarId: id,
+            onMessage: room == null
+                ? null
+                : () {
+                    Navigator.of(pageContext).pop();
+                    _openSdk(room);
+                  },
+          ),
+        ),
+      );
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (context) => _ProfileScaffold(
-          title: entry.isGroup ? '群聊资料' : '联系人资料',
+          title: '群聊资料',
           children: [
             _ProfileHeader(
               id: id,
               name: title,
               handle: entry.id,
-              group: entry.isGroup,
+              group: true,
+              avatarWidget: SdkGroupAvatar(
+                roomId: entry.id,
+                name: title,
+                size: 80,
+              ),
             ),
-            if (room != null || entry.isGroup)
+            _GroupDetailsButton(roomId: entry.id, name: title),
+            if (room != null)
               FilledButton(
                 child: const Text('发消息'),
                 onPressed: () {
                   Navigator.pop(context);
-                  _openSdk(
-                    room ??
-                        (
-                          id: entry.id,
-                          title: title,
-                          preview: '',
-                          unread: 0,
-                          isGroup: true,
-                          updatedAt: null,
-                          peerId: null,
-                        ),
-                  );
+                  _openSdk(room);
                 },
               ),
           ],

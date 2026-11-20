@@ -112,7 +112,7 @@ actor SharedCommunity {
             guard let revision = request.revision else { throw SharedFailure.invalidInput }
             let action: V2GroupInvitationOperationAction
             switch request.action {
-            case "create": action = .create(lifetimeSeconds: 3600, maximumApprovedUses: 10, expectedMembershipRevision: revision)
+            case "create": action = .create(lifetimeSeconds: 7 * 24 * 3600, maximumApprovedUses: 100, expectedMembershipRevision: revision)
             case "revoke": action = .revoke(inviteID: try .init(request.intentID ?? ""), expectedMembershipRevision: revision)
             case "approve", "reject": action = .decide(requestID: try .init(request.intentID ?? ""), decision: request.action == "approve" ? .approve : .reject, expectedMembershipRevision: revision)
             default: throw SharedFailure.invalidInput
@@ -121,6 +121,10 @@ actor SharedCommunity {
         case .muteMember:
             guard let revision = request.revision, let target = request.targetUserID else { throw SharedFailure.invalidInput }
             _ = try await moderation.enqueue(roomID: room, targetUserID: UserID(target), action: .mute(untilMilliseconds: UInt64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)), reasonCode: .init("group_rules"), expectedMembershipRevision: revision)
+        case .moderateMemberRemoval:
+            guard let revision = request.revision, let target = request.targetUserID else { throw SharedFailure.invalidInput }
+            _ = try await moderation.enqueue(roomID: room, targetUserID: UserID(target), action: .remove,
+                reasonCode: .init("ADMIN_ACTION"), expectedMembershipRevision: revision)
         default: throw SharedFailure.invalidInput
         }
     }

@@ -3,6 +3,7 @@ package com.xmtx.im.sharedsdk
 import android.content.Context
 import com.xmtx.im.swiftplatform.AndroidRuntimePlatform
 import kotlinx.collections.immutable.PersistentList
+import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
@@ -35,19 +36,31 @@ internal fun decodeSharedError(value: String): SharedError =
 class SharedSdkException(val reason: SharedError) : Exception(reason.name)
 data class SharedConversation(
     val id: String, val title: String, val preview: String,
-    val unread: Long = 0, val isGroup: Boolean = false, val updatedAt: Long? = null, val peerID: String? = null
+    val unread: Long = 0, val isGroup: Boolean = false, val updatedAt: Long? = null, val peerID: String? = null,
+    val isPinned: Boolean = false, val isArchived: Boolean = false, val muteUntil: Long? = null
 )
 private fun JSONObject.optionalLong(key: String): Long? = if (isNull(key)) null else getLong(key)
 private fun JSONObject.conversation() = SharedConversation(
     getString("id"), getString("title"), getString("preview"), optLong("unread"),
-    optBoolean("isGroup"), optionalLong("updatedAt"), optString("peerID").takeIf(String::isNotEmpty)
+    optBoolean("isGroup"), optionalLong("updatedAt"), optString("peerID").takeIf(String::isNotEmpty),
+    optBoolean("isPinned"), optBoolean("isArchived"), optionalLong("muteUntil")
 )
-data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?, val createdAt: Long? = null)
+data class SharedEntity(val kind: String, val offset: Int, val length: Int, val url: String?)
+data class SharedMessage(val id: String, val senderID: String, val text: String, val sequence: Long, val withdrawn: Boolean, val hasMedia: Boolean, val attachments: PersistentList<SharedAttachment>, val revision: Long, val canMutate: Boolean, val readByPeer: Boolean, val replyToID: String?, val replyPreview: String?, val forwardedFromID: String?, val createdAt: Long? = null, val mentionSummary: String? = null, val entities: PersistentList<SharedEntity> = persistentListOf(), val roomSequence: Long = 0, val isPinned: Boolean = false)
 enum class SharedSendStatus { Preparing, Pending, WaitingForNetwork, WaitingForAuthentication, AcceptedAwaitingProjection, ConfirmingOutcome, NeedsAttention, ExpiredUnsubmitted, Closed, Rejected }
-data class SharedPendingMessage(val id: String, val text: String, val status: SharedSendStatus)
+data class SharedPendingMessage(val id: String, val text: String, val status: SharedSendStatus, val preparationStatus: String? = null, val createdAt: Long? = null,
+                              val preparedAttachments: Long? = null, val totalAttachments: Long? = null)
 data class SharedChat(val roomID: String, val messages: PersistentList<SharedMessage>, val pending: PersistentList<SharedPendingMessage>, val hasOlder: Boolean, val isLatest: Boolean, val hasMorePending: Boolean, val pendingPage: Int, val focusMessageID: String?)
+data class SharedDeviceSession(val deviceID: String, val deviceName: String, val platform: String, val createdAt: Long, val lastActiveAt: Long, val isCurrentDevice: Boolean)
+data class SharedDeviceSessions(val sessions: PersistentList<SharedDeviceSession>, val nextCursor: String?)
+data class SharedFavoriteMessage(val id: String, val roomID: String, val roomTitle: String, val senderID: String, val text: String, val createdAt: Long?, val attachmentNames: List<String>)
+data class SharedFavorites(val messages: List<SharedFavoriteMessage>, val hasMore: Boolean)
+data class SharedPushState(val preferenceEnabled: Boolean, val desiredEnabled: Boolean, val waitingForToken: Boolean, val pending: Boolean, val pauseReason: String?)
+data class SharedActivity(val roomID: String, val isGroup: Boolean, val isOnline: Boolean?, val typingUserIDs: List<String>)
+data class SharedPrivacy(val allowsStrangerMessages: Boolean?, val allowsUserAdd: Boolean?, val allowsDirectReadReceipts: Boolean?,
+    val allowsGroupReadReceipts: Boolean?, val allowsOnlinePresence: Boolean?, val allowsTypingIndicators: Boolean?, val blockedUsers: List<String>)
 data class SharedSnapshot(val state: SharedSessionState, val userID: String?, val allowsStrangerMessages: Boolean?, val appliedSequence: Long,
-    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null)
+    val acknowledgedSequence: Long, val connections: Long, val conversations: PersistentList<SharedConversation>, val failure: SharedError?, val hasMoreConversations: Boolean, val isFirstConversationPage: Boolean, val chat: SharedChat?, val directory: SharedDirectory?, val resource: SharedResourceView?, val messaging: SharedMessagingView?, val windowID: String? = null, val deviceSessions: SharedDeviceSessions? = null, val privacy: SharedPrivacy? = null, val favorites: SharedFavorites? = null, val activity: SharedActivity? = null, val push: SharedPushState? = null)
 
 internal object NativeSharedSDK {
     init { System.loadLibrary("IMV2SharedSDK") }
@@ -100,6 +113,16 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun openMessageTimeline(roomID: String, pageSize: Int = 50): SharedConversationWindow =
         openWindow(JSONObject().put("operation", "openTimelineWindow").put("roomID", roomID).put("limit", pageSize))
 
+    /** Null keeps the current field; muteUntil uses epoch milliseconds and 0 clears the mute. */
+    suspend fun setConversationState(roomID: String, isPinned: Boolean? = null, isArchived: Boolean? = null,
+                                     muteUntil: Long? = null): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "conversationState").put("roomID", roomID).apply {
+            if (isPinned != null) put("isPinned", isPinned)
+            if (isArchived != null) put("archived", isArchived)
+            if (muteUntil != null) put("muteUntil", muteUntil)
+        })
+    }
+
     private suspend fun openWindow(request: JSONObject): SharedConversationWindow {
         var completedID: String? = null
         try {
@@ -125,6 +148,62 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun login(account: String, password: String): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "login").put("account", account).put("password", password))
     }
+    suspend fun deviceSessions(cursor: String? = null): SharedSnapshot = execute(JSONObject().put("operation", "deviceSessions").apply {
+        if (cursor != null) put("intentID", cursor)
+    })
+    suspend fun favorites(next: Boolean = false): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "favorites").put("action", if (next) "next" else "first"))
+    }
+    suspend fun pushState(): SharedSnapshot = mutate("pushState")
+    suspend fun setPushEnabled(enabled: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "setPushEnabled").put("flag1", enabled))
+    }
+    suspend fun receivePushToken(provider: String, environment: String, token: String): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "receivePushToken").put("text", token)
+            .put("scope", provider).put("action", environment))
+    }
+    suspend fun retryPush(): SharedSnapshot = mutate("retryPush")
+    suspend fun removePushEndpoint(): SharedSnapshot = mutate("removePushEndpoint")
+    suspend fun activity(roomID: String): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "activity").put("roomID", roomID))
+    }
+    suspend fun setTyping(roomID: String, typing: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "setTyping").put("roomID", roomID).put("flag1", typing))
+    }
+    suspend fun closeActivity(): SharedSnapshot = mutate("closeActivity")
+    suspend fun moderateMessage(roomID: String, messageID: String): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "moderateMessage").put("roomID", roomID).put("messageID", messageID))
+    }
+    suspend fun pinMessage(roomID: String, messageID: String, roomSequence: Long, isPinned: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "pinMessage").put("roomID", roomID).put("messageID", messageID)
+            .put("offset", roomSequence).put("flag1", isPinned))
+    }
+    suspend fun setFavorite(roomID: String, messageID: String, favorited: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "setFavorite").put("roomID", roomID).put("messageID", messageID).put("flag1", favorited))
+    }
+    suspend fun privacy(): SharedSnapshot = mutation.withLock { execute(JSONObject().put("operation", "privacy")) }
+    suspend fun setPrivacy(kind: String, flag1: Boolean?, flag2: Boolean?): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "setPrivacy").put("action", kind).apply {
+            if (flag1 != null) put("flag1", flag1)
+            if (flag2 != null) put("flag2", flag2)
+        })
+    }
+    suspend fun revokeDevice(deviceID: String?, all: Boolean): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "revokeDevice").put("action", if (all) "all" else "device").apply {
+            if (deviceID != null) put("targetUserID", deviceID)
+        })
+    }
+    suspend fun passwordLifecycle(account: String, action: String, currentPassword: String?, newPassword: String?, recoveryCode: String?): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "passwordLifecycle").put("account", account).put("action", action).apply {
+            if (currentPassword != null) put("password", currentPassword)
+            if (newPassword != null) put("newPassword", newPassword)
+            if (recoveryCode != null) put("recoveryCode", recoveryCode)
+        })
+    }
+    suspend fun register(account: String, password: String, publicHandle: String, displayName: String): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "register").put("account", account).put("password", password)
+            .put("publicHandle", publicHandle).put("displayName", displayName))
+    }
     suspend fun connect(): SharedSnapshot = mutate("connect")
     suspend fun disconnect(): SharedSnapshot = mutate("disconnect")
     suspend fun synchronize(): SharedSnapshot = mutate("synchronize")
@@ -132,7 +211,9 @@ class SharedClient private constructor(private val handle: Long) {
     /** Persistent local exit + revocation handoff; cancel the foreground collector before calling. */
     suspend fun signOut(): SharedSnapshot = withContext(NonCancellable) { mutate("signOut") }
     suspend fun openConversation(roomID: String, messageID: String? = null): SharedSnapshot = directoryCall("openConversation", "roomID" to roomID, "messageID" to messageID)
-    suspend fun searchMessages(query: String, roomID: String? = null): SharedSnapshot = directoryCall("searchMessages", "text" to query, "roomID" to roomID)
+    suspend fun locateMessage(roomID: String, messageID: String): SharedSnapshot = directoryCall("locateMessage", "roomID" to roomID, "messageID" to messageID)
+    suspend fun searchMessages(query: String, roomID: String? = null, filter: String? = null, senderUserID: String? = null): SharedSnapshot =
+        directoryCall("searchMessages", "text" to query, "roomID" to roomID, "scope" to filter, "targetUserID" to senderUserID)
     suspend fun nextSearch(): SharedSnapshot = directoryCall("searchMessages", "action" to "next")
     suspend fun clearMessaging(): SharedSnapshot = mutate("clearMessaging")
     suspend fun editMessage(roomID: String, messageID: String, revision: Long, text: String): SharedSnapshot = directoryCall("messageAction", "roomID" to roomID, "messageID" to messageID, "revision" to revision, "action" to "edit", "text" to text)
@@ -142,6 +223,8 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun markVisibleMessages(roomID: String, ids: List<String>): SharedSnapshot = directoryCall("markVisibleMessages", "roomID" to roomID, "messageIDs" to org.json.JSONArray(ids))
     suspend fun messageReaders(roomID: String, messageID: String, next: Boolean = false): SharedSnapshot = directoryCall("messageReaders", "roomID" to roomID, "messageID" to messageID, "action" to if (next) "next" else "first")
     suspend fun forwardMessage(roomID: String, messageID: String, revision: Long, targetRoomID: String): SharedSnapshot = directoryCall("forwardMessage", "roomID" to roomID, "messageID" to messageID, "revision" to revision, "targetRoomID" to targetRoomID)
+    suspend fun forwardMessage(roomID: String, messageID: String, revision: Long, targetRoomIDs: List<String>): SharedSnapshot =
+        directoryCall("forwardMessage", "roomID" to roomID, "messageID" to messageID, "revision" to revision, "targetRoomIDs" to org.json.JSONArray(targetRoomIDs))
     suspend fun retryForward(roomID: String, id: String): SharedSnapshot = directoryCall("interactionAction", "roomID" to roomID, "intentID" to id, "action" to "retryForward")
     suspend fun cancelForward(roomID: String, id: String): SharedSnapshot = directoryCall("interactionAction", "roomID" to roomID, "intentID" to id, "action" to "cancelForward")
     suspend fun nextConversations(): SharedSnapshot = mutate("conversationsNext")
@@ -150,9 +233,13 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun latestMessages(): SharedSnapshot = mutate("messagesLatest")
     suspend fun nextPending(): SharedSnapshot = mutate("pendingNext")
     suspend fun firstPending(): SharedSnapshot = mutate("pendingFirst")
-    suspend fun sendText(roomID: String, text: String, replyToMessageID: String? = null): SharedSnapshot = mutation.withLock {
-        execute(JSONObject().put("operation", "sendText").put("roomID", roomID).put("text", text).put("replyToMessageID", replyToMessageID))
+    suspend fun sendText(roomID: String, text: String, replyToMessageID: String? = null, mentions: List<String>? = null): SharedSnapshot = mutation.withLock {
+        execute(JSONObject().put("operation", "sendText").put("roomID", roomID).put("text", text).apply {
+            if (replyToMessageID != null) put("replyToMessageID", replyToMessageID)
+            if (!mentions.isNullOrEmpty()) put("mentions", org.json.JSONArray(mentions))
+        })
     }
+    suspend fun resendUnsent(intentID: String): SharedSnapshot = directoryCall("resendUnsent", "intentID" to intentID)
     suspend fun retrySend(intentID: String): SharedSnapshot = mutation.withLock {
         execute(JSONObject().put("operation", "retrySend").put("intentID", intentID))
     }
@@ -172,7 +259,18 @@ class SharedClient private constructor(private val handle: Long) {
         text: String? = null, role: SharedRole? = null, permissions: List<SharedPermission>? = null): SharedSnapshot =
         directoryCall("groupAction", "roomID" to roomID, "action" to action.wire, "revision" to revision, "targetUserID" to targetUserID,
             "text" to text, "role" to role?.wire, "permissions" to permissions?.let { org.json.JSONArray(it.map(SharedPermission::wire)) })
-    suspend fun openProfile(userID: String): SharedSnapshot = directoryCall("openProfile", "targetUserID" to userID)
+    suspend fun profiles(page: String, context: String, roomID: String?, userIDs: List<String>): SharedSnapshot =
+        directoryCall("profiles", "page" to page, "scope" to context, "roomID" to roomID, "members" to org.json.JSONArray(userIDs))
+    suspend fun clearProfiles(page: String): SharedSnapshot = directoryCall("clearProfiles", "page" to page)
+    /** Display-only read; intentionally bypasses the account mutation mutex. */
+    suspend fun avatar(userID: String, context: String, roomID: String? = null): SharedSnapshot =
+        execute(JSONObject().put("operation", "avatar").put("page", "avatar").put("scope", context)
+            .put("targetUserID", userID).apply { if (roomID != null) put("roomID", roomID) })
+    suspend fun groupNickname(roomID: String): SharedSnapshot = directoryCall("groupNickname", "roomID" to roomID)
+    suspend fun saveGroupNickname(roomID: String, name: String?, revision: Long?): SharedSnapshot =
+        directoryCall("saveGroupNickname", "roomID" to roomID, "text" to (name ?: ""), "revision" to revision)
+    suspend fun openProfile(userID: String, context: String = "relationship", roomID: String? = null): SharedSnapshot =
+        directoryCall("openProfile", "targetUserID" to userID, "scope" to context, "roomID" to roomID)
     suspend fun saveAlias(userID: String, name: String?, revision: Long?): SharedSnapshot = directoryCall("saveAlias", "targetUserID" to userID, "text" to (name ?: ""), "revision" to revision)
     suspend fun invitations(roomID: String): SharedSnapshot = directoryCall("invitations", "roomID" to roomID)
     suspend fun nextInvitations(roomID: String): SharedSnapshot = directoryCall("invitationsNext", "roomID" to roomID)
@@ -181,10 +279,14 @@ class SharedClient private constructor(private val handle: Long) {
     suspend fun inviteAction(roomID: String, action: SharedInviteAction, revision: Long? = null, id: String? = null, note: String? = null): SharedSnapshot =
         directoryCall("inviteAction", "roomID" to roomID, "action" to action.wire, "revision" to revision, "intentID" to id, "text" to note)
     suspend fun muteMember(roomID: String, userID: String, revision: Long): SharedSnapshot = directoryCall("muteMember", "roomID" to roomID, "targetUserID" to userID, "revision" to revision)
+    suspend fun moderateMemberRemoval(roomID: String, userID: String, revision: Long): SharedSnapshot =
+        directoryCall("moderateMemberRemoval", "roomID" to roomID, "targetUserID" to userID, "revision" to revision)
     suspend fun discardDirectoryDraft(id: String): SharedSnapshot = directoryCall("discardDirectoryDraft", "intentID" to id)
     suspend fun retryDirectoryWork(id: String): SharedSnapshot = directoryCall("retryDirectoryWork", "intentID" to id)
     suspend fun openAvatarEditor(roomID: String? = null): SharedSnapshot = directoryCall("openAvatarEditor", "roomID" to roomID)
-    suspend fun changeAvatar(roomID: String?, revision: Long, jpeg: String? = null, width: Int? = null, height: Int? = null): SharedSnapshot = directoryCall("changeAvatar", "roomID" to roomID, "revision" to revision, "image" to jpeg, "width" to width, "height" to height)
+    suspend fun changeAvatar(roomID: String?, revision: Long, jpeg: String? = null, width: Int? = null, height: Int? = null,
+                             text: String? = null, action: String? = null): SharedSnapshot = directoryCall("changeAvatar", "roomID" to roomID,
+        "revision" to revision, "image" to jpeg, "width" to width, "height" to height, "text" to text, "action" to action)
     suspend fun avatarAction(roomID: String?, id: String, action: SharedAvatarAction): SharedSnapshot = directoryCall("avatarAction", "roomID" to roomID, "intentID" to id, "action" to action.wire)
     /** Stream device bytes in bounded chunks; Swift owns staging, validation and atomic handoff. */
     suspend fun importAttachment(roomID: String, name: String, contentType: String, input: java.io.InputStream, width: Int? = null, height: Int? = null): SharedSnapshot = mutation.withLock {
@@ -318,10 +420,51 @@ class SharedClient private constructor(private val handle: Long) {
             value.optJSONObject("chat")?.let { chat ->
                 val messages = chat.getJSONArray("messages"); val pending = chat.getJSONArray("pending")
                 SharedChat(chat.getString("roomID"), (0 until messages.length()).map { index -> messages.getJSONObject(index).let {
-                    SharedMessage(it.getString("id"), it.getString("senderID"), it.getString("text"), it.getLong("sequence"), it.getBoolean("withdrawn"), it.getBoolean("hasMedia"), it.getJSONArray("attachments").let { rows -> (0 until rows.length()).map { index -> decodeAttachment(rows.getJSONObject(index)) }.toPersistentList() }, it.getLong("revision"), it.getBoolean("canMutate"), it.getBoolean("readByPeer"), it.optString("replyToID").takeIf(String::isNotEmpty), it.optString("replyPreview").takeIf(String::isNotEmpty), it.optString("forwardedFromID").takeIf(String::isNotEmpty), it.optionalLong("createdAt"))
+                    SharedMessage(it.getString("id"), it.getString("senderID"), it.getString("text"), it.getLong("sequence"), it.getBoolean("withdrawn"), it.getBoolean("hasMedia"), it.getJSONArray("attachments").let { rows -> (0 until rows.length()).map { index -> decodeAttachment(rows.getJSONObject(index)) }.toPersistentList() }, it.getLong("revision"), it.getBoolean("canMutate"), it.getBoolean("readByPeer"), it.optString("replyToID").takeIf(String::isNotEmpty), it.optString("replyPreview").takeIf(String::isNotEmpty), it.optString("forwardedFromID").takeIf(String::isNotEmpty), it.optionalLong("createdAt"), it.optString("mentionSummary").takeIf(String::isNotEmpty),
+                        (0 until it.optJSONArray("entities").let { rows -> rows?.length() ?: 0 }).map { index ->
+                            val entity = it.getJSONArray("entities").getJSONObject(index)
+                            SharedEntity(entity.getString("kind"), entity.getInt("offset"), entity.getInt("length"),
+                                entity.optString("url").takeIf(String::isNotEmpty))
+                        }.toPersistentList(), it.getLong("roomSequence"), it.getBoolean("isPinned"))
                 } }.toPersistentList(), (0 until pending.length()).map { index -> pending.getJSONObject(index).let {
-                    SharedPendingMessage(it.getString("id"), it.getString("text"), SharedSendStatus.entries.first { status -> status.name.equals(it.getString("status"), true) })
+                    SharedPendingMessage(it.getString("id"), it.getString("text"), SharedSendStatus.entries.first { status -> status.name.equals(it.getString("status"), true) },
+                        it.optString("preparationStatus").takeIf(String::isNotEmpty), it.optionalLong("createdAt"),
+                        it.optionalLong("preparedAttachments"), it.optionalLong("totalAttachments"))
                 } }.toPersistentList(), chat.getBoolean("hasOlder"), chat.getBoolean("isLatest"), chat.getBoolean("hasMorePending"), chat.getInt("pendingPage"), chat.optString("focusMessageID").takeIf { it.isNotEmpty() })
-            }, value.optJSONObject("directory")?.let { decodeDirectory(it, startedAt) }, value.optJSONObject("resource")?.let { decodeResources(it, startedAt) }, value.optJSONObject("messaging")?.let { decodeMessaging(it, startedAt) }, value.optString("windowID").takeIf { it.isNotEmpty() })
+            }, value.optJSONObject("directory")?.let { decodeDirectory(it, startedAt) }, value.optJSONObject("resource")?.let { decodeResources(it, startedAt) }, value.optJSONObject("messaging")?.let { decodeMessaging(it, startedAt) }, windowID = value.optString("windowID").takeIf { it.isNotEmpty() },
+            privacy = value.optJSONObject("privacy")?.let { privacy ->
+                val blocked = privacy.getJSONArray("blockedUsers")
+                SharedPrivacy(
+                    if (privacy.has("allowsStrangerMessages")) privacy.getBoolean("allowsStrangerMessages") else null,
+                    if (privacy.has("allowsUserAdd")) privacy.getBoolean("allowsUserAdd") else null,
+                    if (privacy.has("allowsDirectReadReceipts")) privacy.getBoolean("allowsDirectReadReceipts") else null,
+                    if (privacy.has("allowsGroupReadReceipts")) privacy.getBoolean("allowsGroupReadReceipts") else null,
+                    if (privacy.has("allowsOnlinePresence")) privacy.getBoolean("allowsOnlinePresence") else null,
+                    if (privacy.has("allowsTypingIndicators")) privacy.getBoolean("allowsTypingIndicators") else null,
+                    (0 until blocked.length()).map { blocked.getString(it) })
+            }, activity = value.optJSONObject("activity")?.let { activity ->
+                val typing = activity.getJSONArray("typingUserIDs")
+                SharedActivity(activity.getString("roomID"), activity.getBoolean("isGroup"),
+                    if (activity.has("isOnline")) activity.getBoolean("isOnline") else null,
+                    (0 until typing.length()).map { typing.getString(it) })
+            }, push = value.optJSONObject("push")?.let { push ->
+                SharedPushState(push.getBoolean("preferenceEnabled"), push.getBoolean("desiredEnabled"),
+                    push.getBoolean("waitingForToken"), push.getBoolean("pending"),
+                    push.optString("pauseReason").takeIf(String::isNotEmpty))
+            }, favorites = value.optJSONObject("favorites")?.let { favorites ->
+                val rows = favorites.getJSONArray("messages")
+                SharedFavorites((0 until rows.length()).map { index -> rows.getJSONObject(index).let {
+                    val names = it.getJSONArray("attachmentNames")
+                    SharedFavoriteMessage(it.getString("id"), it.getString("roomID"), it.getString("roomTitle"),
+                        it.getString("senderID"), it.getString("text"), it.optionalLong("createdAt"),
+                        (0 until names.length()).map { i -> names.getString(i) })
+                } }, favorites.getBoolean("hasMore"))
+            }, deviceSessions = value.optJSONObject("deviceSessions")?.let { sessions ->
+                val rows = sessions.getJSONArray("sessions")
+                SharedDeviceSessions((0 until rows.length()).map { index -> rows.getJSONObject(index).let {
+                    SharedDeviceSession(it.getString("deviceID"), it.getString("deviceName"), it.getString("platform"),
+                        it.getLong("createdAt"), it.getLong("lastActiveAt"), it.getBoolean("isCurrentDevice"))
+                } }.toPersistentList(), sessions.optString("nextCursor").takeIf(String::isNotEmpty))
+            })
     }
 }

@@ -14,10 +14,12 @@ struct SharedGroup: Encodable, Sendable {
     let announcement: String; let announcementRevision: UInt64; let policies: [SharedRolePolicy]
     let permissions: [String]; let policiesReady: Bool
 }
+struct SharedGroupNickname: Encodable, Sendable { let roomID: String; let name: String?; let revision: UInt64? }
 struct SharedDirectory: Encodable, Sendable {
     let contacts: [SharedContact]; let scope: String; let hasMoreContacts: Bool; let firstContacts: Bool
     let groups: [SharedConversation]; let hasMoreGroups: Bool; let firstGroups: Bool
     let avatarEditor: SharedAvatarEditor?
+    let groupNickname: SharedGroupNickname?
     let profiles: [SharedProfile]; let selectedProfile: String?; let community: SharedCommunitySnapshot
     let identity: SharedIdentity?; let group: SharedGroup?; let works: [SharedWork]; let failure: String?
 }
@@ -129,10 +131,34 @@ actor SharedSocialGroups {
             }
         } } catch is CancellationError {} catch { failure = sharedFailure(error) } }]
     }
+    func pinMessage(roomID: String, messageID: String, roomSequence: UInt64, isPinned: Bool) async throws {
+        let room = try RoomID(roomID), message = try MessageID(messageID)
+        guard try await store.roomAllowsLocalRead(roomID: room) else { throw SharedFailure.invalidInput }
+        let action = V2GroupCapabilityAction.pin(messageID: message, isPinned: isPinned, expectedRoomSequence: roomSequence)
+        _ = try await capability.enqueue(confirmation: capability.confirmationWindow(roomID: room, action: action))
+    }
+    func resolveMentions(_ handles: [String]) async throws -> [V2MentionTarget] {
+        guard handles.count <= V2MessageCommandLimits.maxMentions else { throw SharedFailure.invalidInput }
+        var targets: [V2MentionTarget] = []
+        var seen = Set<String>()
+        for raw in handles {
+            let handle = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !handle.isEmpty else { continue }
+            if handle.lowercased() == "@all" {
+                if seen.insert("everyone").inserted { targets.append(.everyone) }
+                continue
+            }
+            let lookup = try await directory.resolveForPresentation(handle: handle)
+            guard lookup.isValid() else { throw SharedFailure.invalidInput }
+            let id = lookup.identity.userID
+            if seen.insert(id.rawValue).inserted { targets.append(.user(id)) }
+        }
+        return targets
+    }
     func execute(_ request: SharedRequest) async throws {
         switch request.operation {
         case .openAvatarEditor:
-            contactsVisible = false; await people.clear(); await community.clear()
+            contactsVisible = false; await community.clear()
             try await avatars.open(room: request.roomID.map(RoomID.init))
         case .changeAvatar: try await avatars.change(request)
         case .avatarAction: try await avatars.action(request)
@@ -147,9 +173,9 @@ actor SharedSocialGroups {
             guard let handle = request.text else { throw SharedFailure.invalidInput }
             lookup = try await directory.resolveForPresentation(handle: handle)
         case .clearDiscovery:
-            lookup = nil; contactsVisible = false; await people.clear(); await community.clear(); await avatars.clear()
+            lookup = nil; contactsVisible = false; await people.clearAll(); await community.clear(); await avatars.clear()
         case .socialAction:
-            await people.clear()
+            await people.clearAll()
             guard let raw = request.targetUserID, let action = request.action else { throw SharedFailure.invalidInput }
             let target = try UserID(raw)
             let command: V2SocialOperationAction
@@ -163,14 +189,34 @@ actor SharedSocialGroups {
         case .createGroup:
             guard let title = request.text, let ids = request.members, ids.count <= 100 else { throw SharedFailure.invalidInput }
             _ = try await creation.enqueue(title: title, members: ids.map { try UserID($0) })
+        case .groupNickname:
+            guard let raw = request.roomID else { throw SharedFailure.invalidInput }
+            try await people.loadGroupNickname(room: try RoomID(raw))
+        case .saveGroupNickname:
+            try await people.saveGroupNickname(request)
+        case .profiles:
+            guard let page = request.page, let ids = request.members else { throw SharedFailure.invalidInput }
+            let context = try profileContext(request.scope ?? "relationship", roomID: request.roomID)
+            try await people.show(page: page, ids: ids, context: context)
+            await people.load(page: page)
+        case .clearProfiles:
+            guard let page = request.page else { throw SharedFailure.invalidInput }
+            await people.clear(page: page)
+        case .avatar:
+            guard let id = request.targetUserID else { throw SharedFailure.invalidInput }
+            let context = try profileContext(request.scope ?? "relationship", roomID: request.roomID)
+            try await people.show(page: "avatar", ids: [id], context: context)
+            await people.load(page: "avatar")
+            try await people.loadAvatar(page: "avatar", userID: id)
         case .openProfile:
-            lookup = nil; contactsVisible = false
-            try await people.open(UserID(request.targetUserID ?? ""))
+            lookup = nil
+            let context = try profileContext(request.scope ?? "relationship", roomID: request.roomID)
+            try await people.open(try UserID(request.targetUserID ?? ""), context: context)
         case .saveAlias: try await people.save(request)
         case .invitations, .invitationsNext, .previewInvite, .refreshInvite, .inviteAction, .muteMember:
             try await community.execute(request)
         case .openGroup, .groupMembersNext:
-            contactsVisible = false; await people.clear()
+            contactsVisible = false
             guard let raw = request.roomID else { throw SharedFailure.invalidInput }
             let room = try RoomID(raw)
             guard try await store.roomAllowsLocalRead(roomID: room) else { throw SharedFailure.invalidInput }
@@ -225,6 +271,19 @@ actor SharedSocialGroups {
         default: throw SharedFailure.invalidInput
         }
     }
+    private func profileContext(_ scope: String, roomID: String?) throws -> V2ProfileViewContext {
+        switch scope {
+        case "relationship": return .relationship
+        case "direct": return .directConversation
+        case "room":
+            guard let roomID else { throw SharedFailure.invalidInput }
+            return .room(try RoomID(roomID))
+        case "joinReview":
+            guard let roomID else { throw SharedFailure.invalidInput }
+            return .groupJoinReview(try RoomID(roomID))
+        default: throw SharedFailure.invalidInput
+        }
+    }
     func snapshot() async throws -> SharedDirectory {
         let contacts: [SharedContact]
         if scope == "blocked" {
@@ -264,6 +323,6 @@ actor SharedSocialGroups {
         if let work = profiles.1 { works.append(work) }
         return .init(contacts: contacts, scope: scope, hasMoreContacts: nextContact != nil, firstContacts: contactCursor == nil,
             groups: groups.items.map { .init(id: $0.roomID.rawValue, title: $0.title, preview: "") }, hasMoreGroups: nextGroup != nil, firstGroups: groupCursor == nil,
-            avatarEditor: try await avatars.snapshot(), profiles: profiles.0, selectedProfile: await people.selected?.rawValue, community: communitySnapshot, identity: lookup.map { .init(userID: $0.identity.userID.rawValue, handle: $0.identity.handle.rawValue, name: $0.identity.displayName) }, group: group, works: works, failure: failure?.rawValue)
+            avatarEditor: try await avatars.snapshot(), groupNickname: await people.currentGroupNickname, profiles: profiles.0, selectedProfile: await people.selected?.rawValue, community: communitySnapshot, identity: lookup.map { .init(userID: $0.identity.userID.rawValue, handle: $0.identity.handle.rawValue, name: $0.identity.displayName) }, group: group, works: works, failure: failure?.rawValue)
     }
 }

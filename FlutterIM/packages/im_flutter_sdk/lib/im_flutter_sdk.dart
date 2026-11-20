@@ -4,6 +4,12 @@ import 'package:flutter/services.dart';
 
 import 'src/messages.g.dart' as wire;
 
+enum ImMembershipAction { add, remove, role, transfer, leave, dissolve }
+
+enum ImContactScope { accepted, incoming, outgoing, blocked }
+
+enum ImSocialAction { accept, reject, remove, block, unblock }
+
 enum ImSessionState {
   signedOut,
   signingOut,
@@ -11,11 +17,18 @@ enum ImSessionState {
   connecting,
   connected,
   offline,
+  offlineReadOnly,
   closed,
 }
 
 enum ImSendStatus {
   preparing,
+  preparationWaiting,
+  preparationPaused,
+  preparationUserPaused,
+  preparationExpired,
+  preparationRejected,
+  preparationProcessing,
   pending,
   waitingForNetwork,
   waitingForAuthentication,
@@ -28,6 +41,41 @@ enum ImSendStatus {
   unknown,
 }
 
+typedef ImFavoriteMessage = ({
+  String id,
+  String roomId,
+  String roomTitle,
+  String senderId,
+  String text,
+  int? createdAt,
+  List<String> attachmentNames,
+});
+typedef ImFavorites = ({
+  List<ImFavoriteMessage> messages,
+  bool hasMore,
+});
+typedef ImReaders = ({
+  String roomId,
+  String messageId,
+  List<String> users,
+  bool hasNext,
+  int remainingMilliseconds,
+});
+typedef ImSearchHit = ({
+  String id,
+  String roomId,
+  String text,
+  String senderId,
+});
+typedef ImSearchPage = ({String status, List<ImSearchHit> hits, bool hasNext});
+
+typedef ImTimelinePage = ({
+  String windowId,
+  List<ImMessage> messages,
+  bool hasOlder,
+  bool isLatest,
+});
+
 typedef ImSession = ({ImSessionState state, String? userId});
 typedef ImConversation = ({
   String id,
@@ -35,18 +83,143 @@ typedef ImConversation = ({
   String preview,
   int unread,
   bool isGroup,
+  bool isPinned,
+  bool isArchived,
   int? updatedAt,
   String? peerId,
+  int? muteUntil,
 });
 typedef ImDirectoryEntry = ({String id, String title, bool isGroup});
+typedef ImPushState = ({
+  bool preferenceEnabled,
+  bool desiredEnabled,
+  bool waitingForToken,
+  bool pending,
+  String? pauseReason,
+});
+typedef ImActivity = ({
+  String roomId,
+  bool isGroup,
+  bool? isOnline,
+  List<String> typingUserIds,
+});
+typedef ImPrivacy = ({
+  bool? allowsStrangerMessages,
+  bool? allowsUserAdd,
+  bool? allowsDirectReadReceipts,
+  bool? allowsGroupReadReceipts,
+  bool? allowsOnlinePresence,
+  bool? allowsTypingIndicators,
+  List<String> blockedUsers,
+});
+typedef ImDeviceSession = ({
+  String deviceId,
+  String deviceName,
+  String platform,
+  int createdAt,
+  int lastActiveAt,
+  bool isCurrentDevice,
+});
+typedef ImDeviceSessions = ({
+  List<ImDeviceSession> sessions,
+  String? nextCursor,
+});
+typedef ImGroupNickname = ({String roomId, String? name, int? revision});
+typedef ImInvite = ({
+  String id,
+  String url,
+  int expires,
+  int used,
+  int maximum,
+});
+typedef ImJoinRequest = ({
+  String id,
+  String userId,
+  String note,
+  String state,
+});
+typedef ImInvitePreview = ({
+  String roomId,
+  String title,
+  String? requestId,
+  String? state,
+  bool member,
+  bool canSubmit,
+  bool canCancel,
+});
+typedef ImCommunity = ({
+  String? roomId,
+  List<ImInvite> invites,
+  List<ImJoinRequest> requests,
+  bool hasMore,
+  ImInvitePreview? preview,
+  String? failure,
+});
+typedef ImProfile = ({
+  String page,
+  String userId,
+  String name,
+  String handle,
+  String? alias,
+  int? aliasRevision,
+  String? groupNickname,
+  int? groupNicknameRevision,
+  int remainingMilliseconds,
+  Uint8List? avatar,
+});
+typedef ImAvatarEditor = ({
+  String? roomId,
+  int revision,
+  bool canManage,
+  int remainingMilliseconds,
+  bool hasAvatar,
+  String? name,
+  String? handle,
+  Uint8List? image,
+});
+typedef ImTransfer = ({
+  String id,
+  String name,
+  String kind,
+  String phase,
+  int? total,
+  int? confirmed,
+  List<String> actions,
+});
+
+typedef ImAttachment = ({
+  String id,
+  String name,
+  String contentType,
+  int bytes,
+});
+typedef ImEntity = ({
+  String kind,
+  int offset,
+  int length,
+  String? url,
+});
 typedef ImMessage = ({
   String id,
   String senderId,
   String text,
   bool withdrawn,
   bool hasMedia,
+  List<ImAttachment> attachments,
+  bool readByPeer,
+  int? revision,
+  int? mutableRevision,
+  bool isForwarded,
+  String? replyPreview,
+  String? replyToId,
   ImSendStatus? pendingStatus,
   int? createdAt,
+  int? preparedAttachments,
+  int? totalAttachments,
+  String? mentionSummary,
+  List<ImEntity> entities,
+  int? roomSequence,
+  bool? isPinned,
 });
 
 extension on wire.ImSession {
@@ -61,7 +234,33 @@ extension on wire.ImMessage {
     text: text,
     withdrawn: withdrawn,
     hasMedia: hasMedia,
+    attachments: List<ImAttachment>.unmodifiable(
+      attachments.map(
+        (a) => (
+          id: a.id,
+          name: a.name,
+          contentType: a.contentType,
+          bytes: a.bytes,
+        ),
+      ),
+    ),
+    readByPeer: readByPeer,
+    revision: revision,
+    mutableRevision: mutableRevision,
+    isForwarded: isForwarded,
+    replyPreview: replyPreview,
+    replyToId: replyToId,
     createdAt: createdAt,
+    preparedAttachments: preparedAttachments,
+    totalAttachments: totalAttachments,
+    mentionSummary: mentionSummary,
+    entities: List<ImEntity>.unmodifiable(
+      (entities ?? const []).map(
+        (e) => (kind: e.kind, offset: e.offset, length: e.length, url: e.url),
+      ),
+    ),
+    roomSequence: roomSequence,
+    isPinned: isPinned ?? false,
     pendingStatus: pendingStatus == null
         ? null
         : ImSendStatus.values.firstWhere(
@@ -127,10 +326,142 @@ final class ImClient {
     _publish((await _host.restore()).value);
     _schedule(Duration.zero);
   });
+  Future<void> register(
+    String account,
+    String password,
+    String publicHandle,
+    String displayName,
+  ) => _ordered(() async {
+    _publish((await _host.register(account, password, publicHandle, displayName)).value);
+    _schedule(Duration.zero);
+  });
+
+  Future<ImPrivacy?> privacy() => _ordered(() async {
+    final value = await _host.privacy();
+    return value == null
+        ? null
+        : (
+            allowsStrangerMessages: value.allowsStrangerMessages,
+            allowsUserAdd: value.allowsUserAdd,
+            allowsDirectReadReceipts: value.allowsDirectReadReceipts,
+            allowsGroupReadReceipts: value.allowsGroupReadReceipts,
+            allowsOnlinePresence: value.allowsOnlinePresence,
+            allowsTypingIndicators: value.allowsTypingIndicators,
+            blockedUsers: List<String>.unmodifiable(value.blockedUsers),
+          );
+  });
+
+  Future<ImPrivacy?> setPrivacy(
+    String kind, {
+    bool? flag1,
+    bool? flag2,
+  }) => _ordered(() async {
+    final value = await _host.setPrivacy(kind, flag1, flag2);
+    return value == null
+        ? null
+        : (
+            allowsStrangerMessages: value.allowsStrangerMessages,
+            allowsUserAdd: value.allowsUserAdd,
+            allowsDirectReadReceipts: value.allowsDirectReadReceipts,
+            allowsGroupReadReceipts: value.allowsGroupReadReceipts,
+            allowsOnlinePresence: value.allowsOnlinePresence,
+            allowsTypingIndicators: value.allowsTypingIndicators,
+            blockedUsers: List<String>.unmodifiable(value.blockedUsers),
+          );
+  });
+
+  Future<ImDeviceSessions> deviceSessions({String? cursor}) =>
+      _ordered(() async {
+        final value = await _host.deviceSessions(cursor);
+        return (
+          sessions: value.sessions
+              .map(
+                (session) => (
+                  deviceId: session.deviceId,
+                  deviceName: session.deviceName,
+                  platform: session.platform,
+                  createdAt: session.createdAt,
+                  lastActiveAt: session.lastActiveAt,
+                  isCurrentDevice: session.isCurrentDevice,
+                ),
+              )
+              .toList(growable: false),
+          nextCursor: value.nextCursor,
+        );
+      });
+
+  Future<void> revokeDevice({String? deviceId, bool all = false}) =>
+      _ordered(() => _host.revokeDevice(deviceId, all));
+
+  Future<void> passwordLifecycle({
+    required String account,
+    required String action,
+    String? currentPassword,
+    String? newPassword,
+    String? recoveryCode,
+  }) => _ordered(
+    () => _host.passwordLifecycle(
+      account,
+      action,
+      currentPassword,
+      newPassword,
+      recoveryCode,
+    ),
+  );
+
   Future<void> signIn(String account, String password) => _ordered(() async {
     _publish((await _host.signIn(account, password)).value);
     _schedule(Duration.zero);
   });
+
+  Future<void> connectNow() => _ordered(() async {
+    _publish((await _host.connect()).value);
+  });
+
+  Future<void> synchronize() => _ordered(_host.synchronize);
+
+  Future<ImPushState?> pushState() => _ordered(() async {
+    final value = await _host.pushState();
+    return value == null
+        ? null
+        : (
+            preferenceEnabled: value.preferenceEnabled,
+            desiredEnabled: value.desiredEnabled,
+            waitingForToken: value.waitingForToken,
+            pending: value.pending,
+            pauseReason: value.pauseReason,
+          );
+  });
+
+  Future<void> setPushEnabled({required bool enabled}) =>
+      _ordered(() => _host.setPushEnabled(enabled));
+
+  Future<void> receivePushToken({
+    required String provider,
+    required String environment,
+    required String token,
+  }) => _ordered(() => _host.receivePushToken(provider, environment, token));
+
+  Future<void> retryPush() => _ordered(_host.retryPush);
+
+  Future<void> removePushEndpoint() => _ordered(_host.removePushEndpoint);
+
+  Future<ImActivity?> activity(String roomId) => _ordered(() async {
+    final value = await _host.activity(roomId);
+    return value == null
+        ? null
+        : (
+            roomId: value.roomId,
+            isGroup: value.isGroup,
+            isOnline: value.isOnline,
+            typingUserIds: List<String>.unmodifiable(value.typingUserIds),
+          );
+  });
+
+  Future<void> setTyping(String roomId, {required bool typing}) =>
+      _ordered(() => _host.setTyping(roomId, typing));
+
+  Future<void> closeActivity() => _ordered(_host.closeActivity);
 
   void _schedule(Duration delay) {
     _timer?.cancel();
@@ -174,44 +505,324 @@ final class ImClient {
     }
   });
 
-  Stream<List<ImConversation>> watchConversations() => _watch(
-    null,
-    (value) => value.conversations.map(
-      (c) => (
-        id: c.id,
-        title: c.title,
-        preview: c.preview,
-        unread: c.unread,
-        isGroup: c.isGroup,
-        updatedAt: c.updatedAt,
-        peerId: c.peerId,
-      ),
+  Stream<List<ImConversation>> watchConversations({bool archived = false}) =>
+      _watch(
+        null,
+        (_, value) => List<ImConversation>.unmodifiable(
+          value.conversations.map(
+            (c) => (
+              id: c.id,
+              title: c.title,
+              preview: c.preview,
+              unread: c.unread,
+              isGroup: c.isGroup,
+              isPinned: c.isPinned,
+              isArchived: c.isArchived,
+              updatedAt: c.updatedAt,
+              peerId: c.peerId,
+              muteUntil: c.muteUntil,
+            ),
+          ),
+        ),
+        archived: archived,
+      );
+
+  /// 更新会话置顶、归档（隐藏聊天）和免打扰截止时间；空值表示保留当前字段。
+  Future<void> setConversationState(
+    String roomId, {
+    bool? isPinned,
+    bool? isArchived,
+    int? muteUntil,
+  }) => _ordered(
+    () => _host.setConversationState(roomId, isPinned, isArchived, muteUntil),
+  );
+  Future<List<ImDirectoryEntry>> directory() async =>
+      (await directoryPage()).entries;
+
+  /// A null selector restarts both lists. Otherwise advance only the selected list.
+  Future<({List<ImDirectoryEntry> entries, bool moreContacts, bool moreGroups})>
+  directoryPage({
+    bool? nextGroups,
+    ImContactScope scope = ImContactScope.accepted,
+  }) => _ordered(() async {
+    final page = await _host.directory(nextGroups, scope.name);
+    return (
+      entries: page.entries
+          .map(
+            (item) => (id: item.id, title: item.title, isGroup: item.isGroup),
+          )
+          .toList(growable: false),
+      moreContacts: page.moreContacts,
+      moreGroups: page.moreGroups,
+    );
+  });
+
+  Future<({Uint8List bytes, Duration remaining})?> avatar(
+    String userId, {
+    String context = 'relationship',
+    String? roomId,
+  }) async {
+    final value = await _host.avatar('avatar', userId, context, roomId);
+    if (value == null) return null;
+    return (
+      bytes: value.bytes,
+      remaining: Duration(milliseconds: value.remainingMilliseconds),
+    );
+  }
+
+  Future<ImAvatarEditor?> openAvatarEditor({String? roomId}) =>
+      _ordered(() async {
+        final value = await _host.openAvatarEditor(roomId);
+        return value == null
+            ? null
+            : (
+                roomId: value.roomId,
+                revision: value.revision,
+                canManage: value.canManage,
+                remainingMilliseconds: value.remainingMilliseconds,
+                hasAvatar: value.hasAvatar,
+                name: value.name,
+                handle: value.handle,
+                image: value.image,
+              );
+      });
+
+  Future<void> changeAvatar({
+    String? roomId,
+    required int revision,
+    Uint8List? jpeg,
+    int? width,
+    int? height,
+    String? displayName,
+    String? action,
+  }) => _ordered(
+    () => _host.changeAvatar(
+      roomId,
+      revision,
+      jpeg,
+      width,
+      height,
+      displayName,
+      action,
     ),
   );
-  Future<List<ImDirectoryEntry>> directory() => _ordered(
-    () async => (await _host.directory())
-        .map((item) => (id: item.id, title: item.title, isGroup: item.isGroup))
-        .toList(growable: false),
+
+  Future<List<ImProfile>> profiles({
+    required String page,
+    required String context,
+    String? roomId,
+    required List<String> userIds,
+  }) => _ordered(() async {
+    final rows = await _host.profiles(page, context, roomId, userIds);
+    return rows.map(_profile).toList(growable: false);
+  });
+
+  Future<List<ImProfile>> openProfile(
+    String userId, {
+    String context = 'relationship',
+    String? roomId,
+  }) => _ordered(() async {
+    final rows = await _host.openProfile(userId, context, roomId);
+    return rows.map(_profile).toList(growable: false);
+  });
+
+  Future<void> saveAlias(
+    String userId, {
+    String? alias,
+    int? revision,
+  }) => _ordered(() => _host.saveAlias(userId, alias, revision));
+
+  Future<void> clearProfiles(String page) =>
+      _ordered(() => _host.clearProfiles(page));
+
+  Future<String> resolveUserId(String handle) =>
+      _ordered(() => _host.resolveUserId(handle));
+  Future<void> changeMembership(
+    String roomId,
+    int revision,
+    ImMembershipAction action, {
+    String? target,
+    String? role,
+  }) => _ordered(
+    () => _host.changeMembership(roomId, revision, action.name, target, role),
   );
 
-  Stream<List<ImMessage>> watchMessages(String roomId) =>
-      _watch(roomId, (value) => value.messages.map((m) => m.value));
+  Future<ImGroupNickname?> groupNickname(String roomId) =>
+      _ordered(() async {
+        final value = await _host.groupNickname(roomId);
+        return value == null
+            ? null
+            : (
+                roomId: value.roomId,
+                name: value.name,
+                revision: value.revision,
+              );
+      });
+  Future<void> saveGroupNickname(
+    String roomId,
+    String? name, {
+    int? revision,
+  }) => _ordered(() => _host.saveGroupNickname(roomId, name, revision));
+  Future<void> updateGroupPermissions(
+    String roomId,
+    int revision,
+    String role,
+    Set<String> permissions,
+  ) => _ordered(
+    () => _host.updateGroupPermissions(
+      roomId,
+      revision,
+      role,
+      permissions.toList(growable: false),
+    ),
+  );
+  Future<void> moderateMemberRemoval(
+    String roomId,
+    String userId,
+    int revision,
+  ) => _ordered(
+    () => _host.moderateMemberRemoval(roomId, userId, revision),
+  );
+  Future<void> updateAnnouncement(String roomId, int revision, String text) =>
+      _ordered(() => _host.updateAnnouncement(roomId, revision, text));
 
-  Stream<List<T>> _watch<T>(
+  Future<
+    ({
+      String announcement,
+      int? editableAnnouncementRevision,
+      int membershipRevision,
+      String actorRole,
+      Set<String> permissions,
+      Map<String, String> members,
+      List<({String role, Set<String> permissions, int revision})> policies,
+      bool policiesReady,
+      bool hasMore,
+    })
+  >
+  groupMembers(String roomId, {bool next = false}) => _ordered(() async {
+    final page = await _host.groupMembers(roomId, next);
+    return (
+      announcement: page.announcement,
+      editableAnnouncementRevision: page.editableAnnouncementRevision,
+      membershipRevision: page.membershipRevision,
+      actorRole: page.actorRole,
+      permissions: page.permissions.toSet(),
+      members: {for (final member in page.members) member.userId: member.role},
+      policies: [
+        for (final policy in page.policies)
+          (
+            role: policy.role,
+            permissions: policy.permissions.toSet(),
+            revision: policy.revision,
+          ),
+      ],
+      policiesReady: page.policiesReady,
+      hasMore: page.hasMore,
+    );
+  });
+  Future<ImCommunity> invitations(String roomId) =>
+      _ordered(() async => _community(await _host.invitations(roomId)));
+  Future<ImCommunity> nextInvitations(String roomId) =>
+      _ordered(() async => _community(await _host.nextInvitations(roomId)));
+  Future<ImCommunity> previewInvite(String text) =>
+      _ordered(() async => _community(await _host.previewInvite(text.trim())));
+  Future<ImCommunity> refreshInvite() =>
+      _ordered(() async => _community(await _host.refreshInvite()));
+  Future<void> inviteAction(
+    String roomId,
+    int revision,
+    String action, {
+    String? intentId,
+    String? note,
+  }) => _ordered(
+    () => _host.inviteAction(roomId, revision, action, intentId, note),
+  );
+  Future<void> submitJoin(String note) =>
+      _ordered(() => _host.submitJoin(note));
+  Future<void> cancelJoin(String roomId) =>
+      _ordered(() => _host.cancelJoin(roomId));
+  Future<void> muteMember(String roomId, String userId, int revision) =>
+      _ordered(() => _host.muteMember(roomId, userId, revision));
+
+  ImCommunity _community(wire.ImCommunity value) => (
+    roomId: value.roomId,
+    invites: value.invites
+        .map(
+          (invite) => (
+            id: invite.id,
+            url: invite.url,
+            expires: invite.expires,
+            used: invite.used,
+            maximum: invite.maximum,
+          ),
+        )
+        .toList(growable: false),
+    requests: value.requests
+        .map(
+          (request) => (
+            id: request.id,
+            userId: request.userId,
+            note: request.note,
+            state: request.state,
+          ),
+        )
+        .toList(growable: false),
+    hasMore: value.hasMore,
+    preview: value.preview == null
+        ? null
+        : (
+            roomId: value.preview!.roomId,
+            title: value.preview!.title,
+            requestId: value.preview!.requestId,
+            state: value.preview!.state,
+            member: value.preview!.member,
+            canSubmit: value.preview!.canSubmit,
+            canCancel: value.preview!.canCancel,
+          ),
+    failure: value.failure,
+  );
+
+  Future<void> createGroup(String title, List<String> members) =>
+      _ordered(() => _host.createGroup(title, members));
+
+  Future<void> requestContact(String handle) =>
+      _ordered(() => _host.requestContact(handle));
+
+  Future<void> socialAction(String userId, ImSocialAction action) =>
+      _ordered(() => _host.socialAction(userId, action.name));
+
+  Stream<List<ImMessage>> watchMessages(String roomId) =>
+      watchTimeline(roomId).map((page) => page.messages);
+
+  Stream<ImTimelinePage> watchTimeline(String roomId) => _watch(
+    roomId,
+    (id, view) => (
+      windowId: id,
+      messages: List<ImMessage>.unmodifiable(view.messages.map((m) => m.value)),
+      hasOlder: view.hasOlder,
+      isLatest: view.isLatest,
+    ),
+  );
+
+  Future<void> changeWindowPage(String windowId, {required bool latest}) =>
+      _ordered(() => _host.changeWindowPage(windowId, latest));
+
+  Stream<T> _watch<T>(
     String? room,
-    Iterable<T> Function(wire.WindowView) select,
-  ) {
-    late final StreamController<List<T>> stream;
+    T Function(String, wire.WindowView) select, {
+    bool archived = false,
+  }) {
+    late final StreamController<T> stream;
     Future<String>? opening;
     Future<void>? stopping;
     var stopped = false;
     late Future<void> Function() stop;
     Future<void> read() async {
       try {
-        final id = await (opening = _host.openWindow(room));
+        final id = await (opening = _host.openWindow(room, archived));
         while (!stopped) {
           final view = await _host.nextUpdate(id);
-          if (!stopped) stream.add(List.unmodifiable(select(view)));
+          if (!stopped) stream.add(select(id, view));
         }
       } catch (error, stack) {
         if (!stopped) stream.addError(error, stack);
@@ -246,7 +857,7 @@ final class ImClient {
     }
 
     stop = () => stopping ??= startRelease();
-    stream = StreamController<List<T>>(
+    stream = StreamController<T>(
       onListen: () {
         if (_closed || _signingOut || _session.userId == null) {
           stream.addError(StateError('No active IM session'));
@@ -261,8 +872,219 @@ final class ImClient {
     return stream.stream;
   }
 
-  Future<void> sendText(String roomId, String text) =>
-      _ordered(() => _host.sendText(roomId, text));
+  Future<void> sendAttachment(
+    String roomId, {
+    required String path,
+    required String name,
+    required String contentType,
+    String text = '',
+  }) => _ordered(
+    () => _host.sendAttachment(roomId, path, name, contentType, text),
+  );
+
+  Future<List<ImTransfer>> transfers() => _ordered(
+    () async => (await _host.transfers())
+        .map(
+          (row) => (
+            id: row.id,
+            name: row.name,
+            kind: row.kind,
+            phase: row.phase,
+            total: row.total,
+            confirmed: row.confirmed,
+            actions: List<String>.unmodifiable(row.actions),
+          ),
+        )
+        .toList(growable: false),
+  );
+  Future<void> transferAction(String id, String action) =>
+      _ordered(() => _host.transferAction(id, action));
+
+  Future<({Uint8List bytes, Duration remaining})> previewAttachment(
+    String roomId,
+    String messageId,
+    String mediaId,
+  ) => _ordered(() async {
+    final elapsed = Stopwatch()..start();
+    final view = await _host.previewAttachment(roomId, messageId, mediaId);
+    final remaining =
+        Duration(milliseconds: view.remainingMilliseconds) - elapsed.elapsed;
+    if (remaining <= Duration.zero || view.bytes.isEmpty) {
+      throw PlatformException(code: 'previewUnavailable');
+    }
+    return (bytes: view.bytes, remaining: remaining);
+  });
+
+  Future<void> exportAttachment(
+    String roomId,
+    String messageId,
+    String mediaId,
+    String destination,
+  ) => _ordered(
+    () => _host.exportAttachment(roomId, messageId, mediaId, destination),
+  );
+
+  Future<void> downloadAttachment(
+    String roomId,
+    String messageId,
+    String mediaId,
+  ) => _ordered(() => _host.downloadAttachment(roomId, messageId, mediaId));
+
+  Future<void> forwardMessage(
+    String roomId,
+    String messageId,
+    int revision,
+    String targetRoomId,
+  ) => forwardMessageToRooms(roomId, messageId, revision, [targetRoomId]);
+
+  Future<void> forwardMessageToRooms(
+    String roomId,
+    String messageId,
+    int revision,
+    List<String> targetRoomIds,
+  ) {
+    final targets = List<String>.unmodifiable(targetRoomIds);
+    return _ordered(
+      () => _host.forwardMessage(roomId, messageId, revision, targets),
+    );
+  }
+
+  Future<void> editMessage(
+    String roomId,
+    String messageId,
+    int revision,
+    String text,
+  ) => _ordered(() => _host.editMessage(roomId, messageId, revision, text));
+  Future<void> withdrawMessage(String roomId, String messageId, int revision) =>
+      _ordered(() => _host.withdrawMessage(roomId, messageId, revision));
+
+  Future<void> cancelPendingSend(String intentId) =>
+      _ordered(() => _host.cancelPendingSend(intentId));
+
+  Future<List<ImMessage>> locateMessage(String roomId, String messageId) =>
+      _ordered(() async {
+        final view = await _host.locateMessage(roomId, messageId);
+        return view.messages
+            .map((message) => message.value)
+            .toList(growable: false);
+      });
+
+  Future<ImSearchPage> searchMessages(
+    String? roomId,
+    String query, {
+    bool next = false,
+    String? filter,
+    String? senderUserId,
+  }) => _ordered(() async {
+    final page = await _host.searchMessages(
+      roomId,
+      query.trim(),
+      next,
+      filter,
+      senderUserId,
+    );
+    return (
+      status: page.status,
+      hits: page.hits
+          .map(
+        (hit) => (
+          id: hit.id,
+          roomId: hit.roomId,
+          text: hit.text,
+          senderId: hit.senderId,
+        ),
+      )
+          .toList(growable: false),
+      hasNext: page.hasNext,
+    );
+  });
+  Future<void> clearMessageSearch() => _ordered(_host.clearMessageSearch);
+  Future<ImFavorites> favorites({bool next = false}) => _ordered(() async {
+    final page = await _host.favorites(next);
+    return (
+      messages: page.messages
+          .map(
+            (message) => (
+              id: message.id,
+              roomId: message.roomId,
+              roomTitle: message.roomTitle,
+              senderId: message.senderId,
+              text: message.text,
+              createdAt: message.createdAt,
+              attachmentNames: List<String>.unmodifiable(
+                message.attachmentNames,
+              ),
+            ),
+          )
+          .toList(growable: false),
+      hasMore: page.hasMore,
+    );
+  });
+
+  Future<void> setFavorite(
+    String roomId,
+    String messageId, {
+    required bool favorited,
+  }) => _ordered(
+    () => _host.setFavorite(roomId, messageId, favorited),
+  );
+
+  Future<void> moderateMessage(String roomId, String messageId) =>
+      _ordered(() => _host.moderateMessage(roomId, messageId));
+
+  Future<void> pinMessage(
+    String roomId,
+    String messageId, {
+    required int roomSequence,
+    required bool isPinned,
+  }) => _ordered(
+    () => _host.pinMessage(roomId, messageId, roomSequence, isPinned),
+  );
+
+  Future<ImReaders> messageReaders(
+    String roomId,
+    String messageId, {
+    bool next = false,
+  }) => _ordered(() async {
+    final value = await _host.messageReaders(roomId, messageId, next);
+    return (
+      roomId: value.roomId,
+      messageId: value.messageId,
+      users: List<String>.unmodifiable(value.users),
+      hasNext: value.hasNext,
+      remainingMilliseconds: value.remainingMilliseconds,
+    );
+  });
+
+  Future<void> recoverSend(String intentId, {required bool resend}) =>
+      _ordered(() => _host.recoverSend(intentId, resend));
+
+  Future<void> sendText(
+    String roomId,
+    String text, {
+    String? replyToMessageId,
+    List<String> mentions = const [],
+  }) => _ordered(
+    () => _host.sendText(
+      roomId,
+      text,
+      replyToMessageId,
+      mentions.isEmpty ? null : mentions,
+    ),
+  );
+  ImProfile _profile(wire.ImProfile value) => (
+    page: value.page,
+    userId: value.userId,
+    name: value.name,
+    handle: value.handle,
+    alias: value.alias,
+    aliasRevision: value.aliasRevision,
+    groupNickname: value.groupNickname,
+    groupNicknameRevision: value.groupNicknameRevision,
+    remainingMilliseconds: value.remainingMilliseconds,
+    avatar: value.avatar,
+  );
+
   Future<void> _stopWindows() async {
     await Future.wait(_windows.toList().map((stop) => stop()));
   }
