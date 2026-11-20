@@ -13,7 +13,7 @@ struct V2SearchField: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.body).foregroundStyle(.secondary).accessibilityHidden(true)
-            TextField(title, text: $text, prompt: Text(title).foregroundStyle(Color.clear))
+            TextField(title, text: $text, prompt: Text(""))
                 .focused($isFocused)
                 .textFieldStyle(.plain)
                 .font(.body).foregroundStyle(.primary).lineLimit(1)
@@ -25,8 +25,8 @@ struct V2SearchField: View {
                 .accessibilityIdentifier(identifier)
                 .overlay(alignment: .leading) {
                     if text.isEmpty {
-                        // Keep the accessible prompt and draw it at the same
-                        // contrast as the search icon in either appearance.
+                        // The field already exposes its label to VoiceOver.
+                        // Draw the hint at the same contrast as the search icon.
                         Text(title).font(.body).foregroundStyle(.secondary).lineLimit(1)
                             .allowsHitTesting(false).accessibilityHidden(true)
                     }

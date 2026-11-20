@@ -126,8 +126,13 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let list = app.collectionViews["v2.performance.list"]
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         let slot = list.cells.element(boundBy: 1)
+        XCTAssertTrue(slot.wait(for: \.isHittable, toEqual: true, timeout: 5))
         slot.swipeLeft()
         let archive = app.buttons["隐藏"]
+        if !archive.waitForExistence(timeout: 3), slot.isHittable {
+            // A live insertion can move the first gesture's target before UIKit opens the actions.
+            slot.swipeLeft()
+        }
         XCTAssertTrue(archive.waitForExistence(timeout: 3))
         let owner = slot.identifier
         XCTAssertTrue(owner.hasPrefix("v2.performance.cell."))

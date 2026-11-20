@@ -264,8 +264,10 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(app.collectionViews["v2.resources.retention.unavailable.sheet"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["设计说明与产品界面方案.png"].exists)
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "本次最多处理 1 项")).firstMatch.exists)
-        reveal(confirm, in: app)
+        // Audit the presented sheet before a scroll clips its oversized text at the window edge.
         if audit { try auditStorage(app, name: "Unavailable retention scoped confirmation") }
+        reveal(confirm, in: app)
+        attach(app, name: "Unavailable retention confirmation action is reachable")
         app.buttons["v2.resources.retention.unavailable.cancel"].tap()
         reveal(manage, in: app); manage.tap(); XCTAssertTrue(app.collectionViews["v2.resources.retention.unavailable.sheet"].waitForExistence(timeout: 5)); reveal(confirm, in: app); confirm.tap()
         let receipt = app.staticTexts["v2.resources.retention.unavailable.feedback"]
@@ -443,6 +445,7 @@ final class IMAppResourceCenterUITests: XCTestCase {
         for _ in 0..<12 where selected.count < 2 { app.swipeUp() }
         XCTAssertEqual(selected.count, 2)
         XCTAssertTrue(selected.element(boundBy: 0).isSelected && selected.element(boundBy: 1).isSelected)
+        try auditStorage(app, name: "Selected image grid and selection controls")
         let cached = selected.matching(NSPredicate(format: "label CONTAINS %@", "设计说明与产品界面方案")).firstMatch
         reveal(cached, in: app)
         for _ in 0..<12 where !Self.containsFixtureImage(app.screenshot()) {
@@ -451,7 +454,7 @@ final class IMAppResourceCenterUITests: XCTestCase {
         }
         let rendered = NSPredicate { _, _ in Self.containsFixtureImage(app.screenshot()) }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: rendered, object: nil)], timeout: 10), .completed)
-        try auditStorage(app, name: "Selected image grid retains pixels and explicit selection states")
+        attach(app, name: "Selected image grid retains pixels and explicit selection states")
         reveal(category, in: app); category.tap(); app.buttons["文件"].tap()
         let cleared = NSPredicate { _, _ in mode.label == "选择" && !all.exists }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: cleared, object: nil)], timeout: 10), .completed)
@@ -499,10 +502,10 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(cleanup.isHittable); cleanup.tap()
         let confirm = app.buttons["v2.resources.selection.cleanup.confirm"]
         XCTAssertTrue(app.navigationBars["所选缓存清理"].waitForExistence(timeout: 10))
-        try auditStorage(app, name: "Selected physical cleanup metadata")
+        try auditStorage(app, name: "Selected physical cleanup metadata and scope")
         for _ in 0..<12 where !confirm.isHittable { app.swipeUp() }
         XCTAssertTrue(confirm.isHittable)
-        try auditStorage(app, name: "Selected cleanup scope and confirmation")
+        attach(app, name: "Selected cleanup confirmation action is reachable")
         app.buttons["v2.resources.selection.cleanup.done"].tap()
     }
 
@@ -704,8 +707,26 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["测试数据已清理"].waitForExistence(timeout: 10)); app.terminate()
     }
     @MainActor private func auditStorage(_ app: XCUIApplication, name: String) throws {
-        attach(app, name: name)
+        // A scroll can keep decelerating after XCTest reports the app idle.
+        // Let the rendered frame settle before comparing colors to AX bounds.
+        var frame = app.screenshot()
+        for _ in 0..<5 {
+            let next = app.screenshot()
+            if next.pngRepresentation == frame.pngRepresentation { break }
+            frame = next
+        }
+        let screenshot = XCTAttachment(screenshot: frame)
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let viewport = app.frame
         try app.performAccessibilityAudit(for: .all) { issue in
+            if issue.auditType == .contrast, let bounds = issue.element?.frame, !bounds.isEmpty,
+               bounds.minY < viewport.minY || bounds.maxY > viewport.maxY {
+                // The raster audit cannot compare a complete label outside the rendered window.
+                print("Accessibility audit \(name): clipped contrast sample at \(bounds)")
+                return true
+            }
             let details = "\(issue.compactDescription)\n\(issue.detailedDescription)"
             let element = issue.element?.debugDescription
             print("Accessibility audit \(name): \(details)\n\(element ?? "No accessibility element identified")")

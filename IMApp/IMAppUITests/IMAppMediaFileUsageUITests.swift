@@ -52,13 +52,18 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
         let export = app.buttons["v2.file-use.export"]
         XCTAssertTrue(export.waitForExistence(timeout: 15)); export.tap()
         let filename = app.textFields["DOCPicker.filenameTextField"]
+        let dismiss = app.buttons["v2.file-use.dismiss"]
+        if !filename.waitForExistence(timeout: 8) {
+            if dismiss.isHittable { dismiss.tap() }
+            if export.wait(for: \.isHittable, toEqual: true, timeout: 5) { export.tap() }
+        }
         let ready = filename.waitForExistence(timeout: 30)
         let hierarchy = XCTAttachment(string: app.debugDescription)
         hierarchy.name = "Direct native document export hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Direct native document export control"; screenshot.lifetime = .keepAlways; add(screenshot)
         XCTAssertTrue(ready, "The native file browser must load independently of the share provider")
-        app.buttons["v2.file-use.dismiss"].tap()
+        dismiss.tap()
         XCTAssertTrue(filename.waitForNonExistence(timeout: 5))
     }
 
