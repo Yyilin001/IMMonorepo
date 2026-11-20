@@ -441,11 +441,11 @@ final class IMAppResourceCenterUITests: XCTestCase {
         mode.tap()
         let all = app.buttons["v2.resources.selection.all"]
         reveal(all, in: app); all.tap()
+        try auditStorage(app, name: "Selected image grid and selection controls")
         let selected = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.resources.selection.item."))
         for _ in 0..<12 where selected.count < 2 { app.swipeUp() }
         XCTAssertEqual(selected.count, 2)
         XCTAssertTrue(selected.element(boundBy: 0).isSelected && selected.element(boundBy: 1).isSelected)
-        try auditStorage(app, name: "Selected image grid and selection controls")
         let cached = selected.matching(NSPredicate(format: "label CONTAINS %@", "设计说明与产品界面方案")).firstMatch
         reveal(cached, in: app)
         for _ in 0..<12 where !Self.containsFixtureImage(app.screenshot()) {

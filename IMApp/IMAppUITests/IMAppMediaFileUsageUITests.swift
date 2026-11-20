@@ -51,20 +51,17 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
         app.launch()
         let export = app.buttons["v2.file-use.export"]
         XCTAssertTrue(export.waitForExistence(timeout: 15)); export.tap()
-        let filename = app.textFields["DOCPicker.filenameTextField"]
-        let dismiss = app.buttons["v2.file-use.dismiss"]
-        if !filename.waitForExistence(timeout: 8) {
-            if dismiss.isHittable { dismiss.tap() }
-            if export.wait(for: \.isHittable, toEqual: true, timeout: 5) { export.tap() }
-        }
-        let ready = filename.waitForExistence(timeout: 30)
+        let destination = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH %@",
+            "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage")).firstMatch
+        let ready = destination.waitForExistence(timeout: 30)
         let hierarchy = XCTAttachment(string: app.debugDescription)
         hierarchy.name = "Direct native document export hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Direct native document export control"; screenshot.lifetime = .keepAlways; add(screenshot)
         XCTAssertTrue(ready, "The native file browser must load independently of the share provider")
-        dismiss.tap()
-        XCTAssertTrue(filename.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["DOCPicker.actionButton"].isEnabled)
+        app.buttons["v2.file-use.dismiss"].tap()
+        XCTAssertTrue(destination.waitForNonExistence(timeout: 5))
     }
 
     @MainActor func testURLShareCanOpenSystemFileExport() {
