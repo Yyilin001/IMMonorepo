@@ -37,6 +37,7 @@ jobs:
         shell: bash
         run: |
           source "$HOME/.local/share/swiftly/env.sh"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
           python3 experiments/swift-android/build_probe.py --shared-sdk
       - name: 验证 Android 构建与 Lint
         working-directory: IMAndroid

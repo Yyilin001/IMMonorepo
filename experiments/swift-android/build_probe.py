@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +47,8 @@ def main():
     if not NDK.is_dir():
         raise SystemExit(f"Install NDK 30.0.16248370 first; it was not found at {NDK}. See README.md.")
     sdk = sdk_install_dir / SDK_RELATIVE_PATH
+    # SwiftBuild 6.4.2 on Linux fails to link this AArch64 Android product.
+    build_system = ["--build-system", "native"] if sys.platform == "linux" else []
     run([sdk / "scripts/setup-android-sdk.sh"], env={**os.environ, "ANDROID_NDK_HOME": str(NDK)})
     prebuilt = next((NDK / "toolchains/llvm/prebuilt").iterdir())
     clang = prebuilt / "bin/aarch64-linux-android31-clang"
@@ -82,7 +85,7 @@ def main():
         capabilities[name] = {"compiles": result.returncode == 0, "exitCode": result.returncode}
     if not capabilities["foundation_baseline"]["compiles"]:
         raise SystemExit("Foundation baseline failed; API probe failures would not be meaningful")
-    search = subprocess.run(["swiftly", "run", "swift", "build", "--package-path", str(ROOT / "MessageSubstringSearch"),
+    search = subprocess.run(["swiftly", "run", "swift", "build", *build_system, "--package-path", str(ROOT / "MessageSubstringSearch"),
                              "--scratch-path", str(BUILD / "search-check"), "--swift-sdks-path", str(sdk_install_dir),
                              "--swift-sdk", SDK_ID, "--triple", TRIPLE,
                              "--jobs", "4", "-Xcc", "-I" + str(sqlite), "+" + VERSION],
@@ -90,7 +93,7 @@ def main():
     (BUILD / "search-current.log").write_text(search.stdout)
     capabilities["current_search_package"] = {"compiles": search.returncode == 0, "exitCode": search.returncode}
     (BUILD / "capabilities.json").write_text(json.dumps(capabilities, indent=2) + "\n")
-    args = ["swiftly", "run", "swift", "build", "--package-path", ROOT / "IMV2ClientKit" if shared_sdk else HERE,
+    args = ["swiftly", "run", "swift", "build", *build_system, "--package-path", ROOT / "IMV2ClientKit" if shared_sdk else HERE,
             "--swift-sdks-path", sdk_install_dir, "--swift-sdk", SDK_ID,
             "--triple", TRIPLE, "--skip-update", "-c", "release", "--jobs", "4", "--product", "IMV2SharedSDK" if shared_sdk else "IMSwiftProbe",
             "-Xcc", "-I" + str(sqlite), "-Xlinker", "-L" + str(BUILD),
