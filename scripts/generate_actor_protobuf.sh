@@ -10,4 +10,5 @@ else
 fi
 OUT="${ACTOR_PROTOBUF_OUT:-$ROOT_DIR/IMV2Server/Sources/IMV2ActorContracts/Protobuf}"
 mkdir -p "$OUT"
-protoc --plugin="protoc-gen-swift=$PLUGIN" --proto_path="$ROOT_DIR/Protocol/im_actor/v1" --swift_opt=Visibility=Package --swift_out="$OUT" "$ROOT_DIR/Protocol/im_actor/v1/actor_value.proto"
+# Ubuntu 22.04 requires this flag for proto3 optional fields.
+protoc --experimental_allow_proto3_optional --plugin="protoc-gen-swift=$PLUGIN" --proto_path="$ROOT_DIR/Protocol/im_actor/v1" --swift_opt=Visibility=Package --swift_out="$OUT" "$ROOT_DIR/Protocol/im_actor/v1/actor_value.proto"
