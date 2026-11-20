@@ -26,6 +26,7 @@ trap cleanup EXIT
 
 xcodebuild build-for-testing \
   -project "${PROJECT_FILE}" \
+  -scmProvider system \
   -scheme "${SCHEME}" \
   -configuration "${CONFIGURATION}" \
   -destination "${DESTINATION}" \

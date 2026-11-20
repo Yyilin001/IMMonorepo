@@ -25,6 +25,7 @@ fi
 
 xcodebuild test \
   -project "${PROJECT_FILE}" \
+  -scmProvider system \
   -scheme "${SCHEME}" \
   -configuration "${CONFIGURATION}" \
   -destination "${DESTINATION}" \

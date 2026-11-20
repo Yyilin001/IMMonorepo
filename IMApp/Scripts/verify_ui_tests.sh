@@ -15,6 +15,7 @@ for test_id in "$@"; do test_filters+=("-only-testing:${test_id}"); done
 
 xcodebuild test \
   -project "${PROJECT_FILE}" \
+  -scmProvider system \
   -scheme "${SCHEME}" \
   -configuration "${CONFIGURATION}" \
   -destination "${DESTINATION}" \

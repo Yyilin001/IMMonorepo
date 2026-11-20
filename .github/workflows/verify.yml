@@ -116,30 +116,56 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install probe orchestration dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ripgrep openssl python3
-      - name: Exercise client-first discovery and Host crash recovery
-        env:
-          DOCKER_CONTEXT: default
-          VA_G4_MODE: linux
-          VA_G4_LINUX_CLIENT_FIRST: "1"
+      - name: Build the Linux recovery probe products
         run: |
-          export VA_G4_LINUX_SCRATCH_DIR="$RUNNER_TEMP/actor-swiftpm"
-          export VA_G4_LINUX_RUN_ROOT="$RUNNER_TEMP/actor-process-evidence"
-          mkdir -p "$VA_G4_LINUX_SCRATCH_DIR" "$VA_G4_LINUX_RUN_ROOT"
-          bash ./IMV2/scripts/test_v2_virtual_actor_business_probe.sh
-      - name: Exercise concurrent Hosts and peer-only network partition
-        env:
-          DOCKER_CONTEXT: default
-          VA_G6_MODE: linux
+          export IMV2_VA_LINUX_CACHE_DIR="$RUNNER_TEMP/actor-cache"
+          export IMV2_VA_LINUX_SCRATCH_DIR="$RUNNER_TEMP/actor-swiftpm"
+          export IMV2_VA_LINUX_COMPOSE_PROJECT="imv2-va-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash ./IMV2/scripts/run_v2_virtual_actor_linux.sh build \
+            VirtualActorBusinessProbe IMV2PlacementControlApp IMV2RoomHostSupervisorApp
+      - name: Exercise Host crash recovery and network loss
         run: |
-          export VA_G6_LINUX_SCRATCH_DIR="$RUNNER_TEMP/actor-swiftpm"
-          export VA_G6_LINUX_RUN_ROOT="$RUNNER_TEMP/actor-process-evidence"
-          python3 ./IMV2/scripts/test_v2_virtual_actor_multihost_probe.py
+          release="$RUNNER_TEMP/actor-swiftpm/IMV2Server-release/x86_64-unknown-linux-gnu/release"
+          build_result="$RUNNER_TEMP/actor-recovery-build.json"
+          PYTHONPATH=IMV2/scripts python3 - "$release" "$build_result" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+          from test_v2_native_host_crash import IMAGE, PRODUCTS, source_digest
+
+          release, result = map(Path, sys.argv[1:])
+          products = {}
+          for name in PRODUCTS:
+              with (release / name).open("rb") as binary:
+                  products[name] = hashlib.file_digest(binary, "sha256").hexdigest()
+          result.write_text(json.dumps(dict(passed=True, image=IMAGE,
+                                          sourceDigest=source_digest(Path.cwd()), products=products)))
+          PY
+
+          context="colima-imv2-native-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          evidence="$RUNNER_TEMP/actor-process-evidence"
+          sudo docker context create "$context" --docker host=unix:///var/run/docker.sock
+          cleanup() {
+            sudo docker context rm "$context"
+            if [[ -d "$evidence" ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$evidence"
+            fi
+          }
+          trap cleanup EXIT
+          # The probe reads journals written by service containers as root.
+          sudo python3 ./IMV2/scripts/test_v2_native_host_crash.py \
+            --docker-context "$context" --source-dir "$GITHUB_WORKSPACE" \
+            --release-dir "$release" --build-result "$build_result" \
+            --artifact-dir "$evidence"
       - name: Upload process recovery evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: room-actor-process-recovery
-          path: ${{ runner.temp }}/actor-process-evidence/*-evidence/
+          path: |
+            ${{ runner.temp }}/actor-process-evidence/result.json
+            ${{ runner.temp }}/actor-process-evidence/evidence/
           if-no-files-found: warn
 
   operational-config:
@@ -162,10 +188,27 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
       IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_CI_VERIFICATION_SCRIPT: ./IMApp/Scripts/verify_generic_simulator_build.sh
     steps:
       - uses: actions/checkout@v4
-      - name: Build app and test bundles without signing
-        run: bash ./IMApp/Scripts/verify_generic_simulator_build.sh
+      - &verify-ios
+        name: Run iOS verification with private Swift package access
+        env:
+          MESSAGING_UI_DEPLOY_KEY: ${{ secrets.MESSAGING_UI_DEPLOY_KEY }}
+        run: |
+          : "${MESSAGING_UI_DEPLOY_KEY:?MessagingUI read-only deploy key is required}"
+          ssh_dir="$(mktemp -d "$RUNNER_TEMP/messaging-ui.XXXXXX")"
+          trap 'rm -r -- "$ssh_dir"' EXIT
+          umask 077
+          printf '%s\n' "$MESSAGING_UI_DEPLOY_KEY" > "$ssh_dir/key"
+          unset MESSAGING_UI_DEPLOY_KEY
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i \"$ssh_dir/key\" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$ssh_dir/known_hosts\""
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=url.ssh://git@github.com/Yyilin001/MessagingUI.git.insteadOf
+          export GIT_CONFIG_VALUE_0=https://github.com/Yyilin001/MessagingUI.git
+          git ls-remote "$GIT_CONFIG_VALUE_0" HEAD > /dev/null
+          bash "$IMAPP_CI_VERIFICATION_SCRIPT"
 
   ios-unit-tests:
     name: iOS unit tests
@@ -174,10 +217,10 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
       IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_CI_VERIFICATION_SCRIPT: ./IMApp/Scripts/verify_unit_tests.sh
     steps:
       - uses: actions/checkout@v4
-      - name: Run deterministic App store and projection tests
-        run: bash ./IMApp/Scripts/verify_unit_tests.sh
+      - *verify-ios
 
   ios-ui-tests:
     name: iOS signed-out UI tests
@@ -186,7 +229,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
       IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_CI_VERIFICATION_SCRIPT: ./IMApp/Scripts/verify_ui_tests.sh
     steps:
       - uses: actions/checkout@v4
-      - name: Run deterministic signed-out accessibility UI tests
-        run: bash ./IMApp/Scripts/verify_ui_tests.sh
+      - *verify-ios
