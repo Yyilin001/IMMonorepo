@@ -18,8 +18,12 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
         app.launch()
         let share = app.buttons["v2.file-use.share"]
         XCTAssertTrue(share.waitForExistence(timeout: 15)); share.tap()
-        app.tapSaveToFilesForTesting()
+        let saveToFiles = app.tapSaveToFilesForTesting()
         let filename = app.textFields["DOCPicker.filenameTextField"]
+        if !filename.waitForExistence(timeout: 5), saveToFiles.isHittable {
+            // The system share action can be visible before its remote controller is ready.
+            saveToFiles.tap()
+        }
         XCTAssertTrue(filename.waitForExistence(timeout: 15))
         XCTAssertTrue([exportName, (exportName as NSString).deletingPathExtension].contains(filename.value as? String ?? ""))
         let screenshot = XCTAttachment(screenshot: app.screenshot())
@@ -143,13 +147,14 @@ extension XCTestCase {
 }
 
 extension XCUIApplication {
-    @MainActor func tapSaveToFilesForTesting() {
+    @discardableResult @MainActor func tapSaveToFilesForTesting() -> XCUIElement {
         let labels = ["保存到“文件”", "存储到“文件”", "Save to Files"]
         let action = descendants(matching: .any).matching(NSPredicate(
             format: "elementType IN %@ AND label IN[c] %@",
             [XCUIElement.ElementType.cell.rawValue, XCUIElement.ElementType.button.rawValue], labels
         )).firstMatch
-        XCTAssertTrue(action.waitForExistence(timeout: 20))
+        XCTAssertTrue(action.wait(for: \.isHittable, toEqual: true, timeout: 20))
         action.tap()
+        return action
     }
 }
