@@ -283,11 +283,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let input = root.appending(path: "activation.json")
         try JSONEncoder().encode(token).write(to: input)
         let process = Process(), host = URL(fileURLWithPath: CommandLine.arguments[0])
+        let testArguments = ["--testing-library", "swift-testing", "--filter", "committedSendCrashChild"]
+        process.executableURL = host
+        #if os(macOS)
         let binary = try #require(Bundle(for: CommitCrashBundleMarker.self).executableURL)
         try #require(host.lastPathComponent == "swiftpm-testing-helper")
-        process.executableURL = host
-        process.arguments = ["--test-bundle-path", binary.path, binary.path,
-            "--testing-library", "swift-testing", "--filter", "committedSendCrashChild"]
+        process.arguments = ["--test-bundle-path", binary.path, binary.path] + testArguments
+        #else
+        // SwiftPM links the test suite directly into the Linux runner.
+        process.arguments = testArguments
+        #endif
         var environment = ProcessInfo.processInfo.environment
         environment["IMV2_COMMITTED_SEND_CRASH_SPEC"] = input.path
         process.environment = environment
