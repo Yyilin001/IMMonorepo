@@ -1,5 +1,8 @@
 import Crypto
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import GRDB
 import IMV2Core
 @testable import IMV2ClientKit
