@@ -104,8 +104,7 @@ jobs:
           PGPORT: "5432"
           PGUSER: im_v2_test
           PGPASSWORD: im_v2_test
-        # The helper requires connection settings, provisions canonical schemas,
-        # and enables both resource opt-ins using separate disposable databases.
+        # The helper provisions the canonical schema in fresh resource databases.
         run: bash ./scripts/test_v2_server_native_postgres.sh --skip-build --filter 'V2Resource|V2MediaScan'
 
       - name: Run admin PostgreSQL integration tests
