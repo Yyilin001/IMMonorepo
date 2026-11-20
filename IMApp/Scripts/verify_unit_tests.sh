@@ -23,12 +23,14 @@ else
   result_bundle="${result_directory}/Result.xcresult"
 fi
 
+# This suite has main-actor fixtures with real scheduling deadlines.
 xcodebuild test \
   -project "${PROJECT_FILE}" \
   -scmProvider system \
   -scheme "${SCHEME}" \
   -configuration "${CONFIGURATION}" \
   -destination "${DESTINATION}" \
+  -parallel-testing-enabled NO \
   -resultBundlePath "${result_bundle}" \
   "${test_filters[@]}" \
   CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-
