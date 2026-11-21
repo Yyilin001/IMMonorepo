@@ -517,6 +517,7 @@ struct V2RoomClusterBridgeTests {
             _ = try await caller.invokeRecoveryBatch(on: fixture.identity,
                 items: [items[0]], deadline: end)
             #expect(await gate.executedItemCounts == [1])
+            try await waitUntil { await caller.dispatchedCallCount() == 0 }
             let before = await caller.callMetricsSnapshot()
             let beforeDispatch = try #require(before.recoveryStages[.actualDispatch])
             #expect(beforeDispatch.started == 1 && beforeDispatch.completed == 1 && beforeDispatch.active == 0)
