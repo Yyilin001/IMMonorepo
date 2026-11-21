@@ -240,11 +240,12 @@ jobs:
           export GIT_CONFIG_KEY_0=url.ssh://git@github.com/Yyilin001/MessagingUI.git.insteadOf
           export GIT_CONFIG_VALUE_0=https://github.com/Yyilin001/MessagingUI.git
           git ls-remote "$GIT_CONFIG_VALUE_0" HEAD > /dev/null
-          test_filters=()
+          set --
           if [[ -n "${IMAPP_UI_TEST_FILTER:-}" ]]; then
             read -r -a test_filters <<< "$IMAPP_UI_TEST_FILTER"
+            if [[ -n "${test_filters[0]:-}" ]]; then set -- "${test_filters[@]}"; fi
           fi
-          bash "$IMAPP_CI_VERIFICATION_SCRIPT" "${test_filters[@]}"
+          bash "$IMAPP_CI_VERIFICATION_SCRIPT" "$@"
 
   ios-unit-tests:
     if: github.event_name != 'workflow_dispatch' || inputs.ios_ui_test_filter == ''

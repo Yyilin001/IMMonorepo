@@ -25,11 +25,10 @@ if [[ -n "$ui_test_runtime" ]]; then
   DESTINATION="platform=iOS Simulator,id=$ui_test_simulator"
 fi
 if [[ $# -eq 0 ]]; then set -- IMAppUITests; fi
-test_filters=()
-for test_id in "$@"; do test_filters+=("-only-testing:${test_id}"); done
-result_options=()
+test_options=()
+for test_id in "$@"; do test_options+=("-only-testing:${test_id}"); done
 if [[ -n "${RUNNER_TEMP:-}" ]]; then
-  result_options=(-resultBundlePath "$RUNNER_TEMP/IMAppUITests.xcresult")
+  test_options+=(-resultBundlePath "$RUNNER_TEMP/IMAppUITests.xcresult")
 fi
 
 xcodebuild test \
@@ -39,8 +38,7 @@ xcodebuild test \
   -configuration "${CONFIGURATION}" \
   -destination "${DESTINATION}" \
   -parallel-testing-enabled NO \
-  "${result_options[@]}" \
-  "${test_filters[@]}" \
+  "${test_options[@]}" \
   CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-
 
 printf 'iOS UI tests result=pass project=%s scheme=%s configuration=%s destination=%s selection=%s\n' \
