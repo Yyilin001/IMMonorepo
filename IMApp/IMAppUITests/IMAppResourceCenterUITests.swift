@@ -210,22 +210,21 @@ final class IMAppResourceCenterUITests: XCTestCase {
             app.buttons["BackButton"].tap()
             XCTAssertTrue(app.navigationBars["存储管理"].waitForExistence(timeout: 5))
         }
-        if atBottom {
-            let action = app.buttons["v2.resources.retention.unavailable.preview"]
-            reveal(action, in: app)
-        }
         let viewport = app.scrollViews["v2.resources.storage"]
         XCTAssertTrue(viewport.exists)
+        if atBottom {
+            let cleanup = app.buttons["v2.resources.cleanup.preview"]
+            reveal(cleanup, in: app)
+            for _ in 0..<4 where cleanup.frame.maxY > viewport.frame.maxY { app.swipeUp() }
+            XCTAssertTrue(viewport.frame.contains(cleanup.frame))
+        }
         let viewportFrame = viewport.frame
-        let navigationFrame = app.navigationBars["存储管理"].frame
+        let navigation = app.navigationBars["存储管理"]
+        let navigationFrame = navigation.frame
         let bounds = XCTAttachment(string: "Scroll view: \(viewportFrame); navigation: \(navigationFrame)")
         bounds.name = "Storage scroll viewport bounds"; bounds.lifetime = .keepAlways; add(bounds)
-        attach(app, name: atBottom ? "Contrast diagnostic bottom" : "Contrast diagnostic top")
-        try app.performAccessibilityAudit(for: .contrast) { issue in
-            let report = XCTAttachment(string: "\(issue.detailedDescription)\n\(issue.element?.debugDescription ?? app.debugDescription)")
-            report.name = "Contrast diagnostic issue"; report.lifetime = .keepAlways; self.add(report)
-            return false
-        }
+        try auditStorage(app, name: atBottom ? "Contrast diagnostic bottom" : "Contrast diagnostic top",
+                         types: .contrast, navigation: navigation)
     }
 
     @MainActor func testUnavailableRetentionManagementPreservesPrivacyAndReleasesIntent() throws {
@@ -455,7 +454,20 @@ final class IMAppResourceCenterUITests: XCTestCase {
         let rendered = NSPredicate { _, _ in Self.containsFixtureImage(app.screenshot()) }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: rendered, object: nil)], timeout: 10), .completed)
         attach(app, name: "Selected image grid retains pixels and explicit selection states")
-        reveal(category, in: app); category.tap(); app.buttons["文件"].tap()
+        let search = app.textFields["v2.resources.library.search"]
+        // The pinned search field can cover a category row still marked hittable.
+        func categoryIsVisible() -> Bool {
+            category.isHittable && category.frame.minY > search.frame.maxY
+        }
+        for _ in 0..<12 where !categoryIsVisible() {
+            if category.exists && category.frame.midY < app.frame.midY { app.swipeDown() }
+            else { app.swipeUp() }
+        }
+        XCTAssertTrue(categoryIsVisible())
+        category.tap()
+        let documents = app.buttons["文件"]
+        XCTAssertTrue(documents.waitForExistence(timeout: 5))
+        documents.tap()
         let cleared = NSPredicate { _, _ in mode.label == "选择" && !all.exists }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: cleared, object: nil)], timeout: 10), .completed)
         attach(app, name: "Filtering exits selection instead of keeping hidden targets")
@@ -706,7 +718,9 @@ final class IMAppResourceCenterUITests: XCTestCase {
         app.terminate(); app.launchArguments += ["-v2-ui-testing-resource-center-cleanup"]; app.launch()
         XCTAssertTrue(app.staticTexts["测试数据已清理"].waitForExistence(timeout: 10)); app.terminate()
     }
-    @MainActor private func auditStorage(_ app: XCUIApplication, name: String) throws {
+    @MainActor private func auditStorage(_ app: XCUIApplication, name: String,
+                                         types: XCUIAccessibilityAuditType = .all,
+                                         navigation: XCUIElement? = nil) throws {
         // A scroll can keep decelerating after XCTest reports the app idle.
         // Let the rendered frame settle before comparing colors to AX bounds.
         var frame = app.screenshot()
@@ -720,12 +734,22 @@ final class IMAppResourceCenterUITests: XCTestCase {
         screenshot.lifetime = .keepAlways
         add(screenshot)
         let viewport = app.frame
-        try app.performAccessibilityAudit(for: .all) { issue in
-            if issue.auditType == .contrast, let bounds = issue.element?.frame, !bounds.isEmpty,
-               bounds.minY < viewport.minY || bounds.maxY > viewport.maxY {
-                // The raster audit cannot compare a complete label outside the rendered window.
-                print("Accessibility audit \(name): clipped contrast sample at \(bounds)")
-                return true
+        let navigationFrame = navigation?.frame
+        try app.performAccessibilityAudit(for: types) { issue in
+            if issue.auditType == .contrast, let element = issue.element, !element.frame.isEmpty {
+                let bounds = element.frame
+                if bounds.minY < viewport.minY || bounds.maxY > viewport.maxY {
+                    // The raster audit cannot compare a complete label outside the rendered window.
+                    print("Accessibility audit \(name): clipped contrast sample at \(bounds)")
+                    return true
+                }
+                if let navigation, let navigationFrame, bounds.intersects(navigationFrame),
+                   !navigation.descendants(matching: element.elementType).allElementsBoundByAccessibilityElement
+                    .contains(where: { $0.frame == bounds && $0.label == element.label }) {
+                    // The opaque navigation bar can cover a scroll row still present in the AX tree.
+                    print("Accessibility audit \(name): contrast sample obscured by navigation at \(bounds)")
+                    return true
+                }
             }
             let details = "\(issue.compactDescription)\n\(issue.detailedDescription)"
             let element = issue.element?.debugDescription
