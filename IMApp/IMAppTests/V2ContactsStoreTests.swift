@@ -245,24 +245,11 @@ struct V2ContactsStoreTests {
     }
 
     @Test func contactListLoadsStableAdditionalPages() async throws {
-        let currentUserID = try UserID("00000000-0000-0000-0000-000000000831")
-        let date = Date(timeIntervalSince1970: 1_750_000_000)
-        let projections = try (1 ... 51).map { index in
-            let identity = try makeIdentity(
-                userID: String(format: "00000000-0000-0000-0000-%012d", 900 + index),
-                handle: "friend\(index)",
-                displayName: "Friend \(index)"
-            )
-            return V2ContactProjection(
-                userID: identity.userID,
-                state: .accepted,
-                requestedByUserID: currentUserID,
-                updatedAt: date.addingTimeInterval(TimeInterval(index)),
-                publicIdentity: identity
-            )
-        }
-        let source = ContactsDataSourceFake(projections: projections, hydratedProfiles: [:])
-        let store = makeStore(dataSource: source, currentUserID: currentUserID)
+        let current = UserID(uuid: UUID())
+        let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-contact-pages-\(UUID()).sqlite"), installationBinding: .init(value: UUID()))
+        _ = try await seedContactGroup(local, current: current, group: 0, range: 1...51, after: 0)
+        let reads = try ContactReadFixture(local: local, current: current)
+        let store = makeStore(dataSource: reads.source, currentUserID: current)
 
         await store.refresh()
         #expect(store.friends.count == 50)
@@ -274,21 +261,24 @@ struct V2ContactsStoreTests {
         await store.refresh()
         #expect(store.friends.count == 51)
         #expect(store.friendsNextCursor == nil)
+        await reads.close()
+        await #expect(throws: V2DirectoryServiceError.self) {
+            try await reads.source.contactProjectionPage(
+                scope: .friends, matching: nil, before: nil, limit: 50, includeTotalCount: false
+            )
+        }
+        try await local.close()
     }
 
     @Test func refreshRetainsIndependentContactAndSearchWindows() async throws {
-        let currentUserID = UserID(uuid: UUID())
-        var projections: [V2ContactProjection] = []
+        let current = UserID(uuid: UUID())
+        let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-contact-independent-windows-\(UUID()).sqlite"), installationBinding: .init(value: UUID()))
+        var sequence: UInt64 = 0
         for (group, count) in [120, 80, 75].enumerated() {
-            for index in 0..<count {
-                let identity = try makeIdentity(userID: UUID().uuidString, handle: "member\(group)x\(index)", displayName: "Member \(group) \(index)")
-                projections.append(.init(userID: identity.userID, state: group == 0 ? .accepted : .pending,
-                    requestedByUserID: group == 1 ? identity.userID : currentUserID,
-                    updatedAt: Date(timeIntervalSince1970: Double(index)), publicIdentity: identity))
-            }
+            sequence = try await seedContactGroup(local, current: current, group: group, range: 1...count, after: sequence)
         }
-        let source = ContactsDataSourceFake(projections: projections, hydratedProfiles: [:])
-        let store = makeStore(dataSource: source, currentUserID: currentUserID)
+        let reads = try ContactReadFixture(local: local, current: current)
+        let store = makeStore(dataSource: reads.source, currentUserID: current)
         await store.refresh()
         await store.loadMoreFriends()
         await store.loadMoreFriends()
@@ -305,7 +295,9 @@ struct V2ContactsStoreTests {
         #expect(store.incomingRequestCount == 80)
         #expect(store.friendsNextCursor == nil && store.incomingRequestsNextCursor == nil && store.outgoingRequestsNextCursor == nil)
         let removed = try #require(store.filteredFriends.first?.userID)
-        await source.remove(userID: removed)
+        let record = try V2ClientSyncRecord(sequence: sequence + 1, sourceEventID: .init(UUID().uuidString), projectionKind: "relationship",
+            payload: JSONSerialization.data(withJSONObject: ["target_user_id": removed.rawValue, "state": "none", "updated_at_ms": 1_750_100_000_000]))
+        _ = try await local.apply(.init(generation: 1, records: [record], nextSyncToken: .init("removed"), receipt: .init("removed-receipt"), hasMore: false, capabilityProfile: "base"))
         await store.refresh()
         #expect(store.friends.count == 119)
         #expect(!store.filteredFriends.contains { $0.userID == removed })
@@ -313,6 +305,8 @@ struct V2ContactsStoreTests {
         store.searchQuery = "Member 0 1"
         await store.refreshFriendSearch()
         #expect(store.filteredFriends.count <= 50)
+        await reads.close()
+        try await local.close()
     }
 
     @Test("contact refresh follows scrolling across windows and request sections", arguments: [false, true])
@@ -322,7 +316,8 @@ struct V2ContactsStoreTests {
         var sequence: UInt64 = 0
         for group in 0...2 { sequence = try await seedContactGroup(local, current: current, group: group, range: 1...500, after: sequence) }
         let gate = V2ListWindowReadGate()
-        let source = V2GatedContactWindows(source: .init(localStore: local, profiles: .init(store: local, reader: ContactWindowProfileReader()), currentUserID: current), gate: gate)
+        let reads = try ContactReadFixture(local: local, current: current)
+        let source = V2GatedContactWindows(source: reads.source, gate: gate)
         let store = makeStore(dataSource: source, currentUserID: current)
         await store.refresh()
         if searching { store.searchQuery = "Member 0"; await store.refreshFriendSearch() }
@@ -353,6 +348,7 @@ struct V2ContactsStoreTests {
         #expect(store.filteredFriends.count == 300)
         #expect(store.incomingRequests.count == 150 && store.outgoingRequests.count == 150)
         #expect(await gate.reads >= 2)
+        await reads.close()
         try await local.close()
     }
 
@@ -363,7 +359,8 @@ struct V2ContactsStoreTests {
         var sequence: UInt64 = 0
         for group in 0...2 { sequence = try await seedContactGroup(local, current: current, group: group, range: 1...500, after: sequence) }
         let gate = V2ListWindowReadGate()
-        let source = V2GatedContactWindows(source: .init(localStore: local, profiles: .init(store: local, reader: ContactWindowProfileReader()), currentUserID: current), gate: gate)
+        let reads = try ContactReadFixture(local: local, current: current)
+        let source = V2GatedContactWindows(source: reads.source, gate: gate)
         let store = makeStore(dataSource: source, currentUserID: current)
         await store.refresh()
         if lane == 1 { store.searchQuery = "Member 0"; await store.refreshFriendSearch() }
@@ -414,6 +411,7 @@ struct V2ContactsStoreTests {
         #expect(values().map(\.id) != advanced)
         #expect(values().count == (lane < 2 ? 300 : 150))
         #expect(store.incomingRequestCount == 500)
+        await reads.close()
         try await local.close()
     }
 
@@ -425,8 +423,8 @@ struct V2ContactsStoreTests {
         let target = try UserID("00000000-0000-0000-0000-000000000600")
         let profile = try #require(try await local.profileView(userID: target))
         let reader = EarlierWindowProfileReader(profile: profile)
-        let source = V2GRDBContactsDataSource(localStore: local, profiles: .init(store: local, reader: reader), currentUserID: current)
-        let store = makeStore(dataSource: source, currentUserID: current)
+        let reads = try ContactReadFixture(local: local, current: current, reader: reader)
+        let store = makeStore(dataSource: reads.source, currentUserID: current)
         await store.refresh()
         for _ in 0..<10 {
             showContact(try #require(store.friends.last?.id), viewport: store.friendsViewport, ids: store.friends.map(\.id))
@@ -441,6 +439,7 @@ struct V2ContactsStoreTests {
         #expect(store.friends.count == 300)
         #expect(await reader.requests == [[V2ProfileViewLookupKey(userID: target, context: .relationship)]])
         #expect(try await local.profileView(userID: target) == profile)
+        await reads.close()
         try await local.close()
     }
 
@@ -457,9 +456,8 @@ struct V2ContactsStoreTests {
         for user in users { try await local.markProfileUnavailable(userID: user) }
         let remote = AuthorizedContactProjectionReader(actor: current, device: device, views: views)
         let presentations = V2ProfilePresentationRepository(actorUserID: current, deviceID: device, reader: remote)
-        let profiles = V2ProfileRepository(store: local, reader: V2ProfileProjectionReader(presentations: presentations))
-        let source = V2GRDBContactsDataSource(localStore: local, profiles: profiles, currentUserID: current)
-        let store = makeStore(dataSource: source, currentUserID: current)
+        let reads = try ContactReadFixture(local: local, current: current, reader: V2ProfileProjectionReader(presentations: presentations))
+        let store = makeStore(dataSource: reads.source, currentUserID: current)
         do {
             await store.refresh()
             #expect(store.state == .loaded)
@@ -478,8 +476,8 @@ struct V2ContactsStoreTests {
             await store.refresh(revalidateProfiles: true)
             #expect(store.friends.allSatisfy { $0.publicIdentity == nil })
             #expect(try await local.profileViews(userIDs: users).isEmpty)
-            await profiles.close(); await presentations.close(); try await local.close()
-        } catch { await profiles.close(); await presentations.close(); try? await local.close(); throw error }
+            await reads.close(); await presentations.close(); try await local.close()
+        } catch { await reads.close(); await presentations.close(); try? await local.close(); throw error }
     }
 
     @Test("relationship revocation cancels a slow profile read before applying the latest SQLite window")
@@ -488,9 +486,9 @@ struct V2ContactsStoreTests {
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-contact-revoke-refresh-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
         _ = try await seedContactGroup(local, current: current, group: 0, range: 1...1, after: 0)
         let reader = CancellableContactProfileReader()
-        let source = V2GRDBContactsDataSource(localStore: local, profiles: .init(store: local, reader: reader), currentUserID: current)
+        let reads = try ContactReadFixture(local: local, current: current, reader: reader)
         let notifier = V2ProjectionChangeNotifier(localStore: local)
-        let store = makeStore(dataSource: source, currentUserID: current, projectionChangeNotifier: notifier)
+        let store = makeStore(dataSource: reads.source, currentUserID: current, projectionChangeNotifier: notifier)
         await store.refresh()
         let target = try #require(store.friends.first?.userID)
         try await local.markProfileUnavailable(userID: target)
@@ -508,6 +506,7 @@ struct V2ContactsStoreTests {
             #expect(try await local.profileView(userID: target) == nil)
             group.cancelAll()
         }
+        await reads.close()
         try await local.close()
     }
 
@@ -518,8 +517,8 @@ struct V2ContactsStoreTests {
         for (group, count) in [600, 400, 400].enumerated() {
             sequence = try await seedContactGroup(local, current: current, group: group, range: 1...count, after: sequence)
         }
-        let source = V2GRDBContactsDataSource(localStore: local, profiles: .init(store: local, reader: ContactWindowProfileReader()), currentUserID: current)
-        let store = makeStore(dataSource: source, currentUserID: current)
+        let reads = try ContactReadFixture(local: local, current: current)
+        let store = makeStore(dataSource: reads.source, currentUserID: current)
         await store.refresh()
         for _ in 0..<10 {
             showContact(try #require(store.friends.last?.id), viewport: store.friendsViewport, ids: store.friends.map(\.id))
@@ -577,6 +576,7 @@ struct V2ContactsStoreTests {
         #expect(!store.outgoingRequests.contains { $0.id == removed.id })
         #expect(store.requestsViewport.restoration?.itemID != removed.id)
         #expect(store.incomingRequestCount == 400)
+        await reads.close()
         try await local.close()
     }
 
@@ -591,8 +591,8 @@ struct V2ContactsStoreTests {
         for (group, count) in [450, 250, 250].enumerated() {
             sequence = try await seedContactGroup(local, current: current, group: group, range: 1...count, after: sequence)
         }
-        let source = V2GRDBContactsDataSource(localStore: local, profiles: .init(store: local, reader: ContactWindowProfileReader()), currentUserID: current)
-        let store = makeStore(dataSource: source, currentUserID: current)
+        let reads = try ContactReadFixture(local: local, current: current)
+        let store = makeStore(dataSource: reads.source, currentUserID: current)
         await store.refresh()
         let window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
@@ -645,6 +645,7 @@ struct V2ContactsStoreTests {
         window.isHidden = true
         window.rootViewController = nil
         await Task.yield()
+        await reads.close()
         try await local.close()
     }
 
@@ -706,6 +707,37 @@ struct V2ContactsStoreTests {
     }
 }
 
+private struct ContactReadFixture {
+    let source: V2ContactsDataSource
+    private let contacts: V2ContactService
+    private let profiles: V2ProfileRepository
+
+    init(local: GRDBV2LocalSyncStore, current: UserID, reader: any V2ProfileViewReading = ContactWindowProfileReader()) throws {
+        let baseURL = URL(string: "https://contacts.invalid")!
+        let http = UnusedContactHTTP()
+        let social = try V2HTTPSocialOperationClient(baseURL: baseURL, credentials: http, transport: http)
+        let direct = try V2HTTPDirectRoomOperationClient(baseURL: baseURL, credentials: http, transport: http)
+        let directory = try V2HTTPPublicIdentityDirectory(endpoint: baseURL, actorUserID: current, credentials: http, transport: http)
+        contacts = .init(accountID: current, store: local,
+            social: .init(accountID: current, store: local, client: social),
+            direct: .init(accountID: current, store: local, client: direct), directory: directory)
+        profiles = .init(store: local, reader: reader)
+        source = .init(contacts: contacts, profiles: profiles)
+    }
+
+    func close() async {
+        await contacts.close()
+        await profiles.close()
+    }
+}
+
+private struct UnusedContactHTTP: V2ClientPushEndpointCredentialProvider, V2ClientMediaEdgeCredentialProvider,
+    V2ClientPushEndpointHTTPTransport, V2ClientMediaEdgeHTTPTransport {
+    func pushEndpointCredentials() throws -> V2ClientPushEndpointCredentials { throw URLError(.notConnectedToInternet) }
+    func mediaEdgeCredentials() throws -> V2ClientMediaEdgeCredentials { throw URLError(.notConnectedToInternet) }
+    func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) { throw URLError(.notConnectedToInternet) }
+}
+
 private struct ContactWindowProfileReader: V2ProfileViewReading {
     func readProfileViews(_ keys: [V2ProfileViewLookupKey]) async throws -> [V2ProfileViewLookupResult] {
         Issue.record("window fixture already has all authorized profiles")
@@ -720,15 +752,13 @@ private actor ContactsDataSourceFake: V2ContactsReading {
     private var readFailure: V2HTTPFailure?
     func setReadFailure(_ failure: V2HTTPFailure?) { readFailure = failure }
 
-    func remove(userID: UserID) { projections.removeAll { $0.userID == userID } }
-
     init(projections: [V2ContactProjection], hydratedProfiles: [UserID: V2PublicIdentity]) {
         self.projections = projections
         self.hydratedProfiles = hydratedProfiles
     }
 
     func contactProjectionPage(
-        scope: V2ContactProjectionPageScope,
+        scope: V2ContactListScope,
         matching query: String?,
         before cursor: V2ClientRelationshipCursor?,
         limit: Int,
@@ -772,6 +802,14 @@ private actor ContactsDataSourceFake: V2ContactsReading {
             nil
         }
         return .init(projections: page, nextCursor: nextCursor, totalCount: totalCount)
+    }
+
+    func contactProjectionWindow(
+        scope: V2ContactListScope, matching query: String?, around anchor: V2ClientRelationshipCursor,
+        limit: Int, precedingCount: Int, includeTotalCount: Bool
+    ) async throws -> V2ContactProjectionWindow {
+        Issue.record("Anchored reads must be tested through the shared contact service")
+        throw V2DirectoryServiceError.invalidInput
     }
 
     func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws {

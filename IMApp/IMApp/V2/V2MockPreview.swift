@@ -255,13 +255,22 @@ private actor V2MockPreviewSource: V2GroupMemberDirectoryReading, V2GroupCreatio
         return .init(hits: Array(hits.prefix(request.limit)), nextCursor: nil)
     }
 
-    func contactProjectionPage(scope: V2ContactProjectionPageScope, matching query: String?, before cursor: V2ClientRelationshipCursor?, limit: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionPage {
+    func contactProjectionPage(scope: V2ContactListScope, matching query: String?, before cursor: V2ClientRelationshipCursor?, limit: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionPage {
         let names = scope == .friends ? ["小林", "陈晨", "阿青"] : scope == .incomingRequests ? ["李晓"] : ["周宁"]
         let items = try names.enumerated().map { i, name in
             let identity = try V2PublicIdentity(userID: .init(String(format: "00000000-0000-0000-0000-%012d", (scope == .friends ? 201 : scope == .incomingRequests ? 211 : 221) + i)), handle: .init("friend\(i + 1)"), displayName: name, accountKind: .regular)
             return V2ContactProjection(userID: identity.userID, state: scope == .friends ? .accepted : .pending, requestedByUserID: scope == .incomingRequests ? identity.userID : user, updatedAt: .now, publicIdentity: identity)
         }
         return .init(projections: cursor == nil ? items.filter { query == nil || query!.isEmpty || $0.publicIdentity!.displayName.contains(query!) } : [], nextCursor: nil, totalCount: items.count)
+    }
+    func contactProjectionWindow(
+        scope: V2ContactListScope, matching query: String?, around anchor: V2ClientRelationshipCursor,
+        limit: Int, precedingCount: Int, includeTotalCount: Bool
+    ) async throws -> V2ContactProjectionWindow {
+        let page = try await contactProjectionPage(scope: scope, matching: query, before: nil,
+            limit: limit, includeTotalCount: includeTotalCount)
+        let target = page.projections.first { $0.userID == anchor.targetUserID } ?? page.projections.first
+        return .init(page: page, anchorID: target?.userID.rawValue, hasEarlier: false)
     }
     func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws {}
     func resolveForPresentation(handle: String) async throws -> V2PublicIdentityLookupSnapshot { throw V2PublicIdentityValidationError.invalidHandle }

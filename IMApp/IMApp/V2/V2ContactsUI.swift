@@ -32,12 +32,6 @@ struct V2ContactProjection: Sendable {
     let publicIdentity: V2PublicIdentity?
 }
 
-enum V2ContactProjectionPageScope: Equatable, Sendable {
-    case friends
-    case incomingRequests
-    case outgoingRequests
-}
-
 struct V2ContactProjectionPage: Sendable {
     let projections: [V2ContactProjection]
     let nextCursor: V2ClientRelationshipCursor?
@@ -50,87 +44,64 @@ struct V2ContactProjectionWindow: Sendable {
     let hasEarlier: Bool
 }
 
-protocol V2ContactsWindowReading: Sendable {
-    func contactProjectionWindow(scope: V2ContactProjectionPageScope, matching query: String?, around anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow
-}
-
 protocol V2ContactsReading: Sendable {
     func contactProjectionPage(
-        scope: V2ContactProjectionPageScope,
+        scope: V2ContactListScope,
         matching query: String?,
         before cursor: V2ClientRelationshipCursor?,
         limit: Int,
         includeTotalCount: Bool
     ) async throws -> V2ContactProjectionPage
+    func contactProjectionWindow(
+        scope: V2ContactListScope, matching query: String?, around anchor: V2ClientRelationshipCursor,
+        limit: Int, precedingCount: Int, includeTotalCount: Bool
+    ) async throws -> V2ContactProjectionWindow
     func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws
 }
 
-/// 应用侧对可复用 ClientKit 存储的组合。
+/// 将共享 SDK 的关系和资料投影组合为 iOS 联系人页面模型。
 ///
 /// 资料读取器只会收到关系授权上下文，因此无法把一组标识变成全局资料目录。
-actor V2GRDBContactsDataSource: V2ContactsReading, V2ContactsWindowReading {
-    private let localStore: GRDBV2LocalSyncStore
+struct V2ContactsDataSource: V2ContactsReading {
+    private let contacts: V2ContactService
     private let profiles: V2ProfileRepository
-    private let currentUserID: UserID
-    private let business: V2ContactService?
 
-    init(localStore: GRDBV2LocalSyncStore, profiles: V2ProfileRepository, currentUserID: UserID, business: V2ContactService? = nil) {
-        self.business = business
-        self.localStore = localStore
+    init(contacts: V2ContactService, profiles: V2ProfileRepository) {
+        self.contacts = contacts
         self.profiles = profiles
-        self.currentUserID = currentUserID
     }
 
     func contactProjectionPage(
-        scope: V2ContactProjectionPageScope,
+        scope: V2ContactListScope,
         matching query: String?,
         before cursor: V2ClientRelationshipCursor?,
         limit: Int,
         includeTotalCount: Bool
     ) async throws -> V2ContactProjectionPage {
-        if let business {
-            return try await projectionPage(business.page(scope: sharedScope(scope), matching: query,
-                before: cursor, limit: limit, includeTotalCount: includeTotalCount))
-        }
-        let clientScope: V2ClientRelationshipPageScope = switch scope {
-        case .friends: .accepted
-        case .incomingRequests: .incomingRequests(currentUserID: currentUserID)
-        case .outgoingRequests: .outgoingRequests(currentUserID: currentUserID)
-        }
-        let page = try await localStore.relationshipPage(
-            scope: clientScope,
-            matching: query,
-            before: cursor,
-            limit: limit,
-            includeTotalCount: includeTotalCount
-        )
+        let page = try await contacts.page(scope: scope, matching: query, before: cursor,
+            limit: limit, includeTotalCount: includeTotalCount)
         return try await projectionPage(page)
     }
 
-    func contactProjectionWindow(scope: V2ContactProjectionPageScope, matching query: String?, around anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow {
-        if let business {
-            let window = try await business.window(scope: sharedScope(scope), matching: query, around: anchor, limit: limit, precedingCount: precedingCount)
-            let page = try await projectionPage(window.page)
-            let total = includeTotalCount ? try await business.page(scope: sharedScope(scope), matching: query, limit: 1, includeTotalCount: true).totalCount : nil
-            return .init(page: .init(projections: page.projections, nextCursor: page.nextCursor, totalCount: total), anchorID: window.anchor?.targetUserID.rawValue, hasEarlier: window.hasEarlier)
-        }
-        let clientScope: V2ClientRelationshipPageScope = switch scope {
-        case .friends: .accepted
-        case .incomingRequests: .incomingRequests(currentUserID: currentUserID)
-        case .outgoingRequests: .outgoingRequests(currentUserID: currentUserID)
-        }
-        let window = try await localStore.relationshipWindow(scope: clientScope, matching: query, around: anchor, limit: limit, precedingCount: precedingCount)
+    func contactProjectionWindow(
+        scope: V2ContactListScope, matching query: String?, around anchor: V2ClientRelationshipCursor,
+        limit: Int, precedingCount: Int, includeTotalCount: Bool
+    ) async throws -> V2ContactProjectionWindow {
+        let window = try await contacts.window(scope: scope, matching: query, around: anchor,
+            limit: limit, precedingCount: precedingCount)
         let page = try await projectionPage(window.page)
-        let total = includeTotalCount ? try await localStore.relationshipPage(scope: clientScope, matching: query, limit: 1, includeTotalCount: true).totalCount : nil
-        return .init(page: .init(projections: page.projections, nextCursor: page.nextCursor, totalCount: total), anchorID: window.anchor?.targetUserID.rawValue, hasEarlier: window.hasEarlier)
-    }
-
-    private func sharedScope(_ scope: V2ContactProjectionPageScope) -> V2ContactListScope {
-        switch scope { case .friends: .friends; case .incomingRequests: .incomingRequests; case .outgoingRequests: .outgoingRequests }
+        let total = includeTotalCount
+            ? try await contacts.page(scope: scope, matching: query, limit: 1, includeTotalCount: true).totalCount
+            : nil
+        return .init(
+            page: .init(projections: page.projections, nextCursor: page.nextCursor, totalCount: total),
+            anchorID: window.anchor?.targetUserID.rawValue,
+            hasEarlier: window.hasEarlier
+        )
     }
 
     private func projectionPage(_ page: V2ClientRelationshipPage) async throws -> V2ContactProjectionPage {
-        let profileViews = try await localStore.profileViews(userIDs: page.relationships.map(\.targetUserID))
+        let profileViews = try await profiles.profileViews(userIDs: page.relationships.map(\.targetUserID))
         let projections: [V2ContactProjection] = page.relationships.map {
             V2ContactProjection(
                 userID: $0.targetUserID,
@@ -176,7 +147,6 @@ final class V2ContactsStore {
     }
 
     private let dataSource: any V2ContactsReading
-    private let windowReader: (any V2ContactsWindowReading)?
     private let identityResolver: any V2PublicIdentityPresentationResolving
     private(set) var socialPending:[V2SocialOperationPending]=[]
     private(set) var socialProposals:[V2SocialOperationProposal]=[]
@@ -246,7 +216,6 @@ final class V2ContactsStore {
         profileNames: V2ProfileNameService? = nil
     ) {
         self.dataSource = dataSource
-        windowReader = dataSource as? any V2ContactsWindowReading
         self.identityResolver = identityResolver
         self.relationshipChanger = relationshipChanger
         self.userBlockChanger = userBlockChanger
@@ -331,15 +300,13 @@ final class V2ContactsStore {
                 if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     if case let .ready(target) = friendsViewport.resolveRead(capturedAnchorID: capturedFriendAnchor,
                         returnedIDs: friendPage.projections.map { $0.userID.rawValue }, fallback: friendWindow.anchorID) { friendRestoration = target }
-                    else if windowReader != nil { continue }
-                    else { friendRestoration = nil }
+                    else { continue }
                 } else { friendRestoration = nil }
                 let requestRestoration: String?
                 if case let .ready(target) = requestsViewport.resolveRead(capturedAnchorID: requestAnchor,
                     returnedIDs: (incomingPage.projections + outgoingPage.projections).map { $0.userID.rawValue },
                     fallback: requestAnchor == nil ? nil : (requestAnchorIsIncoming ? incomingWindow.anchorID : outgoingWindow.anchorID)) { requestRestoration = target }
-                else if windowReader != nil { continue }
-                else { requestRestoration = nil }
+                else { continue }
                 apply(friendPage.projections, scope: .friends, appending: false)
                 apply(incomingPage.projections, scope: .incomingRequests, appending: false)
                 apply(outgoingPage.projections, scope: .outgoingRequests, appending: false)
@@ -431,8 +398,7 @@ final class V2ContactsStore {
                 let restorationID: String?
                 if case let .ready(target) = friendsViewport.resolveRead(capturedAnchorID: capturedAnchor,
                     returnedIDs: page.projections.map { $0.userID.rawValue }, fallback: window.anchorID) { restorationID = target }
-                else if windowReader != nil { continue }
-                else { restorationID = nil }
+                else { continue }
                 friendSearchResults = makeItems(page.projections)
                 friendSearchNextCursor = page.nextCursor
                 loadedSearchQuery = query
@@ -730,7 +696,7 @@ final class V2ContactsStore {
         switch lane { case .friends: friends; case .search: friendSearchResults; case .incoming: incomingRequests; case .outgoing: outgoingRequests }
     }
 
-    private func laneScope(_ lane: PageLane) -> V2ContactProjectionPageScope {
+    private func laneScope(_ lane: PageLane) -> V2ContactListScope {
         switch lane { case .friends, .search: .friends; case .incoming: .incomingRequests; case .outgoing: .outgoingRequests }
     }
 
@@ -750,20 +716,20 @@ final class V2ContactsStore {
         let activeID = lane == .friends && !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : viewportAnchorID
         let anchorID = values.contains(where: { $0.id == activeID }) ? activeID : (earlierLanes.contains(lane) ? values.first?.id : nil)
         let limit = min(count, windowLimit(lane))
-        guard let windowReader, let index = values.firstIndex(where: { $0.id == anchorID }) else {
+        guard let index = values.firstIndex(where: { $0.id == anchorID }) else {
             let page = try await loadProjectionWindow(scope: laneScope(lane), matching: query, count: limit, revalidateProfiles: revalidateProfiles, includeTotalCount: includeTotalCount)
             return .init(page: page, anchorID: nil, hasEarlier: false)
         }
         let anchor = V2ClientRelationshipCursor(updatedAt: values[index].updatedAt, targetUserID: values[index].userID)
-        return try await loadAnchoredWindow(reader: windowReader, lane: lane, query: query, anchor: anchor,
+        return try await loadAnchoredWindow(lane: lane, query: query, anchor: anchor,
             limit: limit, precedingCount: min(50, index, limit - 1), revalidateProfiles: revalidateProfiles, includeTotalCount: includeTotalCount)
     }
 
-    private func loadAnchoredWindow(reader: any V2ContactsWindowReading, lane: PageLane, query: String?,
+    private func loadAnchoredWindow(lane: PageLane, query: String?,
         anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int,
         revalidateProfiles: Bool, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow {
         let generation = refreshingGeneration, queryGeneration = searchGeneration
-        var window = try await reader.contactProjectionWindow(scope: laneScope(lane), matching: query, around: anchor,
+        var window = try await dataSource.contactProjectionWindow(scope: laneScope(lane), matching: query, around: anchor,
             limit: limit, precedingCount: precedingCount, includeTotalCount: includeTotalCount)
         try Task.checkCancellation()
         guard generation == refreshingGeneration,
@@ -777,7 +743,7 @@ final class V2ContactsStore {
                 guard generation == refreshingGeneration,
                       lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
                 else { throw CancellationError() }
-                let refreshed = try await reader.contactProjectionWindow(scope: laneScope(lane), matching: query, around: anchor,
+                let refreshed = try await dataSource.contactProjectionWindow(scope: laneScope(lane), matching: query, around: anchor,
                     limit: limit, precedingCount: precedingCount, includeTotalCount: false)
                 try Task.checkCancellation()
                 guard generation == refreshingGeneration,
@@ -798,7 +764,7 @@ final class V2ContactsStore {
     }
 
     private func loadProjectionWindow(
-        scope: V2ContactProjectionPageScope,
+        scope: V2ContactListScope,
         matching query: String? = nil,
         count: Int,
         revalidateProfiles: Bool,
@@ -826,7 +792,7 @@ final class V2ContactsStore {
     }
 
     private func loadProjectionPage(
-        scope: V2ContactProjectionPageScope,
+        scope: V2ContactListScope,
         matching query: String? = nil,
         before cursor: V2ClientRelationshipCursor?,
         revalidateProfiles: Bool,
@@ -874,7 +840,7 @@ final class V2ContactsStore {
     }
 
     private func loadMore(
-        scope: V2ContactProjectionPageScope,
+        scope: V2ContactListScope,
         matching query: String?,
         cursor: V2ClientRelationshipCursor?
     ) async {
@@ -951,7 +917,7 @@ final class V2ContactsStore {
     }
 
     private func loadEarlier(_ lane: PageLane, query: String? = nil) async {
-        guard let windowReader, earlierLanes.contains(lane), refreshOperation == nil, pageOperations[lane] == nil,
+        guard earlierLanes.contains(lane), refreshOperation == nil, pageOperations[lane] == nil,
               let first = laneItems(lane).first else { return }
         if lane == .search { guard searchRefreshOperation == nil, loadedSearchQuery == query else { return } }
         let operation = UUID(), generation = refreshingGeneration, queryGeneration = searchGeneration
@@ -960,7 +926,7 @@ final class V2ContactsStore {
         pageOperations[lane] = operation
         defer { if pageOperations[lane] == operation { pageOperations[lane] = nil } }
         do {
-            let window = try await loadAnchoredWindow(reader: windowReader, lane: lane, query: query,
+            let window = try await loadAnchoredWindow(lane: lane, query: query,
                 anchor: .init(updatedAt: first.updatedAt, targetUserID: first.userID), limit: windowLimit(lane),
                 precedingCount: windowLimit(lane) - 50, revalidateProfiles: false, includeTotalCount: false)
             try Task.checkCancellation()
@@ -995,7 +961,7 @@ final class V2ContactsStore {
 
     private func apply(
         _ projections: [V2ContactProjection],
-        scope: V2ContactProjectionPageScope,
+        scope: V2ContactListScope,
         appending: Bool
     ) {
         let items = makeItems(projections)

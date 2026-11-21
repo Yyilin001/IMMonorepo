@@ -73,6 +73,11 @@ public actor V2ProfileRepository {
         try await operations.run { [store] in try await store.profileView(userID: userID) }
     }
 
+    /// 批量读取本地投影内容，沿用持久化层的安全版本下限。
+    public func profileViews(userIDs: [UserID]) async throws -> [UserID: V2ProfileView] {
+        try await operations.run { [store] in try await store.profileViews(userIDs: userIDs) }
+    }
+
     /// 仅补全请求中给出的上下文。
     ///
     /// 服务端判定为不可用的结果会立即移除该目标此前可能残留的已授权投影。

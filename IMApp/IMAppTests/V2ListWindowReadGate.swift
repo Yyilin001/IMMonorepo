@@ -50,10 +50,10 @@ struct V2GatedConversationWindows: V2ConversationDataSource {
 
 }
 
-struct V2GatedContactWindows: V2ContactsReading, V2ContactsWindowReading {
-    let source: V2GRDBContactsDataSource
+struct V2GatedContactWindows: V2ContactsReading {
+    let source: V2ContactsDataSource
     let gate: V2ListWindowReadGate
-    func contactProjectionPage(scope: V2ContactProjectionPageScope, matching query: String?, before cursor: V2ClientRelationshipCursor?, limit: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionPage {
+    func contactProjectionPage(scope: V2ContactListScope, matching query: String?, before cursor: V2ClientRelationshipCursor?, limit: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionPage {
         let result = try await source.contactProjectionPage(scope: scope, matching: query, before: cursor, limit: limit, includeTotalCount: includeTotalCount)
         await gate.holdResult()
         return result
@@ -61,7 +61,7 @@ struct V2GatedContactWindows: V2ContactsReading, V2ContactsWindowReading {
     func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws {
         try await source.hydrateRelationshipProfiles(for: userIDs)
     }
-    func contactProjectionWindow(scope: V2ContactProjectionPageScope, matching query: String?, around anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow {
+    func contactProjectionWindow(scope: V2ContactListScope, matching query: String?, around anchor: V2ClientRelationshipCursor, limit: Int, precedingCount: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionWindow {
         let result = try await source.contactProjectionWindow(scope: scope, matching: query, around: anchor, limit: limit, precedingCount: precedingCount, includeTotalCount: includeTotalCount)
         await gate.holdResult()
         return result

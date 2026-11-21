@@ -1035,11 +1035,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 localStore: localStore, requiresLocalReadAuthorization: localIdentity != nil, business: conversationBusiness, search: searchBusiness, groups: realtime.groups,
                 requestLatestVisible: { try await roomRecovery.requestLatestVisible(roomIDs: $0) }
             )
-            let contactsDataSource = V2GRDBContactsDataSource(
-                localStore: localStore,
-                profiles: realtime.profileRepository,
-                currentUserID: userID, business: realtime.contacts
-            )
+            let contactsDataSource = V2ContactsDataSource(contacts: realtime.contacts, profiles: realtime.profileRepository)
             let thumbnails = V2LocalMediaThumbnailCache(directories: [scope.directory, scope.cacheDirectory])
             activation.onDiscard { await thumbnails.close() }
             let conversationEnvironment = V2ConversationFeatureEnvironment(
