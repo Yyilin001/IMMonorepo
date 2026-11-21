@@ -57,7 +57,10 @@ jobs:
           # Docker containers. The following service-backed integration step
           # installs the canonical schema into a clean PostgreSQL database.
           V2_SCHEMA_BOOTSTRAP_COVERED_BY_POSTGRES_INTEGRATION: "1"
-        run: bash ./scripts/run_v2_swift_tests.sh --server-packages
+        run: |
+          # The container user differs from the host checkout owner.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bash ./scripts/run_v2_swift_tests.sh --server-packages
       - name: Build Linux release products
         run: |
           for product in IMV2AccountServerApp IMV2OperatorServerApp IMV2ServerApp IMV2ResourceImageWorker IMV2LocalGatewayProbe IMV2GatewayLoadGenerator; do
