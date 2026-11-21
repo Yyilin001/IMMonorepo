@@ -43,8 +43,13 @@ final class V2RoomClusterReferenceCache: Sendable {
             if remaining <= 0 { $0.pins[token] = nil } else { $0.pins[token] = remaining }
         }
     }
-    func remove(_ token: V2RoomActivationToken) {
-        state.withLock { $0.actors[token] = nil; $0.removeOrder(token) }
+    @discardableResult
+    func remove(_ token: V2RoomActivationToken) -> Bool {
+        state.withLock { state in
+            let removed = state.actors.removeValue(forKey: token)
+            state.removeOrder(token)
+            return removed != nil
+        }
     }
     func removeAll(on id: V2ActorHostID) {
         state.withLock {

@@ -270,6 +270,26 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.directory.quiesce(deadline: .now + .seconds(1)))
     }
 
+    @Test("credit refusal preserves the route and cannot settle a previous send",
+          arguments: [false, true])
+    func creditRefusalPreservesPriorSendOutcome(previouslyUnknown: Bool) async throws {
+        let fixture = try Fixture()
+        await fixture.directory.remember(fixture.token)
+        let failures: [V2RoomCallFailure] = previouslyUnknown
+            ? [.outcomeUnknown, .notAccepted(.overloaded)] : [.notAccepted(.overloaded)]
+        await fixture.transport.configureCached(available: true, failures: failures)
+        let user = UserID(uuid: UUID()), command = try fixture.send(user: user)
+        await #expect(throws: previouslyUnknown ? V2RoomCallFailure.outcomeUnknown : .notAccepted(.overloaded)) {
+            try await fixture.directory.room(fixture.room).call(command, principal: .user(user),
+                deadline: .now + .seconds(2))
+        }
+        _ = try await fixture.directory.room(fixture.room).call(command, principal: .user(user),
+            deadline: .now + .seconds(2))
+        #expect(await fixture.transport.invoked == Array(repeating: command, count: failures.count + 1))
+        #expect(await fixture.owners.calls == 0)
+        #expect(await fixture.transport.lookups.isEmpty)
+    }
+
     @Test("cached operations preserve identity through unknown replies or transient rollback without location work",
           arguments: [V2RoomCallFailure.outcomeUnknown, .rolledBack(.unavailable)])
     func cachedOperationAvoidsLocationWork(failure: V2RoomCallFailure) async throws {

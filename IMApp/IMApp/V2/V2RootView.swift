@@ -16,6 +16,7 @@ struct V2RootView: View {
     @State private var store: V2AppStore
     @State private var protectedDataRetryTask: Task<Void, Never>?
     @State private var pendingGroupInvitationURL: URL?
+    @State private var showsPreviousSignOut = false
     #if DEBUG
     private let revocationVisualAccessibility: Bool
     private let groupAvatarRecoveryTestScope: UUID?
@@ -93,18 +94,9 @@ struct V2RootView: View {
                     // is ready; authentication recovery never becomes a page.
                     Color(uiColor: .systemBackground).ignoresSafeArea()
                         .accessibilityIdentifier("v2.launch.local-bootstrap")
-                case .signedOut:
+                case .signedOut, .authenticating:
                     signedOutContent
-                        .safeAreaInset(edge: .bottom) {
-                            V2DeviceRevocationStatusView(state: revocationPresentation) {
-                                #if DEBUG
-                                if revocationVisualFixture != nil { revocationVisualFixture = .pending; return }
-                                #endif
-                                await store.retryDeviceRevocation()
-                            }
-                        }
-                case .authenticating:
-                    ProgressView("正在验证身份…")
+                        .disabled(store.route == .authenticating)
                 case .localReadOnly:
                     if store.offlineStartupPresentation == .restoringSession {
                         ProgressView("正在恢复 V2 会话…")
@@ -217,6 +209,39 @@ struct V2RootView: View {
                 initialPasswordMode: initialPasswordMode, initialAccountHandle: initialLocalE2ETestAccountHandle,
                 initialPassword: initialLocalE2ETestPassword, initialPublicHandle: initialLocalE2ETestPublicHandle,
                 initialDisplayName: initialLocalE2ETestDisplayName)
+                .toolbar {
+                    if revocationPresentation != .hidden {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("上次退出") { showsPreviousSignOut = true }
+                                .accessibilityIdentifier("v2.revocation.open")
+                        }
+                    }
+                }
+        }
+        .sheet(isPresented: $showsPreviousSignOut) {
+            NavigationStack {
+                ScrollView {
+                    if revocationPresentation == .hidden {
+                        Text("此前的退出任务已处理。")
+                    } else {
+                        V2DeviceRevocationStatusView(state: revocationPresentation) {
+                            #if DEBUG
+                            if revocationVisualFixture != nil { revocationVisualFixture = .pending; return }
+                            #endif
+                            await store.retryDeviceRevocation()
+                        }
+                    }
+                }
+                .padding()
+                .navigationTitle("上次退出")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") { showsPreviousSignOut = false }
+                            .accessibilityIdentifier("v2.revocation.close")
+                    }
+                }
+            }
         }
     }
 
@@ -304,12 +329,15 @@ struct V2SignInView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("账号信息").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                     TextField("账号", text: $accountHandle)
+                        .textContentType(.username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("v2.password.account-handle")
                         .v2InputSurface()
                     SecureField("密码", text: $password)
                         .textContentType(mode == .register ? .newPassword : .password)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                         .accessibilityIdentifier("v2.password.value")
                         .v2InputSurface()
                     if mode == .register {
@@ -325,7 +353,7 @@ struct V2SignInView: View {
                         Text("请妥善保存密码。注册后可在“我的 → 账号安全”设置离线恢复码；密码和恢复码都丢失后，将无法找回账号。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Button(mode == .register ? "注册" : "登录") {
+                    Button {
                         guard canSubmitPasswordAction else {
                             inputValidationMessage = validationMessage
                             return
@@ -334,7 +362,7 @@ struct V2SignInView: View {
                         inputValidationMessage = nil
                         let submittedPassword = password
                         password = ""
-                        run {
+                        run { [accountHandle, mode, publicHandle, displayName] in
                             await store.authenticatePassword(
                                 accountHandle: accountHandle,
                                 password: submittedPassword,
@@ -342,6 +370,12 @@ struct V2SignInView: View {
                                 publicHandle: publicHandle,
                                 displayName: displayName
                             )
+                        }
+                    } label: {
+                        if store.route == .authenticating {
+                            ProgressView("正在验证身份…")
+                        } else {
+                            Text(mode == .register ? "注册" : "登录")
                         }
                     }
                     .buttonStyle(V2PrimaryButtonStyle())
@@ -381,10 +415,6 @@ struct V2SignInView: View {
                 announceV2AccessibilityAnnouncement(updatedMessage)
             }
         }
-        // Submitting switches the root route to `.authenticating`, which
-        // removes this view immediately. Cancelling here would therefore abort
-        // the very account request the user just started. A replacement submit
-        // still cancels the prior task in `run(_:)`.
     }
 
     private var canSubmitPasswordAction: Bool {

@@ -2748,32 +2748,8 @@ def main():
         except (KeyError, ValueError) as error:
             parser.error('invalid server deployment: ' + str(error))
         args.pg_bin_directory = Path(shutil.which('psql')).parent
-    if args.continuous_user_growth:
-        args.live_user_growth = True
-        if args.nodes != 1 or args.loader_partitions != 8 or args.live_scale_out_partitions < 4:
-            parser.error('continuous growth requires one initial node, eight load partitions and at least four migrated partitions')
-    if args.live_user_growth:
-        if (args.live_scale_out_at is None or args.loader_partitions < 2 or args.loader_partitions % 2
-                or args.growth_measurement_seconds < 60 or args.preclose_recovery_witness
-                or args.online_only or not ingress.enabled(args)):
-            parser.error('user growth requires live expansion, ingress, even loader partitions, >=60s growth measurement, and ordinary message scenario')
-    if args.live_scale_out_at is not None:
-        if not args.dynamic_membership or args.server_deployment is None or args.nodes not in (1, 2, 4) or args.live_scale_out_at < 1 or not args.nodes <= args.live_scale_out_partitions <= 128:
-            parser.error('live expansion requires dynamic membership, 1/2/4 initial gateways, positive offset and at least one partition per new gateway (maximum 128)')
-        expansion_roles = json.loads(args.server_deployment.read_text())['processes']
-        if any(f'gateway-{i}' not in expansion_roles for i in range(8 if args.continuous_user_growth else args.nodes * 2)):
-            parser.error('live expansion requires deployment entries for every target gateway')
-    if args.dynamic_membership:
-        if args.kind != 'candidate' or args.server_deployment is None:
-            parser.error('dynamic membership requires a remote candidate deployment')
-        roles = json.loads(args.server_deployment.read_text())['processes']
-        if any(name not in roles for name in ('membership-controller', 'placement-controller')):
-            parser.error('dynamic membership requires dedicated controller roles in the deployment map')
-        if args.live_scale_out_at is not None:
-            try:
-                dynamic_membership.authority_profile(json.loads(args.server_deployment.read_text()))
-            except ValueError as error:
-                parser.error(str(error))
+    if args.dynamic_membership or args.live_scale_out_at is not None or args.live_user_growth or args.continuous_user_growth:
+        parser.error('online membership changes are retired; benchmark a fixed topology')
     if args.visibility_run_id is not None:
         if args.kind != 'candidate' or args.server_deployment is None or args.online_only:
             parser.error('visibility measurement requires remote candidate scenario with room reads')

@@ -370,6 +370,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                 }
                             }
                             let before = try await count("im_v2.messages", on: ownerSQL)
+                            let completionsBefore = try await count("im_v2.message_send_completions", on: ownerSQL)
                             let blockedIndex = blockedFirst ? 0 : 1
                             let social = PostgresV2SocialRelationshipStore(database: control,
                                 projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
@@ -388,16 +389,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             let input = inputs[blockedIndex]
                             let recovery = try await store.recover(.init(identity: input.identity, fingerprint: input.fingerprint,
                                 domainFingerprint: input.command.fingerprint), token: tokens[blockedIndex])
-                            #expect(recovery == .unresolved)
+                            #expect(recovery == .receipt(rejection))
+                            #expect(try await count("im_v2.message_send_completions", on: ownerSQL) == completionsBefore + 2)
                             _ = try await social.executeSocialFixture(actorUserID: recipients[blockedIndex], targetUserID: senderID,
                                 operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.unblock), now: Date())
-                            let restored = try await sendAll(inputs)
-                            guard case .receipt(let retry) = restored[blockedIndex], case .accepted = retry.outcome else {
-                                Issue.record("same identity retry failed"); throw CancellationError()
+                            #expect(try await sendAll(inputs) == results)
+                            let newInput = try requests()[blockedIndex]
+                            let restored = try await send(newInput)
+                            guard case .receipt(let retry) = restored, case .accepted = retry.outcome else {
+                                Issue.record("new identity rejected after permission was restored"); throw CancellationError()
                             }
-                            #expect(restored[1 - blockedIndex] == results[1 - blockedIndex])
+                            #expect(try await send(newInput) == restored)
                             #expect(try await count("im_v2.messages", on: ownerSQL) == before + 2)
-                            #expect(try await count("im_v2.message_send_completions", on: ownerSQL) == before + 2)
+                            #expect(try await count("im_v2.message_send_completions", on: ownerSQL) == completionsBefore + 3)
                             #expect(try await retiredDirectDenialTableIsAbsent(on: ownerSQL))
                             await policies.shutdown()
                         } catch {
@@ -531,6 +535,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             }
                         }
                         let before = try await count("im_v2.messages", on: ownerSQL)
+                        let completionsBefore = try await count("im_v2.message_send_completions", on: ownerSQL)
                         switch kind {
                         case "concurrent-block": break
                         case "block":
@@ -560,9 +565,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         #expect(rejection.outcome == .rejected(kind == "disable-sender" ? .permissionDenied : .directPolicyDenied))
                         let recovery = try await writer.recover(.init(identity: deniedRequest.identity,
                             fingerprint: deniedRequest.fingerprint, domainFingerprint: deniedRequest.command.fingerprint), token: token)
-                        #expect(recovery == .unresolved)
+                        #expect(recovery == .receipt(rejection))
                         #expect(try await count("im_v2.messages", on: ownerSQL) == before)
-                        #expect(try await count("im_v2.message_send_completions", on: ownerSQL) == before)
+                        #expect(try await count("im_v2.message_send_completions", on: ownerSQL) == completionsBefore + 1)
                         #expect(try await retiredDirectDenialTableIsAbsent(on: ownerSQL))
                         if kind == "block" || kind == "concurrent-block" {
                             _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID,
@@ -571,14 +576,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             _ = try await preferences.executePreferenceFixture(owner: recipient,
                                 operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.allow), now: Date())
                         }
+                        #expect(try await send(deniedRequest) == .receipt(rejection))
                         if kind != "disable-sender" && kind != "disable-recipient" {
-                            let retried = try await send(deniedRequest)
+                            let newRequest = try request()
+                            let retried = try await send(newRequest)
                             guard case .receipt(let receipt) = retried, case .accepted = receipt.outcome else {
-                                Issue.record("same identity permission retry failed"); throw CancellationError()
+                                Issue.record("new identity rejected after permission was restored"); throw CancellationError()
                             }
-                            #expect(try await send(deniedRequest) == retried)
+                            #expect(try await send(newRequest) == retried)
                             #expect(try await count("im_v2.messages", on: ownerSQL) == before + 1)
-                            #expect(try await count("im_v2.message_send_completions", on: ownerSQL) == before + 1)
+                            #expect(try await count("im_v2.message_send_completions", on: ownerSQL) == completionsBefore + 2)
                             #expect(try await retiredDirectDenialTableIsAbsent(on: ownerSQL))
                         }
                         await policies.shutdown()

@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.4
 import PackageDescription
 
 let package = Package(
@@ -50,7 +50,11 @@ let package = Package(
         .testTarget(name: "IMV2SharedRuntimeTests", dependencies: ["IMV2SharedRuntime", "IMV2SharedSDK", "IMV2SharedApple", "IMV2ClientRuntime", "IMV2ClientNetwork"]),
         .testTarget(
             name: "IMV2ClientKitTests",
-            dependencies: ["IMV2ClientKit", "IMV2ClientRuntime", "IMV2ClientNetwork", "IMV2ClientApple", .product(name: "GRDB", package: "GRDB.swift")]
+            dependencies: [
+                "IMV2ClientKit", "IMV2ClientRuntime", "IMV2ClientNetwork", "IMV2ClientApple",
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "Crypto", package: "swift-crypto"),
+            ]
         ),
     ]
 )

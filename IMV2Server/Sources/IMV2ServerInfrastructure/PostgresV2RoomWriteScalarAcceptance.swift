@@ -12,6 +12,7 @@ import SQLKit
 struct V2RoomWriteScalarAcceptancePath {
     let ownerGuard: V2RoomWriteSelectedOwnerGuard
     let policyContext: V2RoomWriteDirectPolicyContext
+    let profileDatabase: (any SQLDatabase)?
     let strangerMessagePolicy: V2StrangerMessagePolicy
     let contentReviewMode: V2ContentReviewMode
 
@@ -203,6 +204,7 @@ struct V2RoomWriteScalarAcceptancePath {
                     sourceEventID: messageStateEventID,
                     createdAt: timelineWriteSet.acceptedMessage.createdAt,
                     stateVersion: timelineWriteSet.acceptedMessage.timelineSequence,
+                    profileDatabase: profileDatabase,
                     sql: sql
                 )
                 updatedDirectPolicyCacheEntry = updatedDirectPolicyCacheEntry?

@@ -48,6 +48,17 @@ struct V2LocalMediaReadBoundaryTests {
         }
     }
 
+    @Test(.enabled(if: geteuid() != 0))
+    func inaccessibleLocalDirectoryIsNotReportedAsMissing() async throws {
+        let fixture = try await Fixture.make()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        try #require(chmod(fixture.root.path, 0o000) == 0)
+        defer { _ = chmod(fixture.root.path, 0o700) }
+        await #expect(throws: V2ResourceProviderError.configurationInvalid) {
+            _ = try await fixture.provider.readDownloadedObject(mediaID: fixture.id, targetURL: fixture.download)
+        }
+    }
+
     @Test("HTTP hash and range bytes keep the same file across a directory replacement",
           arguments: SwapTime.allCases, [false, true])
     func httpStreamPinsAuthorizedFile(swapTime: SwapTime, range: Bool) async throws {

@@ -33,7 +33,7 @@ Android 12 / API 31+、arm64，Jetpack Compose + Navigation 3。App 默认且仅
 
 ## 构建
 
-需要 JDK 17、Android SDK 36、NDK 30.0.16248370、Swift 6.4.1 和匹配的 Android Swift SDK。初次安装按 [固定工具链说明](../experiments/swift-android/README.md) 执行。
+需要 JDK 17、Android SDK 36、NDK 30.0.16248370、Swift 6.4.2 和匹配的 Android Swift SDK。初次安装按 [固定工具链说明](../experiments/swift-android/README.md) 执行。
 
 ```sh
 # 仓库根目录；首轮运行包含能力检查，后续可加 --reuse-capabilities。

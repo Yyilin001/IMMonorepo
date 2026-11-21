@@ -1,0 +1,13 @@
+{
+  "ownedIOSDevicesDeleted": true,
+  "preexistingIOSDevicesPreserved": true,
+  "ownedAndroidAVDDeleted": true,
+  "verificationPackagesUninstalled": true,
+  "ownedPostgresStacksStopped": true,
+  "uiBackendPortsClosed": {
+    "7443": true,
+    "8443": true
+  },
+  "systemTrustModified": false,
+  "normalAndroidBuildRestored": true
+}

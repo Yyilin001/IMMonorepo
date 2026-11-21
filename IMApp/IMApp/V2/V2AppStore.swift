@@ -5,6 +5,12 @@ import Observation
 import OSLog
 import UIKit
 
+private extension V2DeviceRevocationStore {
+    func hasRejectedCredential() throws -> Bool {
+        try jobs().contains { $0.pauseReason == .invalidCredential }
+    }
+}
+
 /// 跟踪那个用于启动前台实时运行时的短生命周期任务。
 ///
 /// 启动完成后，实时循环归运行时自身所有；
@@ -187,13 +193,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private var deviceRevocationObservation: Task<Void, Never>?
     private var revocationObservationState: RevocationObservationState = .unknown
     private var revocationRetrying = false
-    private enum RevocationObservationState { case unknown, known(V2DeviceRevocationQueueStatus), unavailable }
+    private enum RevocationObservationState { case unknown, known(V2DeviceRevocationQueueStatus), credentialRejected, unavailable }
 
     var deviceRevocationPresentation: V2DeviceRevocationPresentation {
         if revocationRetrying { return .retrying }
         if deviceRevocationNeedsRetry || registrationCancellationNeedsRetry { return .unavailable }
         let states = [revocationObservationState, registrationCancellationObservationState]
         if states.contains(where: { if case .unavailable = $0 { true } else { false } }) { return .unavailable }
+        if case .credentialRejected = revocationObservationState { return .credentialRejected }
         if states.contains(where: { if case .known(.paused) = $0 { true } else { false } }) { return .paused }
         if states.contains(where: { if case .known(.pending) = $0 { true } else { false } }) { return .pending }
         return .hidden
@@ -1018,25 +1025,17 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 transport: try V2RegisteredAccountHTTPTransport(executor: realtime.accountRuntime.httpExecutor,
                     allowedBases: [configuration.accountBaseURL, configuration.mediaEdgeEndpoint.deletingLastPathComponent().deletingLastPathComponent()],
                     scope: realtime.accountRuntime.queryScope(accountID: userID.rawValue, authorizationDomain: "accountHTTP")), scheduler: realtime.accountRuntime.scheduler)
-            let publicIdentityDirectory = try V2HTTPPublicIdentityDirectory(
-                endpoint: configuration.endpoint("v2/public-identities/resolve"),
-                actorUserID: userID,
-                credentials: accountHTTP, transport: accountHTTP
-            )
+            let publicIdentityDirectory = realtime.contacts
             let roomRecovery = realtime.roomRecovery
             let conversationBusiness = try await sharedSession.conversations(for: localStore, accountID: userID,
                 requiresAuthorization: localIdentity != nil,
                 requestLatestVisible: { try await roomRecovery.requestLatestVisible(roomIDs: $0) })
             let searchBusiness = try await sharedSession.search(for: localStore)
             let conversationDataSource = V2GRDBConversationDataSource(
-                localStore: localStore, requiresLocalReadAuthorization: localIdentity != nil, business: conversationBusiness, search: searchBusiness,
+                localStore: localStore, requiresLocalReadAuthorization: localIdentity != nil, business: conversationBusiness, search: searchBusiness, groups: realtime.groups,
                 requestLatestVisible: { try await roomRecovery.requestLatestVisible(roomIDs: $0) }
             )
-            let contactsDataSource = V2GRDBContactsDataSource(
-                localStore: localStore,
-                profiles: realtime.profileRepository,
-                currentUserID: userID
-            )
+            let contactsDataSource = V2ContactsDataSource(contacts: realtime.contacts, profiles: realtime.profileRepository)
             let thumbnails = V2LocalMediaThumbnailCache(directories: [scope.directory, scope.cacheDirectory])
             activation.onDiscard { await thumbnails.close() }
             let conversationEnvironment = V2ConversationFeatureEnvironment(
@@ -1067,7 +1066,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                     memberMuter: realtime.groupMemberMuter,
                     moderatedMemberRemover: realtime.moderatedGroupMemberRemover,
                     avatarManager: realtime.groupAvatarManager,
-                    nameOperations: realtime.nameOperations
+                    profileNames: realtime.nameOperations
                 ),
                 discovery: .init(
                     directConversationOpener: realtime.directConversationOpener,
@@ -1106,16 +1105,16 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 directConversationOpener: realtime.directConversationOpener,
                 currentUserID: userID,
                 projectionChangeNotifier: conversationBusiness.changes,
-                nameOperations: realtime.nameOperations
+                profileNames: realtime.nameOperations
             )
             let userBlockSettings = V2UserBlockSettingsStore(
                 resolver: publicIdentityDirectory,
                 changer: realtime.userBlockChanger,
                 currentUserID: userID,
-                localStore: localStore,
+                localStore: localStore, contacts: realtime.contacts,
                 projectionChangeNotifier: conversationBusiness.changes
             )
-            let profileService = V2ProfileIntentService(
+            let profileService = try await realtime.profiles.ownProfile(using: V2ProfileIntentService(
                 store: localStore, accountID: userID,
                 manager: try V2HTTPOwnProfileClient(
                     endpoint: configuration.endpoint("v2/profile/me"),
@@ -1124,39 +1123,18 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                     queryScope: realtime.accountRuntime.queryScope(accountID: userID.rawValue, authorizationDomain: "self-profile")
                 ),
                 avatars: V2ProfileAvatarUploadAdapter(uploader: realtime.attachmentUploader)
-            )
-            let invitationOperations=V2InvitationOperationService(accountID:userID,activationID:realtime.accountRuntime.ownerID,store:localStore,
-                client:try V2HTTPInvitationOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP),
-                secrets:V2KeychainInvitationSecretStore(installationBinding:try await localStore.boundInstallationBinding()))
+            ))
+            let invitationOperations = realtime.groups.invitations
             let profileDispatcher = V2OperationWorkDispatcher(
                 store: localStore,
-                handlers: [.init(kind:.groupInvite) {try await invitationOperations.execute($0)},
-                    .init(kind:.groupJoinRequest) {try await invitationOperations.execute($0)},
-                    .init(kind:.groupJoinDecision) {try await invitationOperations.execute($0)},
-                    .init(kind: .profileUpdate) { try await profileService.execute($0) },
-                    .init(kind: .conversationPreference) { try await realtime.personalPreferences.execute($0) },
+                handlers: [.init(kind: .conversationPreference) { try await realtime.personalPreferences.execute($0) },
                     .init(kind: .messageFavorite) { try await realtime.personalPreferences.execute($0) },
-                    .init(kind: .contactAlias) { try await realtime.nameOperations.execute($0) },
-                    .init(kind: .groupNickname) { try await realtime.nameOperations.execute($0) },
                     .init(kind: .moderation) { try await realtime.messageModerationOperations.execute($0) },
-                    .init(kind: .directRoom) { try await realtime.directRoomOperations.execute($0) },
-                    .init(kind: .groupRoom) { try await realtime.groupCreationOperations.execute($0) },
-                    .init(kind: .pinnedMessage) { try await realtime.groupCapabilityOperations.execute($0) },
-                    .init(kind: .groupAnnouncement) { try await realtime.groupCapabilityOperations.execute($0) },
-                    .init(kind: .groupPermission) { try await realtime.groupCapabilityOperations.execute($0) },
-                    .init(kind: .groupRole) { try await realtime.groupCapabilityOperations.execute($0) },
-                    .init(kind: .groupOwnership) { try await realtime.groupCapabilityOperations.execute($0) },
-                    .init(kind: .groupDissolution) { try await realtime.groupCapabilityOperations.execute($0) },
                     .init(kind:.strangerMessagePreference) { try await realtime.accountPreferences.execute($0) },
                     .init(kind:.userAddPreference) { try await realtime.accountPreferences.execute($0) },
                     .init(kind:.readReceiptPreference) { try await realtime.accountPreferences.execute($0) },
                     .init(kind:.liveActivityPreference) { try await realtime.accountPreferences.execute($0) },
-                    .init(kind:.relationship) { try await realtime.socialOperations.execute($0) },
-                    .init(kind:.userBlock) { try await realtime.socialOperations.execute($0) },
-                    .init(kind: .membership) { try await realtime.membershipOperations.execute($0) },
-                    .init(kind: .memberMute) { try await realtime.memberAdministrationOperations.execute($0) },
-                    .init(kind: .moderatedMemberRemoval) { try await realtime.memberAdministrationOperations.execute($0) },
-                ] + (await realtime.messages.handlers() + realtime.readReceipts.handlers()),
+                ] + profileService.handlers() + realtime.nameOperations.handlers() + realtime.contacts.handlers() + realtime.groups.handlers() + (await realtime.messages.handlers() + realtime.readReceipts.handlers()),
                 ownerID: realtime.accountRuntime.ownerID, diagnostics: realtime.accountRuntime.networkDiagnostics
             )
             let publicIdentitySettings = V2PublicIdentitySettingsStore(
@@ -1173,16 +1151,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 manager: try V2HTTPDeviceSessionClient(endpoint: configuration.endpoint("v2/devices"),
                     credentials: accountHTTP, transport: accountHTTP), operations: remoteDeviceRevocations)
             activation.onDiscard { await deviceSessions.close() }
-            let invitationQueries = V2QueryCoordinator<Data>()
-            activation.onDiscard { await invitationQueries.closeAndDrain() }
-            let invitationScope = realtime.accountRuntime.queryScope(accountID: userID.rawValue, authorizationDomain: "groupInvitationManagement")
-            let groupInvitations = V2GroupInvitationStore(
-                client: try V2HTTPGroupInvitationClient(
-                    baseURL: configuration.accountBaseURL,
-                    credentials: accountHTTP, transport: accountHTTP,
-                    queries: invitationQueries, queryScope: invitationScope
-                ),operations:invitationOperations
-            )
+            let groupInvitations = V2GroupInvitationStore(client: realtime.groups, operations: invitationOperations)
             let pushWakeSettings: V2PushWakeSettingsStore?
             if let remoteNotificationRegistrar {
                 guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
@@ -1208,11 +1177,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 pushWakeSettings = .init(reconciler: reconciler, preferences: preferences, remoteNotificationRegistrar: remoteNotificationRegistrar, environment: configuration.pushEndpointEnvironment)
             } else { pushWakeSettings = nil }
             activation.onDiscard { await pushWakeSettings?.stop() }
-            let presentations = realtime.profilePresentations
-            let groupReader = try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: configuration.endpoint("v2/rooms"),
-                actorUserID: userID, credentials: accountHTTP, transport: accountHTTP)
-            let groupPresentations = V2GroupAvatarPresentationRepository(actorUserID: userID, deviceID: deviceID,
-                reader: groupReader, minimumRevision: { try await localStore.groupAvatarRevision(roomID: $0) })
+            let presentations = realtime.profiles.presentations
+            let groupPresentations = realtime.resources.groupAvatars.presentations
             let pipeline = V2AvatarPipeline(profiles: presentations, groups: groupPresentations,
                 files: realtime.mediaCacheMaintenance, thumbnails: thumbnails,
                 authors: realtime.makeAuthorPresentationCoordinator(presentations))
@@ -1303,7 +1269,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 try await remoteDeviceRevocations.run()
             }
             await realtime.accountRuntime.startActivity(id: "localDirectMessages") {
-                try await realtime.directRoomOperations.runLocalMessagePreparation()
+                try await realtime.contacts.directConversations.runLocalMessagePreparation()
             }
             await realtime.accountRuntime.startActivity(id: "profilePreparation") {
                 try await profileService.runPreparation()
@@ -1311,7 +1277,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             await realtime.accountRuntime.startActivity(id: "personalPreferencePreparation") {
                 try await realtime.personalPreferences.runPreparation()
             }
-            await realtime.accountRuntime.startActivity(id:"groupCapabilityPreparation") { try await realtime.groupCapabilityOperations.runPreparation() }
+            await realtime.accountRuntime.startActivity(id:"groupCapabilityPreparation") { try await realtime.groups.capabilities.runPreparation() }
             await realtime.accountRuntime.startActivity(id:"accountPreferencePreparation") { try await realtime.accountPreferences.runPreparation() }
             await realtime.accountRuntime.startActivity(id:"invitationSecretCleanup") {
                 let wakeups=V2InvitationUnlockWakeups()
@@ -1319,8 +1285,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 for await _ in wakeups.stream {try Task.checkCancellation();try await invitationOperations.releaseProtectedSecrets()}
             }
             await realtime.accountRuntime.startActivity(id:"invitationPreparation") {try await invitationOperations.runPreparation()}
-            await realtime.accountRuntime.startActivity(id:"membershipPreparation") { try await realtime.membershipOperations.runPreparation() }
-            await realtime.accountRuntime.startActivity(id:"memberAdministrationPreparation") { try await realtime.memberAdministrationOperations.runPreparation() }
+            await realtime.accountRuntime.startActivity(id:"membershipPreparation") { try await realtime.groups.membership.runPreparation() }
+            await realtime.accountRuntime.startActivity(id:"memberAdministrationPreparation") { try await realtime.groups.administration.runPreparation() }
             await realtime.accountRuntime.startActivity(id: "readReceiptPreparation") {
                 try await realtime.readReceipts.runPreparation()
             }
@@ -1465,7 +1431,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             do {
                 for try await status in await deviceRevocationStore.statusUpdates() {
                     try Task.checkCancellation()
-                    self?.revocationObservationState = .known(status)
+                    if status == .paused, try await deviceRevocationStore.hasRejectedCredential() {
+                        self?.revocationObservationState = .credentialRejected
+                    } else {
+                        self?.revocationObservationState = .known(status)
+                    }
                 }
             } catch is CancellationError { }
             catch { if !Task.isCancelled { self?.revocationObservationState = .unavailable } }

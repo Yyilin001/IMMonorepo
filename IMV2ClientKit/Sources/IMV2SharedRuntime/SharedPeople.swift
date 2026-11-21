@@ -2,7 +2,6 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import Crypto
 import IMV2Core
 import IMV2ClientRuntime
 
@@ -27,26 +26,23 @@ actor SharedPeople {
         var image: (key: V2ProfileViewLookupKey, grant: V2AvatarReadGrant, data: Data)?
     }
     private let repository: V2ProfilePresentationRepository
-    private let names: V2NameOperationService
+    private let names: V2ProfileNameService
     private let store: GRDBV2LocalSyncStore
     private var pages: [String: Page] = [:]
     private var work: SharedWork?
     private var groupNickname: SharedGroupNickname?
-    private let imageHTTP: any V2AuthHTTPTransport
+    private let resources: V2ResourceService
     private var failure: SharedFailure?
-    init(account: UserID, device: DeviceID, store: GRDBV2LocalSyncStore, base: URL, http: V2SessionHTTPAuthorization, imageHTTP: any V2AuthHTTPTransport) throws {
-        self.imageHTTP = imageHTTP
+
+    init(store: GRDBV2LocalSyncStore, profiles: V2ProfileService, resources: V2ResourceService) {
         self.store = store
-        repository = V2ProfilePresentationRepository(actorUserID: account, deviceID: device,
-            reader: try V2HTTPProfilePresentationClient(endpoint: base.appendingPathComponent("v2/profile-presentations/batch"), credentials: http, transport: http),
-            nicknameRevisions: { try await store.groupNicknameRevisions(keys: $0) },
-            aliasRevisions: { try await store.contactAliasRevisions(keys: $0) })
-        names = V2NameOperationService(accountID: account, store: store,
-            client: try V2HTTPNameOperationClient(endpoint: base.appendingPathComponent("v2/profile-presentations"), credentials: http, transport: http))
+        repository = profiles.presentations
+        names = profiles.names
+        self.resources = resources
     }
-    func handlers() -> [V2OperationWorkDispatcher.Handler] {
-        [.init(kind: .contactAlias) { [names] in try await names.execute($0) }]
-    }
+
+    func handlers() -> [V2OperationWorkDispatcher.Handler] { names.handlers() }
+
     /// Activates one bounded page of authorized presentations. Reusing the same keys keeps the
     /// existing activation and cache; changing them replaces the page and releases its interest.
     func show(page: String, ids: [String], context: V2ProfileViewContext) async throws {
@@ -64,7 +60,9 @@ actor SharedPeople {
         }
         pages[page] = value
     }
-    func showContacts(_ ids: [String]) async throws { try await show(page: "contacts", ids: ids, context: .relationship) }
+    func showContacts(_ ids: [String]) async throws {
+        try await show(page: "contacts", ids: Array(ids.prefix(50)), context: .relationship)
+    }
     /// Waits for the page's initial presentations so callers can render names immediately.
     func load(page: String) async { await pages[page]?.loader?.value }
     func open(_ id: UserID, context: V2ProfileViewContext) async throws {
@@ -118,18 +116,9 @@ actor SharedPeople {
         guard let page = pages[pageID] else { return }
         guard let snapshot = await repository.cachedSnapshot(for: key, activation: page.activation),
               let end = snapshot.avatarDeadline, end > .now,
-              let grant = await repository.avatarReadGrant(for: key, activation: page.activation),
-              let plan = grant.avatar.plan else { return }
-        try await grant.requireValid()
-        guard plan.mode == .httpGet, (1...2_097_152).contains(plan.expectedByteCount) else { throw SharedFailure.invalidInput }
-        var request = URLRequest(url: plan.url); request.httpMethod = "GET"
-        for header in plan.headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
-        // This transport receives only object capability headers; no account authorization wrapper.
-        let (data, response) = try await imageHTTP.data(for: request)
-        try await grant.requireValid()
-        guard pages[pageID]?.activation == page.activation, end > .now, response.statusCode == 200,
-              data.count == grant.avatar.byteCount,
-              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == grant.avatar.checksum.value else { throw SharedFailure.operationFailed }
+              let grant = await repository.avatarReadGrant(for: key, activation: page.activation) else { return }
+        let data = try await resources.avatarBytes(grant)
+        guard pages[pageID]?.activation == page.activation, end > .now else { throw CancellationError() }
         pages[pageID]?.image = (key, grant, data)
     }
     func loadGroupNickname(room: RoomID) async throws {
@@ -188,10 +177,12 @@ actor SharedPeople {
         guard let old = pages.removeValue(forKey: page) else { return }
         old.loader?.cancel(); old.observer?.cancel()
         await repository.deactivate(old.activation)
+        await old.loader?.value
+        await old.observer?.value
     }
     func clearAll() async {
         for page in Array(pages.keys) { await clear(page: page) }
         pages.removeAll()
     }
-    func close() async { await clearAll(); work = nil; failure = nil; await repository.close() }
+    func close() async { await clearAll(); work = nil; failure = nil; groupNickname = nil }
 }

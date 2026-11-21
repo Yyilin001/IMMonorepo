@@ -10,7 +10,7 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-82"
+    public static let currentSchemaID = "im-v2-current-83"
     private static let requiredTables = [
         "schema_contract", "room_dispatch_outbox", "account_notification_outbox", "author_presentation_change_head", "author_presentation_control_changes", "control_housekeeping_cursor", "realtime_device_control_versions", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "profile_security_invalidation_outbox", "public_profile_update_operations", "user_contact_aliases", "contact_alias_operation_receipts", "room_member_nicknames", "group_nickname_operation_receipts", "group_rooms", "group_invitation_admissions", "group_invitation_receipts", "group_invitation_control_commands", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
@@ -23,7 +23,7 @@ public enum V2SchemaReadiness {
         "push_device_budgets", "push_wake_outbox", "push_device_endpoints", "push_device_intents",
         "resource_group_avatar_closures", "resource_group_avatars", "resource_group_avatar_operations", "resource_catalog", "resource_forward_outputs", "resource_upload_sessions", "resource_blob_placements", "resource_variants", "resource_imports", "resource_import_holds", "resource_import_source_closures", "resource_storage_migrations",
         "media_objects", "media_scan_outbox", "media_download_grants", "media_purge_outbox", "message_media_references", "message_mentions", "moderation_operations", "moderation_audit_entries", "content_review_jobs", "content_review_decisions", "content_review_findings", "content_review_cases",
-        "room_recovery_topology", "user_shard_router_configuration", "user_shard_route_overrides",
+        "room_recovery_topology", "deployment_shard_sources", "user_shard_router_configuration", "user_shard_route_overrides",
         "device_room_progress",
         "policy_authorization_scopes",
         "policy_authorization_changes",

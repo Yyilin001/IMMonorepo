@@ -233,6 +233,12 @@ internal class SharedAppViewModel(application: Application) : AndroidViewModel(a
         if (error is CancellationException) return
         val message = when ((error as? SharedSdkException)?.reason) {
             SharedError.AuthenticationRequired -> "账号或密码不正确，或需要重新登录"
+            SharedError.CredentialsUnavailable -> "暂时无法读取本机凭据，请稍后重试"
+            SharedError.CredentialIssueRecoveryPending -> "凭据签发结果正在确认，请稍后重试"
+            SharedError.LocalStoreCloseFailed -> "本地会话暂时无法关闭，请重试"
+            SharedError.MalformedCredentials -> "本机凭据格式异常"
+            SharedError.DeviceMismatch -> "设备身份与当前会话不匹配"
+            SharedError.SessionInvalidated -> "会话已变更，请刷新后重试"
             SharedError.NetworkUnavailable -> "连接暂时不可用，请稍后重试"
             SharedError.StorageUnavailable -> "无法访问本机账户数据，请稍后重试"
             SharedError.InvalidConfiguration -> "请检查服务器地址和登录信息"

@@ -22,6 +22,11 @@ package struct V2PolicyMutationService: V2PolicyMutationServing {
         precondition(!endpoint.isEmpty && endpoint.utf8.count <= 512)
         self.owners = owners; self.endpoint = endpoint
     }
+    package func pressure(endpoint: String) async throws -> V2PolicyDirectoryPressure {
+        guard endpoint == self.endpoint else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
+        let state = await owners.pressure()
+        return .init(closed: state.closed, owners: state.owners, inFlight: state.roots)
+    }
     package func mutatePolicy(_ request: V2PolicyMutationWire, deadline: ContinuousClock.Instant) async throws -> V2PolicyMutationReceiptWire {
         guard request.endpoint == endpoint else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
         guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }

@@ -17,6 +17,8 @@ struct V2ConversationSnapshotList: View {
     }
 
     var body: some View {
+        let input = self.input
+        let canRestore = store.viewport.restoration == nil || presentation.presentedInput == input
         List(presentation.snapshot.rows) { row in
             V2ConversationSnapshotRow(row: row, store: store, navigation: navigation)
                 .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
@@ -24,7 +26,9 @@ struct V2ConversationSnapshotList: View {
         .listStyle(.plain)
         .accessibilityIdentifier("v2.conversation.list")
         .refreshable { await store.refresh() }
-        .modifier(V2ListViewportContainer(viewport: store.viewport, coordinateSpace: "v2.conversations.viewport"))
+        // A row from the previous frame cannot complete this restoration.
+        .modifier(V2ListViewportContainer(viewport: store.viewport, coordinateSpace: "v2.conversations.viewport",
+                                          canRestore: canRestore))
         .onChange(of: input, initial: true) { _, next in presentation.submit(next) }
         .task { await presentation.run() }
     }

@@ -185,11 +185,9 @@ public actor V2ResourceCenter {
             let original = try await self.files.variantSnapshots(for: key).first(where: { $0.descriptor.key.rendition == .original })
             if let original {
                 if try await self.files.hasPublishedBytes(checksum: original.descriptor.checksum, bytes: original.descriptor.byteCount) { return .local }
+                if let source { return .queued(.download(try journal.enqueueManualDownload(key, source: source))) }
             }
-            let job: UUID
-            if let source, original != nil { job = try journal.enqueueManualDownload(key, source: source) }
-            else { job = try journal.enqueueUnresolvedDownload(mediaID: mediaID, message: message) }
-            return .queued(.download(job))
+            return try await self.files.prepareUnresolvedMessageDownload(mediaID: mediaID, message: message, allowCached: original == nil)
         }
     }
     public func businessOwnerSnapshots(for query: V2ResourceBusinessOwnerQuery) async throws -> AsyncStream<V2ResourceBusinessOwnerSnapshot> {

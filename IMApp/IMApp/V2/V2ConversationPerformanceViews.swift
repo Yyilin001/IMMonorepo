@@ -30,6 +30,7 @@ struct V2ConversationPerformanceConfigView: View {
                 Picker(config.scenario == .seek ? "每秒跳转" : "每秒事件", selection: $config.rate) {
                     ForEach(config.scenario.rates, id: \.self) { rate in Text(rate.formatted()).tag(rate) }
                 }
+                .accessibilityIdentifier("v2.performance.rate")
                 Picker("持续时间", selection: $config.seconds) {
                     ForEach([5, 15, 30, 60], id: \.self) { seconds in Text("\(seconds) 秒").tag(seconds) }
                 }

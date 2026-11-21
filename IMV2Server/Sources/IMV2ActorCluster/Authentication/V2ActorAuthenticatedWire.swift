@@ -77,6 +77,15 @@ public struct V2ActorSessionGrant: Codable, Equatable, Sendable {
     public var agreementKey: Data? = nil
 }
 
+public struct V2PolicyDirectoryPressure: Codable, Equatable, Sendable {
+    public let closed: Bool
+    public let owners: Int
+    public let inFlight: Int
+    public init(closed: Bool, owners: Int, inFlight: Int) {
+        self.closed = closed; self.owners = owners; self.inFlight = inFlight
+    }
+}
+
 public enum V2ActorRPCRequest: Codable, Equatable, Sendable {
     case placementWrite(V2PlacementRaftWire)
     case placementRead(V2PlacementRaftWire)
@@ -84,6 +93,7 @@ public enum V2ActorRPCRequest: Codable, Equatable, Sendable {
     case drainPlacement(V2ActorPlacementDrainWire)
     case activate(roomID: RoomID, owner: V2RoomDataOwner)
     case lookup(V2RoomActivationToken)
+    case policyPressure(endpoint: String)
     case mutatePolicy(V2PolicyMutationWire)
     case policySnapshots(V2PolicySnapshotRequestWire)
     case updatePolicySnapshot(V2PolicySnapshotUpdateWire)
@@ -110,6 +120,7 @@ public enum V2ActorRPCResponse: Codable, Equatable, Sendable {
     case completed(Bool)
     case acknowledged
     case policyMutationIdentityConflict(V2PolicyMutationWire)
+    case policyPressure(V2PolicyDirectoryPressure)
     case policyMutationCommitted(V2PolicyMutationReceiptWire)
     case policySnapshots(V2PolicySnapshotBatchWire)
     case forwardPair(V2ActorForwardMessageResultWire)

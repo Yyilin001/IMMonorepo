@@ -1,0 +1,74 @@
+[
+  {
+    "kind": "native-backend-test-assertion",
+    "log": "/tmp/im-phase18-native3.log",
+    "cause": "Avatar derivatives are server-processed; original JPEG equality is not the avatar contract.",
+    "resolution": "Decode returned authorized image, verify stable cached bytes; file downloads retain exact byte equality.",
+    "rerun": "/tmp/im-phase18-native4.log",
+    "passed": true
+  },
+  {
+    "kind": "ios-upload-fixture",
+    "attempts": [
+      "/tmp/im-phase18-ios-backend.log",
+      "/tmp/im-phase18-ios-backend2.log"
+    ],
+    "cause": "Observation parser expected removed wire partNumber instead of scope.part.number, misclassifying real background PUT.",
+    "resolution": "Align fixture with current Swift contract and add two Python tests.",
+    "uploadRerunPassed": true
+  },
+  {
+    "kind": "ios-download-fixture",
+    "attempts": [
+      "/tmp/im-phase18-ios-backend3.log"
+    ],
+    "cause": "Uploader reuses existing bytes, so download button no longer exists; completion UI is now View File.",
+    "resolution": "Use a fresh owned installation with real UI login to require download; check current View File entry and cold cached reuse."
+  },
+  {
+    "kind": "ios-simulator-suspension",
+    "attempts": [
+      "/tmp/im-phase18-ios-backend4.log",
+      "/tmp/im-phase18-ios-backend5.log"
+    ],
+    "cause": "XCTest observed runningBackground for 90 seconds rather than runningBackgroundSuspended.",
+    "resolution": "Retain strict suspension assertion and record iOS 18.5 simulator scheduling failures; attempt 3 passed actual suspension. Repeat on installed iOS 27.0 runtime."
+  },
+  {
+    "kind": "download-observation-layout",
+    "cause": "Read-only review found observer still using obsolete global background directory and media-cache filename pattern.",
+    "resolution": "Observe current account .background inbox and UUID files bound by the resource journal, with a contract test for stage, canonical cache, unbound bytes and corruption."
+  },
+  {
+    "kind": "ios27-ui-harness",
+    "attempts": [
+      "/tmp/im-phase18-ios-backend6.log"
+    ],
+    "cause": "Existing conversation menu locator failed at IMAppLocalTwoInstallE2ETests.swift:1851 on iOS 27.0.",
+    "resolution": "Do not claim iOS 27 UI acceptance; complete phase18 functional verification on iOS 18.5."
+  },
+  {
+    "kind": "obsolete-download-transport-assumption",
+    "attempts": [
+      "/tmp/im-phase18-ios-backend7.log"
+    ],
+    "cause": "Existing manual download demand intentionally selects foreground Range GET; HTTP evidence showed one successful 206 response, while the legacy gate required 200 background GET.",
+    "resolution": "Add an explicitly named manual-download facade acceptance case with actual 206 observation and journal-bound file hash verification. Keep the independent background-download test strict and preserve production transport selection."
+  },
+  {
+    "kind": "ios-download-completion-locator",
+    "attempts": [
+      "/tmp/im-phase18-ios-backend8.log"
+    ],
+    "cause": "The real download completed and View File appeared, but the test queried the disappeared Download button for its identifier after tapping.",
+    "resolution": "Capture the stable identifier before the UI transition. No product behavior change."
+  },
+  {
+    "kind": "download-observation-root",
+    "attempts": [
+      "/tmp/im-phase18-ios-backend9.log"
+    ],
+    "cause": "Persistent and Caches roots share the owned scope name; the old fixture assumed there was only one such directory and returned 400.",
+    "resolution": "Locate the single authoritative V2.sqlite across both roots and keep byte verification journal-bound. Contract test now creates both roots."
+  }
+]

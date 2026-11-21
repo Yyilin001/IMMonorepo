@@ -7,6 +7,7 @@ import SQLKit
 /// Prepares a locked direct-room append and writes policy, messages, then
 /// projections on the connection borrowed from the Store transaction.
 struct V2RoomWriteDirectBatchPath: Sendable {
+    var profileDatabase: (any SQLDatabase)? = nil
     let strangerMessagePolicy: V2StrangerMessagePolicy
 
     /// 在所有受影响的房间、成员、单聊配对与策略行都已完成预检加锁之后，
@@ -81,7 +82,7 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         do {
             projectionChanges = try await v2MeasureSendOperationStage(.ownerProjection, metrics: sendOperationMetrics) {
                 try await V2RoomWriteDirectProjectionPath.appendBatch(
-                    for: prepared,
+                    for: prepared, profileDatabase: profileDatabase,
                     sql: sql
                 )
             }

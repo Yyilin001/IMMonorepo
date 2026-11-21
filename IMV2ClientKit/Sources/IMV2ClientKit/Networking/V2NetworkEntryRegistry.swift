@@ -48,6 +48,8 @@ public enum V2NetworkEntryRegistry {
         "V2NativeBackgroundSession.swift": [.objectBytes],
         "V2RangeDownloadTransport.swift": [.objectBytes],
         "V2BoundedFileUpload.swift": [.objectBytes],
+        "AndroidResourceTransport.swift": [.objectBytes],
+        "AppleSharedPlatform.swift": [.objectBytes],
         "V2FoundationHTTPSession.swift": [.accountHTTP],
         "V2SecureURLSession.swift": [.configuration]
     ]

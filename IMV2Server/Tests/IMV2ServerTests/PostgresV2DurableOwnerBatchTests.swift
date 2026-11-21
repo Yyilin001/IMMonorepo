@@ -384,6 +384,187 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("cross-room commit shares one transaction, fences stale rooms and recovers lost ACKs",
+          arguments: ["commit", "stale", "retiredPermit", "constraint", "unknown", "scheduler", "byteLimit"])
+    func crossRoomPlainCommit(scenario: String) async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try forwardImportTestProfile()
+            let rooms = try await ownerBatchRooms(database: database, profile: profile, now: now)
+            for recipient in [memberTwoUUID, memberThreeUUID] {
+                try await sql.raw("""
+                    INSERT INTO im_v2.user_relationships VALUES
+                    (LEAST(\(bind: senderUUID)::uuid,\(bind: recipient)::uuid),
+                     GREATEST(\(bind: senderUUID)::uuid,\(bind: recipient)::uuid),'accepted',\(bind: senderUUID),\(bind: now))
+                    """).run()
+            }
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
+            let metrics = V2SendOperationBatchMetrics(), observer = DurableOwnerBatchObserver()
+            let store = PostgresV2MessageSendOperationStore(database: database,
+                writes: PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled)
+                    .usingControlDatabase(database).usingPolicyAuthorizations(policies),
+                clock: { now }, committedMessageObserver: observer, sendOperationMetrics: metrics)
+            let prepare = policies.fixtureSendPreparation(store: store, now: { now })
+            try await withRoomActivation(database: database, roomID: rooms[0]) { first in
+                try await withRoomActivation(database: database, roomID: rooms[1]) { second in
+                    let tokens = [first, second]
+                    for token in tokens {
+                        let warm = try ownerBatchCommand(room: token.roomID, text: "initialize", now: now)
+                        let handle = try await prepare([warm], token, .now + .seconds(30))
+                        let result = try await store.executeIndependentRoomTurns([handle], capacityProfile: profile,
+                            identifiers: .init(), now: { now })
+                        _ = try result[0].get()
+                    }
+                    let text = scenario == "byteLimit" ? String(repeating: "a", count: 18_000) : "batch"
+                    let firstID = try ClientMessageID("FFFFFFFF-0000-4000-8000-000000000002")
+                    let secondID = try ClientMessageID("00000000-0000-4000-8000-000000000001")
+                    let commands = try rooms.map { try ownerBatchCommand(room: $0, operationID: firstID, text: text, now: now) }
+                    let firstCommands = scenario == "commit"
+                        ? try [commands[0], ownerBatchCommand(room: rooms[0], operationID: secondID, text: "next in room", now: now)]
+                        : [commands[0]]
+                    let a = try await prepare(firstCommands, first, .now + .seconds(30))
+                    let b = try await prepare([commands[1]], second, .now + .seconds(30))
+                    if scenario == "stale" {
+                        try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: rooms[1].uuidValue!)").run()
+                    } else if scenario == "retiredPermit" {
+                        await policies.retire(token: second)
+                    } else if scenario == "constraint" {
+                        // Reject only the second message after the first room could have advanced.
+                        let room = try #require(rooms[1].uuidValue)
+                        let operation = try #require(commands[1].command.clientMessageID.uuidValue)
+                        try await sql.raw("""
+                            ALTER TABLE im_v2.message_send_completions ADD CHECK
+                            ((room_id,client_message_id) <> (\(literal: room.uuidString)::uuid,\(literal: operation.uuidString)::uuid))
+                            """).run()
+                    } else if scenario == "unknown" {
+                        try await sql.raw("""
+                            CREATE FUNCTION im_v2.fixture_slow_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+                            BEGIN PERFORM pg_sleep(1); RETURN NEW; END $$
+                            """).run()
+                        try await sql.raw("""
+                            CREATE CONSTRAINT TRIGGER fixture_slow_commit AFTER INSERT ON im_v2.messages
+                            DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION im_v2.fixture_slow_commit()
+                            """).run()
+                    }
+                    let before = try await count("im_v2.messages", on: sql)
+                    let outboxBefore = try await count("im_v2.room_dispatch_outbox", on: sql)
+                    let observed = Mutex<[Int]>([])
+                    let instrumented = store.observingOwnerTransactions { _, _, count in observed.withLock { $0.append(count) } }
+                    if scenario == "scheduler" || scenario == "byteLimit" {
+                        let (gate, signal) = AsyncStream<Void>.makeStream()
+                        let scheduler = V2DurableSendOperationOwnerBatcher(store: store,
+                            configuration: .init(maximumPendingRequests: 8, maximumCrossRoomMessages: 4),
+                            maximumRetainedBytes: 262_144, resourceDemandLimit: 1,
+                            scheduledConnection: { deadline, body in
+                                for await _ in gate { break }
+                                try await instrumented.withMessageWriteConnection(deadline: deadline, body)
+                            }, scheduledGroup: { turn, group in
+                                try await turn.executeGroup?(group, profile, .init(), { now })
+                            }, scheduledExecute: { turn, handle in try await turn.execute(handle, profile, .init(), { now }) })
+                        async let firstACK = scheduler.execute(a)
+                        async let secondACK = scheduler.execute(b)
+                        let cutoff = ContinuousClock.now + .seconds(3)
+                        while scheduler.pressureSnapshot().queuedTurns < 2 && ContinuousClock.now < cutoff { await Task.yield() }
+                        signal.finish()
+                        let received = try await [firstACK, secondACK]
+                        await scheduler.shutdown()
+                        #expect(observed.withLock { $0 } == (scenario == "byteLimit" ? [1, 1] : [2]))
+                        #expect(received.map(\.count) == [1, 1])
+                        #expect(observer.count == 4)
+                        #expect(try await count("im_v2.messages", on: sql) == before + 2)
+                        #expect(try await count("im_v2.message_send_completions", on: sql) == before + 2)
+                        return
+                    }
+                    let deadline = ContinuousClock.now + (scenario == "unknown" ? .milliseconds(600) : .seconds(10))
+                    let outcomes: [V2ScheduledSendOutcome]?
+                    do {
+                        outcomes = try await instrumented.withMessageWriteConnection(deadline: .now + .seconds(10), pipelineDepth: 2) { executor in
+                            let execute = try #require(executor.makeTurn().executeGroup)
+                            if scenario == "commit" {
+                                let duplicateRoom = try await execute([b, b], profile, .init(), { now })
+                                #expect(duplicateRoom == nil)
+                            }
+                            return try await V2RoomSQLDeadline.withDeadline(deadline) {
+                                try await execute([a, b], profile, .init(), { now })
+                            }
+                        }
+                        #expect(scenario != "unknown")
+                    } catch is V2RoomTransactionOutcomeUnknown {
+                        #expect(scenario == "unknown")
+                        #expect(observer.count == 2)
+                        #expect(metrics.sendOperationBatchMetricsSnapshot().ownerCohortIsolations == 0)
+                        // Wait for the server's deferred COMMIT to settle after its client disconnected.
+                        for _ in 0..<200 {
+                            if try await count("pg_stat_activity WHERE datname=current_database() AND query='COMMIT' AND state='active'", on: sql) == 0 { break }
+                            try await Task.sleep(for: .milliseconds(25))
+                        }
+                        let committed = try await count("im_v2.messages", on: sql) - before
+                        #expect(committed == 0 || committed == 2)
+                        try await sql.raw("DROP TRIGGER fixture_slow_commit ON im_v2.messages").run()
+                        let retried = try await store.executeIndependentRoomTurns([a, b], capacityProfile: profile, identifiers: .init(), now: { now })
+                        for result in retried { _ = try result.get() }
+                        #expect(try await count("im_v2.messages", on: sql) == before + 2)
+                        #expect(try await count("im_v2.message_send_completions", on: sql) == before + 2)
+                        return
+                    }
+                    let reachedAppend = scenario != "stale" && scenario != "retiredPermit"
+                    #expect(observed.withLock { $0 } == (reachedAppend ? [2] : []))
+                    if scenario == "commit" {
+                        let committed = try #require(outcomes)
+                        #expect(committed.count == 2)
+                        #expect(observer.count == 2)
+                        // An ACK can be lost after COMMIT, before either Actor applies its result.
+                        // Read the permanent receipts through a fresh store, without a live room cache.
+                        let restarted = v2FixtureMessageSendOperationStore(database: database, writes: .init(database: database), clock: { now })
+                        for (i, inputs) in [firstCommands, [commands[1]]].enumerated() {
+                            let values = try committed[i].result.get()
+                            #expect(values.count == inputs.count)
+                            var sequence: UInt64?
+                            for (command, value) in zip(inputs, values) {
+                                let query = try V2MessageSendOperationRecoveryRequest(identity: command.identity,
+                                    fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint)
+                                let durable = try await restarted.recover(query, token: tokens[i])
+                                #expect(value == .sendOperation(durable))
+                                guard case .receipt(let receipt) = durable, case .accepted(let ack) = receipt.outcome else {
+                                    throw V2MessageOperationValidationError.invalidReceipt
+                                }
+                                if let sequence { #expect(ack.roomSequence == sequence + 1) }
+                                sequence = ack.roomSequence
+                                let changed = try ownerBatchCommand(room: rooms[i], operationID: command.command.clientMessageID, text: "different", now: now)
+                                let mismatch = try V2MessageSendOperationRecoveryRequest(identity: changed.identity,
+                                    fingerprint: changed.fingerprint, domainFingerprint: changed.command.fingerprint)
+                                #expect(try await restarted.recover(mismatch, token: tokens[i]) == .fingerprintConflict)
+                            }
+                        }
+                        // Finish the two rooms independently, including in reverse order.
+                        for outcome in committed.reversed() { await outcome.finalize() }
+                        #expect(observer.count == 5)
+                        let replay = try await store.executeIndependentRoomTurns([a, b], capacityProfile: profile, identifiers: .init(), now: { now })
+                        for i in commands.indices {
+                            let values = try committed[i].result.get()
+                            guard case .sendOperation(.receipt(let receipt)) = values.first,
+                                  case .accepted = receipt.outcome else { throw V2MessageOperationValidationError.invalidReceipt }
+                            #expect(receipt.validates(identity: try commands[i].identity, fingerprint: try commands[i].fingerprint))
+                            #expect(try replay[i].get() == values)
+                        }
+                        #expect(try await count("im_v2.messages", on: sql) == before + 3)
+                        #expect(try await count("im_v2.room_dispatch_outbox", on: sql) == outboxBefore + 3)
+                        #expect(try await count("im_v2.message_send_completions", on: sql) == before + 3)
+                    } else {
+                        #expect(outcomes == nil)
+                        #expect(observer.count == 2)
+                        #expect(try await count("im_v2.messages", on: sql) == before)
+                        #expect(try await count("im_v2.room_dispatch_outbox", on: sql) == outboxBefore)
+                        #expect(try await count("im_v2.message_send_completions", on: sql) == before)
+                        let healthy = try await store.executeIndependentRoomTurns([a], capacityProfile: profile, identifiers: .init(), now: { now })
+                        _ = try healthy[0].get()
+                        #expect(try await count("im_v2.messages", on: sql) == before + 1)
+                    }
+                }
+            }
+        }
+    }
+
     private func ownerBatchRooms(database: any FluentKit.Database, profile: V2CapacityProfile, now: Date) async throws -> [RoomID] {
         var rooms: [RoomID] = []
         for recipient in [memberTwoUUID, memberThreeUUID] {
@@ -398,7 +579,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     private func ownerBatchCommand(room: RoomID, operationID: ClientMessageID = .init(uuid: UUID()), text: String, now: Date) throws -> V2MessageSendOperationCommand {
         try .init(command: .init(roomID: room, senderUserID: senderID, clientMessageID: operationID,
-            text: text, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 60_000)
+            text: text, limits: .init(maxUTF8Bytes: max(64, text.utf8.count))), firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 60_000)
     }
 }
 

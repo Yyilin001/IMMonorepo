@@ -279,6 +279,8 @@ struct GatewayDatabaseTopology {
         }
         let roomIdentityControlDatabase: any Database = identityPool.database
 
+        try await V2FixedShardSources.verify(control: database, rooms: configuration.roomShardStorage,
+            users: configuration.userShardStorage) { databaseForRole(for: .foreground, url: $0) }
         // Schema 就绪性属于拓扑状态，不属于工作类别状态。
         // 各类别连接池验证会话 GUC 后，通过前台连接池逐一验证配置的 Schema。
         try await V2SchemaReadiness.verify(database: database)

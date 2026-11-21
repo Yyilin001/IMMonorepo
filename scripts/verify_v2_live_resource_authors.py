@@ -27,14 +27,12 @@ import shutil
 import signal
 import socket
 import ssl
-import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import uuid
-import zlib
 from v2_live_author_capacity import AuthorCapacityFixture
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -785,12 +783,8 @@ def main():
                     # simulator, never the host or any real device. No cloud
                     # credentials enter the UI process or its launch arguments.
                     run(['xcrun', 'simctl', 'keychain', args.app_ui_simulator, 'add-root-cert', str(private / 'ca.der')])
-                    def png_chunk(kind, data):
-                        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
                     image = output / 'system-photo-fixture.png'
-                    image.write_bytes(b'\x89PNG\r\n\x1a\n' +
-                        png_chunk(b'IHDR', struct.pack('>IIBBBBB', 64, 64, 8, 2, 0, 0, 0)) +
-                        png_chunk(b'IDAT', zlib.compress((b'\0' + bytes([32, 120, 230]) * 64) * 64)) + png_chunk(b'IEND', b''))
+                    shutil.copyfile(ROOT / 'IMApp/Scripts/test-fixtures/system-photo.png', image)
                     run(['xcrun', 'simctl', 'addmedia', args.app_ui_simulator, str(image)])
                     groups = subprocess.check_output(['xcrun', 'simctl', 'get_app_container', args.app_ui_simulator,
                         'com.apple.DocumentsApp', 'groups'], env=environment, text=True)

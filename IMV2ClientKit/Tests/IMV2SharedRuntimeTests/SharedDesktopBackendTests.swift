@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import AppKit
 import Network
 import Security
 import Testing
@@ -121,6 +122,193 @@ import IMV2SharedApple
             _ = try? await first.command(["operation":"close"]); _ = try? await peer.command(["operation":"close"])
             try? await fixture.cleanSecureItems()
             throw error
+        }
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IM_SHARED_BACKEND_ENDPOINTS"] != nil))
+    func nativeContactAndGroupFacadeUsesRealBackendAndRetiresWithAccount() async throws {
+        let fixture = try DesktopFixture(path: #require(ProcessInfo.processInfo.environment["IM_SHARED_BACKEND_ENDPOINTS"]))
+        defer { fixture.close() }
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(10)
+        let password = UUID().uuidString + "aA1!", names = ["directory_\(suffix)_a", "directory_\(suffix)_b", "directory_\(suffix)_c"]
+        let accounts = try await names.asyncMap { try await fixture.register($0, password: password) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("im-directory-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let platform = fixture.platform(installation: "directory-a")
+        let config = try fixture.configuration(root: root.appendingPathComponent("a"))
+        var first = try SharedRuntime(config, platform: platform)
+        let peer = try SharedRuntime(fixture.configuration(root: root.appendingPathComponent("b")), platform: fixture.platform(installation: "directory-b"))
+        do {
+            _ = try await first.command(["operation":"login", "account":names[0], "password":password])
+            _ = try await peer.command(["operation":"login", "account":names[1], "password":password])
+            _ = try await first.command(["operation":"connect"]); _ = try await peer.command(["operation":"connect"])
+            let contacts = try #require(await first.contactBusiness), peerContacts = try #require(await peer.contactBusiness)
+            let groups = try #require(await first.groupBusiness), peerGroups = try #require(await peer.groupBusiness)
+            let target = try await contacts.resolve(handle: names[1])
+            #expect(target.userID.rawValue == accounts[1].userID)
+            _ = try await contacts.relationships.enqueue(action: .relationship(.request), targetUserID: target.userID)
+            try await directoryWait([first, peer]) { try await peerContacts.page(scope: .incomingRequests).relationships.contains { $0.targetUserID.rawValue == accounts[0].userID } }
+            _ = try await peerContacts.relationships.enqueue(action: .relationship(.accept), targetUserID: UserID(accounts[0].userID))
+            try await directoryWait([first, peer]) { try await contacts.page(scope: .friends).relationships.contains { $0.targetUserID == target.userID } }
+            _ = try await contacts.relationships.enqueue(action: .userBlock(.block), targetUserID: target.userID)
+            try await directoryWait([first, peer]) { try await contacts.blocked().items.contains { $0.targetUserID == target.userID } }
+            _ = try await contacts.relationships.enqueue(action: .userBlock(.unblock), targetUserID: target.userID)
+            try await directoryWait([first, peer]) { try await contacts.blocked().items.isEmpty }
+            print("Directory native: lookup, request/accept, block/unblock synchronized")
+            let work = try await groups.creation.enqueue(title: "共享群组 \(suffix)", members: [target.userID])
+            try await directoryWait([first, peer]) { try await groups.creation.pending(id: work).receipt != nil }
+            guard case .created(let room, _, _, _) = try await groups.creation.pending(id: work).receipt?.outcome else { throw DesktopFixture.Failure.response }
+            try await directoryWait([first, peer]) { try await groups.page().items.contains { $0.roomID == room } }
+            try await directoryWait([first, peer]) { try await peerGroups.page().items.contains { $0.roomID == room } }
+            let members = try await groups.listRoomMembers(roomID: room, cursor: nil, pageSize: 50)
+            #expect(members.members.count == 2); #expect(members.actorRole == .owner)
+            let originalAnnouncement = try await groups.announcement(in: room)
+            try await groups.capabilities.enqueue(confirmation: groups.capabilities.confirmationWindow(roomID: room,
+                action: .announcement(body: "共享门面公告", expectedRevision: originalAnnouncement?.revision ?? 0)))
+            try await directoryWait([first, peer]) { try await peerGroups.announcement(in: room)?.body == "共享门面公告" }
+            let invitation = try await groups.invitations.confirmation(roomID: room,
+                action: .create(lifetimeSeconds: 3600, maximumApprovedUses: 10, expectedMembershipRevision: members.membershipRevision))
+            try await groups.invitations.enqueue(invitation)
+            try await directoryWait([first, peer]) { try await groups.activeInvites(roomID: room).count == 1 }
+            let link = try #require(try await groups.activeInvites(roomID: room).first)
+            #expect(try await peerGroups.preview(secret: link.secret).isAlreadyMember)
+            try await groups.invitations.enqueue(groups.invitations.confirmation(roomID: room,
+                action: .revoke(inviteID: link.inviteID, expectedMembershipRevision: members.membershipRevision)))
+            try await directoryWait([first, peer]) { try await groups.activeInvites(roomID: room).isEmpty }
+            let leave = try peerGroups.membership.confirmationWindow(roomID: room, action: .remove, expectedMembershipRevision: members.membershipRevision)
+            try await peerGroups.membership.enqueue(targetUserID: target.userID, confirmation: leave)
+            try await directoryWait([first, peer]) { try await groups.listRoomMembers(roomID: room, cursor: nil, pageSize: 50).members.count == 1 }
+            try await directoryWait([first, peer]) { try await peerGroups.page().items.allSatisfy { $0.roomID != room } }
+            print("Directory native: creation, membership, announcement, invitation/revocation and leave synchronized")
+            fixture.cutConnections(installation: "directory-a")
+            try await wait { try await first.current().state == "offline" }
+            _ = try await first.command(["operation":"close"])
+            await #expect(throws: V2DirectoryServiceError.self) { try await contacts.page(scope: .friends) }
+            await #expect(throws: V2DirectoryServiceError.self) { try await groups.creation.latest() }
+            first = try SharedRuntime(config, platform: platform)
+            _ = try await first.command(["operation":"restore"]); _ = try await first.command(["operation":"connect"])
+            let restored = try #require(await first.groupBusiness)
+            try await directoryWait([first, peer]) { try await restored.page().items.contains { $0.roomID == room } }
+            _ = try await first.command(["operation":"signOut"])
+            _ = try await first.command(["operation":"login", "account":names[2], "password":password])
+            let cleanContacts = try #require(await first.contactBusiness), cleanGroups = try #require(await first.groupBusiness)
+            #expect(try await cleanContacts.page(scope: .friends).relationships.isEmpty)
+            #expect(try await cleanGroups.page().items.isEmpty)
+            _ = try await first.command(["operation":"signOut"]); _ = try await first.command(["operation":"close"])
+            _ = try await peer.command(["operation":"signOut"]); _ = try await peer.command(["operation":"close"])
+            try await fixture.cleanSecureItems()
+            print("Directory native: physical disconnect, restore, old handle rejection and account isolation passed")
+        } catch {
+            _ = try? await first.command(["operation":"close"]); _ = try? await peer.command(["operation":"close"])
+            try? await fixture.cleanSecureItems(); throw error
+        }
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IM_SHARED_BACKEND_ENDPOINTS"] != nil))
+    func nativeProfilesAvatarsAndResourcesUseRealBackend() async throws {
+        let fixture = try DesktopFixture(path: #require(ProcessInfo.processInfo.environment["IM_SHARED_BACKEND_ENDPOINTS"]))
+        defer { fixture.close() }
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(10)
+        let password = UUID().uuidString + "aA1!", names = ["resources_\(suffix)_a", "resources_\(suffix)_b"]
+        let accounts = try await names.asyncMap { try await fixture.register($0, password: password) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("im-native-resources-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try SharedRuntime(fixture.configuration(root: root.appendingPathComponent("a")), platform: fixture.platform(installation: "resources-a"))
+        let peer = try SharedRuntime(fixture.configuration(root: root.appendingPathComponent("b")), platform: fixture.platform(installation: "resources-b"))
+        do {
+            _ = try await first.command(["operation":"login", "account":names[0], "password":password])
+            _ = try await peer.command(["operation":"login", "account":names[1], "password":password])
+            _ = try await first.command(["operation":"connect"]); _ = try await peer.command(["operation":"connect"])
+            let contacts = try #require(await first.contactBusiness), peerContacts = try #require(await peer.contactBusiness)
+            let target = try UserID(accounts[1].userID), actor = try UserID(accounts[0].userID)
+            _ = try await contacts.relationships.enqueue(action: .relationship(.request), targetUserID: target)
+            try await directoryWait([first, peer]) { try await peerContacts.page(scope: .incomingRequests).relationships.contains { $0.targetUserID == actor } }
+            _ = try await peerContacts.relationships.enqueue(action: .relationship(.accept), targetUserID: actor)
+            try await directoryWait([first, peer]) { try await contacts.page(scope: .friends).relationships.contains { $0.targetUserID == target } }
+            let profiles = try #require(await first.profileBusiness), peerProfiles = try #require(await peer.profileBusiness)
+            let resources = try #require(await first.resourceBusiness), peerResources = try #require(await peer.resourceBusiness)
+            let own = try await profiles.ownProfile()
+            let original = try await own.refreshProfile()
+            _ = try await own.enqueue(expectedRevision: original.revision, patch: .init(displayName: .set("共享资料验收")))
+            try await directoryWait([first, peer]) { try await own.localProfile()?.publicIdentity?.displayName == "共享资料验收" }
+            let baseline = try await profiles.names.refresh(.contact(target))
+            _ = try await profiles.names.save(.contact(target), name: "原生备注", expectedRevision: baseline.revision)
+            try await directoryWait([first, peer]) { try await profiles.names.cached(.contact(target))?.name == "原生备注" }
+            let pageA = await profiles.presentations.activate(), pageB = await profiles.presentations.activate()
+            let lookup = V2ProfileViewLookupKey(userID: target, context: .relationship)
+            #expect(try await profiles.presentations.presentation(for: lookup, activation: pageA) != nil)
+            #expect(try await profiles.presentations.presentation(for: lookup, activation: pageB) != nil)
+            await profiles.presentations.deactivate(pageA)
+            #expect(try await profiles.presentations.presentation(for: lookup, activation: pageB) != nil)
+            print("Resource native: profile, alias and independent presentation windows passed")
+            let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 12, bitsPerPixel: 24))
+            bitmap.bitmapData?.initialize(repeating: 160, count: 48)
+            let jpeg = try #require(bitmap.representation(using: .jpeg, properties: [:]))
+            let avatar = try await resources.library.importLocal(data: jpeg, displayName: .init("native-avatar.jpg"), contentType: .init("image/jpeg"), purpose: .personalAvatar, imageDimensions: .init(width: 4, height: 4), maximumBytes: 524_288, maximumSelections: 4)
+            let uploadID = UUID(), current = try await own.refreshProfile()
+            _ = try await own.enqueue(expectedRevision: current.revision, patch: .init(avatar: .set(.init(mediaID: .init(uuid: uploadID)))), avatarUpload: .init(id: uploadID, localAssetID: avatar.id, displayName: avatar.displayName.value, contentType: avatar.contentType.value, byteCount: avatar.byteCount))
+            try await directoryWait([first, peer]) { try await own.localProfile()?.avatar?.mediaID == MediaID(uuid: uploadID) }
+            let peerPage = await peerProfiles.presentations.activate(), actorKey = V2ProfileViewLookupKey(userID: actor, context: .relationship)
+            #expect(try await peerProfiles.presentations.presentation(for: actorKey, activation: peerPage) != nil)
+            let grant = try #require(await peerProfiles.presentations.avatarReadGrant(for: actorKey, activation: peerPage))
+            let profileBytes = try await peerResources.avatarBytes(grant)
+            let profileImage = try #require(NSBitmapImageRep(data: profileBytes))
+            #expect(profileImage.pixelsWide > 0 && profileImage.pixelsHigh > 0)
+            #expect(try await peerResources.avatarBytes(grant) == profileBytes)
+            await peerProfiles.presentations.deactivate(peerPage)
+            await #expect(throws: (any Error).self) { try await peerResources.avatarBytes(grant) }
+            print("Resource native: own avatar upload, authorized peer bytes and retired grant rejection passed")
+            let groups = try #require(await first.groupBusiness)
+            let creation = try await groups.creation.enqueue(title: "原生资源 \(suffix)", members: [target])
+            try await directoryWait([first, peer]) { try await groups.creation.pending(id: creation).receipt != nil }
+            guard case .created(let room, _, _, _) = try await groups.creation.pending(id: creation).receipt?.outcome else { throw DesktopFixture.Failure.response }
+            try await open(first, room: room.rawValue); try await open(peer, room: room.rawValue)
+            let groupImage = try await resources.library.importLocal(data: jpeg, displayName: .init("native-group.jpg"), contentType: .init("image/jpeg"), purpose: .groupAvatar(room), imageDimensions: .init(width: 4, height: 4), maximumBytes: 524_288, maximumSelections: 4)
+            guard case .authorized(let authority) = try await resources.groupAvatars.load(roomID: room).access else { throw DesktopFixture.Failure.response }
+            _ = try await resources.groupAvatars.change(roomID: room, expectedRevision: authority.state.revision, image: .init(id: UUID(), localAssetID: groupImage.id, contentType: groupImage.contentType.value, byteCount: groupImage.byteCount))
+            try await directoryWait([first, peer]) {
+                guard case .authorized(let state) = try await resources.groupAvatars.load(roomID: room).access else { return false }
+                return state.state.mediaID != nil && state.state.revision > authority.state.revision
+            }
+            let groupPage = try await peerResources.groupAvatars.presentations.activate(roomID: room)
+            _ = try await peerResources.groupAvatars.presentations.presentation(for: groupPage)
+            let groupGrant = try #require(try await peerResources.groupAvatars.presentations.avatarReadGrant(for: groupPage))
+            let groupBytes = try await peerResources.avatarBytes(groupGrant)
+            #expect(NSBitmapImageRep(data: groupBytes) != nil)
+            #expect(try await peerResources.avatarBytes(groupGrant) == groupBytes)
+            let bytes = Data(repeating: 73, count: 131_073), text = "原生资源消息 \(suffix)"
+            let asset = try await resources.library.importLocal(data: bytes, displayName: .init("native-file.bin"), contentType: .init("application/octet-stream"), purpose: .messageDraft(room), maximumBytes: 262_144, maximumSelections: 4)
+            let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()), text: text, attachmentJobIDs: [UUID()])
+            try await resources.send(intent, assets: [asset.id], messages: #require(await first.messageBusiness))
+            try await directoryWait([first, peer]) { try await peer.current().chat?.messages.contains { $0.text == text && $0.hasMedia } == true }
+            let message = try #require(try await peer.current().chat?.messages.first { $0.text == text })
+            let attachment = try #require(message.attachments.first)
+            let file = try await peerResources.download(.init(mediaID: MediaID(attachment.id)), message: .init(roomID: room, messageID: MessageID(message.id)))
+            let lease = try await file.borrowFile(); let received = try Data(contentsOf: lease.fileURL); await lease.release()
+            #expect(received == bytes)
+            print("Resource native: group avatar and message resource upload/download byte equality passed")
+            _ = try await first.command(["operation":"signOut"])
+            await #expect(throws: V2DirectoryServiceError.self) { try await profiles.names.cached(.contact(target)) }
+            await #expect(throws: V2DirectoryServiceError.self) { try await own.localProfile() }
+            await #expect(throws: V2DirectoryServiceError.self) { try await resources.cancelSend(intent.id) }
+            _ = try await first.command(["operation":"close"]); _ = try await peer.command(["operation":"signOut"]); _ = try await peer.command(["operation":"close"])
+            try await fixture.cleanSecureItems()
+            print("Resource native: account close rejects retained profile/resource handles")
+        } catch {
+            _ = try? await first.command(["operation":"close"]); _ = try? await peer.command(["operation":"close"])
+            try? await fixture.cleanSecureItems(); throw error
+        }
+    }
+    private func directoryWait(_ clients: [SharedRuntime], _ predicate: () async throws -> Bool) async throws {
+        var reconnects = Array(repeating: 0, count: clients.count)
+        try await wait {
+            for (index, client) in clients.enumerated() {
+                let snapshot = try await client.current()
+                if snapshot.state == "offline", reconnects[index] < 3 {
+                    reconnects[index] += 1
+                    print("Directory native host reconnect: client=\(index) failure=\(snapshot.failure ?? "none")")
+                    _ = try await client.command(["operation":"connect"])
+                }
+            }
+            return try await predicate()
         }
     }
     private func open(_ client: SharedRuntime, room: String) async throws {

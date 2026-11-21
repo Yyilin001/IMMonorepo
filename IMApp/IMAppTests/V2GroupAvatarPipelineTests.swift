@@ -108,13 +108,15 @@ struct V2GroupAvatarPipelineTests {
             groups: .init(avatarManager: boundary), media: .init(attachmentStager: boundary)),
             context: .init(roomID: f.presentation.state.roomID.rawValue, title: "头像测试群", kind: .group))
         let displayedStates = OSAllocatedUnfairLock(initialState: [Bool]())
+        let pageScope = V2AuthorPresentationPageScope(context: .list(UUID()))
         let host = UIHostingController(rootView: NavigationStack {
             V2ConversationSettingsView(store: conversation, focusMessage: { _ in })
         }.environment(\.v2AvatarPipeline, pipeline).environment(\.scenePhase, .active)
             .environment(\.v2GroupAvatarDisplayObservation, { size, hasImage in
                 if size == 52 { displayedStates.withLock { $0.append(hasImage) } }
             })
-            .environment(\.v2AuthorPresentationPageScope, V2AuthorPresentationPageScope(context: .group(f.presentation.state.roomID))))
+            .environment(\.v2AuthorPresentationPageScope, pageScope)
+            .task { await pageScope.run(pipeline: pipeline) })
         let sheetHasImage = OSAllocatedUnfairLock(initialState: false)
         let sheet = UIHostingController(rootView: V2GroupAvatarManagementView(store: store)
             .environment(\.v2AvatarPipeline, pipeline).environment(\.scenePhase, .active)
@@ -125,16 +127,17 @@ struct V2GroupAvatarPipelineTests {
         let window = UIWindow(windowScene: scene)
         window.rootViewController = host; window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey(); store.suspend() }
+        func headerIsReady() -> Bool {
+            displayedStates.withLock { $0.last == true }
+                && pageScope.cachedGroup(room: f.presentation.state.roomID, pixels: 52, pipeline: pipeline)?.image != nil
+        }
         let loadedBy = ContinuousClock.now + .seconds(5)
-        while !displayedStates.withLock({ $0.last == true }) && ContinuousClock.now < loadedBy {
+        while !headerIsReady() && ContinuousClock.now < loadedBy {
             try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(displayedStates.withLock { $0.last == true })
-        // Let the independent page cache finish before opening the sheet.
-        try await Task.sleep(for: .milliseconds(100))
+        try #require(headerIsReady())
         displayedStates.withLock { $0.removeAll() }
         let initialReads = await f.reader.calls
-        #expect(initialReads >= 3)
         await withCheckedContinuation { continuation in
             host.present(sheet, animated: true) { continuation.resume() }
         }

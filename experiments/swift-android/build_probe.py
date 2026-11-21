@@ -12,9 +12,14 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BUILD = HERE / "build"
-VERSION = "6.4.1"
+VERSION = (ROOT / ".swift-version").read_text().strip()
 SDK_ID = f"swift-{VERSION}-RELEASE_android"
-SDK = Path.home() / ".swiftpm/swift-sdks" / (SDK_ID + ".artifactbundle/swift-android")
+SDK_RELATIVE_PATH = Path(SDK_ID + ".artifactbundle") / "swift-android"
+SDK_INSTALL_DIRS = (
+    Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "swiftpm/swift-sdks",
+    Path.home() / "Library/org.swift.swiftpm/swift-sdks",
+    Path.home() / ".swiftpm/swift-sdks",
+)
 ANDROID = Path(os.environ.get("ANDROID_HOME", Path.home() / "Library/Android/sdk"))
 NDK = Path(os.environ.get("ANDROID_NDK_HOME", ANDROID / "ndk/30.0.16248370"))
 TRIPLE = "aarch64-unknown-linux-android31"
@@ -33,9 +38,15 @@ def main():
     args = parser.parse_args()
     shared_sdk = args.shared_sdk
     BUILD.mkdir(exist_ok=True)
-    if not SDK.is_dir() or not NDK.is_dir():
-        raise SystemExit(f"Install {SDK_ID} and NDK 30.0.16248370 first; see README.md")
-    run([SDK / "scripts/setup-android-sdk.sh"], env={**os.environ, "ANDROID_NDK_HOME": str(NDK)})
+    sdk_install_dir = next((directory for directory in SDK_INSTALL_DIRS
+                            if (directory / SDK_RELATIVE_PATH / "scripts/setup-android-sdk.sh").is_file()), None)
+    if sdk_install_dir is None:
+        searched = ", ".join(map(str, SDK_INSTALL_DIRS))
+        raise SystemExit(f"Install {SDK_ID} first; it was not found in {searched}. See README.md.")
+    if not NDK.is_dir():
+        raise SystemExit(f"Install NDK 30.0.16248370 first; it was not found at {NDK}. See README.md.")
+    sdk = sdk_install_dir / SDK_RELATIVE_PATH
+    run([sdk / "scripts/setup-android-sdk.sh"], env={**os.environ, "ANDROID_NDK_HOME": str(NDK)})
     prebuilt = next((NDK / "toolchains/llvm/prebuilt").iterdir())
     clang = prebuilt / "bin/aarch64-linux-android31-clang"
     archive = BUILD / "sqlite-amalgamation-3510200.zip"
@@ -64,21 +75,23 @@ def main():
     for name, source in ({} if args.reuse_capabilities else snippets).items():
         file = BUILD / (name + ".swift")
         file.write_text(source)
-        command = ["swiftly", "run", "swiftc", "-typecheck", "-target", TRIPLE, "-sdk", str(SDK / "ndk-sysroot"),
-                   "-resource-dir", str(SDK / "swift-resources/usr/lib/swift-aarch64"), str(file), "+" + VERSION]
+        command = ["swiftly", "run", "swiftc", "-typecheck", "-target", TRIPLE, "-sdk", str(sdk / "ndk-sysroot"),
+                   "-resource-dir", str(sdk / "swift-resources/usr/lib/swift-aarch64"), str(file), "+" + VERSION]
         result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         (BUILD / (name + ".log")).write_text(result.stdout)
         capabilities[name] = {"compiles": result.returncode == 0, "exitCode": result.returncode}
     if not capabilities["foundation_baseline"]["compiles"]:
         raise SystemExit("Foundation baseline failed; API probe failures would not be meaningful")
     search = subprocess.run(["swiftly", "run", "swift", "build", "--package-path", str(ROOT / "MessageSubstringSearch"),
-                             "--scratch-path", str(BUILD / "search-check"), "--swift-sdk", SDK_ID, "--triple", TRIPLE,
+                             "--scratch-path", str(BUILD / "search-check"), "--swift-sdks-path", str(sdk_install_dir),
+                             "--swift-sdk", SDK_ID, "--triple", TRIPLE,
                              "--jobs", "4", "-Xcc", "-I" + str(sqlite), "+" + VERSION],
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (BUILD / "search-current.log").write_text(search.stdout)
     capabilities["current_search_package"] = {"compiles": search.returncode == 0, "exitCode": search.returncode}
     (BUILD / "capabilities.json").write_text(json.dumps(capabilities, indent=2) + "\n")
-    args = ["swiftly", "run", "swift", "build", "--package-path", ROOT / "IMV2ClientKit" if shared_sdk else HERE, "--swift-sdk", SDK_ID,
+    args = ["swiftly", "run", "swift", "build", "--package-path", ROOT / "IMV2ClientKit" if shared_sdk else HERE,
+            "--swift-sdks-path", sdk_install_dir, "--swift-sdk", SDK_ID,
             "--triple", TRIPLE, "--skip-update", "-c", "release", "--jobs", "4", "--product", "IMV2SharedSDK" if shared_sdk else "IMSwiftProbe",
             "-Xcc", "-I" + str(sqlite), "-Xlinker", "-L" + str(BUILD),
             "-Xlinker", "--exclude-libs=libsqlite3.a", "+" + VERSION]
@@ -91,7 +104,7 @@ def main():
     # Remove only this probe's generated libraries so stale runtimes cannot mask missing dependencies.
     for file in output.glob("*.so"):
         file.unlink()
-    candidates = {p.name: p for p in (SDK / "swift-resources/usr/lib/swift-aarch64/android").rglob("*.so")}
+    candidates = {p.name: p for p in (sdk / "swift-resources/usr/lib/swift-aarch64/android").rglob("*.so")}
     candidates["libc++_shared.so"] = prebuilt / "sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
     candidates.update({p.name: p for p in binary_dir.glob("*.so")})
     pending = [binary_dir / ("libIMV2SharedSDK.so" if shared_sdk else "libIMSwiftProbe.so")]

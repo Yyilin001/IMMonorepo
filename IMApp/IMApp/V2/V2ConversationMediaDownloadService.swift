@@ -139,11 +139,13 @@ enum V2DeviceLocalStoragePolicy {
 /// Presentation adapter for the account ResourceCenter. It owns no paths,
 /// cache records or pin counters; ClientKit owns all byte lifetimes.
 actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
+    private let business: V2ResourceService?
     private let cache: V2ResourceDownloadCache
     private let center: V2ResourceCenter
     private var closed = false
 
-    init(cache: V2ResourceDownloadCache, center: V2ResourceCenter) {
+    init(cache: V2ResourceDownloadCache, center: V2ResourceCenter, business: V2ResourceService? = nil) {
+        self.business = business
         self.cache = cache; self.center = center
     }
 
@@ -151,14 +153,16 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         try requireOpen()
         let file: V2ResourceCachedFile
         do {
-            if let message {
+            if business == nil, let message {
                 // Unknown versions persist as logical demands; the authenticated
                 // leaf resolves their byte identity without creating another task.
                 _ = try await center.prepareMessageDownload(mediaID: media.mediaID, message: message)
             }
-            file = try await cache.download(media, message: message)
+            if let business { file = try await business.download(media, message: message) }
+            else { file = try await cache.download(media, message: message) }
         }
         catch V2ResourceStorageError.closed { throw CancellationError() }
+        catch V2DirectoryServiceError.closed { throw CancellationError() }
         try requireOpen()
         let use = try await file.borrowFile()
         do { try await performMaintenance(); await use.release() }

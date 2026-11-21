@@ -13,7 +13,7 @@ import Testing
 
 @Suite("V2 gateway domain command handler")
 struct V2GatewayDomainCommandHandlerTests {
-    @Test("message operation diagnostics defer proven overload and preserve unsafe wire errors")
+    @Test("message operations defer a proven refusal and reconcile an unknown outcome")
     func messageOperationInternalFailureDiagnostics() async throws {
         let fixture = try GatewayDomainFixture()
         let operation = try V2MessageSendOperationCommand(
@@ -26,6 +26,9 @@ struct V2GatewayDomainCommandHandlerTests {
             (.notAccepted(.unavailable), "not_accepted", "unavailable"),
             (.rolledBack(.deadlineExceeded), "rolled_back", "deadline_exceeded"),
             (.notAccepted(.authorityLost), "not_accepted", "lease_lost"),
+            (.notAccepted(.deadlineExceeded), "not_accepted", "deadline_exceeded"),
+            (.notAccepted(.roomCapacityExhausted), "not_accepted", "room_capacity_exhausted"),
+            (.notAccepted(.unsupportedVersion), "not_accepted", "unsupported_version"),
             (.outcomeUnknown, "outcome_unknown", "none")
         ]
         for (failure, disposition, reason) in failures {
@@ -43,10 +46,13 @@ struct V2GatewayDomainCommandHandlerTests {
                     envelope.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
                 }
                 let response = try await handler.handle(envelope: envelope, identity: fixture.identity)
-                if reason == "overloaded" {
+                if reason == "unsupported_version" {
+                    #expect(response.error.code == "UNSUPPORTED_VERSION")
+                    #expect(!response.error.retryable)
+                } else if failure != .outcomeUnknown {
                     guard case .messageSendOperationResult(let wire)? = response.body,
                           case .deferred(let hint) = try V2MessageSendOperationWireCodec.decode(result: wire) else {
-                        Issue.record("proven overload did not return a durable deferral")
+                        Issue.record("proven refusal did not return a correlated deferral")
                         continue
                     }
                     #expect(hint.validates(identity: try operation.identity, fingerprint: try operation.fingerprint))

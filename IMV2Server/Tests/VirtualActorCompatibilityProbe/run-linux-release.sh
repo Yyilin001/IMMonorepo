@@ -5,7 +5,7 @@ probe_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export VA_WORKTREE="$(cd "$probe_dir/../../.." && pwd)"
 export VA_EVIDENCE_DIR="${VA_EVIDENCE_DIR:-/Users/yyl/.codex/virtual-actor-builds/p0/evidence}"
 export VA_BUILD_DIR="${VA_BUILD_DIR:-/Users/yyl/.codex/virtual-actor-builds/p0}"
-export VA_SWIFT_IMAGE="swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6"
+export VA_SWIFT_IMAGE="swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144"
 export DOCKER_CONTEXT=colima-imv2-vapor5
 compose=(docker compose -p imv2-va-p0 -f "$probe_dir/compose.yml")
 

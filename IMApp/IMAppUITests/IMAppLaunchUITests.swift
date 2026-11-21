@@ -11,9 +11,12 @@ final class IMAppLaunchUITests: XCTestCase {
         app.launchArguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-revocation-paused"]
         app.launch()
         let retry = app.buttons["v2.revocation.retry"]
-        XCTAssertTrue(retry.waitForExistence(timeout: 5))
-        XCTAssertTrue(retry.isHittable)
+        let previousExit = app.buttons["v2.revocation.open"]
+        XCTAssertTrue(previousExit.waitForExistence(timeout: 5))
+        XCTAssertFalse(retry.exists)
         XCTAssertTrue(app.textFields["v2.password.account-handle"].isHittable)
+        previousExit.tap()
+        XCTAssertTrue(retry.isHittable)
         let image = XCTAttachment(screenshot: app.screenshot())
         image.lifetime = .keepAlways
         add(image)
@@ -21,6 +24,7 @@ final class IMAppLaunchUITests: XCTestCase {
         retry.tap()
         XCTAssertTrue(app.staticTexts["v2.revocation.status"].exists)
         XCTAssertFalse(retry.exists)
+        app.buttons["v2.revocation.close"].tap()
         XCTAssertTrue(app.buttons["v2.password.submit"].isHittable)
     }
 
@@ -31,12 +35,13 @@ final class IMAppLaunchUITests: XCTestCase {
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge",
             "-AppleLanguages", "(ar)", "-AppleLocale", "ar_SA"]
         app.launch()
-        XCTAssertTrue(app.buttons["v2.revocation.retry"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["v2.revocation.retry"].isHittable)
+        let previousExit = app.buttons["v2.revocation.open"]
+        XCTAssertTrue(previousExit.waitForExistence(timeout: 5))
         XCTAssertTrue(app.textFields["v2.password.account-handle"].isHittable)
         let submit = app.buttons["v2.password.submit"]
         for _ in 0..<3 where !submit.isHittable { app.swipeUp() }
         XCTAssertTrue(submit.isHittable)
+        previousExit.tap()
         XCTAssertTrue(app.buttons["v2.revocation.retry"].isHittable)
         let image = XCTAttachment(screenshot: app.screenshot())
         image.lifetime = .keepAlways

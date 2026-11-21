@@ -47,6 +47,17 @@ package struct PostgresV2PolicyDeploymentPlacementStore: Sendable {
     package init(database: any Database, schema: String = "im_v2") {
         v2PreconditionSQLSchema(schema); self.database = database; self.schema = schema
     }
+    /// A caller joining an existing deployment must not initialize or change its placement.
+    package func verifyExisting(_ placement: V2PolicyOwnerPlacement) async throws {
+        guard let sql = database as? any SQLDatabase,
+              let row = try await sql.raw("""
+                SELECT revision,snapshot_digest FROM \(unsafeRaw: schema).policy_owner_deployment
+                WHERE deployment_id='active'
+                """).first(decoding: DeploymentRow.self) else {
+            throw V2PolicyOwnerPlacement.Failure.corruptPersistence
+        }
+        try row.verify(placement)
+    }
     package func require(_ placement: V2PolicyOwnerPlacement) async throws {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2PolicyOwnerPlacement.Failure.corruptPersistence }
@@ -58,12 +69,19 @@ package struct PostgresV2PolicyDeploymentPlacementStore: Sendable {
                 SELECT revision,snapshot_digest FROM \(unsafeRaw: schema).policy_owner_deployment
                 WHERE deployment_id='active' FOR SHARE
                 """).first(decoding: DeploymentRow.self) else { throw V2PolicyOwnerPlacement.Failure.corruptPersistence }
-            guard row.revision == placement.configuration.revision, row.snapshot_digest == placement.digest else {
+            try row.verify(placement)
+        }
+    }
+    private struct DeploymentRow: Decodable {
+        let revision: Int64
+        let snapshot_digest: Data
+
+        func verify(_ placement: V2PolicyOwnerPlacement) throws {
+            guard revision == placement.configuration.revision, snapshot_digest == placement.digest else {
                 throw V2PolicyOwnerPlacement.Failure.deploymentChanged
             }
         }
     }
-    private struct DeploymentRow: Decodable { let revision: Int64; let snapshot_digest: Data }
 }
 
 package struct PostgresV2PolicyDeploymentRoutes: Sendable {

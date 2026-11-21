@@ -113,7 +113,9 @@ struct V2ResourceBackgroundSourceTests {
         #expect(copy.path.hasPrefix(f.scope.backgroundDirectory.path))
         #expect(!copy.path.hasPrefix(f.scope.directory.path + "/"))
         #expect(try Data(contentsOf: copy) == f.body)
+        #if canImport(Darwin)
         #expect(try copy.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        #endif
         let usage = try await files.snapshot()
         #expect(usage.backgroundReservedBytes >= 8192 && usage.backgroundAllocatedBytes >= 4096)
         #expect(usage.quota.temporaryReservedBytes == usage.backgroundReservedBytes)

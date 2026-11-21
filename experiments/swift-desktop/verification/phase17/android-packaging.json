@@ -1,0 +1,132 @@
+{
+  "normalRelease": true,
+  "debugAndReleaseBuildAndLintPassed": true,
+  "unsigned": true,
+  "apkPath": "IMAndroid/app/build/outputs/apk/release/app-release-unsigned.apk",
+  "bytes": 39213062,
+  "MiB": 37.4,
+  "sha256": "a6ce7f8d64cd97b281c340760dff33e7d511bd4bdbcb60d23501687a7d0cbba8",
+  "testCAIncluded": false,
+  "nativeLibraries": [
+    {
+      "name": "lib/arm64-v8a/libBlocksRuntime.so",
+      "bytes": 10680,
+      "compressedBytes": 4462,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libFoundation.so",
+      "bytes": 6121608,
+      "compressedBytes": 1870038,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libFoundationEssentials.so",
+      "bytes": 6223072,
+      "compressedBytes": 2041637,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libFoundationInternationalization.so",
+      "bytes": 1686312,
+      "compressedBytes": 530052,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libFoundationNetworking.so",
+      "bytes": 3471224,
+      "compressedBytes": 1486395,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libIMV2SharedSDK.so",
+      "bytes": 28161552,
+      "compressedBytes": 10576711,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/lib_FoundationICU.so",
+      "bytes": 40042536,
+      "compressedBytes": 15679887,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libandroidx.graphics.path.so",
+      "bytes": 10096,
+      "compressedBytes": 4386,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libc++_shared.so",
+      "bytes": 1423696,
+      "compressedBytes": 466338,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libdispatch.so",
+      "bytes": 370344,
+      "compressedBytes": 96018,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswiftAndroid.so",
+      "bytes": 47968,
+      "compressedBytes": 15199,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswiftCore.so",
+      "bytes": 6922248,
+      "compressedBytes": 2383872,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswiftDispatch.so",
+      "bytes": 183784,
+      "compressedBytes": 54723,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswiftObservation.so",
+      "bytes": 123720,
+      "compressedBytes": 47196,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswiftSynchronization.so",
+      "bytes": 61752,
+      "compressedBytes": 18813,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswift_Builtin_float.so",
+      "bytes": 7624,
+      "compressedBytes": 2419,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswift_Concurrency.so",
+      "bytes": 694648,
+      "compressedBytes": 238368,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswift_RegexParser.so",
+      "bytes": 945960,
+      "compressedBytes": 327824,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswift_StringProcessing.so",
+      "bytes": 688456,
+      "compressedBytes": 261847,
+      "compression": 8
+    },
+    {
+      "name": "lib/arm64-v8a/libswift_math.so",
+      "bytes": 7040,
+      "compressedBytes": 2295,
+      "compression": 8
+    }
+  ]
+}

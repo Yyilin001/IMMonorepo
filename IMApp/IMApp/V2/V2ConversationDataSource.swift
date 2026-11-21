@@ -20,12 +20,14 @@ protocol V2ConversationSendTimelineReading: Sendable {
 }
 
 actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDirectoryReading, V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
+    private let groups: V2GroupService?
     private let searchBusiness: V2SearchService
     private var business: V2ConversationService?
     private let localStore: GRDBV2LocalSyncStore
     private let requiresLocalReadAuthorization: Bool
     private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
-    init(localStore: GRDBV2LocalSyncStore, requiresLocalReadAuthorization: Bool = false, business: V2ConversationService? = nil, search: V2SearchService? = nil, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
+    init(localStore: GRDBV2LocalSyncStore, requiresLocalReadAuthorization: Bool = false, business: V2ConversationService? = nil, search: V2SearchService? = nil, groups: V2GroupService? = nil, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
+        self.groups = groups
         self.business = business
         self.searchBusiness = search ?? V2SearchService(store: localStore)
         self.localStore = localStore
@@ -55,7 +57,8 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
     }
 
     func groupDirectoryPage(matching query: String, after cursor: V2ClientGroupDirectoryCursor?, limit: Int) async throws -> V2ClientGroupDirectoryPage {
-        try await localStore.groupDirectoryPage(matching: query, after: cursor, limit: limit)
+        if let groups { return try await groups.page(matching: query, after: cursor, limit: limit) }
+        return try await localStore.groupDirectoryPage(matching: query, after: cursor, limit: limit)
     }
 
     func currentTitle(in roomID: RoomID) async throws -> String? {
@@ -266,14 +269,17 @@ actor V2GRDBConversationDataSource: V2ConversationSendTimelineReading, V2GroupDi
     }
 
     func groupAnnouncement(in roomID: String) async throws -> V2ClientGroupAnnouncement? {
-        try await localStore.groupAnnouncement(roomID: .init(roomID))
+        if let groups { return try await groups.announcement(in: .init(roomID)) }
+        return try await localStore.groupAnnouncement(roomID: .init(roomID))
     }
 
     func groupRolePolicyState(in roomID: String) async throws -> V2ClientGroupRolePolicyState {
-        try await localStore.groupRolePolicyState(roomID: .init(roomID))
+        if let groups { return try await groups.rolePolicy(in: .init(roomID)) }
+        return try await localStore.groupRolePolicyState(roomID: .init(roomID))
     }
 
     func retryGroupRolePolicyRecovery(in roomID: String) async throws -> V2ClientGroupRolePolicyState {
+        if let groups { return try await groups.retryRolePolicy(in: .init(roomID)) }
         _ = try await localStore.resumeRolePolicyBaseline(roomID: .init(roomID))
         return try await localStore.groupRolePolicyState(roomID: .init(roomID))
     }

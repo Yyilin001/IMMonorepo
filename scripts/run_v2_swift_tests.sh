@@ -4,13 +4,21 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
+packages=(IMV2Core IMV2ClientKit IMV2Server)
+if [[ $# -eq 1 && "$1" == "--server-packages" ]]; then
+  packages=(IMV2Core IMV2Server)
+elif [[ $# -ne 0 ]]; then
+  printf 'Usage: %s [--server-packages]\n' "${0##*/}" >&2
+  exit 2
+fi
+
 python3 "${repo_root}/scripts/check_v2_postgres_vendor.py"
 python3 "${repo_root}/scripts/check_v2_server_boundaries.py"
 python3 "${repo_root}/scripts/check_actor_serialization_boundaries.py"
 python3 "${repo_root}/IMV2Server/Protocol/generate_actor_rpc.py" --check
 python3 "${repo_root}/scripts/test_v2_protocol_documentation.py"
 
-for package in IMV2Core IMV2ClientKit IMV2Server; do
+for package in "${packages[@]}"; do
   # Let the selected Swift toolchain run Swift Testing itself. Invoking
   # Xcode's xctest directly loses the selected toolchain's libTesting.dylib.
   test_args=(--disable-automatic-resolution --package-path "${repo_root}/${package}")

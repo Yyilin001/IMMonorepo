@@ -31,7 +31,7 @@ def main():
     if manifest["status"] != "verified-linux-release" or manifest["sourceDrift"] != []:
         parser.error("Release build is incomplete or its sources changed")
     if {p["product"] for p in manifest["products"]} != set(PRODUCTS):
-        parser.error("Runtime acceptance requires all seven products")
+        parser.error("Runtime acceptance requires all deployment products")
     for relative, digest in manifest["artifactFiles"].items():
         path = (release / relative).resolve()
         if release not in path.parents or sha256(path) != digest:

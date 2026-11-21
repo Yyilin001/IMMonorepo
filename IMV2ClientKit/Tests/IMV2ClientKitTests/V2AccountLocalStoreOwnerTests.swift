@@ -67,7 +67,9 @@ struct V2AccountLocalStoreOwnerTests {
         let b = try await owner.open(accountID: .init("account-b"))
         #expect(try await savedDurableMessages(in: b).isEmpty)
         #expect(try await owner.scope(for: b).directory != aScope.directory)
+        #if canImport(Darwin)
         #expect(try fixture.root.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        #endif
         try await owner.close(b)
     }
 

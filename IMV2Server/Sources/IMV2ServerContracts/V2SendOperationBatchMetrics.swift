@@ -13,6 +13,8 @@ public enum V2SendOperationStage: String, CaseIterable, Sendable {
     case ownerConnectionAcquire = "owner_connection_acquire"
     case roomQueueWait = "room_queue_wait"
     /// Prepared turn admission to start on a persistent connection worker.
+    case ownerCrossRoomHeadToCommit = "owner_cross_room_head_to_commit"
+    case ownerCrossRoomExecute = "owner_cross_room_execute"
     case ownerReadyWait = "owner_ready_wait"
     /// Confirmed idle connection time, including periods without executable rooms.
     case ownerWorkerIdle = "owner_worker_idle"
@@ -183,6 +185,7 @@ public struct V2SendOperationBatchMetricsSnapshot: Equatable, Sendable {
     public var ownerCohortAttempts: UInt64 = 0
     public var ownerCohortHandles: UInt64 = 0
     public var ownerCohortCommands: UInt64 = 0
+    public var crossRoomCommitsByRoomCount: [Int: UInt64] = [:]
     public var ownerCohortCommits: UInt64 = 0
     public var ownerCohortAcceptedCommands: UInt64 = 0
     public var ownerCohortReplayedCommands: UInt64 = 0

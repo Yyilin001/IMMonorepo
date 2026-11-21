@@ -3,7 +3,7 @@
 # bundled SwiftPM runtime artifacts. Keeping `.build` and source out of the
 # runtime stage prevents repeated local verification from retaining several
 # gigabytes of compiler products per image.
-FROM swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6 AS build
+FROM swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144 AS build
 
 # The classic Docker builder keeps completed multi-stage build images as
 # dangling layers. This label lets the local-stack script reclaim only these
@@ -40,6 +40,7 @@ RUN set -eu; \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2ResourceImageWorker \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2PlacementControlApp \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2RoomHostSupervisorApp \
+    && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2AdminServerApp \
     && bin_path="$(swift build --disable-automatic-resolution -c release --package-path IMV2Server --show-bin-path)" \
     && mkdir -p /runtime/IMV2Server/.build/release \
     && cp "${bin_path}/IMV2AccountServerApp" \
@@ -49,18 +50,19 @@ RUN set -eu; \
           "${bin_path}/IMV2ResourceImageWorker" \
           "${bin_path}/IMV2PlacementControlApp" \
           "${bin_path}/IMV2RoomHostSupervisorApp" \
+          "${bin_path}/IMV2AdminServerApp" \
           /runtime/IMV2Server/.build/release/ \
     && for bundle in "${bin_path}"/*.resources "${bin_path}"/*.bundle; do \
            if [ -d "${bundle}" ]; then cp -RL "${bundle}" /runtime/IMV2Server/.build/release/; fi; \
        done \
     && for product in IMV2AccountServerApp IMV2ServerApp IMV2OperatorServerApp \
            IMV2LocalGatewayProbe IMV2ResourceImageWorker IMV2PlacementControlApp \
-           IMV2RoomHostSupervisorApp; do \
+           IMV2RoomHostSupervisorApp IMV2AdminServerApp; do \
            chmod 0755 "/runtime/IMV2Server/.build/release/${product}"; \
        done \
     && rm -rf /workspace/IMV2Server/.build /root/.cache/org.swift.swiftpm
 
-FROM swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6
+FROM swift:6.4.2-jammy-slim@sha256:9cc9b3a717869275e25d1f3d2a989fbac8a4c7a010efb558590d5d2b2c3ab561
 
 RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|https://ports.ubuntu.com/ubuntu-ports/|g' /etc/apt/sources.list \
     && apt-get update \
@@ -81,7 +83,7 @@ COPY --from=build /runtime/IMV2Server/.build/release ./IMV2Server/.build/release
 RUN set -eu; \
     for product in IMV2AccountServerApp IMV2ServerApp IMV2OperatorServerApp \
         IMV2LocalGatewayProbe IMV2ResourceImageWorker IMV2PlacementControlApp \
-        IMV2RoomHostSupervisorApp; do \
+        IMV2RoomHostSupervisorApp IMV2AdminServerApp; do \
         test -x "/workspace/IMV2Server/.build/release/${product}"; \
     done
 

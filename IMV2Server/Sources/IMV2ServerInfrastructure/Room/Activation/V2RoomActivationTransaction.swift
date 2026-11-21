@@ -322,25 +322,26 @@ func v2ExecuteSingleStatementRoomWrite<Value: Sendable>(
             catch { result = .failure(error) }
             bodyTimer?.finish()
             let confirmationTimer = metrics?.startStage(.ownerCommit)
+            if connection.independentlyConfirmed, case .failure(let error) = result,
+               let rejected = error as? PostgresIndependentQueryError {
+                confirmationTimer?.finish()
+                switch rejected {
+                case .notSubmitted:
+                    V2OwnerConnectionTimeline.current?.mark("independent_query_not_submitted")
+                    state.confirmRollback()
+                    throw V2RoomCallFailure.rolledBack(.unavailable)
+                case .outcomeUnknown:
+                    state.stop(.rollbackFailure)
+                    throw V2RoomTransactionOutcomeUnknown()
+                }
+            }
             let status: PostgresConnection.ReadyForQueryState
             do {
-                if connection.independentlyConfirmed {
-                    // The dedicated query future finishes at its own Sync. A
-                    // connection-wide barrier here would also wait for other rooms.
-                    if case .failure(let error) = result, let rejected = error as? PostgresIndependentQueryError {
-                        switch rejected {
-                        case .notSubmitted:
-                            state.confirmRollback()
-                            throw rejected
-                        case .outcomeUnknown: throw V2RoomTransactionOutcomeUnknown()
-                        }
-                    }
-                    status = .idle
-                } else { status = try await connection.physical.confirmReadyForQuery().get() }
-                confirmationTimer?.finish()
+                defer { confirmationTimer?.finish() }
+                // The dedicated query future already settled at its own Sync.
+                if connection.independentlyConfirmed { status = .idle }
+                else { status = try await connection.physical.confirmReadyForQuery().get() }
             } catch {
-                confirmationTimer?.finish()
-                if case PostgresIndependentQueryError.notSubmitted = error { throw error }
                 state.stop(.rollbackFailure)
                 throw V2RoomTransactionOutcomeUnknown()
             }

@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 
 def validate_runtime(runtime):
     required = ['IMV2ServerApp', 'IMV2AccountServerApp', 'IMV2PlacementControlApp',
-                'IMV2GatewayLoadGenerator', 'IMV2TrustAdmissionTool']
+                'IMV2GatewayLoadGenerator']
     missing = [name for name in required if not (runtime/'bin'/name).is_file()
                or not os.access(runtime/'bin'/name, os.X_OK)]
     if missing:

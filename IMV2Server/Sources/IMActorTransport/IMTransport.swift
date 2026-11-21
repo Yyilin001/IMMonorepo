@@ -87,6 +87,8 @@ public final class IMTransport: Sendable {
         var writingBytes = 0
         var executingByLane: [IMTrafficClass: Int] = [:]
         var writingByLane: [IMTrafficClass: Int] = [:]
+        var rpcRejections: [IMRPCRejection: UInt64] = [:]
+        var messageCreditWaits: [IMMessageCreditWait: UInt64] = [:]
         var admitted: UInt64 = 0
         var rejected: UInt64 = 0
         var completed: UInt64 = 0
@@ -304,7 +306,15 @@ public final class IMTransport: Sendable {
             guard state.pendingCalls < configuration.maximumExecutingCalls,
                   state.pendingCallsByLane[lane, default: 0] < callLimit(lane),
                   bytes <= byteLimit(lane) - state.pendingByLane[lane, default: 0],
-                  bytes <= configuration.maximumExecutingBytes - state.pendingBytes else { throw IMActorError.overloaded }
+                  bytes <= configuration.maximumExecutingBytes - state.pendingBytes else {
+                if lane == .rpc {
+                    state.rpcRejections[.pendingBudget, default: 0] &+= 1
+                    if IMRPCAdmission.usesMessageWindow {
+                        throw IMRPCAdmission.Refusal(reason: .pendingBudget)
+                    }
+                }
+                throw IMActorError.overloaded
+            }
             state.pendingCalls += 1; state.pendingBytes += bytes; state.pendingByLane[lane, default: 0] += bytes
             state.pendingCallsByLane[lane, default: 0] += 1
         }
@@ -323,7 +333,10 @@ public final class IMTransport: Sendable {
         let reservation = bytes + IMFrame.headerBytes
         try state.withLock { state in
             guard reservation <= byteLimit(lane) - state.replyByLane[lane, default: 0],
-                  reservation <= configuration.maximumExecutingBytes - state.replyBytes else { throw IMActorError.overloaded }
+                  reservation <= configuration.maximumExecutingBytes - state.replyBytes else {
+                if lane == .rpc { state.rpcRejections[.replyBudget, default: 0] &+= 1 }
+                throw IMActorError.overloaded
+            }
             state.replyBytes += reservation; state.replyByLane[lane, default: 0] += reservation
         }
         return IMReplyReservation { [self] in
@@ -354,19 +367,31 @@ public final class IMTransport: Sendable {
     func acquireWrite(bytes: Int, lane: IMTrafficClass) -> Bool {
         state.withLock { state in
             guard bytes <= byteLimit(lane) + 65_536 - state.writingByLane[lane, default: 0],
-                  bytes <= configuration.maximumExecutingBytes - state.writingBytes else { return false }
+                  bytes <= configuration.maximumExecutingBytes - state.writingBytes else {
+                if lane == .rpc { state.rpcRejections[.writeBudget, default: 0] &+= 1 }
+                return false
+            }
             state.writingBytes += bytes; state.writingByLane[lane, default: 0] += bytes; return true
         }
     }
     func releaseWrite(bytes: Int, lane: IMTrafficClass) {
         state.withLock { $0.writingBytes -= bytes; $0.writingByLane[lane, default: 0] -= bytes }
     }
+    func recordMessageCreditWait(_ event: IMMessageCreditWait) {
+        state.withLock { $0.messageCreditWaits[event, default: 0] &+= 1 }
+    }
+
+    func recordRejection(_ reason: IMRPCRejection, lane: IMTrafficClass?) {
+        guard lane == .rpc else { return }
+        state.withLock { $0.rpcRejections[reason, default: 0] &+= 1 }
+    }
+
     public var metrics: IMTransportMetrics {
         state.withLock {
             .init(connections: $0.connections.count, connecting: $0.connecting.count,
                   connectionWaiters: $0.connectionWaiters, pendingCalls: $0.pendingCalls, pendingBytes: $0.pendingBytes, executingCalls: $0.executingCount,
                   executingBytes: $0.executingBytes, replyBytes: $0.replyBytes, writingBytes: $0.writingBytes,
-                  admitted: $0.admitted, rejected: $0.rejected, completed: $0.completed)
+                  admitted: $0.admitted, rejected: $0.rejected, completed: $0.completed, rpcRejections: $0.rpcRejections, messageCreditWaits: $0.messageCreditWaits)
         }
     }
     public func retire(_ node: IMNode) {
@@ -441,6 +466,17 @@ private final class IMConnectionWaiter: Sendable {
     }
 }
 
+/// First admission check that refused an RPC, without changing the wire error or spending credits.
+public enum IMRPCRejection: String, Sendable {
+    case messageCreditReserve = "message_credit_reserve", messageCreditWaitTimeout = "message_credit_wait_timeout"
+    case sendCallCredit = "send_call_credit", sendByteCredit = "send_byte_credit"
+    case peerFrame = "peer_frame", pendingOnConnection = "pending_on_connection", channelWritable = "channel_writable"
+    case pendingBudget = "pending_budget", receiverAdmission = "receiver_admission"
+    case replyBudget = "reply_budget", writeBudget = "write_budget"
+}
+
+public enum IMMessageCreditWait: String, Sendable { case enqueued, dispatched, expired }
+
 public struct IMTransportMetrics: Sendable {
     public let connections: Int
     public let connecting: Int
@@ -454,4 +490,6 @@ public struct IMTransportMetrics: Sendable {
     public let admitted: UInt64
     public let rejected: UInt64
     public let completed: UInt64
+    public let rpcRejections: [IMRPCRejection: UInt64]
+    public let messageCreditWaits: [IMMessageCreditWait: UInt64]
 }

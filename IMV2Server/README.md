@@ -8,7 +8,7 @@
 
 ## 部署准备
 
-服务端要求 Swift 6.4；macOS 环境要求 macOS 26.2 或更高版本，并固定使用 Vapor 5.0.0-beta.3。Linux 镜像与 CI 使用相同摘要的 Swift 6.4 Jammy 镜像。数据库所有权、关闭顺序、依赖边界与验证要求见 [Vapor 5 迁移合同](../IMV2/docs/00-foundation/vapor5-migration.md)。
+服务端使用 Swift 6.4.2，macOS 环境要求 macOS 26.2 或更高版本，并固定使用 Vapor 5.0.0-beta.3。Linux 编译和 CI 使用同一份 Swift 6.4.2 Jammy 镜像，部署使用同版本的 Jammy slim 运行镜像。数据库所有权、关闭顺序、依赖边界与验证要求见 [Vapor 5 迁移合同](../IMV2/docs/00-foundation/vapor5-migration.md)。
 
 1. 创建空 PostgreSQL 数据库并安装唯一的当前结构：`psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f IMV2/sql/schema.sql`。部署前，在隔离 Docker PostgreSQL 上运行 `bash scripts/test_v2_postgres_schema_bootstrap.sh`，检查空库初始化、当前结构合同，以及结构导出/恢复等价性。使用现有 PostgreSQL 时，设置 `IMV2_SCHEMA_BOOTSTRAP_NATIVE=1`、`PGHOST`、`PGPORT`、`PGUSER` 和必要凭据，将 PostgreSQL 16 的 `psql`、`pg_dump` 加入 `PATH`。原生检查会创建并删除两个唯一命名的测试数据库，要求具有建库权限。尚未发布的项目只安装当前结构，历史升级脚本和混合版本部署路径已移除。
 2. 通过部署密钥存储提供 PEM 证书链和私钥文件。
@@ -30,6 +30,12 @@
 `IMV2OperatorServerApp` 是独立、仅监听回环地址的控制面程序，每次重放一条明确暂停的房间发件箱或扇出投递记录。它使用专属访问令牌密钥和操作主体，不共享公开网关监听器，并将重放审计证据与状态变更原子写入。
 
 配置见 [`operator-replay.env.example`](operator-replay.env.example)，操作步骤见[运维重放手册](../IMV2/docs/10-operations/durable-work-operator-replay.md)。不要直接公开该端口，应通过已批准的堡垒机或双向 TLS 运维代理访问。
+
+## Web 管理服务
+
+`IMV2AdminServerApp` 是独立、仅监听回环地址的管理 HTTP 服务，提供管理员登录、用户查询、账户禁用和操作审计。管理员身份独立于普通 IM 用户，通过现有 Policy Owner 禁用用例执行业务变更。浏览器不持有 Operator 密钥。
+
+部署需显式安装 [`admin-schema.sql`](../IMV2/sql/admin-schema.sql)，按 [`admin.env.example`](admin.env.example) 提供管理员哈希配置与独立 Actor 调用身份，并由同域 HTTPS 代理托管 [`IMAdminWeb`](../IMAdminWeb/README.md)。完整配置、权限、未知结果恢复和验证命令见前端 README。
 
 ## 账户认证服务
 
@@ -74,6 +80,14 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 ```
 
 冒烟检查在本地 Docker 卷中创建一个唯一命名账户，不访问公开端点，不将令牌写入磁盘或输出。本地隔离 Compose 项目也会验证同一套服务；该证据仅覆盖本地服务，不代表生产部署批准。
+
+## 普通私聊跨房间合批
+
+Room Host 启动时读取 `IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT`，取值为 1 到 4，默认 1。设为 4 时，空闲写连接可从同一逻辑房间分片的就绪队列领取最多四条消息，整个房间轮次保持完整。只有一个就绪房间时立即执行。跨房间事务只包含已授权且无需变更策略的普通私聊，沿用请求的截止时间和 64 KiB 保留字节预算。
+
+每个房间的序号、消息、永久完成记录和投递 outbox 在同一 PostgreSQL 事务中提交。确认提交后分别返回各自的 ACK。停机把上限改回 1 即可回退，无需改动分片映射或数据库 schema。`im_v2_send_operation_store_cross_room_commits_total` 按同一事务中的房间数计数。
+
+容量测试可给发送进程设置 `--message-audit-max-rows N`。结束时压测器将房间、发送者、操作 ID、返回的消息 ID 与序号写到 `<report>.messages.csv`。N 限制每个进程的记录数，超过预算时审计失败。将每个发送进程的文件传给 `--ledger`，将每个权威房间 database 的 libpq service 名传给 `--room-service`，逐条核对 ACK 和永久完成记录，同时统计结果未知但已提交的操作。[对账脚本](../IMV2/scripts/verify_v2_load_message_audit.py)
 
 ## 运维说明
 

@@ -1061,7 +1061,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
 
     @MainActor
     private func openInvitationManagement(in app: XCUIApplication) throws {
-        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        waitForConversationControls(in: app)
         let group = try invitationGroup(in: app)
         XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
         group.tap()
@@ -1069,6 +1069,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(tools.waitForExistence(timeout: 15) && tools.isHittable)
         tools.tap()
         let invites = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@", "v2.group.invitations", "邀请")).firstMatch
+        for _ in 0..<4 where !invites.exists || !invites.isHittable { app.swipeUp() }
         XCTAssertTrue(invites.waitForExistence(timeout: 10) && invites.isHittable)
         invites.tap()
         XCTAssertTrue(app.navigationBars["群邀请与审批"].waitForExistence(timeout: 15))
@@ -1104,7 +1105,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let submit = app.buttons["v2.password.submit"]
         XCTAssertTrue(submit.waitForExistence(timeout: 15) && submit.isEnabled)
         submit.tap()
-        XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30))
+        waitForConversationControls(in: app)
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
@@ -1234,7 +1235,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertEqual(status.label, "入群申请已拒绝。")
         XCTAssertFalse(app.buttons["v2.group-join.submit"].exists)
         app.buttons["v2.group-join.close"].tap()
-        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        waitForConversationControls(in: app)
         XCTAssertFalse(try invitationGroup(in: app).exists, "拒绝申请不能创建群成员会话。")
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
@@ -1278,7 +1279,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 30))
         XCTAssertEqual(status.label, "你已经是该群成员。")
         app.buttons["v2.group-join.close"].tap()
-        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        waitForConversationControls(in: app)
         let group = try invitationGroup(in: app)
         XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
         group.tap()
@@ -1302,7 +1303,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     @MainActor
     func testApplicantLeavesApprovedGroupThroughOrdinaryUI() throws {
         let app = XCUIApplication(); app.activate()
-        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        waitForConversationControls(in: app)
         let group = try invitationGroup(in: app)
         XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
         group.tap()
@@ -1341,7 +1342,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 30))
         XCTAssertEqual(status.label, "入群申请已批准。")
         app.buttons["v2.group-join.close"].tap()
-        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        waitForConversationControls(in: app)
         let group = try invitationGroup(in: app)
         let absent = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: group)
         wait(for: [absent], timeout: 30)
@@ -1364,7 +1365,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     func testApplicantColdRestoresCanonicalApprovedMemberMessage() throws {
         let app = XCUIApplication()
         app.activate()
-        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        waitForConversationControls(in: app)
         let group = try invitationGroup(in: app)
         XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
         group.tap()

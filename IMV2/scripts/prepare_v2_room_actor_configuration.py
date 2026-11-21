@@ -70,9 +70,6 @@ def main() -> None:
     parser.add_argument("--placement-cluster-id", type=uuid.UUID,
                         help="Persistent deployment identity; reuse when adding hosts to an existing deployment")
     parser.add_argument("--extend-from", type=Path, help="Existing private deployment to extend without rotating identities or CA")
-    parser.add_argument("--trust-admission-authority", help="Dedicated service ID for signing new-node trust grants; private key stays in deployment tools")
-    parser.add_argument("--service-membership-shard", help="Existing placement shard holding the committed realtime member roster")
-    parser.add_argument("--membership-controller", action="append", default=[], help="Dedicated caller authorized to commit service membership")
     parser.add_argument("--placement-controller", action="append", default=[], help="Dedicated caller authorized to drain and transfer room partitions")
     args = parser.parse_args()
     previous = None
@@ -93,30 +90,7 @@ def main() -> None:
     if len(args.voters) != 3:
         parser.error("exactly three placement voters are required")
     nodes = args.hosts + args.callers + args.voters
-    authority_id = args.trust_admission_authority
-    if previous:
-        existing_authorities = {doc.get("trustAdmissionAuthorityServiceID") for doc in previous_docs.values()}
-        if len(existing_authorities) != 1:
-            parser.error("existing deployment configurations disagree on admission authority")
-        existing_authority = existing_authorities.pop()
-        if authority_id is not None and authority_id != existing_authority:
-            parser.error("extension cannot replace or introduce an admission authority")
-        authority_id = existing_authority
-    if authority_id is not None and (not re.fullmatch(r"[a-z][a-z0-9_-]{0,62}", authority_id)
-                                     or authority_id in {item[0] for item in nodes}):
-        parser.error("admission authority must be a separate service identity")
     shards = args.shards.split(",")
-    membership_shard = args.service_membership_shard
-    if previous:
-        previous_shards = {doc.get("serviceMembershipShard") for doc in previous_docs.values()}
-        if len(previous_shards) != 1:
-            parser.error("existing deployment configurations disagree on membership control shard")
-        previous_shard = previous_shards.pop()
-        if membership_shard is not None and membership_shard != previous_shard:
-            parser.error("extension cannot change the authoritative membership control shard")
-        membership_shard = previous_shard
-    if membership_shard is not None and membership_shard not in shards:
-        parser.error("membership control shard must be a configured placement shard")
     user_buckets = args.user_buckets.split(",")
     if not 1 <= len(user_buckets) <= 256 or len(set(user_buckets)) != len(user_buckets) or any(
             not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", bucket) for bucket in user_buckets):
@@ -131,29 +105,30 @@ def main() -> None:
     if (not set(args.exclusion_supervisor).issubset({n[0] for n in args.callers})
             or set(args.exclusion_supervisor).intersection(args.worker_caller)):
         parser.error("exclusion-supervisor must be a dedicated caller, not a worker")
-    if (not set(args.membership_controller).issubset({n[0] for n in args.callers})
-            or set(args.membership_controller).intersection(args.worker_caller + args.exclusion_supervisor)
-            or (args.membership_controller and membership_shard is None)):
-        parser.error("membership-controller requires a dedicated caller and membership control shard")
     if (not set(args.placement_controller).issubset({n[0] for n in args.callers})
-            or set(args.placement_controller).intersection(args.worker_caller + args.exclusion_supervisor + args.membership_controller)
-            or (args.placement_controller and membership_shard is None)):
-        parser.error("placement-controller requires a dedicated caller and membership control shard")
+            or set(args.placement_controller).intersection(args.worker_caller + args.exclusion_supervisor)):
+        parser.error("placement-controller requires a dedicated caller")
     count = args.policy_partitions
     if count < 1 or count > 4096 or count & (count - 1) or len(args.hosts) > count:
         parser.error("policy partitions must be a power of two (1..4096), with at least one per host")
     if args.policy_endpoint is not None and args.policy_endpoint not in shards:
         parser.error("policy endpoint must be a configured shard alias")
     if previous:
-        if set(args.placement_controller) != set(previous.get("placementControllers", [])):
-            parser.error("extension cannot replace placement controllers")
-        if set(args.membership_controller) != set(previous.get("membershipControllers", [])):
-            parser.error("extension must retain the configured membership controllers")
+        old_controllers = set(previous.get("placementControllers", []))
+        if set(args.placement_controller).intersection(previous_docs) != old_controllers:
+            parser.error("retain existing placement controllers; a new controller needs a new identity")
+        retired_controllers = set(previous.get("membershipControllers", []))
+        if retired_controllers.intersection(n[0] for n in nodes):
+            parser.error("omit retired membership-controller identities from the new roster")
         for role, requested in [("hosts", args.hosts), ("callers", args.callers), ("voters", args.voters)]:
             old = {item[0]: tuple(item) for item in previous[role]}
             current = {item[0]: tuple(item) for item in requested}
-            if any(current.get(name) != item for name, item in old.items()):
-                parser.error("extension cannot remove, change roles or move existing nodes")
+            if (current.keys() - old.keys()).intersection(previous_docs):
+                parser.error("an existing identity cannot change node roles")
+            if role == "callers" and old.keys() - current.keys() != retired_controllers:
+                parser.error("retain all existing callers except retired membership controllers")
+            if (role == "voters" and old != current) or any(current[name] != old[name] for name in current.keys() & old.keys()):
+                parser.error("keep voters, callers and surviving endpoints fixed")
         if (shards != previous["shards"] or args.policy_partitions != previous["policyPlacement"]["partitionCount"]
                 or set(args.exclusion_supervisor) != set(previous.get("exclusionSupervisors", []))):
             parser.error("extension must retain shards, policy partition count and exclusion authority")
@@ -193,7 +168,7 @@ def main() -> None:
     voter_names = {item[0] for item in args.voters}
     voter_ids = logical_ids(voter_names, 'voter', args.identity_seed)
     if previous:
-        host_ids.update(previous["hostIDs"]); voter_ids.update(previous["voterIDs"])
+        host_ids.update({n: i for n, i in previous["hostIDs"].items() if n in host_names}); voter_ids.update(previous["voterIDs"])
     occupied = {(address, port) for _, address, port in nodes}
     if previous:
         occupied.update((doc["address"], doc["placementControl"]["port"]) for doc in previous_docs.values())
@@ -209,25 +184,7 @@ def main() -> None:
             parser.error("no free control-client port following this endpoint")
         client_ports[name] = candidate
         occupied.add((address, candidate))
-    services = list(reference_services) if previous else []
-    # Never put the authority's private key inside a node directory.
-    authority_directory = root / ".trust-admission"
-    if authority_id and not previous:
-        authority_directory.mkdir(mode=0o700)
-        private_file = authority_directory / "signing.pem"
-        command("openssl", "genpkey", "-algorithm", "ED25519", "-out", str(private_file))
-        public_der = command("openssl", "pkey", "-in", str(private_file), "-pubout", "-outform", "DER")
-        services.append(dict(id=authority_id, publicKeyBase64=base64.b64encode(public_der[-32:]).decode(),
-                             permissions=[], hostIDs=[], shardIDs=[], userBucketIDs=[], gatewayNodeIDs=[]))
-    elif authority_id and (previous_root / ".trust-admission/signing.pem").is_file():
-        authority_directory.mkdir(mode=0o700)
-        private_file = authority_directory / "signing.pem"
-        shutil.copyfile(previous_root / ".trust-admission/signing.pem", private_file)
-        public_der = command("openssl", "pkey", "-in", str(private_file), "-pubout", "-outform", "DER")
-        authorities = [service for service in services if service["id"] == authority_id]
-        if (len(authorities) != 1 or authorities[0]["publicKeyBase64"] != base64.b64encode(public_der[-32:]).decode()
-                or any(authorities[0].get(field) for field in ["permissions", "hostIDs", "gatewayNodeIDs", "shardIDs", "userBucketIDs"])):
-            raise RuntimeError("existing admission authority key or permissions are inconsistent")
+    services = [service for service in reference_services if service["id"] in {n[0] for n in nodes}] if previous else []
     for name, address, _ in nodes:
         directory = root / name
         directory.mkdir(mode=0o700)
@@ -291,13 +248,11 @@ def main() -> None:
             permissions = ["placementVote", "placementRead", "realtimePublish", "realtimeReceive"]
         if name in args.exclusion_supervisor:
             permissions = ["placementRead", "placementWrite", "placementExclude"]
-        if name in args.membership_controller:
-            permissions = ["placementRead", "placementWrite", "placementMembership"]
         if name in args.placement_controller:
             permissions = ["placementRead", "placementWrite", "roomCoordination"]
         services.append(dict(id=name, publicKeyBase64=base64.b64encode(public_der[-32:]).decode(),
                              permissions=permissions, hostIDs=[host_ids[name]] if name in host_names else ([voter_ids[name]] if name in voter_names else []),
-                             shardIDs=shards, userBucketIDs=user_buckets, gatewayNodeIDs=[] if name in args.membership_controller + args.placement_controller else [name]))
+                             shardIDs=shards, userBucketIDs=user_buckets, gatewayNodeIDs=[] if name in args.placement_controller else [name]))
     peers = [dict(hostID=host_ids[name], serviceID=name, address=address, port=port,
                   shardIDs=shards, maximumRooms=args.maximum_rooms_per_host) for name, address, port in args.hosts]
     if previous:
@@ -313,7 +268,13 @@ def main() -> None:
              partitions=list(range(index, args.policy_partitions, len(ordered_hosts))))
         for index, name in enumerate(ordered_hosts)])
     if previous:
-        placement = previous["policyPlacement"]
+        old_placement = previous["policyPlacement"]
+        if all(owner["hostID"] in host_ids.values() for owner in old_placement["owners"]):
+            placement = old_placement
+        else:
+            placement["revision"] = old_placement["revision"] + 1
+            for owner in placement["owners"]:
+                owner["endpoint"] = old_placement["owners"][0]["endpoint"]
     control_peers = [dict(hostID=voter_ids[name], serviceID=name, address=address, port=port, shardIDs=shards)
                      for name, address, port in args.voters]
     for name, address, port in nodes:
@@ -321,42 +282,16 @@ def main() -> None:
         visible = Path(args.mount_root) if args.mount_root else directory
         # Caller configurations retain their required local identity. Gateway
         # hosts share only the Gateway voter roster; callers do not vote there.
-        local_realtime_peers = realtime_peers if name in host_names or name in args.exclusion_supervisor + args.membership_controller + args.placement_controller else realtime_peers + [
+        local_realtime_peers = realtime_peers if name in host_names or name in args.exclusion_supervisor + args.placement_controller else realtime_peers + [
             dict(nodeID=name, serviceID=name, address=address, port=port)]
         document = dict(previous_docs.get(name, {}))
-        if membership_shard is not None:
-            document["serviceMembershipShard"] = membership_shard
+        for obsolete in ("serviceMembershipShard", "trustAdmissionAuthorityServiceID", "trustAdmissionDirectory"):
+            document.pop(obsolete, None)
         document.update(dict(name="imv2-room-actors", address=address,
             port=port, threadPoolSize=2, serviceID=name, hostID=host_ids.get(name),
             signingKeyPath=str(visible / "signing.key"), certificatePath=str(visible / "tls.pem"),
             privateKeyPath=str(visible / "tls.key"), trustRootPath=str(visible / "ca.pem"),
             services=services, peers=peers, realtimePeers=local_realtime_peers))
-        if authority_id:
-            document["trustAdmissionAuthorityServiceID"] = authority_id
-            # A pinned signer alone does not enable runtime ingestion. New
-            # nodes need a real directory and its process-visible path.
-            if "trustAdmissionDirectory" not in document:
-                (directory / "trust-admissions").mkdir(mode=0o700)
-                document["trustAdmissionDirectory"] = str(visible / "trust-admissions")
-            elif previous_root and (previous_root / name / "trust-admissions").is_dir():
-                # Preserve immutable grants when the generated node directory
-                # is installed at the same container mount point on restart.
-                source = previous_root / name / "trust-admissions"
-                if source.is_symlink():
-                    raise RuntimeError("admission directory cannot be a symbolic link")
-                destination = directory / "trust-admissions"
-                destination.mkdir(mode=0o700)
-                files = list(source.glob("*.pb"))
-                if len(files) > 256:
-                    raise RuntimeError("too many persisted admission packets")
-                total = 0
-                for packet in files:
-                    if packet.is_symlink() or not packet.is_file() or not 0 < packet.stat().st_size <= 524288:
-                        raise RuntimeError("invalid persisted admission packet")
-                    total += packet.stat().st_size
-                    if total > 16 * 1024 * 1024:
-                        raise RuntimeError("persisted admission packets exceed size limit")
-                    shutil.copyfile(packet, destination / packet.name)
         storage_paths = {}
         if name in voter_names:
             if name in previous_docs:
@@ -367,10 +302,10 @@ def main() -> None:
                                  for index, shard in enumerate(shards)}
         document["placementControl"] = dict(clusterID=str(cluster_id), port=port if name in voter_names else client_ports[name],
             threadPoolSize=1, localVoterID=voter_ids.get(name), storagePaths=storage_paths, voters=control_peers)
-        if name not in voter_names and name not in args.exclusion_supervisor + args.membership_controller + args.placement_controller:
+        if name not in voter_names and name not in args.exclusion_supervisor + args.placement_controller:
             document["policyPlacement"] = placement
         write_json(directory / "configuration.json", document)
-    write_json(root / "topology.json", dict(placementClusterID=str(cluster_id), hosts=args.hosts, callers=args.callers, voters=args.voters, shards=shards, hostIDs=host_ids, voterIDs=voter_ids, identitySeed=str(args.identity_seed) if args.identity_seed else None, policyPlacement=placement, exclusionSupervisors=args.exclusion_supervisor, membershipControllers=args.membership_controller, placementControllers=args.placement_controller))
+    write_json(root / "topology.json", dict(placementClusterID=str(cluster_id), hosts=args.hosts, callers=args.callers, voters=args.voters, shards=shards, hostIDs=host_ids, voterIDs=voter_ids, identitySeed=str(args.identity_seed) if args.identity_seed else None, policyPlacement=placement, exclusionSupervisors=args.exclusion_supervisor, placementControllers=args.placement_controller))
     print(f"Created {len(nodes)} local/test node configurations in {root}")
     print("Mount only each process's own node directory; keep the CA private key outside application containers.")
 

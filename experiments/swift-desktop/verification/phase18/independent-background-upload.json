@@ -1,0 +1,14 @@
+{
+  "hits": 1,
+  "backgroundRequests": 1,
+  "foregroundHits": 0,
+  "readBytes": 524288,
+  "released": true,
+  "completed": 1,
+  "status": 204,
+  "checksumMatches": true,
+  "expired": false,
+  "durableActiveMappings": 1,
+  "strictSuspensionTestPassed": true,
+  "repeatSimulatorSuspensionFailuresRetained": true
+}

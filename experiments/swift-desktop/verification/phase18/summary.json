@@ -1,0 +1,26 @@
+{
+  "phase": 18,
+  "status": "completed",
+  "swiftTests": 121,
+  "iosTests": 284,
+  "pythonObservationTests": 3,
+  "androidBackendPhases": [
+    7,
+    8,
+    9
+  ],
+  "nativeSwiftBackendPassed": true,
+  "legacyPublicAPISymbols": 6079,
+  "legacyAPIIdentical": true,
+  "kotlinBusinessAdded": false,
+  "committed": false,
+  "limitations": [
+    "iOS 27 UI menu harness not passed",
+    "iOS 18.5 strict upload suspension passed once but repeated simulator runs did not suspend within 90 seconds",
+    "Manual download remains foreground Range GET; strict background download not claimed",
+    "macOS native host only; Windows platform gaps unchanged"
+  ],
+  "iosResourceScenarioStepsPassed": 9,
+  "iosResourceFunctionalStepsPassed": 6,
+  "iosResourceCleanupStepsPassed": 3
+}

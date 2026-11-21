@@ -15,9 +15,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             && ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"] != nil))
     func resourceImportRecoversAcrossOwnerDatabases() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { sourceDB, targetDB, sourceSQL, targetSQL, _ in
-            let sourceName = try #require(try await sourceSQL.raw("SELECT current_database() AS value").first(decoding: ImportRecoveryDatabaseName.self))
-            let targetName = try #require(try await targetSQL.raw("SELECT current_database() AS value").first(decoding: ImportRecoveryDatabaseName.self))
-            #expect(sourceName.value != targetName.value)
+            let identityQuery: SQLQueryString = "SELECT ROW(current_database(), inet_server_addr(), inet_server_port())::text AS value"
+            let sourceIdentity = try #require(try await sourceSQL.raw(identityQuery).first(decoding: ImportRecoveryDatabaseIdentity.self))
+            let targetIdentity = try #require(try await targetSQL.raw(identityQuery).first(decoding: ImportRecoveryDatabaseIdentity.self))
+            #expect(sourceIdentity.value != targetIdentity.value)
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("resource-import-two-owners-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
             let image = try #require(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="))
@@ -92,5 +93,5 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 }
 
-private struct ImportRecoveryDatabaseName: Decodable { let value: String }
+private struct ImportRecoveryDatabaseIdentity: Decodable { let value: String }
 private struct CrossOwnerImportRecoveryState: Decodable { let state: String; let released: Date? }

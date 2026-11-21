@@ -42,7 +42,7 @@ class NativeBackgroundUploadGate:
             # journals the original resource ID from the delegated grant.
             grant = claims['backgroundAuthorization'] if background else None
             media_id = str(uuid.UUID(grant['mediaID']['rawValue'])) if grant else None
-            part_number = int(grant['partNumber']) if grant else None
+            part_number = int(grant['scope']['part']['number']) if grant else None
         except (KeyError, IndexError, ValueError, TypeError, AttributeError):
             background = False
         with self.lock:

@@ -143,7 +143,7 @@ flowchart LR
 
 ### R09 — 转发与跨 owner 持久工作
 
-- **入口：** [Forwarding](../../IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding)、export/import/delivery worker、receipt、operator replay；媒体端口与 R19 联审。
+- **入口：** [Forwarding](../../IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Forwarding)、export/import/delivery worker、receipt、operator replay；媒体端口与 R19 联审。
 - **审核：** 来源授权、目标授权与媒体引用在何时冻结/复验；跨库部分成功如何交接；暂时失败/确定失败的分类；终态保留与清理；手工重放的权限和审计。
 - **验证与交付：** 每段 durable handoff 表及断连、媒体状态变化、owner 不可用、重复领取、清理后重试专项。通过标准是不越权复制、不重发已完成效果、不靠跳过事件或手工推进序号恢复。关联 B04、D07。
 
@@ -155,7 +155,7 @@ flowchart LR
 
 ### R11 — 建群、邀请、申请与审批
 
-- **入口：** [Creation](../../IMV2Server/Sources/IMV2Server/RoomCoordination/Creation)、[Invitations](../../IMV2Server/Sources/IMV2Server/RoomCoordination/Invitations)、邀请目录、全局申请配额与 HTTP。
+- **入口：** [Creation](../../IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomBootstrapDomainExecutor.swift)、[Invitations](../../IMV2Server/Sources/IMV2ServerApplication/Room/Invitations)、邀请目录、全局申请配额与 HTTP。
 - **审核：** token 与预览绑定；创建/补目录/重放；申请、取消、审批、拒绝竞争；control 与 owner 路由；额度释放；稳定 seek pagination。
 - **验证与交付：** 生命周期与路由矩阵，独立 control/双 owner PostgreSQL 定向证据。通过标准是成员变化、申请终态和额度一致，重复审批不重复生效，分页不因审核变化失效。B27 按原路由范围复核，不重新附加在线搬迁。关联 B10、B23–B27、D05、D06。
 

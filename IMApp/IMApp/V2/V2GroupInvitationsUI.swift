@@ -15,7 +15,7 @@ import VisionKit
 @Observable
 final class V2GroupInvitationStore {
     private let client: any V2ClientGroupInvitationManaging
-    private let operations:V2InvitationOperationService
+    private let operations:V2GroupInvitationService
     private(set) var pending:[V2InvitationPending]=[]
     private var managementBaseline:V2GroupInvitationOperationBaseline?
     private var baselineDeadline:ContinuousClock.Instant?
@@ -88,7 +88,8 @@ final class V2GroupInvitationStore {
     var isPresentingJoin = false
     var isPresentingScanner = false
 
-    init(client: any V2ClientGroupInvitationManaging,operations:V2InvitationOperationService) { self.client = client;self.operations=operations }
+    init(client: any V2ClientGroupInvitationManaging, operations: V2GroupInvitationService) { self.client = client; self.operations = operations }
+    init(client: any V2ClientGroupInvitationManaging, operations: V2InvitationOperationService) { self.client = client; self.operations = .init(service: operations) }
 
     var canManage:Bool {!isInvalidated && managementRoomID != nil && managementBaseline != nil && (baselineDeadline.map {$0 > .now} ?? false)}
     func observePending(roomID:String) async {

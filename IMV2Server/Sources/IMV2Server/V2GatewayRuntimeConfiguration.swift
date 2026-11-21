@@ -68,6 +68,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databaseURL: String
     /// Explicit canonical database URL -> local message-write socket mapping.
     public let messageWriteUnixSockets: [String: String]
+    public let messageWriteCrossRoomLimit: Int
     public let messageWritePipelineDepth: Int
     public let databasePolicy: V2PostgresRuntimePolicy
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
@@ -279,7 +280,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
 
     /// Only bounds retained work; physical write connections determine concurrency.
     public func durableSendSchedulingConfiguration() -> V2SendOperationSchedulingConfiguration {
-        .init(maximumPendingRequests: directRoomLogAppendMaximumPendingRequests, pipelineDepth: messageWritePipelineDepth)
+        .init(maximumPendingRequests: directRoomLogAppendMaximumPendingRequests, pipelineDepth: messageWritePipelineDepth,
+              maximumCrossRoomMessages: messageWriteCrossRoomLimit)
     }
 
     /// Persistent message workers require an exclusive message-write pool;
@@ -305,6 +307,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             }
             messageWriteUnixSockets = paths
         } else { messageWriteUnixSockets = [:] }
+        messageWriteCrossRoomLimit = try Self.positiveWithDefault(
+            "IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT", defaultValue: 1, maximum: 4, environment: environment)
         if let raw = Self.optional("IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH", environment: environment) {
             guard let depth = Int(raw), (1...2).contains(depth) else {
                 throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH")

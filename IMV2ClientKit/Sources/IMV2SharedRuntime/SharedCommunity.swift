@@ -3,7 +3,7 @@ import IMV2Core
 import IMV2ClientRuntime
 
 /// Per-installation/account/ref encrypted items; bearers never enter SQLite.
-private struct SharedInvitationSecrets: V2InvitationSecretStoring {
+struct SharedInvitationSecrets: V2InvitationSecretStoring {
     let installation: String
     let persistence: @Sendable (String) -> any SharedSecurePersistence
     private func item(_ reference: UUID, _ account: UserID) throws -> any SharedSecurePersistence {
@@ -29,9 +29,9 @@ struct SharedCommunitySnapshot: Encodable, Sendable {
     let preview: SharedInvitePreview?; let works: [SharedWork]; let failure: String?
 }
 actor SharedCommunity {
-    private let invites: V2InvitationOperationService
-    private let reader: V2HTTPGroupInvitationClient
-    private let moderation: V2MemberAdministrationOperationService
+    private let invites: V2GroupInvitationService
+    private let reader: V2GroupService
+    private let moderation: V2GroupAdministrationService
     private let store: GRDBV2LocalSyncStore
     private var tasks: [Task<Void, Never>] = []
     private var observers: [Task<Void, Never>] = []
@@ -41,18 +41,8 @@ actor SharedCommunity {
     private var preview: (V2GroupInviteSecret, V2GroupInvitePreview)?
     private var invitationRows: [SharedWork] = [], muteRows: [SharedWork] = []
     private var failure: SharedFailure?
-    init(account: UserID, store: GRDBV2LocalSyncStore, base: URL, http: V2SessionHTTPAuthorization, installation: String, persistence: @escaping @Sendable (String) -> any SharedSecurePersistence) throws {
-        self.store = store
-        let activation = UUID()
-        invites = .init(accountID: account, activationID: activation, store: store,
-            client: try V2HTTPInvitationOperationClient(baseURL: base, credentials: http, transport: http), secrets: SharedInvitationSecrets(installation: installation, persistence: persistence))
-        reader = try .init(baseURL: base, credentials: http, transport: http)
-        moderation = .init(accountID: account, activationID: activation, store: store,
-            client: try V2HTTPMemberAdministrationClient(baseURL: base, credentials: http, transport: http))
-    }
-    func handlers() -> [V2OperationWorkDispatcher.Handler] {
-        [V2OperationKind.groupInvite, .groupJoinRequest, .groupJoinDecision].map { kind in .init(kind: kind) { [invites] in try await invites.execute($0) } }
-        + [.init(kind: .memberMute) { [moderation] in try await moderation.execute($0) }]
+    init(store: GRDBV2LocalSyncStore, groups: V2GroupService) {
+        self.store = store; reader = groups; invites = groups.invitations; moderation = groups.administration
     }
     func start() {
         tasks = [Task { do { try await invites.runPreparation() } catch is CancellationError {} catch { failure = sharedFailure(error) } },

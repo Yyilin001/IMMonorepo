@@ -80,18 +80,8 @@ package actor V2PlacementRaftEndpoint: V2PlacementRaftServing {
             guard trust.authorizedSources(for: try trust.configuredHostServiceID(for: host.hostID), configured: roomHosts[host.hostID]).contains(wire.shardID) else { throw V2ActorAuthenticationError.forbidden }
         }
         switch request.command {
-        case .installServiceMembership(let membership):
-            guard request.certificate == nil,
-                  try trust.configuredService(serviceID).permissions.contains(.placementMembership) else {
-                throw V2ActorAuthenticationError.forbidden
-            }
-            // Every proposed endpoint must already belong to an admitted
-            // realtime service. This controller need not be a serving member.
-            guard let first = membership.peers.first else { throw V2ActorAuthenticationError.invalidConfiguration }
-            try trust.validateRealtimeRoster(membership.peers,
-                local: .init(nodeID: first.nodeID, serviceID: first.serviceID, incarnationID: UUID()),
-                address: first.address, port: first.port)
-            try trust.validateRoomRoster(membership.roomPeers, configured: roomHosts)
+        case .installServiceMembership:
+            throw V2ActorAuthenticationError.forbidden
         case .admitHost(let hostID):
             guard trust.authorizedSources(for: try trust.configuredHostServiceID(for: hostID), configured: roomHosts[hostID]).contains(wire.shardID),
                   try trust.configuredHostServiceID(for: hostID) == serviceID,

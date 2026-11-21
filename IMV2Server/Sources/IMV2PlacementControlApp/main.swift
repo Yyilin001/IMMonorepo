@@ -18,9 +18,15 @@ enum IMV2PlacementControlApp {
     static func main() async {
         do {
             let arguments = Array(CommandLine.arguments.dropFirst())
-            let membershipCommand = arguments.count == 2 && arguments.first == "--install-membership"
+            if arguments.count == 3, arguments[0] == "--prepare-offline-policy-change" {
+                let sql = try V2PlacementControlService.offlinePolicyChange(
+                    from: Data(contentsOf: URL(fileURLWithPath: arguments[1])),
+                    to: Data(contentsOf: URL(fileURLWithPath: arguments[2])))
+                print(sql)
+                return
+            }
             let transferCommand = arguments.count == 2 && arguments.first == "--transfer-room-partition"
-            guard arguments.isEmpty || arguments == ["--provision"] || arguments == ["--inspect"] || membershipCommand || transferCommand else {
+            guard arguments.isEmpty || arguments == ["--provision"] || arguments == ["--inspect"] || transferCommand else {
                 throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
             let environment = Environment()
@@ -32,17 +38,12 @@ enum IMV2PlacementControlApp {
                   Set(names).count == names.count else { throw V2RoomActorApplicationConfigurationError.invalidConfiguration }
             let configuration = try V2RoomActorApplicationConfiguration(environment: environment,
                 hostsRooms: false, configuredShardIDs: Set(names))
-            if membershipCommand || transferCommand {
+            if transferCommand {
                 LoggingSystem.bootstrap { label in StreamLogHandler.standardError(label: label) }
                 let file = try FileHandle(forReadingFrom: URL(fileURLWithPath: arguments[1]))
                 defer { try? file.close() }
                 let request = try file.read(upToCount: 65537) ?? Data()
-                var output: Data
-                if membershipCommand {
-                    output = try await V2PlacementControlService.installServiceMembership(configuration: configuration, request: request)
-                } else {
-                    output = try await V2PlacementControlService.transferRoomPartition(configuration: configuration, request: request)
-                }
+                var output = try await V2PlacementControlService.transferRoomPartition(configuration: configuration, request: request)
                 output.append(10); FileHandle.standardOutput.write(output)
                 return
             }

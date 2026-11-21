@@ -23,7 +23,7 @@ import uuid
 from v2_native_placement_inspection import decode_placement_inspection, room_placement, require_live_owner, same_owner
 
 ROOT = Path(__file__).resolve().parents[2]
-IMAGE = "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6"
+IMAGE = "swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144"
 NODES = ("host-a", "host-b", "client")
 VOTERS = ("placement-a", "placement-b", "placement-c")
 LINKS = {"host-a": ("control", "owner-a"), "host-b": ("control", "owner-b"),

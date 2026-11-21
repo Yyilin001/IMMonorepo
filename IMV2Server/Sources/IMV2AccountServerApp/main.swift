@@ -176,6 +176,8 @@ enum IMV2AccountServerApp {
                 try await V2CapacityProfileReadiness.verify(database: pool.database, profile: configuration.capacityProfile)
                 accountStorageDatabases[url] = pool.database
             }
+            try await V2FixedShardSources.verify(control: database, rooms: configuration.roomShardStorage,
+                users: configuration.userShardStorage) { accountStorageDatabases[$0] }
             var roomDatabases: [String: any Database] = [:]
             for storage in configuration.roomShardStorage {
                 guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -311,7 +313,7 @@ enum IMV2AccountServerApp {
                 let resourceRegistry = storageAssembly.registry
                 let resourceDelivery = try V2SignedResourceDelivery(registry: resourceRegistry,
                     baseURL: resourceConfiguration.publicBaseURL, keyID: "local-v1", keys: ["local-v1": resourceConfiguration.signingKey])
-                V2VaporResourceByteRoutes(delivery: resourceDelivery).register(on: app)
+                V2VaporResourceByteRoutes(delivery: resourceDelivery, logger: logger).register(on: app)
                 for owner in accountStorageDatabases.values {
                     try await V2BoundMediaProvider(database: owner, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports).verifyReferencedBindings()
                 }

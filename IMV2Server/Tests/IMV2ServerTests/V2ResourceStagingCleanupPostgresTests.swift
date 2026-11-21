@@ -8,9 +8,12 @@ import SQLKit
 import Testing
 @testable import IMV2ServerInfrastructure
 
+private let stagingCleanupDatabaseURL = ProcessInfo.processInfo.environment["IMV2_RESOURCE_STAGING_TEST_DATABASE_URL"]
+    ?? ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"]
+
 @Suite(.serialized)
 struct V2ResourceStagingCleanupPostgresTests {
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
+    @Test(.enabled(if: stagingCleanupDatabaseURL != nil))
     func publishedPartsCleanUpAfterFailureAndProcessReassembly() async throws {
         try await withFixture { fixture in
             try await V2SchemaReadiness.verify(database: fixture.database)
@@ -42,7 +45,7 @@ struct V2ResourceStagingCleanupPostgresTests {
         }
     }
 
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
+    @Test(.enabled(if: stagingCleanupDatabaseURL != nil))
     func expiredCleanupLeaseRejectsOldAcknowledgmentsAndRequiresQueueIndex() async throws {
         try await withFixture { fixture in
             let upload = try await fixture.upload(Data([1, 2, 3]))
@@ -88,7 +91,7 @@ struct V2ResourceStagingCleanupPostgresTests {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("im-oss-cleanup-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         do {
-            resources.databases.use(try .postgres(url: #require(ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"])), as: .psql, isDefault: true)
+            resources.databases.use(try .postgres(url: #require(stagingCleanupDatabaseURL)), as: .psql, isDefault: true)
             let fixture = try CleanupFixture(database: resources.database(.psql), root: root)
             try await body(fixture)
             try await resources.shutdown()

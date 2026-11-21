@@ -69,6 +69,24 @@ private func v2SafeErrorCode(_ error: any Error) -> String {
         "missing_configuration"
     case V2GatewayRuntimeConfigurationError.invalid:
         "invalid_configuration"
+    case V2RealtimeJournalError.invalidInput:
+        "journal_invalid_input"
+    case V2RealtimeJournalError.authorityLost:
+        "journal_authority_lost"
+    case V2RealtimeJournalError.corruptPersistenceState:
+        "journal_corrupt_persistence"
+    case V2ResourceProviderError.integrityMismatch:
+        "resource_integrity_mismatch"
+    case V2ResourceProviderError.configurationInvalid:
+        "resource_configuration_invalid"
+    case V2ResourceProviderError.unsupportedCapability:
+        "resource_unsupported_capability"
+    case V2ResourceProviderError.preconditionFailed:
+        "resource_precondition_failed"
+    case V2ResourceProviderError.temporarilyUnavailable:
+        "resource_temporarily_unavailable"
+    case V2ResourceProviderError.operationOutcomeUnknown:
+        "resource_operation_outcome_unknown"
     case is DecodingError:
         "decoding_failed"
     case is V2FrameCodecError:

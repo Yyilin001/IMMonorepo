@@ -172,15 +172,17 @@ struct V2ListViewportRow: ViewModifier {
 struct V2ListViewportContainer: ViewModifier {
     let viewport: V2ListViewport
     let coordinateSpace: String
+    var canRestore = true
 
     func body(content: Content) -> some View {
+        let request = canRestore ? viewport.restoration : nil
         ScrollViewReader { proxy in
             content
                 .coordinateSpace(name: coordinateSpace)
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { viewport.resize(visibleBounds: $0) }
                 .v2OnUserScroll { viewport.userDidBeginScrolling() }
-                .task(id: viewport.restoration?.id) {
-                    guard let request = viewport.restoration else { return }
+                .task(id: request?.id) {
+                    guard let request else { return }
                     await viewport.performRestoration(request) { proxy.scrollTo($0, anchor: .top) }
                 }
         }

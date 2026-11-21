@@ -7,6 +7,7 @@ import SQLKit
 /// A complete fresh cohort reduced in each room's runtime-owned turn order.
 /// Policy execution supplies control facts; preflight checks room-local state.
 struct V2RoomWriteDurableOwnerBatchPath: Sendable {
+    var profileDatabase: (any SQLDatabase)? = nil
     let strangerMessagePolicy: V2StrangerMessagePolicy
 
     func append(_ items: [Item], sql: any SQLDatabase, sendOperationMetrics: V2SendOperationBatchMetrics? = nil,
@@ -37,7 +38,7 @@ struct V2RoomWriteDurableOwnerBatchPath: Sendable {
         let appends = try reduce(items, rows: rows, usesPreloadedRows: preloadedRows != nil,
             metrics: sendOperationMetrics)
         guard appends.count == items.count else { return .init(commits: []) }
-        let persistence = V2RoomWriteDirectBatchPath(strangerMessagePolicy: strangerMessagePolicy)
+        let persistence = V2RoomWriteDirectBatchPath(profileDatabase: profileDatabase, strangerMessagePolicy: strangerMessagePolicy)
         let commits = try await persistence.complete(appends, sql: sql, sendOperationMetrics: sendOperationMetrics, combinedWrite: combinedWrite,
             prevalidatedDirectMemberships: preloadedRows != nil && combinedWrite != nil)
         return .init(commits: commits)
@@ -62,7 +63,7 @@ struct V2RoomWriteDurableOwnerBatchPath: Sendable {
         var timelineSequences: [UUID: Int64] = [:]
         var replied = Set<V2DirectSendPolicyCache.Key>()
         var projected = Set<V2DirectSendPolicyCache.Key>()
-        let persistence = V2RoomWriteDirectBatchPath(strangerMessagePolicy: strangerMessagePolicy)
+        let persistence = V2RoomWriteDirectBatchPath(profileDatabase: profileDatabase, strangerMessagePolicy: strangerMessagePolicy)
         for (ordinal, item) in items.enumerated() {
             let row = rows[ordinal], request = item.request, room = row.room
             guard row.ordinal == (usesPreloadedRows ? item.index : ordinal) else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }

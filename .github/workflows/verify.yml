@@ -4,15 +4,21 @@ on:
   pull_request:
   push:
   workflow_dispatch:
+    inputs:
+      ios_ui_test_filter:
+        description: "Space-separated XCTest identifiers for a focused iOS UI run"
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
   swift-and-postgres:
+    if: github.event_name != 'workflow_dispatch' || inputs.ios_ui_test_filter == ''
     name: Swift packages and PostgreSQL integration
     runs-on: ubuntu-latest
-    container: swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6
+    container: swift:6.4.2-jammy@sha256:18a1cdd3e55ee32b0b3e1a15f12a4e1320b67544e542ed96c907629e5e434144
     services:
       postgres:
         image: postgres:16-alpine
@@ -44,14 +50,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install native verification dependencies
-        run: apt-get update && apt-get install --yes --no-install-recommends libsqlite3-dev ripgrep postgresql-client python3 imagemagick openssl
+        run: apt-get update && apt-get install --yes --no-install-recommends ripgrep postgresql-client protobuf-compiler python3 imagemagick ffmpeg openssl
       - name: Run package tests
         env:
           # This job runs inside a Swift container and cannot launch sibling
           # Docker containers. The following service-backed integration step
           # installs the canonical schema into a clean PostgreSQL database.
           V2_SCHEMA_BOOTSTRAP_COVERED_BY_POSTGRES_INTEGRATION: "1"
-        run: bash ./scripts/run_v2_swift_tests.sh
+        run: |
+          # The container user differs from the host checkout owner.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bash ./scripts/run_v2_swift_tests.sh --server-packages
       - name: Build Linux release products
         run: |
           for product in IMV2AccountServerApp IMV2OperatorServerApp IMV2ServerApp IMV2ResourceImageWorker IMV2LocalGatewayProbe IMV2GatewayLoadGenerator; do
@@ -104,11 +113,35 @@ jobs:
           PGPORT: "5432"
           PGUSER: im_v2_test
           PGPASSWORD: im_v2_test
-        # The helper requires connection settings, provisions canonical schemas,
-        # and enables both resource opt-ins using separate disposable databases.
+        # The helper provisions the canonical schema in fresh resource databases.
         run: bash ./scripts/test_v2_server_native_postgres.sh --skip-build --filter 'V2Resource|V2MediaScan'
 
+      - name: Run admin PostgreSQL integration tests
+        env:
+          PGHOST: postgres
+          PGPORT: "5432"
+          PGUSER: im_v2_test
+          PGPASSWORD: im_v2_test
+          IMV2_ADMIN_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_admin_test
+          IMV2_ADMIN_TEST_DATABASE_IS_DISPOSABLE: "1"
+        run: |
+          createdb --template=template0 im_v2_admin_test
+          psql -Xq -v ON_ERROR_STOP=1 -d im_v2_admin_test -f ./IMV2/sql/schema.sql -f ./IMV2/sql/admin-schema.sql
+          swift test --disable-automatic-resolution --skip-build --no-parallel --package-path IMV2Server --filter IMV2AdminTests
+
+  swift-clientkit:
+    if: github.event_name != 'workflow_dispatch' || inputs.ios_ui_test_filter == ''
+    name: Swift ClientKit tests on macOS
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      # The full suite includes URLProtocol request copying and Apple backup metadata.
+      - run: bash ./scripts/run_v2_clientkit_native_tests.sh --disable-automatic-resolution --no-parallel
+
   room-actor-process-recovery:
+    if: github.event_name != 'workflow_dispatch' || inputs.ios_ui_test_filter == ''
     name: Linux room actor process recovery
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -116,33 +149,60 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install probe orchestration dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ripgrep openssl python3
-      - name: Exercise client-first discovery and Host crash recovery
-        env:
-          DOCKER_CONTEXT: default
-          VA_G4_MODE: linux
-          VA_G4_LINUX_CLIENT_FIRST: "1"
+      - name: Build the Linux recovery probe products
         run: |
-          export VA_G4_LINUX_SCRATCH_DIR="$RUNNER_TEMP/actor-swiftpm"
-          export VA_G4_LINUX_RUN_ROOT="$RUNNER_TEMP/actor-process-evidence"
-          mkdir -p "$VA_G4_LINUX_SCRATCH_DIR" "$VA_G4_LINUX_RUN_ROOT"
-          bash ./IMV2/scripts/test_v2_virtual_actor_business_probe.sh
-      - name: Exercise concurrent Hosts and peer-only network partition
-        env:
-          DOCKER_CONTEXT: default
-          VA_G6_MODE: linux
+          export IMV2_VA_LINUX_CACHE_DIR="$RUNNER_TEMP/actor-cache"
+          export IMV2_VA_LINUX_SCRATCH_DIR="$RUNNER_TEMP/actor-swiftpm"
+          export IMV2_VA_LINUX_COMPOSE_PROJECT="imv2-va-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash ./IMV2/scripts/run_v2_virtual_actor_linux.sh build \
+            VirtualActorBusinessProbe IMV2PlacementControlApp IMV2RoomHostSupervisorApp
+      - name: Exercise Host crash recovery and network loss
         run: |
-          export VA_G6_LINUX_SCRATCH_DIR="$RUNNER_TEMP/actor-swiftpm"
-          export VA_G6_LINUX_RUN_ROOT="$RUNNER_TEMP/actor-process-evidence"
-          python3 ./IMV2/scripts/test_v2_virtual_actor_multihost_probe.py
+          release="$RUNNER_TEMP/actor-swiftpm/IMV2Server-release/out/Products/Release-linux-x86_64"
+          build_result="$RUNNER_TEMP/actor-recovery-build.json"
+          PYTHONPATH=IMV2/scripts python3 - "$release" "$build_result" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+          from test_v2_native_host_crash import IMAGE, PRODUCTS, source_digest
+
+          release, result = map(Path, sys.argv[1:])
+          products = {}
+          for name in PRODUCTS:
+              with (release / name).open("rb") as binary:
+                  products[name] = hashlib.file_digest(binary, "sha256").hexdigest()
+          result.write_text(json.dumps(dict(passed=True, image=IMAGE,
+                                          sourceDigest=source_digest(Path.cwd()), products=products)))
+          PY
+
+          context="colima-imv2-native-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          evidence="$RUNNER_TEMP/actor-process-evidence"
+          sudo docker context create "$context" --docker host=unix:///var/run/docker.sock
+          cleanup() {
+            sudo docker context rm "$context"
+            if [[ -d "$evidence" ]]; then
+              sudo chown -R "$(id -u):$(id -g)" "$evidence"
+            fi
+          }
+          trap cleanup EXIT
+          # The probe reads journals written by service containers as root.
+          sudo python3 ./IMV2/scripts/test_v2_native_host_crash.py \
+            --docker-context "$context" --source-dir "$GITHUB_WORKSPACE" \
+            --release-dir "$release" --build-result "$build_result" \
+            --artifact-dir "$evidence"
       - name: Upload process recovery evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: room-actor-process-recovery
-          path: ${{ runner.temp }}/actor-process-evidence/*-evidence/
+          path: |
+            ${{ runner.temp }}/actor-process-evidence/result.json
+            ${{ runner.temp }}/actor-process-evidence/evidence/
           if-no-files-found: warn
 
   operational-config:
+    if: github.event_name != 'workflow_dispatch' || inputs.ios_ui_test_filter == ''
     name: Prometheus and local Compose configuration
     runs-on: ubuntu-latest
     steps:
@@ -155,39 +215,85 @@ jobs:
           bash ./IMV2/scripts/test_v2_local_compose_env_precedence.sh
 
   ios-build-for-testing:
+    if: github.event_name != 'workflow_dispatch' || inputs.ios_ui_test_filter == ''
     name: iOS build-for-testing
-    runs-on: macos-26
-    # The app deployment target is iOS 26.2. Pin both the hosted image and the
-    # selected toolchain/runtime instead of inheriting moving `latest` aliases.
+    runs-on: xcode-27
+    # Xcode 27.2 ships Swift 6.4.2 and the iOS 27.2 simulator.
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
-      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_CI_VERIFICATION_SCRIPT: ./IMApp/Scripts/verify_generic_simulator_build.sh
     steps:
       - uses: actions/checkout@v4
-      - name: Build app and test bundles without signing
-        run: bash ./IMApp/Scripts/verify_generic_simulator_build.sh
+      - &verify-ios
+        name: Run iOS verification with private Swift package access
+        env:
+          MESSAGING_UI_DEPLOY_KEY: ${{ secrets.MESSAGING_UI_DEPLOY_KEY }}
+        run: |
+          : "${MESSAGING_UI_DEPLOY_KEY:?MessagingUI read-only deploy key is required}"
+          ssh_dir="$(mktemp -d "$RUNNER_TEMP/messaging-ui.XXXXXX")"
+          trap 'rm -r -- "$ssh_dir"' EXIT
+          umask 077
+          printf '%s\n' "$MESSAGING_UI_DEPLOY_KEY" > "$ssh_dir/key"
+          unset MESSAGING_UI_DEPLOY_KEY
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i \"$ssh_dir/key\" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$ssh_dir/known_hosts\""
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=url.ssh://git@github.com/Yyilin001/MessagingUI.git.insteadOf
+          export GIT_CONFIG_VALUE_0=https://github.com/Yyilin001/MessagingUI.git
+          git ls-remote "$GIT_CONFIG_VALUE_0" HEAD > /dev/null
+          set --
+          if [[ -n "${IMAPP_UI_TEST_FILTER:-}" ]]; then
+            read -r -a test_filters <<< "$IMAPP_UI_TEST_FILTER"
+            if [[ -n "${test_filters[0]:-}" ]]; then set -- "${test_filters[@]}"; fi
+          fi
+          bash "$IMAPP_CI_VERIFICATION_SCRIPT" "$@"
 
   ios-unit-tests:
+    if: github.event_name != 'workflow_dispatch' || inputs.ios_ui_test_filter == ''
     name: iOS unit tests
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
-      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_CI_VERIFICATION_SCRIPT: ./IMApp/Scripts/verify_unit_tests.sh
     steps:
       - uses: actions/checkout@v4
-      - name: Run deterministic App store and projection tests
-        run: bash ./IMApp/Scripts/verify_unit_tests.sh
+      - *verify-ios
 
   ios-ui-tests:
     name: iOS signed-out UI tests
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
-      IMAPP_UI_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=26.2
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      IMAPP_UNIT_TEST_DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+      IMAPP_UI_TEST_RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-27-2
+      IMAPP_CI_VERIFICATION_SCRIPT: ./IMApp/Scripts/verify_ui_tests.sh
+      IMAPP_UI_TEST_FILTER: ${{ inputs.ios_ui_test_filter }}
     steps:
       - uses: actions/checkout@v4
-      - name: Run deterministic signed-out accessibility UI tests
-        run: bash ./IMApp/Scripts/verify_ui_tests.sh
+      - *verify-ios
+      - name: Export failed UI test evidence
+        if: failure()
+        run: |
+          result="$RUNNER_TEMP/IMAppUITests.xcresult"
+          [[ -d "$result" ]] || exit 0
+          output="$RUNNER_TEMP/ios-ui-failures"
+          xcrun xcresulttool export attachments --only-failures --path "$result" --output-path "$output"
+          # Keep custom screenshots and hierarchy reports from failed tests.
+          failed_tests="$(xcrun xcresulttool get test-results summary --path "$result" |
+            jq -r '[.testFailures[]?.testIdentifierURL // empty] | unique[]')"
+          while IFS= read -r test_id; do
+            [[ -n "$test_id" ]] || continue
+            xcrun xcresulttool export attachments --test-id "$test_id" --path "$result" \
+              --output-path "$output/${test_id##*/}"
+          done <<< "$failed_tests"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ios-ui-failures
+          path: ${{ runner.temp }}/ios-ui-failures
+          if-no-files-found: ignore
+          retention-days: 3
