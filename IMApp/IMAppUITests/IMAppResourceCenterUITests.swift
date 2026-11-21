@@ -591,16 +591,21 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(file.isHittable)
         if page == .library { try auditStorage(app, name: "Document library and long filename"); return }
         file.tap()
-        XCTAssertTrue(app.navigationBars["资源详情"].waitForExistence(timeout: 5))
+        let navigation = app.navigationBars["资源详情"]
+        XCTAssertTrue(navigation.waitForExistence(timeout: 5))
         if page == .metadata { try auditStorage(app, name: "Document metadata"); return }
-        let retain = app.buttons["v2.resources.retain"]
-        for _ in 0..<12 where !retain.isHittable { app.swipeUp() }
-        XCTAssertTrue(retain.isHittable)
+        // The metadata audit changes Dynamic Type, rebuilding the List and
+        // resetting its offset. Audit scrolled rows at their actual launch size.
+        let scrolledAuditTypes = XCUIAccessibilityAuditType.all.subtracting(.dynamicType)
         if page == .actions {
-            try auditStorage(app, name: "Document actions and source")
+            for id in ["v2.resources.preview", "v2.resources.share", "v2.resources.retain"] {
+                revealDetailControl(app.buttons[id], below: navigation, in: app)
+            }
             let explanation = app.buttons["v2.resources.usage-explanation"]
-            for _ in 0..<12 where !explanation.isHittable { app.swipeUp() }
-            XCTAssertTrue(explanation.isHittable); explanation.tap()
+            revealDetailControl(explanation, below: navigation, in: app)
+            try auditStorage(app, name: "Document actions", types: scrolledAuditTypes, navigation: navigation)
+            revealDetailControl(explanation, below: navigation, in: app)
+            explanation.tap()
             let alert = app.alerts["使用与保留说明"]
             XCTAssertTrue(alert.waitForExistence(timeout: 5))
             XCTAssertTrue(alert.staticTexts["查看和分享前会验证当前访问权限。保留本机可防止自动清理，但不会获得永久访问权限。"].exists)
@@ -610,17 +615,25 @@ final class IMAppResourceCenterUITests: XCTestCase {
         }
         // Each system audit gets a fresh process and scope, so its internal
         // font and scroll changes cannot become another page's initial state.
-        for id in ["v2.resources.preview", "v2.resources.share"] {
-            let control = app.buttons[id]
-            for _ in 0..<12 where !control.isHittable { app.swipeUp() }
-            XCTAssertTrue(control.isHittable)
-        }
         let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.resources.source.")).firstMatch
-        for _ in 0..<12 where !source.isHittable { app.swipeUp() }
-        XCTAssertTrue(source.isHittable)
-        app.swipeUp()
-        XCTAssertTrue(source.isHittable)
-        try auditStorage(app, name: "Document source navigation")
+        revealDetailControl(source, below: navigation, in: app)
+        try auditStorage(app, name: "Document source navigation", types: scrolledAuditTypes, navigation: navigation)
+    }
+
+    @MainActor private func revealDetailControl(_ element: XCUIElement, below navigation: XCUIElement, in app: XCUIApplication) {
+        func isVisible() -> Bool {
+            guard element.isHittable else { return false }
+            let frame = element.frame
+            return !frame.isEmpty && frame.minY >= navigation.frame.maxY && frame.maxY <= app.frame.maxY
+        }
+        for _ in 0..<12 where !isVisible() {
+            if element.exists && element.frame.minY < navigation.frame.maxY {
+                app.swipeDown(velocity: .slow)
+            } else {
+                app.swipeUp(velocity: .slow)
+            }
+        }
+        XCTAssertTrue(isVisible())
     }
 
     @MainActor func testTransferNetworkWaitPassesAccessibilityAudit() throws { try verifyTransferAudit(large: false) }

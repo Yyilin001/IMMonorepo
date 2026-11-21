@@ -1221,7 +1221,12 @@ struct V2ContactsRootView: View {
                 ProgressView().accessibilityLabel("正在加载更多联系人")
             } else {
                 Button(title) { Task { await action() } }
-                    .onAppear { Task { await action() } }
+                    .onAppear {
+                        // A programmatic scroll to an anchor can materialize this
+                        // footer before the List has settled on its restored window.
+                        guard store.friendsViewport.restoration == nil else { return }
+                        Task { await action() }
+                    }
             }
             Spacer()
         }

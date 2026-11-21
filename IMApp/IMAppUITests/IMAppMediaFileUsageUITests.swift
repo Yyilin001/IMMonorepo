@@ -117,13 +117,18 @@ final class IMAppMediaFileUsageUITests: XCTestCase {
             let resumed = app.buttons["播放音频"]
             let readyAgain = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"), object: resumed)
             XCTAssertEqual(XCTWaiter.wait(for: [readyAgain], timeout: 10), .completed)
+        } else {
+            XCTAssertTrue(app.saveToFilesActionForTesting.waitForExistence(timeout: 20))
         }
         let discard = app.buttons["v2.file-use.discard"]
-        XCTAssertTrue(discard.waitForExistence(timeout: 10)); discard.tap()
-        XCTAssertTrue(app.staticTexts["使用中的文件已保留"].waitForExistence(timeout: 10))
+        XCTAssertTrue(discard.wait(for: \.isHittable, toEqual: true, timeout: 20))
+        discard.tap()
+        let retired = app.staticTexts["v2.file-use.retirement"]
+        let retained = retired.wait(for: \.label, toEqual: "使用中的文件已保留", timeout: 10)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Retired file retained by " + kind
+        screenshot.name = "File retirement during " + kind
         screenshot.lifetime = .keepAlways; add(screenshot)
+        XCTAssertTrue(retained, "File retirement status: \(retired.label)")
         app.buttons["v2.file-use.dismiss"].tap()
         let close = app.buttons["v2.file-use.close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10)); close.tap()
@@ -150,12 +155,16 @@ extension XCTestCase {
 }
 
 extension XCUIApplication {
-    @discardableResult @MainActor func tapSaveToFilesForTesting() -> XCUIElement {
+    @MainActor var saveToFilesActionForTesting: XCUIElement {
         let labels = ["保存到“文件”", "存储到“文件”", "Save to Files"]
-        let action = descendants(matching: .any).matching(NSPredicate(
+        return descendants(matching: .any).matching(NSPredicate(
             format: "elementType IN %@ AND label IN[c] %@",
             [XCUIElement.ElementType.cell.rawValue, XCUIElement.ElementType.button.rawValue], labels
         )).firstMatch
+    }
+
+    @discardableResult @MainActor func tapSaveToFilesForTesting() -> XCUIElement {
+        let action = saveToFilesActionForTesting
         XCTAssertTrue(action.wait(for: \.isHittable, toEqual: true, timeout: 20))
         action.tap()
         return action

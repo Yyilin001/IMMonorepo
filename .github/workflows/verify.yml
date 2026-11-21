@@ -278,10 +278,18 @@ jobs:
       - name: Export failed UI test evidence
         if: failure()
         run: |
-          if [[ -d "$RUNNER_TEMP/IMAppUITests.xcresult" ]]; then
-            xcrun xcresulttool export attachments --only-failures --path "$RUNNER_TEMP/IMAppUITests.xcresult" \
-              --output-path "$RUNNER_TEMP/ios-ui-failures"
-          fi
+          result="$RUNNER_TEMP/IMAppUITests.xcresult"
+          [[ -d "$result" ]] || exit 0
+          output="$RUNNER_TEMP/ios-ui-failures"
+          xcrun xcresulttool export attachments --only-failures --path "$result" --output-path "$output"
+          # Keep custom screenshots and hierarchy reports from failed tests.
+          failed_tests="$(xcrun xcresulttool get test-results summary --path "$result" |
+            jq -r '[.testFailures[]?.testIdentifierURL // empty] | unique[]')"
+          while IFS= read -r test_id; do
+            [[ -n "$test_id" ]] || continue
+            xcrun xcresulttool export attachments --test-id "$test_id" --path "$result" \
+              --output-path "$output/${test_id##*/}"
+          done <<< "$failed_tests"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
