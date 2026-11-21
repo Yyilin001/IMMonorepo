@@ -122,18 +122,24 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         app.buttons["v2.conversation.performance.open"].tap()
         app.buttons["v2.performance.scenario"].tap()
         app.buttons[scenario].tap()
+        if scenario == "持续新增会话" {
+            app.buttons["v2.performance.rate"].tap()
+            app.buttons["20"].tap()
+        }
+        app.buttons["v2.performance.duration"].tap()
+        app.buttons["60 秒"].tap()
         app.buttons["v2.performance.start"].tap()
         let list = app.collectionViews["v2.performance.list"]
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         let slot = list.cells.element(boundBy: 1)
         XCTAssertTrue(slot.wait(for: \.isHittable, toEqual: true, timeout: 5))
-        slot.swipeLeft()
         let archive = app.buttons["隐藏"]
-        if !archive.waitForExistence(timeout: 3), slot.isHittable {
-            // A live insertion can move the first gesture's target before UIKit opens the actions.
+        for _ in 0..<4 where !archive.exists {
+            // Resolve the visible position again if a live insertion interrupted the gesture.
             slot.swipeLeft()
+            if archive.waitForExistence(timeout: 2) { break }
         }
-        XCTAssertTrue(archive.waitForExistence(timeout: 3))
+        XCTAssertTrue(archive.exists)
         let owner = slot.identifier
         XCTAssertTrue(owner.hasPrefix("v2.performance.cell."))
         let events = app.staticTexts["v2.performance.events"]
