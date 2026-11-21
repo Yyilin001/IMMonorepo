@@ -27,6 +27,10 @@ fi
 if [[ $# -eq 0 ]]; then set -- IMAppUITests; fi
 test_filters=()
 for test_id in "$@"; do test_filters+=("-only-testing:${test_id}"); done
+result_options=()
+if [[ -n "${RUNNER_TEMP:-}" ]]; then
+  result_options=(-resultBundlePath "$RUNNER_TEMP/IMAppUITests.xcresult")
+fi
 
 xcodebuild test \
   -project "${PROJECT_FILE}" \
@@ -35,6 +39,7 @@ xcodebuild test \
   -configuration "${CONFIGURATION}" \
   -destination "${DESTINATION}" \
   -parallel-testing-enabled NO \
+  "${result_options[@]}" \
   "${test_filters[@]}" \
   CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-
 

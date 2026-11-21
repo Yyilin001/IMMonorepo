@@ -10,9 +10,10 @@ struct V2SearchField: View {
     var hint = ""
 
     var body: some View {
+        let hintColor = Color.primary.opacity(0.78)
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.body).foregroundStyle(.secondary).accessibilityHidden(true)
+                .font(.body).foregroundStyle(hintColor).accessibilityHidden(true)
             TextField(title, text: $text, prompt: Text(""))
                 .focused($isFocused)
                 .textFieldStyle(.plain)
@@ -27,7 +28,7 @@ struct V2SearchField: View {
                     if text.isEmpty {
                         // The field already exposes its label to VoiceOver.
                         // Draw the hint at the same contrast as the search icon.
-                        Text(title).font(.body).foregroundStyle(.secondary).lineLimit(1)
+                        Text(title).font(.body).foregroundStyle(hintColor).lineLimit(1)
                             .allowsHitTesting(false).accessibilityHidden(true)
                     }
                 }

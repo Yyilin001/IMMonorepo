@@ -411,12 +411,12 @@ final class IMAppResourceCenterUITests: XCTestCase {
         }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: filtered, object: nil)], timeout: 10), .completed)
         XCTAssertFalse(app.buttons["v2.resources.library.next"].exists)
-        app.buttons["v2.resources.library.search.clear"].tap()
+        let clear = app.buttons["v2.resources.library.search.clear"]
+        clear.tap()
         let restored = NSPredicate { _, _ in
-            (search.value as? String) == "搜索资源" && rows.count > 1
+            !clear.exists && rows.count > 1
         }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: restored, object: nil)], timeout: 10), .completed)
-        XCTAssertFalse(app.buttons["v2.resources.library.search.clear"].exists)
         let next = app.buttons["v2.resources.library.next"]
         for _ in 0..<40 where !next.isHittable { app.swipeUp() }
         XCTAssertTrue(next.isHittable && next.isEnabled)
