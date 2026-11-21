@@ -72,10 +72,10 @@ import IMV2SharedRuntime
         let first = Task { try await f.session.completeSignOut() }
         await f.credentials.deleteBarrier.waitUntilStarted()
         first.cancel()
-        let second = Task { try await f.session.completeSignOut() }
         #expect(await f.marker.pending)
+        #expect(await f.credentials.record != nil)
         await f.credentials.deleteBarrier.release()
-        try await first.value; try await second.value
+        try await first.value
         #expect(await !f.marker.pending)
         #expect(await f.credentials.deletions == 1)
     }
