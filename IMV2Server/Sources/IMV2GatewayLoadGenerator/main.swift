@@ -147,6 +147,7 @@ private struct LoadConfiguration: Sendable {
     let caPath: String
     let credentialsPath: String
     let reportPath: String
+    let messageAuditMaximumRows: Int
     let connections: Int
     let localBindAddress: String?
     let bindInterfaceIndex: UInt32?
@@ -227,6 +228,7 @@ private struct LoadConfiguration: Sendable {
         self.accountBaseURL=accountBaseURL
         self.caPath = caPath
         self.credentialsPath = credentialsPath
+        self.messageAuditMaximumRows = try Self.integer(values["--message-audit-max-rows"] ?? "0", range: 0...Int.max)
         self.reportPath = reportPath
         port = try Self.integer(values["--port"] ?? "443", range: 1...65_535)
         if let expected = try? SocketAddress(ipAddress: serverName, port: port) {
@@ -403,7 +405,7 @@ private struct LoadConfiguration: Sendable {
             && maximumInFlightMessagesPerConnection == 1
             && scenario?.sendDispatch == .boundedClientQueue
             && (scenario?.maximumQueuedMessagesPerConnection ?? 0) >= 1) else { throw LoadError.invalidArguments }
-        recoveryBurstWorkers = try Self.integer(values["--recovery-burst-workers"] ?? "128", range: 1...connections)
+        recoveryBurstWorkers = try Self.integer(values["--recovery-burst-workers"] ?? String(min(128, connections)), range: 1...connections)
         recoveryBurstMaximumAttempts = try Self.integer(values["--recovery-burst-max-attempts"] ?? "1", range: 1...3)
         recoveryBurstOfflineSeconds = try Self.integer(values["--recovery-burst-offline-seconds"] ?? "0", range: 0...300)
         recoveryBurstOfflineMessagesPerRoom = try Self.integer(values["--recovery-burst-offline-messages-per-room"] ?? "0", range: 0...16)
@@ -631,14 +633,89 @@ private struct RecoveryBatchStats {
     var latency = LatencyHistogram()
 }
 
+private enum MessageRetryCause: Sendable { case serverBusy, deferred, other }
+
+/// Accumulates actual elapsed time from scheduling a retry to issuing the next wire attempt.
+private struct MessageRetryTiming: Sendable {
+    var busyMilliseconds = 0.0
+    var deferredMilliseconds = 0.0
+    var otherMilliseconds = 0.0
+    var pending: (cause: MessageRetryCause, start: NIODeadline)?
+
+    mutating func finishWait(at now: NIODeadline) {
+        guard let pending else { return }
+        self.pending = nil
+        let elapsed = (now - pending.start).millisecondsDouble
+        switch pending.cause {
+        case .serverBusy: busyMilliseconds += elapsed
+        case .deferred: deferredMilliseconds += elapsed
+        case .other: otherMilliseconds += elapsed
+        }
+    }
+}
+
+private struct MessageRetryBucket: Encodable {
+    var operations = 0
+    var withServerBusy = 0
+    var withDeferred = 0
+    var busyMilliseconds = 0.0
+    var deferredMilliseconds = 0.0
+    var otherMilliseconds = 0.0
+
+    mutating func record(_ timing: MessageRetryTiming) {
+        operations += 1
+        if timing.busyMilliseconds > 0 { withServerBusy += 1 }
+        if timing.deferredMilliseconds > 0 { withDeferred += 1 }
+        busyMilliseconds += timing.busyMilliseconds
+        deferredMilliseconds += timing.deferredMilliseconds
+        otherMilliseconds += timing.otherMilliseconds
+    }
+}
+
 private struct MessageSendCohortReport: Encodable {
     let messagesSent: Int
     let messagesAcknowledged: Int
     let messageLatency: Percentiles
     let messageEndToEndLatency: Percentiles
+    let retryWaitByEndToEndMillisecond: [Int: MessageRetryBucket]
+}
+
+/// Optional fixed-budget identity ledger. All file I/O happens after the measured run.
+private final class LoadMessageAudit: @unchecked Sendable {
+    private let lock = NIOLock()
+    private let maximumRows: Int
+    private var rows = 0
+    private var incomplete = false
+    private var csv = Data("room_id,sender_user_id,client_message_id,message_id,room_sequence,outcome\n".utf8)
+
+    init(maximumRows: Int) { self.maximumRows = maximumRows }
+
+    func record(_ operation: V2MessageSendOperationCommand, accepted: V2MessageOperationAcceptance? = nil, outcome: String) {
+        let command = operation.command
+        guard let room = command.roomID.uuidValue, let sender = command.senderUserID.uuidValue,
+              let client = command.clientMessageID.uuidValue else {
+            lock.withLock { incomplete = true }
+            return
+        }
+        let line = "\(room),\(sender),\(client),\(accepted?.messageID.rawValue ?? ""),\(accepted?.roomSequence ?? 0),\(outcome)\n"
+        lock.withLock {
+            guard rows < maximumRows else { incomplete = true; return }
+            csv.append(contentsOf: line.utf8)
+            rows += 1
+        }
+    }
+
+    func write(nextTo reportPath: String) throws {
+        let data = try lock.withLock {
+            guard !incomplete else { throw LoadError.incompleteMessageAudit }
+            return csv
+        }
+        try data.write(to: URL(fileURLWithPath: reportPath + ".messages.csv"), options: .atomic)
+    }
 }
 
 private final class LoadStatistics: @unchecked Sendable {
+    let messageAudit: LoadMessageAudit?
     let visibilityRunID: UUID?
     let visibilityClockDomain: UUID?
     private let visibilityAllowedCohorts: Set<String>
@@ -649,6 +726,7 @@ private final class LoadStatistics: @unchecked Sendable {
     private var visibilityCohorts: [String: VisibilityCohort] = [:]
     private var visibilityEvents: [String: Int] = [:]
     init(configuration: LoadConfiguration) {
+        messageAudit = configuration.messageAuditMaximumRows > 0 ? LoadMessageAudit(maximumRows: configuration.messageAuditMaximumRows) : nil
         visibilityRunID = configuration.visibilityRunID
         visibilityClockDomain = configuration.visibilityClockDomain
         visibilityAllowedCohorts = Set(configuration.scenario?.phases.map(\.name) ?? [])
@@ -781,6 +859,7 @@ private final class LoadStatistics: @unchecked Sendable {
         var acknowledged = 0
         var latency = LatencyHistogram()
         var endToEnd = LatencyHistogram()
+        var retryWait: [Int: MessageRetryBucket] = [:]
     }
     private var cohortWindows = V2LoadMessageCohortWindows()
     private var cohorts: [String: MessageCohort] = [:]
@@ -793,7 +872,8 @@ private final class LoadStatistics: @unchecked Sendable {
     func messageSendCohorts() -> [String: MessageSendCohortReport] {
         lock.withLock {
             cohorts.mapValues { .init(messagesSent: $0.sent, messagesAcknowledged: $0.acknowledged,
-                messageLatency: $0.latency.percentiles, messageEndToEndLatency: $0.endToEnd.percentiles) }
+                messageLatency: $0.latency.percentiles, messageEndToEndLatency: $0.endToEnd.percentiles,
+                retryWaitByEndToEndMillisecond: $0.retryWait) }
         }
     }
 
@@ -899,7 +979,8 @@ private final class LoadStatistics: @unchecked Sendable {
             if let name = cohortWindows.cohort(scheduledAt: scheduledAt.uptimeNanoseconds) { cohorts[name]?.sent += 1 }
         }
     }
-    func recordMessageAcknowledged(milliseconds: Double, endToEndMilliseconds: Double, scheduledAt: NIODeadline) {
+    func recordMessageAcknowledged(milliseconds: Double, endToEndMilliseconds: Double, scheduledAt: NIODeadline,
+                                   retryTiming: MessageRetryTiming) {
         lock.withLock {
             state.messagesAcknowledged += 1
             state.messageLatency.record(milliseconds)
@@ -908,6 +989,10 @@ private final class LoadStatistics: @unchecked Sendable {
                 cohort.acknowledged += 1
                 cohort.latency.record(milliseconds)
                 cohort.endToEnd.record(endToEndMilliseconds)
+                if retryTiming.busyMilliseconds + retryTiming.deferredMilliseconds + retryTiming.otherMilliseconds > 0 {
+                    let bucket = LatencyHistogram.bucketIndex(endToEndMilliseconds)
+                    cohort.retryWait[bucket, default: MessageRetryBucket()].record(retryTiming)
+                }
             }
         }
     }
@@ -1438,6 +1523,9 @@ private struct LoadRun: Sendable {
                 checkpointWorker = RealtimeCheckpointWorker(slots: slots, requested: configuration.connections,
                     requestPath: request, responsePath: response)
             }
+            if configuration.scenario != nil, statistics.snapshot().active != configuration.connections {
+                throw LoadError.scenarioStartBarrierFailure("connection ramp did not reach the requested population")
+            }
             if !configuration.onlineOnly && (configuration.messagesPerSecond > 0 || configuration.scenario != nil) {
                 try await startWorkloads(channels: slots.compactMap(\.channel))
             }
@@ -1570,6 +1658,7 @@ private struct LoadRun: Sendable {
         let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
         let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, messageSendCohorts: statistics.messageSendCohorts(), receiverVisibility: statistics.visibilityReport(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, receiverDrain: receiverDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
+        try statistics.messageAudit?.write(nextTo: configuration.reportPath)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -1589,7 +1678,8 @@ private struct LoadRun: Sendable {
         deadline: NIODeadline? = nil,
         attempt: RecoveryBurstAttempt? = nil,
         reconnectSlot: LoadConnectionSlot? = nil,
-        reconnectSnapshot: LoadReconnectSnapshot? = nil
+        reconnectSnapshot: LoadReconnectSnapshot? = nil,
+        remainingSourcePortRetries: Int = 4
     ) -> EventLoopFuture<Channel> {
         statistics.recordAttempt()
         let eventLoop = group.next()
@@ -1668,7 +1758,15 @@ private struct LoadRun: Sendable {
         // failed ramp can shut its EventLoopGroup down without leaking promises.
         connection.cascadeFailure(to: authenticated)
         guard deadline != nil else {
-            return connection.flatMap { channel in authenticated.futureResult.map { channel } }
+            return connection.flatMap { channel in authenticated.futureResult.map { channel } }.flatMapError { error in
+                // A local fixed port can become occupied after the benchmark's
+                // exclusion snapshot. Replace it before trying TLS or auth.
+                guard localSourcePorts != nil, remainingSourcePortRetries > 0, attempt == nil, reconnectSlot == nil,
+                      Self.isOccupiedSourcePort(error) else { return eventLoop.makeFailedFuture(error) }
+                return self.connect(credential: credential, targetUserIDs: targetUserIDs,
+                    connectionIndex: connectionIndex, group: group, sslContext: sslContext, statistics: statistics,
+                    restoredCursors: restoredCursors, remainingSourcePortRetries: remainingSourcePortRetries - 1)
+            }
         }
         return connection.flatMap { channel in
             attempt?.install(channel)
@@ -1681,6 +1779,12 @@ private struct LoadRun: Sendable {
                 channel.close().flatMapError { _ in channel.eventLoop.makeSucceededFuture(()) }.flatMapThrowing { throw error }
             }.always { _ in timeout?.cancel() }
         }
+    }
+
+    private static func isOccupiedSourcePort(_ error: Error) -> Bool {
+        if let io = error as? IOError { return io.errnoCode == EADDRINUSE }
+        guard let dial = error as? NIOConnectionError, !dial.connectionErrors.isEmpty else { return false }
+        return dial.connectionErrors.allSatisfy { ($0.error as? IOError)?.errnoCode == EADDRINUSE }
     }
 
     private func enforceGuards(statistics: LoadStatistics) throws {
@@ -2453,6 +2557,7 @@ private struct LoadMessageSnapshot: Sendable {
     let scheduledAt: NIODeadline
     let deadline: NIODeadline
     let attempts: Int
+    let retryTiming: MessageRetryTiming
 }
 private struct LoadReconnectSnapshot: Sendable {
     let operations: [LoadMessageSnapshot]
@@ -2771,7 +2876,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "97736031feae19034152aebaf4fdc4daf151e685f3d2f4c2c7a1931cf594dd6b"
+    static let algorithmSourceSHA256 = "27ec179346aaa7b638037567569f38629ace4d1fbfa0971f4519cb0238e904f2"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     // Keep the load operation inside the server's 24-hour admission ceiling even
@@ -2837,6 +2942,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let scheduledAt: NIODeadline
         let deadline: NIODeadline
         var attempts = 0
+        var retryTiming = MessageRetryTiming()
         var restoredAfterReconnect = false
         var wireRequestID: UInt64?
         var lastWireAction: MessageWireAction = .submit
@@ -2845,6 +2951,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             command = snapshot.command; identity = snapshot.identity; fingerprint = snapshot.fingerprint
             sent = snapshot.sent; scheduledAt = snapshot.scheduledAt
             deadline = snapshot.deadline; attempts = snapshot.attempts
+            retryTiming = snapshot.retryTiming
             restoredAfterReconnect = true
         }
         init(command: V2MessageSendOperationCommand, sent: NIODeadline, scheduledAt: NIODeadline) throws {
@@ -3070,6 +3177,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             operation.timer?.cancel()
             if let requestID = operation.wireRequestID { pendingRequests.removeValue(forKey: requestID) }
             messageRequestIDs.remove(operationID)
+            statistics.messageAudit?.record(operation.command, outcome: "unknown")
             statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN_CONNECTION_CLOSED")
             statistics.recordWorkloadFailure(kind: "message", code: "TCP_OUTCOME_UNKNOWN_CONNECTION_CLOSED")
         }
@@ -3601,7 +3709,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 statistics.recordMessageTransportEvent("TRANSFERRED")
                 return LoadMessageSnapshot(command: operation.command, identity: operation.identity,
                     fingerprint: operation.fingerprint, sent: operation.sent, scheduledAt: operation.scheduledAt, deadline: operation.deadline,
-                    attempts: operation.attempts)
+                    attempts: operation.attempts, retryTiming: operation.retryTiming)
             }
             for _ in 0..<queuedScenarioMessages { statistics.recordMessageTransportEvent("TRANSFERRED_QUEUE") }
             let snapshot = LoadReconnectSnapshot(operations: operations, queuedStarts: Array(queuedScenarioMessageStarts),
@@ -4074,7 +4182,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private func emitMessageAttempt(operationID: UInt64, action: MessageWireAction, context: ChannelHandlerContext) throws {
         guard let operation = messageOperations[operationID] else { return }
         guard context.channel.isActive, operation.attempts < Self.maximumMessageWireAttempts, NIODeadline.now() < operation.deadline else {
-            try finishMessage(operationID, failure: "TCP_OUTCOME_UNKNOWN_RETRY_EXHAUSTED", context: context); return
+            try finishMessage(operationID, failure: .unknown("RETRY_EXHAUSTED"), context: context); return
         }
         let requestID = takeRequestID()
         var request = IMV2Envelope()
@@ -4086,6 +4194,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 fingerprint: operation.fingerprint, domainFingerprint: operation.command.command.fingerprint)
             request.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery: query)
         } else { request.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation.command) }
+        if operation.retryTiming.pending != nil { operation.retryTiming.finishWait(at: .now()) }
         operation.attempts += 1; operation.wireRequestID = requestID; operation.lastWireAction = actualAction
         pendingRequests[requestID] = .message(operationID: operationID)
         statistics.recordMessageTransportEvent(actualAction == .submit ? "WIRE_SUBMIT" : "WIRE_RECOVERY_QUERY")
@@ -4102,7 +4211,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
         do { try write(request, frameVersion: UInt8(benchmarkWireVersion), context: context) }
         catch {
-            try finishMessage(operationID, failure: "TCP_OUTCOME_UNKNOWN_WRITE_FAILURE", drain: false, context: context)
+            try finishMessage(operationID, failure: .unknown("WRITE_FAILURE"), drain: false, context: context)
             throw error
         }
     }
@@ -4122,7 +4231,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 try finishMessage(operationID, failure: nil, drain: false, context: context)
                 let acknowledgedAt = NIODeadline.now()
                 statistics.recordMessageAcknowledged(milliseconds: (acknowledgedAt - operation.sent).millisecondsDouble,
-                    endToEndMilliseconds: (acknowledgedAt - operation.scheduledAt).millisecondsDouble, scheduledAt: operation.scheduledAt)
+                    endToEndMilliseconds: (acknowledgedAt - operation.scheduledAt).millisecondsDouble, scheduledAt: operation.scheduledAt,
+                    retryTiming: operation.retryTiming)
+                statistics.messageAudit?.record(operation.command, accepted: accepted, outcome: "accepted")
                 statistics.recordMessageTransportEvent("ACCEPTED")
                 if operation.restoredAfterReconnect { statistics.recordMessageTransportEvent("RECOVERED_AFTER_RECONNECT") }
                 let roomID = operation.command.command.roomID.rawValue
@@ -4155,11 +4266,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 try drainQueuedScenarioMessages(context: context)
             case .rejected(let reason):
                 statistics.recordMessageTransportEvent("TERMINAL_REJECTED_" + reason.rawValue)
-                try finishMessage(operationID, failure: "TCP_REJECTED_" + reason.rawValue, context: context)
+                try finishMessage(operationID, failure: .failed("TCP_REJECTED_" + reason.rawValue), context: context)
             }
         case .fingerprintConflict:
             statistics.recordMessageTransportEvent("FINGERPRINT_CONFLICT")
-            try finishMessage(operationID, failure: "TCP_FINGERPRINT_CONFLICT", context: context)
+            try finishMessage(operationID, failure: .failed("TCP_FINGERPRINT_CONFLICT"), context: context)
         case .unresolved:
             statistics.recordMessageTransportEvent("UNRESOLVED")
             let expired = Date().timeIntervalSince1970 * 1_000 >= Double(operation.command.firstSubmissionDeadlineMilliseconds)
@@ -4171,18 +4282,21 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             }
             statistics.recordMessageTransportEvent("DEFERRED_" + hint.reason.rawValue)
             try scheduleMessageAttempt(operationID: operationID, action: operation.lastWireAction,
-                delayMilliseconds: Int64(max(1, hint.retryAfterMilliseconds ?? 1_000)), context: context)
+                delayMilliseconds: Int64(max(1, hint.retryAfterMilliseconds ?? 1_000)), cause: .deferred, context: context)
         }
     }
 
     private func scheduleMessageAttempt(operationID: UInt64, action: MessageWireAction, delayMilliseconds: Int64,
+                                        cause: MessageRetryCause = .other,
                                         context: ChannelHandlerContext) throws {
         guard let operation = messageOperations[operationID] else { return }
         let now = NIODeadline.now()
         let base = now + .milliseconds(max(0, delayMilliseconds))
         let remaining = (operation.deadline - base).nanoseconds
+        // The next planned action is not proof about previous submissions. Only a
+        // permanent receipt can settle an operation whose retry budget ran out.
         guard operation.attempts < Self.maximumMessageWireAttempts, remaining > 0 else {
-            try finishMessage(operationID, failure: action == .submit ? "TCP_DEFERRED_RETRY_EXHAUSTED" : "TCP_OUTCOME_UNKNOWN_UNRESOLVED", context: context)
+            try finishMessage(operationID, failure: .retryBudgetExhausted(resubmitting: action == .submit), context: context)
             return
         }
         // Match the production policy: the server floor is the base, then
@@ -4192,10 +4306,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let window = min(ceilingNanoseconds, Double(remaining))
         let next = base + .nanoseconds(Int64(window * Double.random(in: 0...1)))
         guard next < operation.deadline else {
-            try finishMessage(operationID, failure: action == .submit ? "TCP_DEFERRED_RETRY_EXHAUSTED" : "TCP_OUTCOME_UNKNOWN_UNRESOLVED", context: context)
+            try finishMessage(operationID, failure: .retryBudgetExhausted(resubmitting: action == .submit), context: context)
             return
         }
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
+        operation.retryTiming.pending = (cause, now)
         operation.timer = context.eventLoop.scheduleTask(in: .nanoseconds((next - now).nanoseconds)) {
             let handler = handler.value, context = boundContext.value
             handler.messageOperations[operationID]?.timer = nil
@@ -4204,14 +4319,15 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    private func finishMessage(_ operationID: UInt64, failure: String?, drain: Bool = true, context: ChannelHandlerContext) throws {
+    private func finishMessage(_ operationID: UInt64, failure: V2LoadMessageFailure?, drain: Bool = true, context: ChannelHandlerContext) throws {
         guard let operation = messageOperations.removeValue(forKey: operationID) else { return }
         operation.timer?.cancel()
         if let requestID = operation.wireRequestID { pendingRequests.removeValue(forKey: requestID) }
         messageRequestIDs.remove(operationID)
         if let failure {
-            if failure.hasPrefix("TCP_OUTCOME_UNKNOWN") { statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN") }
-            statistics.recordWorkloadFailure(kind: "message", code: failure)
+            statistics.messageAudit?.record(operation.command, outcome: failure.auditOutcome)
+            if case .unknown = failure { statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN") }
+            statistics.recordWorkloadFailure(kind: "message", code: failure.code)
         }
         if drain { try drainQueuedScenarioMessages(context: context) }
     }
@@ -4700,8 +4816,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 // other retryable failures query the same immutable identity.
                 try scheduleMessageAttempt(operationID: operationID,
                     action: code == "SERVER_BUSY" ? operation.lastWireAction : .query,
-                    delayMilliseconds: max(1_000, Int64(retryAfterSeconds) * 1_000), context: context)
-            } else { try finishMessage(operationID, failure: "TCP_SERVER_" + code, context: context) }
+                    delayMilliseconds: max(1_000, Int64(retryAfterSeconds) * 1_000),
+                    cause: code == "SERVER_BUSY" ? .serverBusy : .other, context: context)
+            } else { try finishMessage(operationID, failure: .failed("TCP_SERVER_" + code), context: context) }
         case .syncPull, .syncAck:
             // Every rejected wire action retains the original failure count.
             statistics.recordWorkloadFailure(kind: "sync", code: code, retryable: retryable)
@@ -5305,9 +5422,13 @@ private struct LatencyHistogram: Sendable {
     private(set) var count = 0
     private(set) var maximum = 0.0
 
+    static func bucketIndex(_ milliseconds: Double) -> Int {
+        Int(min(Double(maximumBucketMilliseconds), milliseconds).rounded(.down))
+    }
+
     mutating func record(_ milliseconds: Double) {
         guard milliseconds.isFinite, milliseconds >= 0 else { return }
-        let bucket = min(Self.maximumBucketMilliseconds, Int(milliseconds.rounded(.down)))
+        let bucket = Self.bucketIndex(milliseconds)
         buckets[bucket] += 1
         count += 1
         maximum = max(maximum, milliseconds)
@@ -5384,6 +5505,7 @@ private struct Percentiles: Encodable {
 }
 
 private enum LoadError: Error, CustomStringConvertible {
+    case incompleteMessageAudit
     case invalidArguments
     case messageSendNegotiationFailed
     case localSourcePortRangeExhausted
@@ -5407,6 +5529,7 @@ private enum LoadError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
+        case .incompleteMessageAudit: return "message audit exceeded its configured row budget or encountered an invalid identity"
         case .invalidArguments:
             return "invalid arguments; required: --host --ca-path --credentials --report"
         case .messageSendNegotiationFailed: return "TCP message send operation capability or payload limit was not negotiated"

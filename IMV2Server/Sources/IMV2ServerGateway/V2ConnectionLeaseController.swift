@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import IMV2Core
 import IMV2ServerApplication
 import IMV2ServerContracts
@@ -18,12 +19,17 @@ public actor V2ConnectionLeaseController {
         var renewAt: ContinuousClock.Instant
         var retryAt: ContinuousClock.Instant?
     }
+    private let logger = Logger(label: "imv2.gateway.presence.cleanup")
     private let store: any V2LivePresenceLeaseManaging
     private let batcher: V2LivePresenceRenewalBatcher
     private let maximumConnections: Int
     private let onRemoved: @Sendable (UUID, V2AuthenticatedConnection, Bool) async -> Void
     private var retainedConnections: Set<UUID> = []
-    private var pendingCleanup: [UUID: V2AuthenticatedConnection] = [:]
+    private struct Cleanup {
+        let identity: V2AuthenticatedConnection
+        let waiter: CheckedContinuation<Bool?, Never>?
+    }
+    private var pendingCleanup: [UUID: Cleanup] = [:]
     private var cleanupOrder: [UUID] = []
     private var cleanupOffset = 0
     private var cleanupQueued: Set<UUID> = []
@@ -101,6 +107,20 @@ public actor V2ConnectionLeaseController {
         updateWake(connectionID)
     }
 
+    func retire(connectionID: UUID, lifecycle: UInt64, identity: V2AuthenticatedConnection) async -> Bool? {
+        guard leases[connectionID].map({ $0.lifecycle == lifecycle }) != false,
+              admissions[connectionID].map({ $0 == lifecycle }) != false else { return nil }
+        revoke(connectionID: connectionID, lifecycle: lifecycle)
+        if renewing[connectionID] != nil || projectionRefreshes[connectionID] != nil {
+            // Retain cleanup before the queued renewal callback can release
+            // this UUID. A renewal that already reached SQL still owns it.
+            let result = await removePresence(identity: identity, connectionID: connectionID)
+            await batcher.cancelQueuedRenewal(connectionID: connectionID)
+            return result
+        }
+        return await removePresence(identity: identity, connectionID: connectionID)
+    }
+
     public func heartbeat(connectionID: UUID, lifecycle: UInt64) async -> Bool {
         let probe = V2GatewayHeartbeatDiagnostics.current
         probe?.mark(.leaseEntered)
@@ -154,6 +174,7 @@ public actor V2ConnectionLeaseController {
             updateWake(connectionID)
             end(connectionID)
         }
+        guard !closed, leases[connectionID]?.lifecycle == submitted.lifecycle else { return false }
         let started = ContinuousClock.now, date = Date()
         let result: Result<V2LivePresenceLeaseRefresh, any Error>
         do { result = .success(try await batcher.renew(identity: submitted.identity, connectionID: connectionID, now: date)) }
@@ -192,17 +213,23 @@ public actor V2ConnectionLeaseController {
             scheduleCleanup(identity: identity, connectionID: connectionID)
             return nil
         }
-        begin(connectionID)
-        defer { end(connectionID) }
-        return try? await store.removePresence(identity: identity, connectionID: connectionID, now: Date())
+        guard retainedConnections.contains(connectionID) else {
+            begin(connectionID)
+            defer { end(connectionID) }
+            return try? await store.removePresence(identity: identity, connectionID: connectionID, now: Date())
+        }
+        return await withCheckedContinuation { waiter in
+            scheduleCleanup(identity: identity, connectionID: connectionID, waiter: waiter)
+        }
     }
 
-    private func scheduleCleanup(identity: V2AuthenticatedConnection, connectionID: UUID) {
+    private func scheduleCleanup(identity: V2AuthenticatedConnection, connectionID: UUID,
+                                 waiter: CheckedContinuation<Bool?, Never>? = nil) {
         guard pendingCleanup[connectionID] == nil else { return }
         // The original admission reserved this position. Failed duplicate
         // registrations do not create additional cleanup records.
         guard retainedConnections.contains(connectionID) else { return }
-        pendingCleanup[connectionID] = identity
+        pendingCleanup[connectionID] = .init(identity: identity, waiter: waiter)
         enqueueEligibleCleanup(connectionID)
     }
 
@@ -213,22 +240,61 @@ public actor V2ConnectionLeaseController {
         if cleanupWorker == nil { cleanupWorker = Task { await self.runCleanup() } }
     }
 
+    private func removeBatch(_ requests: [V2LivePresenceLeaseRemovalRequest]) async -> [UUID: Bool] {
+        var remaining = requests
+        var results: [UUID: Bool] = [:]
+        for attempt in 0..<3 {
+            guard !remaining.isEmpty else { break }
+            if attempt > 0 {
+                try? await Task.sleep(for: .milliseconds(attempt == 1 ? 50 : 200))
+            }
+            do {
+                let reply = try await store.removePresenceBatch(remaining, now: Date())
+                for request in remaining {
+                    results[request.connectionID] = reply[request.connectionID]
+                }
+                remaining.removeAll { results[$0.connectionID] != nil }
+            } catch {
+                // A lost reply can follow a committed delete. Retry with the original IDs.
+            }
+            if !remaining.isEmpty {
+                logger.warning("Presence cleanup batch incomplete", metadata: [
+                    "attempt": "\(attempt + 1)", "unresolved": "\(remaining.count)"
+                ])
+            }
+        }
+        return results
+    }
+
     private func runCleanup() async {
+        // Coalesce concurrent socket closes without sending a transaction per connection.
+        try? await Task.sleep(for: .milliseconds(2))
         while cleanupOffset < cleanupOrder.count {
-            let id = cleanupOrder[cleanupOffset]; cleanupOffset += 1
-            cleanupQueued.remove(id)
-            guard let identity = pendingCleanup[id], operations[id] == nil else { continue }
-            // Retained ID ownership prevents a successor from being admitted
-            // between draining old SQL and this final compensating deletion.
-            if leases[id] == nil, admissions[id] == nil {
+            let upperBound = min(cleanupOrder.count, cleanupOffset + 256)
+            var requests: [V2LivePresenceLeaseRemovalRequest] = []
+            for index in cleanupOffset..<upperBound {
+                let id = cleanupOrder[index]
+                cleanupQueued.remove(id)
+                guard let cleanup = pendingCleanup[id], operations[id] == nil else { continue }
+                guard leases[id] == nil, admissions[id] == nil else {
+                    pendingCleanup.removeValue(forKey: id)
+                    releaseRetiredPosition(id)
+                    cleanup.waiter?.resume(returning: nil)
+                    continue
+                }
+                // The retained position prevents UUID reuse until the SQL settles.
                 begin(id)
-                let result = try? await store.removePresence(identity: identity, connectionID: id, now: Date())
-                if let result { await onRemoved(id, identity, result) }
-                pendingCleanup.removeValue(forKey: id)
+                requests.append(.init(identity: cleanup.identity, connectionID: id))
+            }
+            cleanupOffset = upperBound
+            let results = await removeBatch(requests)
+            for request in requests {
+                let id = request.connectionID
+                let cleanup = pendingCleanup.removeValue(forKey: id)
+                let result = results[id]
+                if cleanup?.waiter == nil, let result { await onRemoved(id, request.identity, result) }
                 end(id)
-            } else {
-                pendingCleanup.removeValue(forKey: id)
-                releaseRetiredPosition(id)
+                cleanup?.waiter?.resume(returning: result)
             }
             if cleanupOffset > 512, cleanupOffset * 2 > cleanupOrder.count {
                 cleanupOrder.removeFirst(cleanupOffset); cleanupOffset = 0
@@ -244,13 +310,17 @@ public actor V2ConnectionLeaseController {
 
     public func metrics() async -> V2LivePresenceRenewalBatcherSnapshot { await batcher.snapshot() }
 
-    public func finish() async {
+    public func stopRenewals() async {
         closed = true
         wake?.cancel(); wake = nil; wakeDeadline = nil
-        admissions.removeAll()
-        leases.removeAll()
         renewalDeadlines.removeAll()
         await batcher.finish()
+    }
+
+    public func finish() async {
+        await stopRenewals()
+        admissions.removeAll()
+        leases.removeAll()
         while true {
             while let task = activeWakes.values.first { await task.value }
             await cleanupWorker?.value
@@ -294,6 +364,8 @@ public actor V2ConnectionLeaseController {
             renewing.removeValue(forKey: id)
             end(id)
             retry(id, lifecycle: lease.lifecycle)
+        } else if accepted, renewing[id] == ticket, leases[id]?.lifecycle != lease.lifecycle {
+            await batcher.cancelQueuedRenewal(connectionID: id)
         }
     }
 
@@ -301,8 +373,13 @@ public actor V2ConnectionLeaseController {
         started: ContinuousClock.Instant, date: Date,
         result: Result<V2LivePresenceLeaseRefresh, any Error>) async {
         guard renewing[id] == ticket else { return }
-        renewing.removeValue(forKey: id)
-        end(id)
+        // A rejected renewal can repair the row using the admission policy.
+        // Retain this UUID through that SQL so cleanup cannot run ahead of it.
+        defer {
+            renewing.removeValue(forKey: id)
+            updateWake(id)
+            end(id)
+        }
         _ = await apply(result, connectionID: id, submitted: submitted, started: started, date: date)
     }
 

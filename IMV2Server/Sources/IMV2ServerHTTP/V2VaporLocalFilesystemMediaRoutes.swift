@@ -119,7 +119,10 @@ public struct V2VaporLocalFilesystemMediaRoutes<Provider: V2LocalMediaByteServin
             let eTag: String
             do { eTag = try await object.strongETag() }
             catch is CancellationError { throw CancellationError() }
-            catch { throw Abort(.notFound) }
+            catch V2LocalFilesystemMediaProviderError.objectUnavailable { throw Abort(.notFound) }
+            catch V2ResourceProviderError.integrityMismatch { throw Abort(.badGateway) }
+            catch V2ResourceProviderError.temporarilyUnavailable { throw Abort(.serviceUnavailable) }
+            catch { throw Abort(.internalServerError) }
             var headers = noStoreHeaders()
             headers[.contentType] = "application/octet-stream"
             headers[HTTPField.Name("X-Content-Type-Options")!] = "nosniff"

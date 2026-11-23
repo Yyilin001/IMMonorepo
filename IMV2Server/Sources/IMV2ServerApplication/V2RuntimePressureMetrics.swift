@@ -662,6 +662,12 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             ("cohort_replayed_commands_total", operations.ownerCohortReplayedCommands, "Permanent receipt replays returned by confirmed setwise commits."),
             ("cohort_isolations_total", operations.ownerCohortIsolations, "Proven rollback isolation decisions; not scalar fallback command counts.")
         ]
+        let groupCommits = "im_v2_send_operation_store_cross_room_commits_total"
+        lines.append("# HELP \(groupCommits) Confirmed cross-room transactions by number of rooms.")
+        lines.append("# TYPE \(groupCommits) counter")
+        for rooms in 2...V2SendOperationSchedulingConfiguration.supportedCrossRoomMessageLimit.upperBound {
+            lines.append("\(groupCommits){rooms=\"\(rooms)\"} \(operations.crossRoomCommitsByRoomCount[rooms] ?? 0)")
+        }
         for (suffix, value, help) in counters {
             let name = "im_v2_send_operation_store_\(suffix)"
             lines.append(contentsOf: ["# HELP \(name) \(help)", "# TYPE \(name) counter", "\(name) \(value)"])

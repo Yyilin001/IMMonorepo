@@ -1144,7 +1144,6 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         #expect(reoffered)
         try await waitUntil { socket.writer.hints.contains(99) }
         #expect(socket.writer.readyHeads == [10])
-        let sentCount = socket.writer.hints.filter { $0 == 99 }.count
         let repeated = await socket.stream.offerRoomSubscriptionHead(authorization, highWatermark: 99, permit: gate)
         #expect(repeated)
         let advanced = await socket.stream.offerRoomSubscriptionHead(authorization, highWatermark: 100, permit: gate)
@@ -1152,7 +1151,7 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         try await waitUntil { socket.writer.hints.contains(100) }
         // The advanced frame settles the same persistent writer after the
         // repeated offer; already admitted H=99 must not be sent again.
-        #expect(socket.writer.hints.filter { $0 == 99 }.count == sentCount)
+        #expect(socket.writer.hints == [99, 100])
         #expect(socket.writer.readyHeads == [10])
         try await socket.stream.finish()
         await f.registry.shutdownRealtimeRecovery()

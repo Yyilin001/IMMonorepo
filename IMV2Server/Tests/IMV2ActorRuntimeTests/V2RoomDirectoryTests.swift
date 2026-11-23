@@ -270,6 +270,26 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.directory.quiesce(deadline: .now + .seconds(1)))
     }
 
+    @Test("credit refusal preserves the route and cannot settle a previous send",
+          arguments: [false, true])
+    func creditRefusalPreservesPriorSendOutcome(previouslyUnknown: Bool) async throws {
+        let fixture = try Fixture()
+        await fixture.directory.remember(fixture.token)
+        let failures: [V2RoomCallFailure] = previouslyUnknown
+            ? [.outcomeUnknown, .notAccepted(.overloaded)] : [.notAccepted(.overloaded)]
+        await fixture.transport.configureCached(available: true, failures: failures)
+        let user = UserID(uuid: UUID()), command = try fixture.send(user: user)
+        await #expect(throws: previouslyUnknown ? V2RoomCallFailure.outcomeUnknown : .notAccepted(.overloaded)) {
+            try await fixture.directory.room(fixture.room).call(command, principal: .user(user),
+                deadline: .now + .seconds(2))
+        }
+        _ = try await fixture.directory.room(fixture.room).call(command, principal: .user(user),
+            deadline: .now + .seconds(2))
+        #expect(await fixture.transport.invoked == Array(repeating: command, count: failures.count + 1))
+        #expect(await fixture.owners.calls == 0)
+        #expect(await fixture.transport.lookups.isEmpty)
+    }
+
     @Test("cached operations preserve identity through unknown replies or transient rollback without location work",
           arguments: [V2RoomCallFailure.outcomeUnknown, .rolledBack(.unavailable)])
     func cachedOperationAvoidsLocationWork(failure: V2RoomCallFailure) async throws {
@@ -427,6 +447,22 @@ struct V2RoomDirectoryTests {
                 availableRooms: 1, isHealthy: true)]), transport: fixture.transport, configuration: try .init())
         let result = try await directory.resolve(fixture.room, deadline: .now + .seconds(2))
         #expect(result == fixture.token)
+        #expect(await fixture.transport.activations == 1)
+        await directory.drain()
+    }
+
+    @Test("single Core callers resolve only their pinned host without Placement")
+    func fixedCoreCallerResolvesPinnedHost() async throws {
+        let fixture = try Fixture()
+        let other = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let hosts = PlacementHosts(values: [
+            .init(identity: other, accessibleShardIDs: [fixture.owner.shardID], availableRooms: 100, isHealthy: true),
+            .init(identity: fixture.host, accessibleShardIDs: [fixture.owner.shardID], availableRooms: 1, isHealthy: true),
+        ])
+        let directory = V2RoomDirectory(owners: fixture.owners, fixedHostID: fixture.host.hostID,
+            hosts: hosts, transport: fixture.transport, configuration: try .init())
+        let resolved = try await directory.resolve(fixture.room, deadline: .now + .seconds(2))
+        #expect(resolved == fixture.token)
         #expect(await fixture.transport.activations == 1)
         await directory.drain()
     }

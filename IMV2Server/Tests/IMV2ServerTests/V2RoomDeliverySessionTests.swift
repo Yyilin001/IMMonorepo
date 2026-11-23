@@ -8,6 +8,31 @@ import IMV2ServerContracts
 @testable import IMV2ServerApplication
 
 struct V2RoomDeliverySessionTests {
+    @Test("idle retirement respects only live grants on the current Gateway session")
+    func idleRetentionTracksLiveGrants() async throws {
+        let (token, gateway, _) = try fixture()
+        let host = V2RoomDeliverySessionHost()
+        await host.configure(send: { _, _, _ in .accepted }, hostReady: { true })
+        _ = try await host.retain(activation: token, gateway: gateway)
+        let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+        #expect(!(await host.hasLiveSubscription(for: token)))
+        host.observeAuthorization(.init(fence: fence, issued: 1, applied: 1, invalidated: false,
+            transmissionStarted: true), gateway: gateway.identity)
+        #expect(await host.hasLiveSubscription(for: token))
+        await host.peerUnavailable(host: token.host, gateway: gateway.identity)
+        #expect(!(await host.hasLiveSubscription(for: token)))
+        _ = try await host.retain(activation: token, gateway: gateway)
+        #expect(!(await host.hasLiveSubscription(for: token)))
+        let successor = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 2, baselineSequence: 1)
+        host.observeAuthorization(.init(fence: successor, issued: 1, applied: 1, invalidated: false,
+            transmissionStarted: true), gateway: gateway.identity)
+        #expect(await host.hasLiveSubscription(for: token))
+        host.observeAuthorization(.init(fence: successor, issued: 2, applied: 2, invalidated: false,
+            transmissionStarted: true, isUnreferenced: true), gateway: gateway.identity)
+        #expect(!(await host.hasLiveSubscription(for: token)))
+        await host.close()
+    }
+
     @Test("releasing an exposed room invalidates its shared generation before a late owner close")
     func retiringRoomCannotLeaveGatewayReady() async throws {
         let (token, gateway, _) = try fixture()

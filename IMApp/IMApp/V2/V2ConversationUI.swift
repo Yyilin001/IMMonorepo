@@ -1031,7 +1031,7 @@ final class V2ConversationListStore {
         explicitDirectPresentationKeys[roomID] = .init(userID: identity.userID, context: .directConversation)
     }
 
-    var localDirectConversationService: V2DirectRoomOperationService? {
+    var localDirectConversationService: V2DirectConversationService? {
         (directConversationOpener as? any V2DirectConversationRecovering)?.service
     }
 

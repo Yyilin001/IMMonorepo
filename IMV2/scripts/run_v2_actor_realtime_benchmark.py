@@ -247,6 +247,7 @@ def gateway_env(args, kind, database, index, actors, manifest):
             values[key] = value
     actor = actors/f'gateway-{index}'
     public_tls = actors/'public-ingress' if ingress.enabled(args) else actor
+    connections_per_gateway = max(20_000, (manifest.get('users', 0) + NODES - 1) // NODES)
     database_host = json.loads(args.server_deployment.read_text())['postgresHost'] if getattr(args, 'server_deployment', None) else args.pg_host
     values.update(
         IM_V2_DATABASE_URL=f'postgresql://{args.pg_user}@{database_host}:{args.pg_port}/{database}?sslmode=disable',
@@ -259,7 +260,8 @@ def gateway_env(args, kind, database, index, actors, manifest):
         IM_V2_GROUP_ROOM_SHARD_ID=manifest['shardID'], IM_V2_CAPACITY_PROFILE_ID=manifest['capacityProfileID'],
         IM_V2_MAX_COMMANDS_PER_WINDOW=str(manifest['commandWindowLimit']), IM_V2_CONTENT_REVIEW_MODE='disabled',
         IM_V2_METRICS_HOST='127.0.0.1', IM_V2_METRICS_PORT=str(args.metrics_port+index),
-        IM_V2_MAX_CONNECTIONS='20000', IM_V2_RATE_LIMIT_MAX_TRACKED_IDENTITIES='40000',
+        IM_V2_MAX_CONNECTIONS=str(connections_per_gateway),
+        IM_V2_RATE_LIMIT_MAX_TRACKED_IDENTITIES=str(2 * connections_per_gateway),
         IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT='5', IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT='3',
         IM_V2_SYNC_DATABASE_WORK_LIMIT='3', IM_V2_DATABASE_EVENT_LOOP_THREADS='1',
         IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP='11', IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS='100',
@@ -292,19 +294,20 @@ def gateway_env(args, kind, database, index, actors, manifest):
         node_message_connections = getattr(args, 'candidate_message_write_connections', 8)
         loops = getattr(args, 'candidate_event_loop_threads', 4)
         message_connections = node_message_connections // loops
+        sync_connections = getattr(args, 'candidate_sync_connections', 1)
         values.update(IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP=str(getattr(args, 'candidate_policy_control_connections', 4)),
                       IM_V2_DATABASE_EVENT_LOOP_THREADS=str(loops),
                       IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS='1',
                       IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED='true',
                       IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP=str(message_connections),
-                      IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP=str(9 + message_connections),
+                      IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP=str(8 + message_connections + sync_connections),
                       IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP='4',
-                      IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP='1',
+                      IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP=str(sync_connections),
                       IM_V2_DATABASE_DELIVERY_CONNECTIONS_PER_EVENT_LOOP='1',
                       IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP='2',
                       IM_V2_DATABASE_MAINTENANCE_CONNECTIONS_PER_EVENT_LOOP='1',
                       IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT='2',
-                      IM_V2_SYNC_DATABASE_WORK_LIMIT='1',
+                      IM_V2_SYNC_DATABASE_WORK_LIMIT=str(sync_connections),
                       IM_V2_USER_PROJECTION_CONCURRENCY='1')
     else:
         values.pop('IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP', None)
@@ -341,6 +344,9 @@ def account_env(args, kind, database, actors, manifest):
                   IM_V2_ACCOUNT_LISTEN_HOST='127.0.0.1',IM_V2_ACCOUNT_LISTEN_PORT=str(args.account_port),
                   IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS='10000000',IM_V2_MAX_USER_SHARD_STORES='1')
     values.pop('IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP', None)
+    if kind == 'candidate':
+        # The gateway's sync budget does not change the Account pool.
+        values.update(IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP='1', IM_V2_SYNC_DATABASE_WORK_LIMIT='1')
     values.update(IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED='false',
                   IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP='4',
                   IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP='1')
@@ -352,10 +358,12 @@ def account_env(args, kind, database, actors, manifest):
 
 def prepare(args, manifest):
     actors = args.output_dir/f'actors{NODES}'
+    single_core = getattr(args, 'single_core', False)
+    room_hosts = 1 if single_core else NODES
     command = ['python3',str(ROOT/'IMV2/scripts/prepare_v2_room_actor_configuration.py'),
                '--output-dir',str(actors),'--shards',manifest['shardID'],'--user-buckets',manifest['userBucket'],
                '--maximum-rooms-per-host',str(getattr(args, 'maximum_rooms_per_host', None)
-                   or max(10000, (manifest['rooms'] * 5 + NODES * 4 - 1) // (NODES * 4))),
+                   or max(10000, (manifest['rooms'] * 5 + room_hosts * 4 - 1) // (room_hosts * 4))),
                '--caller',f'account={hostname(args, "account")}:{args.actor_port+NODES}']
     if getattr(args, 'dynamic_membership', False):
         command += dynamic_membership.configuration_arguments(args, manifest['shardID'])
@@ -367,10 +375,14 @@ def prepare(args, manifest):
     # entrypoint. Baseline files below retain their original authorization.
     command += ['--policy-partitions', '16']
     placement_port = args.placement_port if args.placement_port is not None else args.actor_port + 64
-    command += [value for index, name in enumerate(('placement-a', 'placement-b', 'placement-c'))
-                for value in ('--placement-voter', f'{name}={hostname(args, name)}:{placement_port+index}')]
+    if single_core:
+        command += ['--single-core']
+    else:
+        command += [value for index, name in enumerate(('placement-a', 'placement-b', 'placement-c'))
+                    for value in ('--placement-voter', f'{name}={hostname(args, name)}:{placement_port+index}')]
     for index in range(NODES):
-        command += ['--host',f'gateway-{index}={hostname(args, f"gateway-{index}")}:{args.actor_port+index}']
+        role = '--gateway' if single_core and index > 0 else '--host'
+        command += [role, f'gateway-{index}={hostname(args, f"gateway-{index}")}:{args.actor_port+index}']
     run_command(command, args.output_dir/'prepare.log')
     ingress.prepare(args, actors)
     for name in [f'gateway-{index}' for index in range(NODES)]+['account']:
@@ -426,7 +438,7 @@ def required_benchmark_binaries(args):
         (args.baseline_checkout, args.baseline_binary, args.baseline_account_binary)):
         raise ValueError('baseline/both requires baseline checkout, gateway binary and account binary')
     binaries = [args.candidate_binary, args.candidate_account_binary, args.loader_binary]
-    if args.kind != 'baseline':
+    if args.kind != 'baseline' and not getattr(args, 'single_core', False):
         binaries.append(candidate_placement_binary(args))
     if args.kind != 'candidate':
         binaries += [args.baseline_binary, args.baseline_account_binary]
@@ -2041,7 +2053,7 @@ def run_revision(args, kind, actors, counts, manifest):
         initial_facts_empty = all(type(value) is int and value == 0 for value in initial.values()) and len(initial) == 3
         if not initial_facts_empty:
             raise RuntimeError('planned_reconnect_fixture_not_empty')
-    processes, streams, loaders = [], [], []
+    processes, streams, loaders, gateways = [], [], [], []
     placement_processes = []
     failure_context = None
     result = None
@@ -2129,7 +2141,7 @@ def run_revision(args, kind, actors, counts, manifest):
             expansion = dynamic_membership.LiveExpansion(args, actors, directory, manifest, candidate_placement_binary(args))
         if args.actor_partition_canary is not None:
             failure_stage = 'partition_fixture'
-        if kind == 'candidate':
+        if kind == 'candidate' and not getattr(args, 'single_core', False):
             failure_stage = 'placement_startup'
             start_controls(binary=candidate_placement_binary(args), actors=actors,
                 shards=[manifest['shardID']], log_directory=directory, owned=placement_processes,
@@ -2165,7 +2177,18 @@ def run_revision(args, kind, actors, counts, manifest):
         if actor_proxy:
             for index, environment in enumerate(gateway_environments):
                 environment.update(actor_proxy.environment(index))
-        gateways=[start([str(binary)],f'gateway-{i}',gateway_environments[i]) for i in range(NODES)]
+        for i in range(NODES):
+            gateways.append(start([str(binary)], f'gateway-{i}', gateway_environments[i]))
+            if i == 0 and NODES > 1 and getattr(args, 'single_core', False):
+                deadline = time.monotonic() + 45
+                while True:
+                    if gateways[0].poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError('single Core did not become ready before ingress launch')
+                    try:
+                        gateway_metrics(args, 0)
+                        break
+                    except (OSError, RuntimeError):
+                        time.sleep(0.25)
         if actor_proxy:
             foreground = {realtime_topic_partition(json.loads(line)['targetRoomIDs'][0])
                           for line in (args.fixture/'credentials.jsonl').read_text().splitlines()}
@@ -2277,7 +2300,7 @@ def run_revision(args, kind, actors, counts, manifest):
                      '--server-name',hostname(args, f'gateway-{client_gateway}'),'--ca-path',str(actors/'ca/cert.pem'),
                      '--credentials',str(args.output_dir/f'part-{i}.jsonl'),'--report',str(directory/f'prefill-report-{i}.json' if prefill else directory/f'report-{i}.json'),
                      '--revision',kind,'--connections',str(count),'--ramp-per-second',str(args.loader_ramp_per_second),'--ramp-batch-size',str(args.loader_ramp_batch_size),
-                     '--workload-ramp-per-second','16',
+                     '--workload-ramp-per-second',str(args.loader_workload_ramp_per_second),
                      '--hold-seconds','60','--event-loops','1','--messages-per-second','0',
                      '--recovery-burst-workers',str(min(128,count)), '--max-inflight-messages-per-connection',str(benchmark_message_send_window(args, kind)),
                      '--message-bytes','128','--targets-per-connection',str(benchmark_targets_per_connection(prefill=prefill)),'--sync-reads','1','--room-log-reads','1',
@@ -2625,6 +2648,7 @@ def main():
                         help='Migrate all surplus room partitions and verify the complete balanced assignment.')
     parser.add_argument('--dynamic-membership', action='store_true',
                         help='Commit the initial gateway roster before starting business processes')
+    parser.add_argument('--single-core', action='store_true', help='single local Room Core, without Placement services')
     parser.add_argument('--nodes', type=int, choices=(1, 2, 4, 6, 8), default=6)
     parser.add_argument('--loader-partitions', type=int, default=12)
     parser.add_argument('--maximum-rooms-per-host', type=int, metavar='128...65536')
@@ -2670,6 +2694,8 @@ def main():
                         help='candidate per-TCP business send window; loader uses the same window (default: 4)')
     parser.add_argument('--candidate-message-write-connections', type=int, default=8,
                         help='candidate-only total message connections per node; divided across selected loops (default: 8)')
+    parser.add_argument('--candidate-sync-connections', type=int, default=1,
+                        help='candidate sync pool and admission slots per Gateway (one non-message EventLoop)')
     parser.add_argument('--candidate-message-write-pipeline-depth', type=int, choices=(1, 2), default=2,
                         help='bounded independent SQL cycles per real write connection; 1 disables pipelining')
     parser.add_argument('--candidate-message-write-transport', choices=('tcp', 'unix'), default='tcp',
@@ -2684,6 +2710,8 @@ def main():
     parser.add_argument('--loader-ramp-per-second', type=int, default=200,
                         help='connection ramp per loader partition, not the cluster aggregate')
     parser.add_argument('--loader-ramp-batch-size', type=int, default=32)
+    parser.add_argument('--loader-workload-ramp-per-second', type=int, choices=range(1, 1001), default=16,
+                        metavar='1...1000', help='per-partition room warmup rate after authentication')
     parser.add_argument('--preclose-recovery-witness',action='store_true',help='candidate scaled diagnostic: bounded pre-close checkpoints and one read-only DB witness; never changes quality')
     parser.add_argument('--loader-excluded-local-ports', default='', help='comma-separated occupied source ports to skip within fixed loader ranges')
     parser.add_argument('--loader-local-port-base', type=int, default=DEFAULT_LOADER_LOCAL_PORT_BASE,
@@ -2736,7 +2764,11 @@ def main():
         configure_topology(args.nodes, args.loader_partitions, automatic_source_ports=args.server_deployment is not None)
     except ValueError as error:
         parser.error(str(error))
-    if args.nodes != 6 and (args.kind != 'candidate' or not args.allow_scaled_diagnostic
+    if args.single_core and (args.kind != 'candidate' or args.server_deployment is not None
+            or args.actor_partition_canary is not None or app_canary_enabled(args)):
+        parser.error('single-core requires a local candidate without placement fault or App mode')
+    diagnostic_topology = args.allow_scaled_diagnostic or (args.single_core and args.allow_small_canary)
+    if args.nodes != 6 and (args.kind != 'candidate' or not diagnostic_topology
             or args.actor_partition_canary is not None or app_canary_enabled(args)):
         parser.error('variable topology requires candidate scaled simulation without fault/App modes')
     if args.server_deployment is not None:
@@ -2748,32 +2780,8 @@ def main():
         except (KeyError, ValueError) as error:
             parser.error('invalid server deployment: ' + str(error))
         args.pg_bin_directory = Path(shutil.which('psql')).parent
-    if args.continuous_user_growth:
-        args.live_user_growth = True
-        if args.nodes != 1 or args.loader_partitions != 8 or args.live_scale_out_partitions < 4:
-            parser.error('continuous growth requires one initial node, eight load partitions and at least four migrated partitions')
-    if args.live_user_growth:
-        if (args.live_scale_out_at is None or args.loader_partitions < 2 or args.loader_partitions % 2
-                or args.growth_measurement_seconds < 60 or args.preclose_recovery_witness
-                or args.online_only or not ingress.enabled(args)):
-            parser.error('user growth requires live expansion, ingress, even loader partitions, >=60s growth measurement, and ordinary message scenario')
-    if args.live_scale_out_at is not None:
-        if not args.dynamic_membership or args.server_deployment is None or args.nodes not in (1, 2, 4) or args.live_scale_out_at < 1 or not args.nodes <= args.live_scale_out_partitions <= 128:
-            parser.error('live expansion requires dynamic membership, 1/2/4 initial gateways, positive offset and at least one partition per new gateway (maximum 128)')
-        expansion_roles = json.loads(args.server_deployment.read_text())['processes']
-        if any(f'gateway-{i}' not in expansion_roles for i in range(8 if args.continuous_user_growth else args.nodes * 2)):
-            parser.error('live expansion requires deployment entries for every target gateway')
-    if args.dynamic_membership:
-        if args.kind != 'candidate' or args.server_deployment is None:
-            parser.error('dynamic membership requires a remote candidate deployment')
-        roles = json.loads(args.server_deployment.read_text())['processes']
-        if any(name not in roles for name in ('membership-controller', 'placement-controller')):
-            parser.error('dynamic membership requires dedicated controller roles in the deployment map')
-        if args.live_scale_out_at is not None:
-            try:
-                dynamic_membership.authority_profile(json.loads(args.server_deployment.read_text()))
-            except ValueError as error:
-                parser.error(str(error))
+    if args.dynamic_membership or args.live_scale_out_at is not None or args.live_user_growth or args.continuous_user_growth:
+        parser.error('online membership changes are retired; benchmark a fixed topology')
     if args.visibility_run_id is not None:
         if args.kind != 'candidate' or args.server_deployment is None or args.online_only:
             parser.error('visibility measurement requires remote candidate scenario with room reads')
@@ -2797,6 +2805,9 @@ def main():
         parser.error('message connections must divide evenly across candidate EventLoops')
     if not 1 <= args.candidate_message_write_connections <= 247:
         parser.error('candidate message connections must be in 1...247 (total workload capacity <=256)')
+    if (args.candidate_sync_connections < 1 or
+            8 + args.candidate_message_write_connections // args.candidate_event_loop_threads + args.candidate_sync_connections > 256):
+        parser.error('candidate sync connections must be positive and total workload capacity must not exceed 256 per EventLoop')
     if not 1 <= args.candidate_policy_control_connections <= 64:
         parser.error('candidate policy control connections must be in 1...64; process ceiling is checked at startup')
     if args.app_journal_trim_canary and not args.app_room_progress_canary:
@@ -2898,11 +2909,16 @@ def main():
                   ownedPostgresWALIOTimeDiagnostic=args.pg_track_wal_io_timing,
                   ownedPostgresWALSyncMethod=args.pg_wal_sync_method,
                   baselineBinarySHA256=sha(args.baseline_binary) if args.kind != 'candidate' else None,candidateBinarySHA256=sha(args.candidate_binary),
-                  candidatePlacementBinarySHA256=sha(candidate_placement_binary(args)) if args.kind != 'baseline' else None,
+                  singleCore=args.single_core, runnerSHA256=sha(Path(__file__)),
+                  candidatePlacementBinarySHA256=sha(candidate_placement_binary(args))
+                  if args.kind != 'baseline' and not args.single_core else None,
                   loaderBinarySHA256=sha(args.loader_binary),loaderContract=loader_contract,
+                  loaderRampPerSecond=args.loader_ramp_per_second,loaderRampBatchSize=args.loader_ramp_batch_size,
+                  loaderWorkloadRampPerSecond=args.loader_workload_ramp_per_second,
                   benchmarkWireVersions=dict(baseline=45,candidate=CANDIDATE_WIRE_VERSION),
                   authorizationModes=dict(baseline='legacy', candidate=args.candidate_authorization_mode),
                   candidatePolicyControlConnectionsPerNode=args.candidate_policy_control_connections,
+                  candidateSyncConnectionsPerNode=args.candidate_sync_connections,
                   candidateMessageWriteConnectionsPerEventLoop=args.candidate_message_write_connections // args.candidate_event_loop_threads,
                   candidateMessageWriteConnectionsPerNode=args.candidate_message_write_connections,
                   candidateMessageWritePipelineDepth=args.candidate_message_write_pipeline_depth,

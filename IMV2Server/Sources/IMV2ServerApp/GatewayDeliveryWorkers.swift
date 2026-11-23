@@ -6,7 +6,7 @@ import IMV2Server
 import IMV2ServerInfrastructure
 
 extension GatewayBackgroundWorkers {
-    func startDeliveryWorkers(on workers: GatewayWorkerSupervisor) {
+    func startDeliveryWorkers(_ delivery: Delivery, on workers: GatewayWorkerSupervisor) {
         let configuration = self.configuration
         let logger = self.logger
         let contentReviewWorker = delivery.contentReviewWorker

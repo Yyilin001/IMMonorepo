@@ -26,6 +26,33 @@ struct V2PolicyFactsSnapshotCacheTests {
         await cache.shutdown()
     }
 
+    @Test("restored-room policy hints are bounded, ordered and stop admitting during shutdown")
+    func boundedRestoredRoomHints() async {
+        let first = UUID(), second = UUID(), dropped = UUID(), peer = UUID()
+        let firstGate = PostgreSQLTransactionGate(), secondGate = PostgreSQLTransactionGate()
+        let seen = Mutex<[UUID]>([])
+        let prefetch = V2DirectRoomPolicyPrefetch(maximumPending: 1) { lower, higher in
+            #expect(higher == peer)
+            seen.withLock { $0.append(lower) }
+            if lower == first {
+                await firstGate.holdTransaction()
+                throw V2PolicyAuthorizationLifecycleError.busy
+            }
+            if lower == second { await secondGate.holdTransaction() }
+        }
+        prefetch.offer(first, peer)
+        await firstGate.waitUntilHeld()
+        prefetch.offer(second, peer)
+        prefetch.offer(dropped, peer)
+        await firstGate.releaseTransaction()
+        await secondGate.waitUntilHeld()
+        prefetch.stop()
+        prefetch.offer(UUID(), peer)
+        await secondGate.releaseTransaction()
+        await prefetch.join()
+        #expect(seen.withLock { $0 } == [first, second])
+    }
+
     @Test("invalid and overflowing room capacities cannot create unbounded policy retention")
     func invalidRoomCapacity() {
         #expect(throws: V2ActorContractError.self) { try V2NodePolicyStateCache.capacityForActiveRooms(0) }

@@ -28,6 +28,7 @@ enum V2RoomWriteDirectProjectionPath {
     /// - Throws: 持久化状态损坏或写入失败时抛出。
     static func appendBatch(
         for appends: [PreparedDirectRoomLogAppend],
+        profileDatabase: (any SQLDatabase)? = nil,
         sql: any SQLDatabase
     ) async throws -> [DirectPostAcceptanceProjectionChanges] {
         guard !appends.isEmpty else { return [] }
@@ -78,12 +79,13 @@ enum V2RoomWriteDirectProjectionPath {
         // A policy denial can clear can_send without hiding an established
         // profile. Restoring that capability needs no descriptive profile
         // facts and must not re-enter the account table on that path.
+        let source = try await profileSource(for: inputs.filter { !$0.senderProfileVisibleToRecipient }.map(\.senderID), database: profileDatabase)
         let profiles: SQLQueryString = inputs.contains(where: { !$0.senderProfileVisibleToRecipient }) ? """
             SELECT needed.ordinal, profile.public_handle,
                    profile.display_name, profile.account_kind,
                    profile.revision, profile.updated_at
             FROM needed
-            JOIN im_v2.public_user_profiles AS profile
+            JOIN \(source) AS profile
               ON profile.user_id = needed.sender_id
              AND profile.state = 'active'
              AND profile.revision > 0
@@ -254,6 +256,26 @@ enum V2RoomWriteDirectProjectionPath {
 }
 
 extension V2RoomWriteDirectProjectionPath {
+    // Only the first visibility transition needs descriptive account facts. Bind its
+    // snapshot into the room transaction that commits the message and outbox together.
+    private static func profileSource(for users: [UUID], database: (any SQLDatabase)?) async throws -> SQLQueryString {
+        guard let database, !users.isEmpty else { return "im_v2.public_user_profiles" }
+        let row = try await database.raw("""
+            SELECT coalesce(json_agg(p),'[]')::text AS profiles FROM (
+                SELECT user_id, public_handle, display_name, account_kind, revision, updated_at, state
+                FROM im_v2.public_user_profiles WHERE user_id = ANY(\(bind: Array(Set(users)))::uuid[])
+                  AND state = 'active' AND revision > 0
+            ) p
+            """).first()
+        guard let row else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let profiles = try row.decode(column: "profiles", as: String.self)
+        return """
+            (SELECT * FROM jsonb_to_recordset(\(bind: profiles)::jsonb) AS p(
+                user_id uuid, public_handle text, display_name text, account_kind text,
+                revision bigint, updated_at timestamptz, state text))
+            """
+    }
+
     static func appendSingle(
         roomID: UUID,
         senderID: UUID,
@@ -263,11 +285,13 @@ extension V2RoomWriteDirectProjectionPath {
         sourceEventID: UUID,
         createdAt: Date,
         stateVersion: UInt64,
+        profileDatabase: (any SQLDatabase)? = nil,
         sql: any SQLDatabase
     ) async throws -> DirectPostAcceptanceProjectionChanges {
         guard !senderProfileVisibleToRecipient || senderCanSend != true else {
             return .init(senderCapabilityInserted: false, recipientProfileInserted: false)
         }
+        let source = try await profileSource(for: senderProfileVisibleToRecipient ? [] : [senderID], database: profileDatabase)
         let profiles: SQLQueryString = senderProfileVisibleToRecipient ? """
             SELECT NULL::text AS public_handle, NULL::text AS display_name,
                    NULL::text AS account_kind, NULL::bigint AS revision,
@@ -275,7 +299,7 @@ extension V2RoomWriteDirectProjectionPath {
             WHERE FALSE
             """ : """
             SELECT public_handle, display_name, account_kind, revision, updated_at
-            FROM im_v2.public_user_profiles
+            FROM \(source) AS source_profile
             WHERE user_id = \(bind: senderID)
               AND state = 'active'
               AND revision > 0

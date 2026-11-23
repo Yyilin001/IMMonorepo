@@ -1546,8 +1546,14 @@ public actor V2GatewayByteStream {
                         scopeID: authorization.fence.roomID.rawValue, scopeGeneration: authorization.scopeGeneration,
                         highWatermark: authorization.baselineSequence, confirms: { true }, scopePermit: selected.permit)
                     guard roomSubscriptionState?.authorization == authorization else { continue }
-                    if accepted { roomSubscriptionReady = authorization }
-                    else {
+                    if accepted {
+                        // A client may ignore hints sent before Ready. Reset once
+                        // at this boundary, even if a coalesced offer wakes us again.
+                        guard (try? await gate.eventLoop.submit {
+                            gate.enqueue(authorization, now: .now) { gate.resetSubmittedHead() }
+                        }.get()) == true, roomSubscriptionState?.authorization == authorization else { continue }
+                        roomSubscriptionReady = authorization
+                    } else {
                         V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headReadyRefused)
                         do { try await Task.sleep(for: .milliseconds(100)) } catch { return }; continue
                     }
@@ -1558,11 +1564,6 @@ public actor V2GatewayByteStream {
                 // drain, and wakes on writability instead of polling this actor.
                 if let contract = await session.authenticatedFrameContract(),
                    roomSubscriptionState?.authorization == authorization {
-                    // Bytes sent before Ready may have been ignored by a
-                    // recovering client. Start hint coverage after that boundary.
-                    guard let gate = authorization.socketGate,
-                          (try? await gate.eventLoop.submit { gate.resetSubmittedHead() }.get()) != nil,
-                          roomSubscriptionState?.authorization == authorization else { continue }
                     let limits = frameLimits
                     let session = self.session, outbound = recoveryOutbound
                     if foregroundTransport.activateRoomHead(authorization, enqueueIfCurrent: { enqueue in

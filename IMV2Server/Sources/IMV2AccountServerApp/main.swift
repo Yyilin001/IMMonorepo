@@ -130,7 +130,7 @@ enum IMV2AccountServerApp {
             let authenticatedAccountRoutes = app
                 .grouped(V2AuthenticatedAccountMiddleware(authenticator: authenticator))
                 .grouped(V2AuthenticatedAccountRateLimitMiddleware(limiter: edgeClientRateLimiter))
-            await runtimeTasks.start {
+            await runtimeTasks.start("account_edge_rate_limit_retention") {
                 while !Task.isCancelled {
                     do {
                         _ = try await edgeClientRateLimiter.purgeExpired(limit: 1_000)
@@ -149,7 +149,7 @@ enum IMV2AccountServerApp {
             let passwordAttemptLimiter = V2PostgresPasswordLoginAttemptLimiter(
                 database: database, policy: configuration.passwordLoginRateLimit
             )
-            await runtimeTasks.start {
+            await runtimeTasks.start("account_password_attempt_retention") {
                 while !Task.isCancelled {
                     do {
                         _ = try await passwordAttemptLimiter.purgeExpired(limit: 1_000)
@@ -176,6 +176,8 @@ enum IMV2AccountServerApp {
                 try await V2CapacityProfileReadiness.verify(database: pool.database, profile: configuration.capacityProfile)
                 accountStorageDatabases[url] = pool.database
             }
+            try await V2FixedShardSources.verify(control: database, rooms: configuration.roomShardStorage,
+                users: configuration.userShardStorage) { accountStorageDatabases[$0] }
             var roomDatabases: [String: any Database] = [:]
             for storage in configuration.roomShardStorage {
                 guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -249,7 +251,7 @@ enum IMV2AccountServerApp {
             let forwardPlans=V2ForwardPlanService(store:.init(database:database),
                 port:.init(router:roomRouter,rooms:.init(directory:actor.directory)))
             V2VaporForwardPlanRoutes(authenticator:authenticator,service:forwardPlans).register(on:authenticatedAccountRoutes)
-            await runtimeTasks.start {
+            await runtimeTasks.start("forward_plan_recovery") {
                 while !Task.isCancelled {
                     do { try await forwardPlans.runOnce(limit:16) }
                     catch is CancellationError { break }
@@ -311,7 +313,7 @@ enum IMV2AccountServerApp {
                 let resourceRegistry = storageAssembly.registry
                 let resourceDelivery = try V2SignedResourceDelivery(registry: resourceRegistry,
                     baseURL: resourceConfiguration.publicBaseURL, keyID: "local-v1", keys: ["local-v1": resourceConfiguration.signingKey])
-                V2VaporResourceByteRoutes(delivery: resourceDelivery).register(on: app)
+                V2VaporResourceByteRoutes(delivery: resourceDelivery, logger: logger).register(on: app)
                 for owner in accountStorageDatabases.values {
                     try await V2BoundMediaProvider(database: owner, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports).verifyReferencedBindings()
                 }
@@ -414,7 +416,7 @@ enum IMV2AccountServerApp {
                         ("resource_purge", { _ = try await purger.runOnce(limit: 16) })
                     ]
                     for (worker, runOnce) in maintenance {
-                        await runtimeTasks.start {
+                        await runtimeTasks.start(worker) {
                             while !Task.isCancelled {
                                 do { try await runOnce() }
                                 catch is CancellationError { break }
@@ -479,7 +481,7 @@ enum IMV2AccountServerApp {
                 jobs: PostgresV2GroupInviteDirectory(database: database),
                 coordinator: invitationCoordinator,
                 deadline: { .now + .seconds(10) })
-            await runtimeTasks.start {
+            await runtimeTasks.start("invite_creation_recovery") {
                 while !Task.isCancelled {
                     do {
                         let report = try await inviteRecovery.runOnce(limit: 8)
@@ -496,7 +498,7 @@ enum IMV2AccountServerApp {
             let joinQuotaRecovery = V2GroupJoinQuotaRecoveryWorker(
                 controlDatabase: database, coordinator: invitationCoordinator,
                 deadline: { .now + .seconds(10) })
-            await runtimeTasks.start {
+            await runtimeTasks.start("join_quota_recovery") {
                 while !Task.isCancelled {
                     do {
                         let report = try await joinQuotaRecovery.runOnce(limit: 8)
@@ -610,23 +612,28 @@ private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {
 ///
 /// 无论正常退出还是异常退出，都会在开始关闭数据库与事件循环之前取消并等待这批任务收敛。
 private actor RuntimeTaskSupervisor {
-    private var tasks: [Task<Void, Never>] = []
+    private var tasks: [UUID: (task: Task<Void, Never>, name: String)] = [:]
     private var isShuttingDown = false
 
-    func start(_ operation: @escaping @Sendable () async -> Void) {
+    func start(_ name: String, _ operation: @escaping @Sendable () async -> Void) {
         guard !isShuttingDown else { return }
-        tasks.append(Task { await operation() })
+        let id = UUID()
+        let task = Task {
+            defer { tasks.removeValue(forKey: id) }
+            await operation()
+        }
+        tasks[id] = (task, name)
     }
 
     func cancelAndWait(logger: Logger) async {
         guard !isShuttingDown else { return }
         isShuttingDown = true
-        let ownedTasks = tasks
-        tasks.removeAll(keepingCapacity: false)
+        let ownedTasks = tasks.values.map(\.task)
         for task in ownedTasks { task.cancel() }
         guard await v2WaitForTaskDrain(ownedTasks, timeout: .seconds(30)) else {
-            logger.critical("IM V2 account task drain exceeded its shutdown deadline",
-                metadata: V2SafeLogMetadata.drainTimeout(stage: "account_worker_shutdown"))
+            var metadata = V2SafeLogMetadata.drainTimeout(stage: "account_worker_shutdown")
+            metadata["unfinished_workers"] = .array(tasks.values.map(\.name).sorted().map { .string($0) })
+            logger.critical("IM V2 account task drain exceeded its shutdown deadline", metadata: metadata)
             exit(EXIT_FAILURE)
         }
     }

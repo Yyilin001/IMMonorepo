@@ -19,10 +19,11 @@ struct SharedResourceView: Encodable, Sendable {
 /// One resource owner for the Android binding. All durable send/download state
 /// remains in existing Swift services; staging and display state are ephemeral.
 actor SharedMedia {
+    private let business: V2ResourceService
     private let messages: V2MessageService
     private let createStagingFile: @Sendable (URL) throws -> FileHandle
     private let account: UserID; private let store: GRDBV2LocalSyncStore
-    private let resources: V2ResourceCenter; private let uploads: V2ResourceTransferEngine
+    private let resources: V2ResourceCenter
     private let cache: V2ResourceDownloadCache; private let resolver: SharedMediaResolver
     private let stagingRoot: URL
     private var tasks: [Task<Void,Never>] = []
@@ -34,16 +35,15 @@ actor SharedMedia {
     private var selected: (V2MediaMessageLocation, V2MediaPresentation)?
     private var preview: (V2ResourceCachedFile, Data, ContinuousClock.Instant)?
     private var reading: (UUID, V2ResourceCachedFile, Int64)?
-    init(account: UserID, store: GRDBV2LocalSyncStore, resources: V2ResourceCenter, uploads: V2ResourceTransferEngine, base: URL, http: V2SessionHTTPAuthorization, rangeTransport: any V2RangeDownloadTransport, createStagingFile: @escaping @Sendable (URL) throws -> FileHandle, messages: V2MessageService) async throws {
-        self.messages = messages
+    init(business: V2ResourceService, resolver: SharedMediaResolver, account: UserID, store: GRDBV2LocalSyncStore, createStagingFile: @escaping @Sendable (URL) throws -> FileHandle, messages: V2MessageService) async throws {
+        self.business = business; self.messages = messages
         self.createStagingFile = createStagingFile
-        self.account = account; self.store = store; self.resources = resources; self.uploads = uploads
-        let resolver = try SharedMediaResolver(base: base, http: http); self.resolver = resolver
-        cache = try await resources.downloadCache(using: .init(targetResolver: resolver, byteTransfer: V2URLSessionMediaByteTransfer(transport: rangeTransport)))
+        self.account = account; self.store = store; resources = business.library
+        self.resolver = resolver; cache = business.downloads
         stagingRoot = await resources.scope.resourceFilesDirectory.resolvingSymlinksInPath().appendingPathComponent("shared-imports", isDirectory: true)
         if !FileManager.default.fileExists(atPath: stagingRoot.path) { try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
         let facts = try stagingRoot.resourceValues(forKeys: [.isSymbolicLinkKey,.isDirectoryKey])
-        guard facts.isDirectory == true, facts.isSymbolicLink == false, stagingRoot.resolvingSymlinksInPath() == stagingRoot else { throw SharedFailure.storageUnavailable }
+        guard facts.isDirectory == true, facts.isSymbolicLink == false, stagingRoot.resolvingSymlinksInPath().path == stagingRoot.path else { throw SharedFailure.storageUnavailable }
         for file in try FileManager.default.contentsOfDirectory(at: stagingRoot, includingPropertiesForKeys: nil) {
             let facts = try file.resourceValues(forKeys: [.isRegularFileKey,.isSymbolicLinkKey])
             guard UUID(uuidString: file.lastPathComponent) != nil, facts.isRegularFile == true, facts.isSymbolicLink == false else { throw SharedFailure.storageUnavailable }
@@ -56,19 +56,10 @@ actor SharedMedia {
     }
     func start() {
         tasks = [Task { do { try await cache.runRecovery() } catch is CancellationError {} catch { failure = sharedFailure(error) } },
-            Task { do { try await store.runResourcePreparation { try await self.handoff() } } catch is CancellationError {} catch { failure = sharedFailure(error) } },
+            Task { do { try await business.runSendPreparation() } catch is CancellationError {} catch { failure = sharedFailure(error) } },
             Task { do { for await value in try await resources.transferSnapshots(for: .init(limit: 50)) {
                 switch value { case .available(let page): transfers = page.entries; case .unavailable: failure = .storageUnavailable }
             } } catch is CancellationError {} catch { failure = sharedFailure(error) } }]
-    }
-    private func handoff() async throws {
-        for intent in try await store.duePreparedSendIntents() {
-            do { _ = try await store.handOffSendIntent(intent.id) }
-            catch is CancellationError { throw CancellationError() }
-            catch V2ServerTimeAnchor.Failure.unavailable { try await store.deferPreparedSendIntent(intent.id, consumeAttempt: false) }
-            catch { try await store.deferPreparedSendIntent(intent.id) }
-        }
-        try await uploads.releaseFinishedSources()
     }
     func close() async {
         tasks.forEach { $0.cancel() }; await clear()
@@ -87,7 +78,7 @@ actor SharedMedia {
         let display = try V2ResourceDisplayName(name); let content = try V2ResourceContentType(type)
         let dimensions: V2LocalResourceImageDimensions?
         if let width = request.width, let height = request.height { dimensions = try .init(width: width, height: height) } else { dimensions = nil }
-        guard stagingRoot.resolvingSymlinksInPath() == stagingRoot else { throw SharedFailure.storageUnavailable }
+        guard stagingRoot.resolvingSymlinksInPath().path == stagingRoot.path else { throw SharedFailure.storageUnavailable }
         let file = try createStagingFile(url)
         importing = .init(id: id, room: room, name: display, type: content, dimensions: dimensions, url: url, file: file, bytes: 0)
     }
@@ -114,9 +105,8 @@ actor SharedMedia {
     func send(_ request: SharedRequest, room: RoomID) async throws {
         guard let draft, request.intentID == draft.id.value.uuidString, draft.purpose == .messageDraft(room), try await store.roomAllowsLocalRead(roomID: room) else { throw SharedFailure.invalidInput }
         let job = UUID()
-        let upload = try V2ResourceUploadRequest(operationID: .init(uuid: job), mediaID: .init(uuid: job), usage: .messageAttachment(room), contentType: draft.contentType.value, byteCount: draft.byteCount, checksum: draft.checksum, clientModes: [.httpPartPut,.httpPut], displayName: draft.displayName, clientImageDimensions: draft.imageDimensions)
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()), text: request.text ?? "", attachmentJobIDs: [job])
-        try await messages.sendPreparedAttachments(intent, resources: [.init(id: job, request: upload, localAssetID: draft.id)], using: uploads)
+        try await business.send(intent, assets: [draft.id], messages: messages)
         try? await discardSelection(draft); self.draft = nil
     }
     private func presentation(_ location: V2MediaMessageLocation, id: MediaID) async throws -> V2MediaPresentation {
@@ -181,19 +171,7 @@ actor SharedMedia {
         }
     }
     func cancelSend(_ id: UUID) async throws {
-        if let intent = try await store.preparingSendIntent(id: id) {
-            try await store.cancelSendIntent(id)
-            for job in intent.attachmentJobIDs {
-                if try await store.resourceImport(id: job) != nil {
-                    try await store.requestImportCancellation(id: job)
-                } else {
-                    try await uploads.cancel(id: job)
-                }
-            }
-        } else {
-            try await store.abandonProvenUnsentSendIntent(id)
-        }
-        try await uploads.releaseFinishedSources()
+        try await business.cancelSend(id)
     }
     static func identity(_ id: V2ManagedResourceTransferID) -> (String,String) { switch id { case .upload(let id): ("upload",id.uuidString); case .download(let id): ("download",id.uuidString); case .serverImport(let id): ("import",id.uuidString) } }
     func snapshot(chunk: String? = nil) async -> SharedResourceView {

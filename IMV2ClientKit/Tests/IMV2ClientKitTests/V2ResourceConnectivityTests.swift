@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import IMV2ClientKit
 @testable import IMV2ClientRuntime
@@ -7,11 +10,11 @@ import Testing
 
 @Suite("Foundation connectivity callbacks remain observational", .timeLimit(.minutes(1)))
 struct V2ResourceConnectivityTests {
-    @Test(arguments: [Kind.upload, .range, .request])
+    @Test(arguments: Kind.allCases)
     func delegateClearsWaitOnActualActivityAndIgnoresLateWait(kind: Kind) {
         exercise(kind: kind, cancel: false)
     }
-    @Test(arguments: [Kind.upload, .range, .request])
+    @Test(arguments: Kind.allCases)
     func cancellationClearsWaitWithoutResurrection(kind: Kind) {
         exercise(kind: kind, cancel: true)
     }
@@ -22,6 +25,7 @@ struct V2ResourceConnectivityTests {
         #expect(hub.waitingSnapshot().isEmpty)
         observation.finish()
     }
+    #if canImport(Darwin)
     @Test func onlyMediaPoolWaitsAndCallerCanChooseExplicitly() {
         #expect(!V2SecureURLSession.account.configuration.waitsForConnectivity)
         #expect(V2SecureURLSession.mediaProvider.configuration.waitsForConnectivity)
@@ -29,7 +33,13 @@ struct V2ResourceConnectivityTests {
         defer { custom.invalidateAndCancel() }
         #expect(custom.configuration.waitsForConnectivity)
     }
-    enum Kind: Sendable { case upload, range, request }
+    #endif
+    enum Kind: CaseIterable, Sendable {
+        case upload, range
+        #if canImport(Darwin)
+        case request
+        #endif
+    }
     private func exercise(kind: Kind, cancel: Bool) {
         let hub = V2ResourceTransferProgressHub(), id = V2ManagedResourceTransferID.download(UUID())
         let session = V2SecureURLSession.make(), url = URL(string: "https://example.invalid/resource")!
@@ -50,12 +60,14 @@ struct V2ResourceConnectivityTests {
                 return ({ delegate.urlSession(session, taskIsWaitingForConnectivity: task) },
                         { delegate.urlSession(session, dataTask: task, didReceive: response, completionHandler: { _ in }) },
                         { delegate.cancel() })
+            #if canImport(Darwin)
             case .request:
                 let observation = V2ResourceConnectivityObservation()
                 let delegate = V2HTTPExecutionDelegate(events: .init(waiting: { observation.waiting() }, active: { observation.finish() }))
                 return ({ delegate.urlSession(session, taskIsWaitingForConnectivity: task) },
                         { delegate.record(response: 200, bytes: 0) },
                         { delegate.cancel() })
+            #endif
             }
         }
         #expect(hub.waitingSnapshot().isEmpty)

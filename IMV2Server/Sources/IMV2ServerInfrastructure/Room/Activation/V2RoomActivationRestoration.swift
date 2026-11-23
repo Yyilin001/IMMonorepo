@@ -11,7 +11,7 @@ package struct V2RoomSendInitialization: Sendable {
 /// Host owns activation validation. One SELECT reads the complete committed
 /// business state in a statement snapshot, without a separate transaction.
 package func v2RestoreRoomSendInitialization(database: any Database, token: V2RoomActivationToken) async throws -> V2RoomSendInitialization {
-    try await v2WithRoomSnapshotConnection(database: database,
+    try await v2WithBoundedPostgresStatement(database: database,
         deadline: V2RoomSQLDeadline.boundedTransactionDeadline()) { sql in
         return try await V2DirectRoomSendAcceptanceMemory.readInitialization(sql: sql, token: token)
     }

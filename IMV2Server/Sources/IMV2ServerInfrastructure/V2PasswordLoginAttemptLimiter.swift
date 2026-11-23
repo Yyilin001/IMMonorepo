@@ -28,7 +28,7 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
     @discardableResult
     public func purgeExpired(now: Date? = nil, limit: Int) async throws -> Int {
         guard limit > 0 else { return 0 }
-        return try await database.transaction { transaction in
+        return try await v2WithRoomActivationTransaction(database: database, deadline: .now + .seconds(10)) { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2PasswordLoginRateLimitError.unavailable
             }

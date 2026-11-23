@@ -394,6 +394,8 @@ struct V2AuthorPresentationGatewayTests {
             }))
         _ = try await f.login(); _ = try await f.stream.receive(f.subscribe(UUID()))
         let fence = try await f.installOwnerBaseline(owner)
+        // Baseline invalidation owns an ingress key until its worker returns.
+        try await wait { f.ingress?.statistics().retainedKeys == 0 }
         // The Owner's recipient membership must match the installed tenure.
         // A stale recipient cannot offer either body or author work.
         #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: 2, authorizationSequence: 1,
@@ -470,6 +472,7 @@ struct V2AuthorPresentationGatewayTests {
             }))
         _ = try await f.login(); _ = try await f.stream.receive(f.subscribe(UUID()))
         let fence = try await f.installOwnerBaseline(owner)
+        try await wait { f.ingress?.statistics().retainedKeys == 0 }
         func deliver(_ sequence: UInt64, recipients: Set<UserID>, excluded: UUID? = nil) async throws {
             let event = V2RealtimeRoomEvent(roomID: f.room, highWatermark: sequence,
                 sourceEventID: EventID(uuid: UUID()), roomSequence: sequence, projectionKind: "message",

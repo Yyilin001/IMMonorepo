@@ -1,3 +1,4 @@
+#if canImport(Security)
 import Foundation
 import IMV2SharedRuntime
 
@@ -9,3 +10,4 @@ extension V2MobileClient {
                                   storage: directory, platform: .apple())
     }
 }
+#endif

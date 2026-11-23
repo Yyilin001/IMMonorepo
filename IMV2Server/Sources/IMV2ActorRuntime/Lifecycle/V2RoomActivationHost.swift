@@ -34,6 +34,8 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     private let placement: any V2RoomActorPlacementRouting
     private var activationCounter: UInt32 = 0
     private var completedIdleRetirements: UInt64 = 0
+    private var idleRetirementsInFlight: Set<UUID> = []
+    private let maximumIdleRetirements = 8
     private let qualification: V2ActorServiceQualification
     private let configuration: V2RoomRuntimeConfiguration
     private let budget: V2RoomCommandBudget
@@ -49,10 +51,14 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     private var placementAdmissions: [String: @Sendable (RoomID) -> Bool] = [:]
     private var activationQueue: [RoomID] = []
     private var runningActivations = 0
+    private let hasSharedAdmission: Bool
+    private var readyByGeneration: [UUID: Int] = [:]
+    private var retiringRooms = 0
     private var pendingRooms = 0
     private var waiterCount = 0
     // Pure snapshot reads retain lifecycle ownership, never a command reservation.
     private var recoveryBatchesInFlight = 0
+    private var idleDelay: Task<Void, Never>?
     private var idleTask: Task<Void, Never>?
     // Exactly one indexed hint per ready activation. Activity advances lazily
     // when a hint becomes due, without a Host hop on each message.
@@ -92,6 +98,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         self.classify = classify
         self.factory = factory
         self.qualification = qualification
+        hasSharedAdmission = placement.sharedAdmissionQualification === qualification
     }
 
     public func start() {
@@ -169,13 +176,20 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     public func snapshot() -> V2RoomActivationHostSnapshot {
         let probe = V2SynchronousActorTurnProbe.start("host_snapshot_scan")
         defer { probe?.finish() }
+        let qualification = liveQualification()
+        let activeRooms: Int
+        if hasSharedAdmission {
+            activeRooms = qualification.map { readyByGeneration[$0.generation, default: 0] } ?? 0
+        } else {
+            activeRooms = entries.values.count { $0.phase == .ready && isSafe($0) }
+        }
         return .init(
-            accepting: isAcceptingRequests,
-            activeRooms: entries.values.filter { $0.phase == .ready && isSafe($0) }.count,
+            accepting: accepting && qualification != nil,
+            activeRooms: activeRooms,
             pendingRooms: pendingRooms,
             activationWaiters: waiterCount,
             restoringRooms: runningActivations,
-            retiringRooms: entries.values.filter { $0.phase == .draining || $0.phase == .uncertain }.count,
+            retiringRooms: retiringRooms,
             completedIdleRetirements: completedIdleRetirements
         )
     }
@@ -534,6 +548,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         qualificationWatchdog?.cancel(); qualificationWatchdog = nil; qualificationWatchdogID = nil
         qualificationWatchdogDeadline = nil
         idleTask?.cancel()
+        idleDelay?.cancel()
         for entry in Array(entries.values) { beginRetirement(entry, uncertain: false) }
     }
 
@@ -678,6 +693,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
                     }
                 )
                 entry.phase = .ready
+                if hasSharedAdmission { readyByGeneration[entry.qualificationGeneration, default: 0] += 1 }
                 scheduleIdleProbe(entry, at: entry.lane!.idleDeadline(timeout: configuration.idleTimeout.duration))
                 authority.setPhase(.ready)
                 let handle = V2RoomExecutionHandle(token: token, lane: entry.lane!, authority: authority)
@@ -782,6 +798,13 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         removeIdleProbe(entry)
         if entry.phase == .uncertain || (entry.phase == .draining && !uncertain) { return }
         let wasReady = entry.phase == .ready
+        if wasReady && hasSharedAdmission {
+            let generation = entry.qualificationGeneration
+            let count = readyByGeneration[generation, default: 0] - 1
+            precondition(count >= 0)
+            readyByGeneration[generation] = count == 0 ? nil : count
+        }
+        if entry.phase != .draining { retiringRooms += 1 }
         if uncertain { entry.phase = .uncertain; entry.idleRetirement = false }
         else if entry.phase != .uncertain { entry.phase = .draining }
         entry.executionAuthority?.setPhase(entry.phase)
@@ -842,12 +865,17 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         entry.restoreTimer?.cancel()
         removeIdleProbe(entry)
         clearPending(entry)
+        retiringRooms -= 1
         entry.phase = .stopped
         entry.executionAuthority?.setPhase(.stopped)
         executionHandles.withLock { handles in
             if handles[entry.roomID]?.token == entry.token { handles.removeValue(forKey: entry.roomID) }
         }
         entries.removeValue(forKey: entry.roomID)
+        if idleRetirementsInFlight.remove(entry.generation) != nil,
+           let next = idleDeadlines.first, next.deadline <= clock.now {
+            idleDelay?.cancel()
+        }
         // Count the completed native lifecycle, never an idle scan or the
         // start of a drain which may still own SQL, pins or reservations.
         if entry.idleRetirement { completedIdleRetirements += 1 }
@@ -915,13 +943,21 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     private func idleLoop() async {
         let interval = min(configuration.idleTimeout.duration, .seconds(1))
         while accepting {
-            do { try await clock.sleep(for: interval) }
-            catch { return }
+            if idleRetirementsInFlight.count >= maximumIdleRetirements
+                || idleDeadlines.first.map({ $0.deadline > clock.now }) != false {
+                let delay = Task<Void, Never> { try? await Task.sleep(for: interval) }
+                idleDelay = delay
+                await delay.value
+                idleDelay = nil
+            }
             guard accepting else { return }
             idleMaintenancePassCount &+= 1
             var probe = V2SynchronousActorTurnProbe.start("host_idle_scan")
             let cut = clock.now
-            while let due = idleDeadlines.first, due.deadline <= cut {
+            // Idle closures may publish terminal authorization and trigger
+            // Gateway repairs. Do not release an entire expired cohort at once.
+            var availableRetirements = maximumIdleRetirements - idleRetirementsInFlight.count
+            while availableRetirements > 0, let due = idleDeadlines.first, due.deadline <= cut {
                 idleDeadlines.remove(due.id)
                 guard let roomID = idleRooms.removeValue(forKey: due.id), let entry = entries[roomID],
                       entry.generation == due.id, entry.phase == .ready, let lane = entry.lane else { continue }
@@ -937,11 +973,20 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
                 }
                 let cutoff = clock.now - configuration.idleTimeout.duration
                 probe?.finish(); probe = nil
+                if let check = entry.executor?.hasLiveSubscriptions, await check() {
+                    if entries[entry.roomID] === entry, entry.phase == .ready {
+                        scheduleIdleProbe(entry, at: clock.now + configuration.idleTimeout.duration)
+                    }
+                    probe = V2SynchronousActorTurnProbe.start("host_idle_scan")
+                    continue
+                }
                 let claimed = await lane.beginIdleDrain(ifLastActivityAtOrBefore: cutoff)
                 probe = V2SynchronousActorTurnProbe.start("host_idle_scan")
                 guard entries[entry.roomID] === entry, entry.phase == .ready else { continue }
                 if claimed {
                     entry.idleRetirement = true
+                    idleRetirementsInFlight.insert(entry.generation)
+                    availableRetirements -= 1
                     beginRetirement(entry, uncertain: false)
                 } else {
                     scheduleIdleProbe(entry, at: max(clock.now + interval,

@@ -6,10 +6,10 @@ import IMV2ServerContracts
 /// The same user-route fence as personal sync. No room mutation or live room
 /// subscription is involved in accepting account-level delivery responsibility.
 public struct V2RoutedRoomDispatchProjector: V2RoomDispatchProjecting {
-    private let routeFence: any V2UserShardRouteFencing & V2UserShardRouteBatchFencing
+    private let routeFence: V2PostgresUserShardRouter
     private let registry: any V2UserShardStorageResolving
 
-    public init(routeFence: any V2UserShardRouteFencing & V2UserShardRouteBatchFencing, registry: any V2UserShardStorageResolving) {
+    public init(routeFence: V2PostgresUserShardRouter, registry: any V2UserShardStorageResolving) {
         self.routeFence = routeFence; self.registry = registry
     }
 
@@ -29,7 +29,8 @@ public struct V2RoutedRoomDispatchProjector: V2RoomDispatchProjecting {
     public func projectTargets(_ targets: [V2RoomDispatchTarget]) async throws -> Set<UserID> {
         guard targets.count <= 1024 else { throw V2RoomDispatchError.invalidInput }
         guard !targets.isEmpty else { return [] }
-        return try await routeFence.withCurrentRoutes(for: targets.map(\.userID)) { routes, _ in
+        let deadline = ContinuousClock.now + .seconds(10)
+        return try await routeFence.withCurrentRoutes(for: targets.map(\.userID), deadline: deadline) { routes, _ in
             guard routes.count == targets.count else { throw V2RoomDispatchError.corruptPersistence }
             var groups: [String: [V2RoomDispatchTarget]] = [:]
             for (route, target) in zip(routes, targets) { groups[route.bucket, default: []].append(target) }
@@ -41,7 +42,8 @@ public struct V2RoutedRoomDispatchProjector: V2RoomDispatchProjecting {
                 let owner = try registry.location(for: bucket)
                 let database = (owner.database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.userStateProjection) ?? owner.database
                 do {
-                    try await PostgresV2UserStateEventProjector(database: database, schema: owner.schema).appendRoomChanges(batch)
+                    try await PostgresV2UserStateEventProjector(database: database, schema: owner.schema)
+                        .appendRoomChanges(batch, deadline: deadline)
                     accepted.formUnion(batch.map(\.userID))
                 } catch is CancellationError { throw CancellationError() }
                 catch { /* Durable source leases retry unaccepted targets. */ }

@@ -19,6 +19,6 @@ internal fun decodeResources(value: JSONObject, startedAt: Long): SharedResource
             val actions = it.getJSONArray("actions")
             SharedTransfer(it.getString("id"), it.getString("kind"), it.getString("name"), it.getString("phase"), if (it.has("bytes")) it.getLong("bytes") else null,
                 if (it.has("confirmed")) it.getLong("confirmed") else null, (0 until actions.length()).map(actions::getString).toPersistentList())
-        } }.toPersistentList(), optional("failure")?.let { SharedError.OperationFailed })
+        } }.toPersistentList(), optional("failure")?.let(::decodeSharedError))
 }
 enum class SharedTransferAction(val wire: String) { Pause("pause"), Resume("resume"), Retry("retry"), Cancel("cancel"), RetryCancellation("retryCancellation") }

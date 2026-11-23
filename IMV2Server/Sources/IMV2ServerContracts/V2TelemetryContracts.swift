@@ -259,6 +259,7 @@ public enum V2MessageSendFailureReason: String, CaseIterable, Hashable, Sendable
     case authorityLost = "lease_lost"
     case unavailable
     case overloaded
+    case roomCapacityExhausted = "room_capacity_exhausted"
     case deadlineExceeded = "deadline_exceeded"
     case cancelled
     case notFound = "not_found"

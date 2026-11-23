@@ -123,7 +123,8 @@ public actor V2RoomDirectory {
     // 可写调用仍保留完整截止时间和结果未知处理。
     private static let locationLookupTimeout: Duration = .seconds(3)
     private let owners: any V2RoomDataOwnerResolving
-    private let placement: any V2RoomActorPlacementRouting
+    private let placement: (any V2RoomActorPlacementRouting)?
+    private let fixedHostID: V2ActorHostID?
     private let hosts: any V2RoomHostDiscovering
     private let transport: any V2RoomClientTransport
     private let configuration: V2RoomRuntimeConfiguration
@@ -163,6 +164,21 @@ public actor V2RoomDirectory {
                 configuration: V2RoomRuntimeConfiguration) {
         self.owners = owners
         self.placement = placement
+        self.fixedHostID = nil
+        self.hosts = hosts
+        self.transport = transport
+        self.configuration = configuration
+        self.cache = .init(maximumCount: configuration.maximumCachedLocations)
+    }
+
+    /// The authenticated transport pins one configured Core. Its activation
+    /// response supplies the process epoch, so callers need no control-plane read.
+    package init(owners: any V2RoomDataOwnerResolving, fixedHostID: V2ActorHostID,
+                 hosts: any V2RoomHostDiscovering, transport: any V2RoomClientTransport,
+                 configuration: V2RoomRuntimeConfiguration) {
+        self.owners = owners
+        self.placement = nil
+        self.fixedHostID = fixedHostID
         self.hosts = hosts
         self.transport = transport
         self.configuration = configuration
@@ -388,10 +404,11 @@ public actor V2RoomDirectory {
                                       deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
         var lastFailure: V2RoomCallFailure = .notAccepted(.unavailable)
         var forceRecovery = false
+        var sendOutcomeUnknown = false
         for attempt in 0..<configuration.maximumResolveAttempts {
-            try checkDeadline(deadline)
             var installed = cache[request.roomID]
             do {
+                try checkDeadline(deadline)
                 if !forceRecovery, let cached = installed, cached.admission() {
                     cache.record(.cachedCall)
                     V2SendPathTrace.current?.mark("directory_cached_dispatch")
@@ -425,9 +442,13 @@ public actor V2RoomDirectory {
                 }
             } catch {
                 let failure = error as? V2RoomCallFailure ?? .outcomeUnknown
-                lastFailure = failure
+                if case .messaging(.sendOperation) = request, failure == .outcomeUnknown {
+                    sendOutcomeUnknown = true
+                }
+                // A later refusal only establishes what happened to that single attempt.
+                lastFailure = sendOutcomeUnknown ? .outcomeUnknown : failure
                 switch failure.retryAction(policy: request.replayPolicy, hasStableOperationID: request.hasStableOperationID) {
-                case .returnFailure, .reconcile: throw failure
+                case .returnFailure, .reconcile: throw lastFailure
                 case .refreshLocation:
                     forceRecovery = true
                     switch failure {
@@ -442,7 +463,8 @@ public actor V2RoomDirectory {
                 }
                 if attempt + 1 < configuration.maximumResolveAttempts {
                     cache.record(.recoveryWait)
-                    try await clock.sleep(until: min(deadline, clock.now + .milliseconds(100)))
+                    do { try await clock.sleep(until: min(deadline, clock.now + .milliseconds(100))) }
+                    catch where sendOutcomeUnknown { throw V2RoomCallFailure.outcomeUnknown }
                 }
             }
         }
@@ -1003,10 +1025,11 @@ public actor V2RoomDirectory {
             // Unavailability does not prove committed ownership changed. Keep
             // this location hint until authoritative resolution replaces it.
         }
-        let grant = try placement.grant(roomID: roomID, owner: owner)
+        let grant = try placement?.grant(roomID: roomID, owner: owner)
         let candidates = try await measuredHostCandidates(for: owner)
-        guard candidates.contains(where: {
-            $0.identity == grant.host && $0.isHealthy && $0.accessibleShardIDs.contains(owner.shardID)
+        guard let candidate = candidates.first(where: { candidate in
+            candidate.isHealthy && candidate.accessibleShardIDs.contains(owner.shardID) &&
+                (grant.map { $0.host == candidate.identity } ?? (candidate.identity.hostID == fixedHostID))
         }) else { throw V2RoomCallFailure.notAccepted(.unavailable) }
         try checkDeadline(deadline)
         recoveryEntry?.authoritativeRecovery = false
@@ -1014,13 +1037,20 @@ public actor V2RoomDirectory {
         do {
             let began = beginRecoveryStage(.activation, items: 1)
             defer { finishRecoveryStage(.activation, since: began) }
-            resolution = try await transport.activate(on: grant.host, roomID: roomID, owner: owner, deadline: deadline)
+            resolution = try await transport.activate(on: candidate.identity, roomID: roomID, owner: owner, deadline: deadline)
         }
         switch resolution {
         case .ready(let token):
-            guard grant.matches(token) else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+            guard token.host == candidate.identity, grant?.matches(token) != false else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
             return .confirmed(try await confirm(token, roomID: roomID, owner: owner, deadline: deadline))
         }
+    }
+
+    private func activationAdmission(for token: V2RoomActivationToken) throws -> @Sendable () -> Bool {
+        if let placement { return try placement.admission(for: token) }
+        guard token.host.hostID == fixedHostID else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+        // The exact incarnation is authenticated on each transport call.
+        return { true }
     }
 
     private func confirm(_ token: V2RoomActivationToken, roomID: RoomID,
@@ -1032,7 +1062,7 @@ public actor V2RoomDirectory {
         }
         let observedCache = cache[roomID]
         let probeDeadline = locationLookupDeadline(deadline)
-        let admission = try placement.admission(for: token)
+        let admission = try activationAdmission(for: token)
         guard admission() else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
         let found = try await measuredLocationProbe(token, deadline: probeDeadline)
         guard admission() else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
@@ -1083,7 +1113,7 @@ public actor V2RoomDirectory {
         if let old = cache[token.roomID]?.token, old != token {
             guard token.isNewer(than: old) else { return }
         }
-        guard let admission = try? placement.admission(for: token), admission(), nextCacheRevision < UInt64.max else { return }
+        guard let admission = try? activationAdmission(for: token), admission(), nextCacheRevision < UInt64.max else { return }
         nextCacheRevision += 1
         cache.remember(Cached(owner: token.owner, token: token, revision: nextCacheRevision, admission: admission),
             for: token.roomID)

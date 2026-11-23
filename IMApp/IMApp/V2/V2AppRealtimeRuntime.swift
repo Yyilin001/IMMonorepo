@@ -149,6 +149,7 @@ protocol V2ConversationPublicIdentityResolving: Sendable {
 }
 
 extension V2HTTPPublicIdentityDirectory: V2ConversationPublicIdentityResolving {}
+extension V2ContactService: V2ConversationPublicIdentityResolving {}
 
 enum V2GroupConversationCreationOutcome: Equatable, Sendable {
     case created(roomID: String)
@@ -431,11 +432,13 @@ actor V2OutboxMessageFavoriter: V2MessageFavoriting, V2PersonalPreferenceManagin
 }
 
 protocol V2GroupCapabilityManaging:Sendable {
-    var service:V2GroupCapabilityOperationService { get }
+    var service:V2GroupCapabilityService { get }
 }
 
 struct V2OperationGroupMessagePinner: V2GroupMessagePinning, V2GroupCapabilityManaging {
-    let service:V2GroupCapabilityOperationService
+    let service:V2GroupCapabilityService
+    init(service: V2GroupCapabilityService) { self.service = service }
+    init(service: V2GroupCapabilityOperationService) { self.service = .init(service: service) }
     func pinBaseline(roomID:String,messageID:String) async throws -> V2PinnedMessageBaseline {
         try await service.pinBaseline(roomID:.init(roomID),messageID:.init(messageID))
     }
@@ -473,7 +476,9 @@ actor V2OperationMessageForwarder: V2ForwardPlanManaging {
 }
 
 struct V2OperationGroupAnnouncementManager: V2GroupAnnouncementManaging {
-    let service:V2GroupCapabilityOperationService
+    let service:V2GroupCapabilityService
+    init(service: V2GroupCapabilityService) { self.service = service }
+    init(service: V2GroupCapabilityOperationService) { self.service = .init(service: service) }
     func setAnnouncement(roomID:String,body:String,expectedRevision:UInt64) async throws -> V2ConversationCapabilityOutcome {
         let confirmation=try service.confirmationWindow(roomID:.init(roomID),action:.announcement(body:body,expectedRevision:expectedRevision))
         try await service.enqueue(confirmation:confirmation)
@@ -482,7 +487,9 @@ struct V2OperationGroupAnnouncementManager: V2GroupAnnouncementManaging {
 }
 
 struct V2OperationGroupMemberRoleChanger: V2GroupMemberRoleChanging {
-    let service:V2GroupCapabilityOperationService
+    let service:V2GroupCapabilityService
+    init(service: V2GroupCapabilityService) { self.service = service }
+    init(service: V2GroupCapabilityOperationService) { self.service = .init(service: service) }
     func setRole(roomID:String,userID:String,role:V2RoomMembershipRole,expectedMembershipRevision:UInt64) async throws -> V2ConversationCapabilityOutcome {
         let confirmation=try service.confirmationWindow(roomID:.init(roomID),action:.memberRole(targetUserID:.init(userID),role:role,expectedMembershipRevision:expectedMembershipRevision))
         try await service.enqueue(confirmation:confirmation)
@@ -491,7 +498,9 @@ struct V2OperationGroupMemberRoleChanger: V2GroupMemberRoleChanging {
 }
 
 struct V2OperationGroupRolePolicyChanger: V2GroupRolePolicyChanging {
-    let service:V2GroupCapabilityOperationService
+    let service:V2GroupCapabilityService
+    init(service: V2GroupCapabilityService) { self.service = service }
+    init(service: V2GroupCapabilityOperationService) { self.service = .init(service: service) }
     func setPolicy(roomID:String,role:V2RoomMembershipRole,permissions:Set<V2GroupPermission>,expectedRevision:UInt64) async throws -> V2ConversationCapabilityOutcome {
         let confirmation=try service.confirmationWindow(roomID:.init(roomID),action:.rolePermissions(role:role,permissions:permissions,expectedRevision:expectedRevision))
         try await service.enqueue(confirmation:confirmation)
@@ -506,11 +515,13 @@ enum V2DirectConversationOpeningState:Error {
 }
 
 protocol V2DirectConversationRecovering:V2DirectConversationOpening {
-    var service:V2DirectRoomOperationService { get }
+    var service:V2DirectConversationService { get }
 }
 
 struct V2OperationDirectConversationOpener: V2DirectConversationRecovering {
-    let service: V2DirectRoomOperationService
+    let service: V2DirectConversationService
+    init(service: V2DirectConversationService, confirmationTimeout: Duration = .seconds(20)) { self.service = service; self.confirmationTimeout = confirmationTimeout }
+    init(service: V2DirectRoomOperationService, confirmationTimeout: Duration = .seconds(20)) { self.service = .init(service: service); self.confirmationTimeout = confirmationTimeout }
     var confirmationTimeout: Duration = .seconds(20)
 
     func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String {
@@ -557,7 +568,9 @@ protocol V2GroupCreationRecovering:V2GroupConversationCreating {
     func resumeCreation(operationID:String) async throws
 }
 struct V2OperationGroupConversationCreator:V2GroupCreationRecovering {
-    let service:V2GroupCreationOperationService
+    let service:V2GroupCreationService
+    init(service: V2GroupCreationService) { self.service = service }
+    init(service: V2GroupCreationOperationService) { self.service = .init(service: service) }
     func creationUpdates() async -> AsyncThrowingStream<Void,any Error> { await service.updates() }
     func createConversation(title:String,initialMemberUserIDs:[String]) async throws -> V2GroupConversationCreationOutcome {
         let members=try initialMemberUserIDs.map { try UserID($0.trimmingCharacters(in:.whitespacesAndNewlines)) }
@@ -689,8 +702,9 @@ protocol V2MembershipManaging:Sendable {
     func discardMembership(id:UUID) async throws
 }
 actor V2OperationGroupMembershipChanger:V2GroupMembershipChanging,V2MembershipManaging {
-    let service:V2MembershipOperationService
-    init(service:V2MembershipOperationService) { self.service=service }
+    let service:V2GroupMembershipService
+    init(service:V2GroupMembershipService) { self.service=service }
+    init(service:V2MembershipOperationService) { self.service = .init(service: service) }
     nonisolated func membershipConfirmation(roomID:String,action:V2RoomMembershipAction,expectedMembershipRevision:UInt64) throws -> V2MembershipConfirmationWindow {
         try service.confirmationWindow(roomID:.init(roomID),action:action,expectedMembershipRevision:expectedMembershipRevision)
     }
@@ -705,8 +719,9 @@ actor V2OperationGroupMembershipChanger:V2GroupMembershipChanging,V2MembershipMa
 }
 
 actor V2OperationGroupMemberAdministrator: V2GroupMemberMuting, V2ModeratedGroupMemberRemoving, V2MemberAdministrationManaging {
-    let service:V2MemberAdministrationOperationService
-    init(service:V2MemberAdministrationOperationService) { self.service=service }
+    let service:V2GroupAdministrationService
+    init(service:V2GroupAdministrationService) { self.service=service }
+    init(service:V2MemberAdministrationOperationService) { self.service = .init(service: service) }
     func administrationUpdates(roomID:RoomID) async -> AsyncThrowingStream<[V2MemberAdministrationPending],any Error> { await service.updates(roomID:roomID) }
     func resumeAdministration(id:UUID) async throws { try await service.resumeConfirmation(id:id) }
     func reconfirmAdministration(id:UUID,revision:UInt64) async throws { _ = try await service.reconfirmDraft(id:id,expectedMembershipRevision:revision) }
@@ -759,8 +774,9 @@ protocol V2SocialOperationManaging:Sendable {
     func resumeSocialConfirmation(workID:UUID) async throws
 }
 actor V2OperationUserBlockChanger:V2UserBlockChanging,V2SocialOperationManaging {
-    let service:V2SocialOperationService
-    init(service:V2SocialOperationService) { self.service=service }
+    let service:V2RelationshipService
+    init(service:V2RelationshipService) { self.service=service }
+    init(service:V2SocialOperationService) { self.service = .init(service: service) }
     func changeBlock(targetUserID:String,action:V2UserBlockAction) async throws -> V2UserBlockChangeOutcome {
         _ = try await service.enqueue(action:.userBlock(action),targetUserID:.init(targetUserID));return .queuedForRetry
     }
@@ -774,8 +790,9 @@ actor V2OperationUserBlockChanger:V2UserBlockChanging,V2SocialOperationManaging 
     func resumeSocialConfirmation(workID:UUID) async throws { try await service.resumeConfirmation(workID:workID) }
 }
 actor V2OperationRelationshipChanger:V2RelationshipChanging,V2SocialOperationManaging {
-    let service:V2SocialOperationService
-    init(service:V2SocialOperationService) { self.service=service }
+    let service:V2RelationshipService
+    init(service:V2RelationshipService) { self.service=service }
+    init(service:V2SocialOperationService) { self.service = .init(service: service) }
     func changeRelationship(targetUserID:String,action:V2RelationshipAction) async throws -> V2RelationshipChangeOutcome {
         _ = try await service.enqueue(action:.relationship(action),targetUserID:.init(targetUserID));return .queuedForRetry
     }
@@ -970,7 +987,9 @@ final class V2AppRealtimeCoverage {
 struct V2AppRealtimeRuntime {
     let accountRuntime: V2AccountRuntime
     let personalPreferences: V2PersonalPreferenceService
-    let nameOperations: V2NameOperationService
+    let profiles: V2ProfileService
+    let resources: V2ResourceService
+    let nameOperations: V2ProfileNameService
     let resourceTransfers: V2ResourceTransferEngine
     let runtime: V2ClientRuntime
     let lastTimedOutRealtimeCommand: @Sendable () async -> V2FrameCommand?
@@ -991,13 +1010,9 @@ struct V2AppRealtimeRuntime {
     let messageFavoriter: any V2MessageFavoriting
     let groupMessagePinner: any V2GroupMessagePinning
     let messageModerationOperations:V2MessageModerationOperationService
-    let directRoomOperations:V2DirectRoomOperationService
-    let groupCreationOperations:V2GroupCreationOperationService
-    let groupCapabilityOperations:V2GroupCapabilityOperationService
+    let contacts: V2ContactService
+    let groups: V2GroupService
     let accountPreferences:V2AccountPreferenceService
-    let socialOperations:V2SocialOperationService
-    let membershipOperations:V2MembershipOperationService
-    let memberAdministrationOperations:V2MemberAdministrationOperationService
     let forwardPlanOperations:V2ForwardPlanOperationService
     let messageForwarder: any V2MessageForwarding
     let groupAnnouncementManager: any V2GroupAnnouncementManaging
@@ -1062,24 +1077,20 @@ struct V2AppRealtimeRuntime {
         self.messageSendOperations=messageSendOperations
         let socialOperations=V2SocialOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPSocialOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
-        self.socialOperations=socialOperations
         let accountPreferences=V2AccountPreferenceService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
             client:try V2HTTPAccountPreferenceOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP),
             commandNow: { try connection.serverTime.now() })
         self.accountPreferences=accountPreferences
         let groupCreationOperations=V2GroupCreationOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPGroupCreationOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
-        self.groupCreationOperations=groupCreationOperations
         self.messageModerationOperations=V2MessageModerationOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
             client:try V2HTTPMessageModerationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
-        self.directRoomOperations=V2DirectRoomOperationService(accountID:actorUserID,store:localStore,
+        let directRoomOperations=V2DirectRoomOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPDirectRoomOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
         let membershipOperations=V2MembershipOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
             client:try V2HTTPMembershipOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
-        self.membershipOperations=membershipOperations
         let memberAdministrationOperations=V2MemberAdministrationOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
             client:try V2HTTPMemberAdministrationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
-        self.memberAdministrationOperations=memberAdministrationOperations
         let messageMutationOperations=V2MessageMutationOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPMessageMutationOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
         self.messageMutationOperations=messageMutationOperations
@@ -1099,7 +1110,30 @@ struct V2AppRealtimeRuntime {
         self.personalPreferences = personalPreferences
         let groupCapabilityOperations=V2GroupCapabilityOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
             client:try V2HTTPGroupCapabilityOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
-        self.groupCapabilityOperations=groupCapabilityOperations
+        let directory = try V2HTTPPublicIdentityDirectory(endpoint: configuration.endpoint("v2/public-identities/resolve"), actorUserID: actorUserID, credentials: accountHTTP, transport: accountHTTP)
+        let invitationQueries = V2QueryCoordinator<Data>()
+        let invitationReader = try V2HTTPGroupInvitationClient(baseURL: configuration.accountBaseURL, credentials: accountHTTP, transport: accountHTTP,
+            queries: invitationQueries, queryScope: accountRuntime.queryScope(accountID: actorUserID.rawValue, authorizationDomain: "groupInvitationManagement"))
+        let invitations = V2InvitationOperationService(accountID: actorUserID, activationID: accountRuntime.ownerID, store: localStore,
+            client: try V2HTTPInvitationOperationClient(baseURL: configuration.accountBaseURL, credentials: accountHTTP, transport: accountHTTP),
+            secrets: V2KeychainInvitationSecretStore(installationBinding: try await localStore.boundInstallationBinding()))
+        let contacts: V2ContactService
+        let groups: V2GroupService
+        if let sharedSession {
+            contacts = try await sharedSession.contacts(for: localStore, accountID: actorUserID,
+                social: socialOperations, direct: directRoomOperations, directory: directory)
+            groups = try await sharedSession.groups(for: localStore, accountID: actorUserID, transport: transport,
+                invitationReader: invitationReader, creation: groupCreationOperations, membership: membershipOperations,
+                capabilities: groupCapabilityOperations, invitations: invitations, administration: memberAdministrationOperations,
+                closeQueries: { await invitationQueries.closeAndDrain() })
+        } else {
+            contacts = .init(accountID: actorUserID, store: localStore, social: socialOperations, direct: directRoomOperations, directory: directory)
+            groups = .init(accountID: actorUserID, store: localStore, transport: transport,
+                invitationReader: invitationReader, creation: groupCreationOperations, membership: membershipOperations,
+                capabilities: groupCapabilityOperations, invitations: invitations, administration: memberAdministrationOperations,
+                closeQueries: { await invitationQueries.closeAndDrain() })
+        }
+        self.contacts = contacts; self.groups = groups
         let forwardPlanOperations=V2ForwardPlanOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPForwardPlanOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
         self.forwardPlanOperations=forwardPlanOperations
@@ -1129,12 +1163,16 @@ struct V2AppRealtimeRuntime {
             aliasRevisions: { try await localStore.contactAliasRevisions(keys: $0) },
             localDisplayJournal: try await localStore.localProfileDisplayJournal(accountID: actorUserID))
         self.profilePresentations = profilePresentations
-        self.nameOperations = V2NameOperationService(accountID: actorUserID, store: localStore,
+        let names = V2NameOperationService(accountID: actorUserID, store: localStore,
             client: try V2HTTPNameOperationClient(endpoint: configuration.endpoint("v2/profile-presentations"),
                 credentials: accountHTTP, transport: accountHTTP),
             didCommit: { await profilePresentations.invalidateEditedName($0) })
-        let profileRepository = V2ProfileRepository(store: localStore,
-            reader: V2ProfileProjectionReader(presentations: profilePresentations))
+        let profiles: V2ProfileService
+        if let sharedSession {
+            profiles = try await sharedSession.profiles(for: localStore, accountID: actorUserID, presentations: profilePresentations, names: names)
+        } else { profiles = .init(accountID: actorUserID, store: localStore, presentations: profilePresentations, names: names) }
+        self.profiles = profiles; self.nameOperations = profiles.names
+        let profileRepository = profiles.projections
         self.profileRepository = profileRepository
         let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base")
         let backgroundConnection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits, workScheduler: accountRuntime.scheduler, workService: "realtime-background")
@@ -1278,11 +1316,11 @@ struct V2AppRealtimeRuntime {
         readReceiptReporter = V2OperationConversationReadReporter(service: readReceipts)
         conversationStateChanger = V2OutboxConversationStateChanger(service: personalPreferences)
         messageFavoriter = V2OutboxMessageFavoriter(service: personalPreferences)
-        groupMessagePinner = V2OperationGroupMessagePinner(service:groupCapabilityOperations)
+        groupMessagePinner = V2OperationGroupMessagePinner(service:groups.capabilities)
         messageForwarder = V2OperationMessageForwarder(service: messages)
-        groupAnnouncementManager = V2OperationGroupAnnouncementManager(service:groupCapabilityOperations)
-        groupMemberRoleChanger = V2OperationGroupMemberRoleChanger(service:groupCapabilityOperations)
-        groupRolePolicyChanger = V2OperationGroupRolePolicyChanger(service:groupCapabilityOperations)
+        groupAnnouncementManager = V2OperationGroupAnnouncementManager(service:groups.capabilities)
+        groupMemberRoleChanger = V2OperationGroupMemberRoleChanger(service:groups.capabilities)
+        groupRolePolicyChanger = V2OperationGroupRolePolicyChanger(service:groups.capabilities)
         groupReadReceiptReader = V2RealtimeGroupReadReceiptReader(service: readReceipts)
         conversationLiveActivity = V2RealtimeConversationLiveActivity(transport: transport, events: connection,localStore:localStore)
         let resourceControl = try V2HTTPResourceUploadClient(endpoint: configuration.endpoint("v2/resource-uploads"), credentials: accountHTTP, transport: accountHTTP)
@@ -1302,28 +1340,36 @@ struct V2AppRealtimeRuntime {
             store: localStore, intents: groupAvatarIntents, reader: groupReader,
             capabilities: resourceControl, resources: resourceCenter)
         self.groupAvatarManager = groupAvatarManager
-        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, resources: resourceCenter, messageOperations:messageSendOperations, messages: messages,
+        let cache = try await resourceCenter.downloadCache(using: mediaDownloader)
+        let resources: V2ResourceService
+        if let sharedSession {
+            resources = try await sharedSession.resources(for: localStore, accountID: actorUserID, library: resourceCenter,
+                uploads: resourceEngine, downloads: cache, groupAvatars: groupAvatarManager.business)
+        } else { resources = .init(accountID: actorUserID, store: localStore, library: resourceCenter,
+            uploads: resourceEngine, downloads: cache, groupAvatars: groupAvatarManager.business) }
+        self.resources = resources
+        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, resources: resourceCenter, messageOperations:messageSendOperations, messages: messages, resourceBusiness: resources,
             imports: resourceImports, groupAvatars: groupAvatarIntents, groupAvatarManager: groupAvatarManager)
         attachmentUploader = V2ForegroundConversationAttachmentUploader(durable: durableSender)
         let foregroundMediaDownloader = V2ForegroundConversationMediaDownloader(
-            cache: try await resourceCenter.downloadCache(using: mediaDownloader), center: resourceCenter
+            cache: cache, center: resourceCenter, business: resources
         )
         self.mediaDownloader = foregroundMediaDownloader
         self.mediaCacheMaintenance = foregroundMediaDownloader
-        directConversationOpener = V2OperationDirectConversationOpener(service:directRoomOperations)
-        groupConversationCreator = V2OperationGroupConversationCreator(service:groupCreationOperations)
-        groupMemberDirectory = V2RealtimeGroupMemberDirectory(transport: transport)
-        groupMembershipChanger = V2OperationGroupMembershipChanger(service:membershipOperations)
-        groupMemberMuter = V2OperationGroupMemberAdministrator(service:memberAdministrationOperations)
-        moderatedGroupMemberRemover = V2OperationGroupMemberAdministrator(service:memberAdministrationOperations)
+        directConversationOpener = V2OperationDirectConversationOpener(service:contacts.directConversations)
+        groupConversationCreator = V2OperationGroupConversationCreator(service:groups.creation)
+        groupMemberDirectory = V2RealtimeGroupMemberDirectory(transport: groups)
+        groupMembershipChanger = V2OperationGroupMembershipChanger(service:groups.membership)
+        groupMemberMuter = V2OperationGroupMemberAdministrator(service:groups.administration)
+        moderatedGroupMemberRemover = V2OperationGroupMemberAdministrator(service:groups.administration)
         strangerMessagePreferenceUpdater = V2OperationStrangerMessagePreferenceUpdater(service:accountPreferences)
         userAddPreferenceUpdater = V2OperationUserAddPreferenceUpdater(service:accountPreferences)
         readReceiptPreferenceUpdater = V2OperationReadReceiptPreferenceUpdater(service:accountPreferences)
         let liveActivityPreferenceService = V2OperationLiveActivityPreferenceUpdater(service:accountPreferences)
         liveActivityPreferenceUpdater = liveActivityPreferenceService
         liveActivityPreferenceReader = liveActivityPreferenceService
-        userBlockChanger = V2OperationUserBlockChanger(service:socialOperations)
-        relationshipChanger = V2OperationRelationshipChanger(service:socialOperations)
+        userBlockChanger = V2OperationUserBlockChanger(service:contacts.relationships)
+        relationshipChanger = V2OperationRelationshipChanger(service:contacts.relationships)
     }
 
     let directConversationOpener: any V2DirectConversationOpening

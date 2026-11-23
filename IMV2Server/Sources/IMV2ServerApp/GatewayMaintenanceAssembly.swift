@@ -11,11 +11,10 @@ import IMV2Server
 import IMV2ServerInfrastructure
 
 /// 构造定时维护、撤销清理和可选推送处理器，不启动轮询。
-/// 两个撤销 Worker 的启动游标由组合根在监听器绑定前初始化。
+/// 全局撤销清理游标由组合根在监听器绑定前初始化。
 struct GatewayMaintenanceAssembly {
     let profileSecurityInvalidationWorker: V2ProfileSecurityInvalidationWorker
     let readReceiptPreferencePropagationWorker: V2ReadReceiptPreferencePropagationWorker
-    let deviceRevocationWorker: V2DeviceRevocationWorker
     let revokedDeviceProjectionCleanupWorker: V2RevokedDeviceProjectionCleanupWorker
     let moderationAuditRetentionWorker: V2ModerationAuditRetentionWorker
     let mediaRetentionWorker: V2MediaRetentionWorker
@@ -29,6 +28,7 @@ struct GatewayMaintenanceAssembly {
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         prepared: GatewayPreparedAssembly,
+        ownerMaintenance: GatewayOwnerMaintenanceAssembly,
         roomServices: GatewayRoomServicesAssembly,
         actors: V2RoomActorApplication
     ) throws -> Self {
@@ -39,10 +39,9 @@ struct GatewayMaintenanceAssembly {
         let liveSyncNotifier = prepared.frontdoor.liveSyncNotifier
         let maintenanceUserShardRouter = prepared.projection.maintenanceUserShardRouter
         let coLocatedControlBuckets = prepared.coLocatedControlBuckets
-        let roomOwnerMaintenanceDatabases = prepared.ownerMaintenance.roomOwnerMaintenanceDatabases
+        let roomOwnerMaintenanceDatabases = ownerMaintenance.roomOwnerMaintenanceDatabases
         let actorDirectory = actors.directory
         let callTimeout = roomServices.callTimeout
-        let connectionRegistry = prepared.frontdoor.connectionRegistry
         let profileSecurityInvalidationWorker = V2ProfileSecurityInvalidationWorker(
             database: maintenanceDatabase,
             projectionDelivery: maintenanceUserShardProjectionDelivery,
@@ -50,11 +49,6 @@ struct GatewayMaintenanceAssembly {
         )
         let readReceiptPreferencePropagationWorker = V2ReadReceiptPreferencePropagationWorker(
             database: maintenanceDatabase
-        )
-        let deviceRevocationWorker = V2DeviceRevocationWorker(
-            store: V2PostgresDeviceRevocationEventStore(database: maintenanceDatabase),
-            registry: connectionRegistry,
-            nodeID: configuration.gatewayNodeID
         )
         let revokedDeviceProjectionCleanupWorker = V2RevokedDeviceProjectionCleanupWorker(
             store: V2PostgresDeviceRevocationEventStore.projectionCleanup(
@@ -133,7 +127,6 @@ struct GatewayMaintenanceAssembly {
         return .init(
             profileSecurityInvalidationWorker: profileSecurityInvalidationWorker,
             readReceiptPreferencePropagationWorker: readReceiptPreferencePropagationWorker,
-            deviceRevocationWorker: deviceRevocationWorker,
             revokedDeviceProjectionCleanupWorker: revokedDeviceProjectionCleanupWorker,
             moderationAuditRetentionWorker: moderationAuditRetentionWorker,
             mediaRetentionWorker: mediaRetentionWorker,

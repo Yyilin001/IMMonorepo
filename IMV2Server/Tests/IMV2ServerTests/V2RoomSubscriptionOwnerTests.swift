@@ -7,6 +7,70 @@ import IMV2ServerContracts
 @testable import IMV2ServerApplication
 
 struct V2RoomSubscriptionOwnerTests {
+    @Test func headersRequireAContinuousAuthorizedPrefixAndOnlyDeliverWatermarks() async throws {
+        let room = RoomID(uuid: UUID()), alice = UserID(uuid: UUID()), bob = UserID(uuid: UUID())
+        let owner = try V2RoomDataOwner(shardID: "source", epoch: 0)
+        let token = try roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0)
+        let source = SubscriptionOwnerSource(room: room, owner: owner, alice: alice, bob: bob)
+        let service = try await V2RoomSubscriptionOwner.restore(source: source, roomID: room,
+            owner: owner, activation: token, deadline: .now + .seconds(5), trackedUserIDs: [alice])
+        let gateway = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "realtime", incarnationID: UUID())
+        let descriptor = V2GatewayRealtimeDescriptor(identity: gateway, endpointReference: Data([1]),
+                                                      address: "127.0.0.1", port: 8443)
+        let received = Mutex<[V2RoomSubscriptionPayload]>([])
+        let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 2, send: { delivery, _, _ in
+            received.withLock { $0.append(delivery.payload) }
+            return .appliedThrough(delivery.deliverySequence)
+        })
+        func header(_ sequence: UInt64, revision: UInt64, in target: RoomID) throws -> V2CommittedRoomMessageFact {
+            let message = V2AcceptedMessage(messageID: .init(uuid: UUID()), roomID: target, roomSequence: sequence,
+                senderUserID: alice, clientMessageID: .init(uuid: UUID()), text: "body must be retrieved from log",
+                mediaPresentations: [], groupCapacityClass: .large, sourceEventID: .init(uuid: UUID()),
+                acceptedMembershipRevision: revision, createdAt: Date())
+            return .header(try #require(V2CommittedRoomMessageHeader(message)))
+        }
+        await pump.start()
+        do {
+            let deadline = ContinuousClock.now + .seconds(5)
+            let grant = try await service.subscribe(gateway: gateway, userID: alice, token: token, deadline: deadline)
+            try #require(try await service.activate(to: pump, descriptor: descriptor, userID: alice,
+                                                   fence: grant.fence, token: token, deadline: deadline))
+            let beforeReads = await source.reads.count
+            let one = try header(1, revision: 0, in: room), two = try header(2, revision: 0, in: room)
+            let gap = try await service.consumeCommittedMessages(.init(activation: token, facts: [two],
+                dirtyHighWatermark: nil), token: token, deadline: deadline)
+            #expect(gap.hasMore && gap.consumedThrough == 0)
+            let other = try header(1, revision: 0, in: RoomID(uuid: UUID()))
+            await #expect(throws: V2RoomSubscriptionOwnerError.stale) {
+                try await service.consumeCommittedMessages(.init(activation: token, facts: [other],
+                    dirtyHighWatermark: nil), token: token, deadline: deadline)
+            }
+            let four = try header(4, revision: 0, in: room)
+            let result = try await service.consumeCommittedMessages(.init(activation: token, facts: [one, two, four],
+                dirtyHighWatermark: nil), token: token, deadline: deadline)
+            #expect(result.hasMore && result.consumedThrough == 2 && result.observedHighWatermark == 4)
+            #expect(await source.reads.count == beforeReads)
+            await service.signalDelivery()
+            while !received.withLock({ $0.contains(.head(highWatermark: 2)) }) {
+                try #require(ContinuousClock.now < deadline)
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            #expect(received.withLock { values in !values.contains { value in
+                switch value { case .event, .broadcast: true; default: false }
+            } })
+            let changedMembership = try header(3, revision: 1, in: room)
+            await #expect(throws: V2RoomSubscriptionSourceError.snapshotRequired) {
+                try await service.consumeCommittedMessages(.init(activation: token, facts: [changedMembership],
+                    dirtyHighWatermark: nil), token: token, deadline: deadline)
+            }
+            #expect(!received.withLock { $0.contains(.head(highWatermark: 3)) || $0.contains(.head(highWatermark: 4)) })
+            try await service.close(); await pump.close()
+        } catch {
+            try? await service.close(); await pump.close()
+            throw error
+        }
+    }
+
     @Test("fresh authorization joins the predecessor delivery before replacing its pump binding", arguments: [false, true])
     func resetActivationJoinsPreviousDelivery(rejectOldReceipt: Bool) async throws {
         let room = RoomID(uuid: UUID()), alice = UserID(uuid: UUID()), bob = UserID(uuid: UUID())

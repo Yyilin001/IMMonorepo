@@ -7,7 +7,8 @@ import SQLKit
 extension PostgresV2UserStateEventProjector {
     /// Batch already accepted room facts on one account storage shard. Sequence
     /// rows serialize writers only. Snapshot checkpoints never participate.
-    package func appendRoomChanges(_ targets: [V2RoomDispatchTarget]) async throws {
+    package func appendRoomChanges(_ targets: [V2RoomDispatchTarget],
+                                   deadline: ContinuousClock.Instant = .now + .seconds(10)) async throws {
         guard !targets.isEmpty, targets.count <= 1024,
               Set(targets.map(\.userID)).count == targets.count,
               targets.allSatisfy({ (1...32).contains($0.leases.count) }),
@@ -36,7 +37,7 @@ extension PostgresV2UserStateEventProjector {
         let users = targets.map(\.userID).sorted { $0.rawValue < $1.rawValue }
         let usersJSON = String(decoding: try JSONEncoder().encode(users.map(\.rawValue)), as: UTF8.self)
         let values = input
-        try await database.transaction { transaction in
+        try await v2WithRoomActivationTransaction(database: database, deadline: deadline) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomDispatchError.corruptPersistence }
             // Stable order prevents overlapping multi-account batches taking
             // each other's sequence rows in opposite orders.

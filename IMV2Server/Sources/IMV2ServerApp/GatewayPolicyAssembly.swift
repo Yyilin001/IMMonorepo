@@ -99,6 +99,8 @@ struct GatewayPolicyAssembly: Sendable {
             let service = V2RoomPolicyAuthorizationService(roomDatabase: database,
                 policyOwners: remote,
                 locator: locator, maximumRooms: configuration.runtime.maximumActiveRooms,
+                prefetchDirectRooms: configuration.isSingleCore && document.owners.count == 1
+                    && document.owners.first?.hostID == hostID,
                 sendOperationMetrics: original.sendOperationMetrics)
             let bound = try original.usingPolicyAuthorizations(service)
             physical.append(bound)

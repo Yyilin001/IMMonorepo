@@ -383,10 +383,19 @@ public actor V2ResourceFileStore {
     func hasPublishedBytes(checksum: V2ResourceChecksum, bytes: Int64) throws -> Bool {
         try prepare()
         guard let record = try journal.matchingFile(checksum: checksum, byteCount: bytes) else { return false }
+        return try hasPublishedBytes(record)
+    }
+
+    func prepareUnresolvedMessageDownload(mediaID: MediaID, message: V2MediaMessageLocation, allowCached: Bool) throws -> V2ResourceReadPreparation {
+        try prepare()
+        return try journal.prepareUnresolvedDownload(mediaID: mediaID, message: message, canReuse: allowCached ? hasPublishedBytes : nil)
+    }
+
+    private func hasPublishedBytes(_ record: V2ResourceFileRecord) throws -> Bool {
         do {
             let values = try fileURL(record.id, storage: record.storage).resourceValues(
                 forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-            return values.isRegularFile == true && values.isSymbolicLink == false && values.fileSize == Int(exactly: bytes)
+            return values.isRegularFile == true && values.isSymbolicLink == false && values.fileSize == Int(exactly: record.byteCount)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return false }
     }
 
@@ -1043,7 +1052,7 @@ extension V2ResourceFileStore {
         .init(root: backgroundDirectory, sessionID: session, protection: protection)
     }
     func reserveBackgroundDownload(mapping: UUID, session: UUID, target: V2ClientMediaTransferTarget) throws -> V2ResourceTransferStaging {
-        _ = try V2BackgroundDownloadRequest.make(target: target)
+        try V2BackgroundDownloadRequest.validate(target: target)
         guard let grant = target.backgroundDownloadAuthorization, let origin = V2BackgroundResultInbox.originDigest(target.url) else { throw V2BackgroundTransferError.invalidAuthorization }
         let reservation = try reserveTransient(identity: "background-download:\(mapping.uuidString)", bytes: target.expectedByteCount,
             location: .backgroundDownload(session: session, mapping: mapping))

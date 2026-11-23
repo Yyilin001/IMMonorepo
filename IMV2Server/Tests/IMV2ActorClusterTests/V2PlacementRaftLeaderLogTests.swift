@@ -34,8 +34,10 @@ struct V2PlacementRaftLeaderLogTests {
         await #expect(throws: V2ActorAuthenticationError.forbidden) {
             _ = try await endpoint.writePlacement(wire, serviceID: member, callerIncarnation: UUID(), deadline: .now + .seconds(2))
         }
-        _ = try await endpoint.writePlacement(wire, serviceID: controller, callerIncarnation: UUID(), deadline: .now + .seconds(2))
-        #expect(try await log.load().serviceMembership == membership)
+        await #expect(throws: V2ActorAuthenticationError.forbidden) {
+            _ = try await endpoint.writePlacement(wire, serviceID: controller, callerIncarnation: UUID(), deadline: .now + .seconds(2))
+        }
+        #expect(try await log.load().serviceMembership == nil)
         for node in nodes { await node.stop() }
     }
 

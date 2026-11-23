@@ -11,13 +11,26 @@ import Testing
 struct V2PrometheusTelemetrySinkTests {
     @Test("cached call and recovery metrics preserve counter baselines and current gauges")
     func cachedRoomCallMetrics() {
+        var transport = V2RoomTransportCallMetricsSnapshot(cachedRemoteCalls: 17, roomLookups: 1, roomInvocations: 18)
+        transport.localSendDispatches = 2
+        transport.remoteSendDispatches = 3
+        transport.sendReferenceEvictions = 1
+        transport.unsentMessageSubmits = 11
+        transport.unsentMessageRecoveries = 7
+        transport.rpcAdmissionRejections = ["send_call_credit": 4]
         let snapshot = V2RoomRuntimeMetricsSnapshot(host: nil, commands: nil,
             cachedLocations: 2, pendingResolutions: 0, activeResolutions: 0, resolutionWaiters: 0,
             directoryCalls: .init(cachedCalls: 17, cachedResponses: 17, recoveringRooms: 1),
-            transportCalls: .init(cachedRemoteCalls: 17, roomLookups: 1, roomInvocations: 18))
+            transportCalls: transport)
         let lines = v2RoomActorMetricLines(snapshot)
         #expect(lines.contains("# TYPE im_v2_room_actor_cached_remote_calls_total counter"))
         #expect(lines.contains("im_v2_room_actor_cached_remote_calls_total 17"))
+        #expect(lines.contains("im_v2_room_actor_send_local_dispatches_total 2"))
+        #expect(lines.contains("im_v2_room_actor_send_remote_dispatches_total 3"))
+        #expect(lines.contains("im_v2_room_actor_send_transport_reference_evictions_total 1"))
+        #expect(lines.contains("im_v2_room_actor_unsent_message_submits_total 11"))
+        #expect(lines.contains("im_v2_room_actor_unsent_message_recoveries_total 7"))
+        #expect(lines.contains(#"im_v2_actor_transport_rpc_rejections_total{reason="send_call_credit"} 4"#))
         #expect(lines.contains("im_v2_room_actor_physical_lookups_total 1"))
         #expect(lines.contains("im_v2_room_actor_reference_misses_total 0"))
         #expect(lines.contains("# TYPE im_v2_room_actor_recovering_rooms gauge"))

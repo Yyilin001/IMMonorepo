@@ -15,25 +15,21 @@ struct GatewayProjectionAssembly {
     let directRoomLogEventCache: V2DirectRoomLogEventCache?
     let preparedGroupEventPageCache: V2PreparedGroupEventPageCache?
     let roomShardRouter: V2CachedRoomShardRouter
-    let userStateWorkers: [V2UserStateEventWorker]
-    let roomDispatchWorkers: [V2RoomDispatchWorker]
 
     /// 先建立默认用户路由，再为各数据库角色构造独立路由句柄。
-    /// 投影 Worker 按物理房间归属库创建，以消费各库的持久 outbox。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         topology: GatewayDatabaseTopology,
-        coLocatedControlBuckets: Set<String>,
-        roomOwnerDatabaseURLs: [String]
+        coLocatedControlBuckets: Set<String>
     ) async throws -> Self {
         let database = topology.database
         let deliveryDatabase = topology.deliveryDatabase
         let maintenanceDatabase = topology.maintenanceDatabase
-        let userStateRouter = topology.userStateRouter
         let deliveryUserShardStorage = topology.deliveryUserShardStorage
         let maintenanceUserShardStorage = topology.maintenanceUserShardStorage
         let userShardRouter = V2PostgresUserShardRouter(database: database)
-        try await userShardRouter.bootstrap(defaultRoute: configuration.userShardRoute)
+        try await userShardRouter.bootstrap(defaultRoute: configuration.userShardRoute,
+            fixedBuckets: configuration.userShardStorage.count > 1 ? configuration.userShardStorage.map(\.bucket) : [])
         let deploymentUserRouter = try await V2StaticUserShardRouter.load(database: database)
         let deliveryUserShardRouter = V2PostgresUserShardRouter(database: deliveryDatabase)
         let maintenanceUserShardRouter = V2PostgresUserShardRouter(
@@ -78,28 +74,6 @@ struct GatewayProjectionAssembly {
         let roomShardRouter = V2CachedRoomShardRouter(
             source: V2PostgresRoomShardRouter(database: database)
         )
-        let userStateProjector = try V2RoutedUserStateEventProjector(
-            routeFence: userStateRouter,
-            registry: deliveryUserShardStorage
-        )
-        let userStateWorkers = try roomOwnerDatabaseURLs.map { ownerURL in
-            guard let ownerDatabase = topology.databaseForRole(for: .delivery, url: ownerURL) else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            return V2UserStateEventWorker(
-                outbox: try PostgresV2UserStateEventOutbox(database: ownerDatabase),
-                projector: userStateProjector
-            )
-        }
-        let roomDispatchProjector = V2RoutedRoomDispatchProjector(
-            routeFence: userStateRouter, registry: deliveryUserShardStorage)
-        let roomDispatchWorkers = try roomOwnerDatabaseURLs.map { ownerURL in
-            guard let owner = topology.databaseForRole(for: .delivery, url: ownerURL) else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            return V2RoomDispatchWorker(outbox: PostgresV2RoomDispatchStore(database: owner),
-                projector: roomDispatchProjector)
-        }
         return .init(
             userShardRouter: deploymentUserRouter,
             maintenanceUserShardRouter: maintenanceUserShardRouter,
@@ -107,9 +81,7 @@ struct GatewayProjectionAssembly {
             maintenanceUserShardProjectionDelivery: maintenanceUserShardProjectionDelivery,
             directRoomLogEventCache: directRoomLogEventCache,
             preparedGroupEventPageCache: preparedGroupEventPageCache,
-            roomShardRouter: roomShardRouter,
-            userStateWorkers: userStateWorkers,
-            roomDispatchWorkers: roomDispatchWorkers
+            roomShardRouter: roomShardRouter
         )
     }
 }

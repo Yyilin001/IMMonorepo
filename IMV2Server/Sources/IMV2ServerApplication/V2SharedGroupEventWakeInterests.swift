@@ -18,18 +18,26 @@ public actor V2SharedGroupEventWakeInterests {
 
     public enum Failure: Error, Equatable, Sendable { case closed }
 
+    private struct Operation: Sendable {
+        let id: UUID
+        let task: Task<UUID, Error>
+        // The room receipt joins an independent batch shared by its peers.
+        let batch: Task<Void, Error>?
+    }
+
     private final class Entry {
         var owners: [Scope: UUID] = [:]
         var revision = UUID()
         // Actual underlying demand settled by this owner. This is not a
         // coverage proof; the native coordinator restores coverage itself.
         var confirmedActive: Bool?
-        var operation: (id: UUID, task: Task<UUID, Error>)?
+        var operation: Operation?
     }
 
     private let underlying: any V2GroupEventWakeInterestManaging
     private var entries: [RoomID: Entry] = [:]
     private var closed = false
+    private var shutdownTask: Task<Void, Never>?
 
     public init(underlying: any V2GroupEventWakeInterestManaging) {
         self.underlying = underlying
@@ -69,10 +77,10 @@ public actor V2SharedGroupEventWakeInterests {
             let batch = Task { try await self.activateUnderlying(rooms) }
             for (room, entry) in fresh {
                 let revision = entry.revision, operationID = UUID()
-                entry.operation = (operationID, Task {
+                entry.operation = .init(id: operationID, task: Task {
                     try await batch.value
-                    return await self.confirmBatchActivation(roomID: room, operationID: operationID, revision: revision)
-                })
+                    return self.confirmBatchActivation(roomID: room, operationID: operationID, revision: revision)
+                }, batch: batch)
             }
         }
         do {
@@ -122,7 +130,7 @@ public actor V2SharedGroupEventWakeInterests {
 
     private func reconcile(roomID: RoomID, entry: Entry) async throws {
         while entries[roomID] === entry {
-            let operation: (id: UUID, task: Task<UUID, Error>)
+            let operation: Operation
             if let existing = entry.operation { operation = existing }
             else {
                 let desired = !entry.owners.isEmpty
@@ -130,7 +138,7 @@ public actor V2SharedGroupEventWakeInterests {
                     if !desired { entries.removeValue(forKey: roomID) }
                     return
                 }
-                operation = (UUID(), Task { try await self.drive(roomID: roomID, entry: entry) })
+                operation = .init(id: UUID(), task: Task { try await self.drive(roomID: roomID, entry: entry) }, batch: nil)
                 entry.operation = operation
             }
             do {
@@ -178,13 +186,21 @@ public actor V2SharedGroupEventWakeInterests {
     }
 
     public func shutdown() async {
-        guard !closed else { return }
+        if let shutdownTask { await shutdownTask.value; return }
         closed = true
-        let active = entries
-        for entry in active.values { entry.operation?.task.cancel() }
-        for entry in active.values { _ = try? await entry.operation?.task.value }
-        for roomID in active.keys { await underlying.deactivate(roomID: roomID) }
+        let rooms = Array(entries.keys)
+        let operations = entries.values.compactMap(\.operation)
         entries.removeAll()
+        for operation in operations {
+            operation.batch?.cancel()
+            operation.task.cancel()
+        }
+        let task = Task { [underlying] in
+            for operation in operations { _ = try? await operation.task.value }
+            for roomID in rooms { await underlying.deactivate(roomID: roomID) }
+        }
+        shutdownTask = task
+        await task.value
     }
 
     private struct ScopedInterest: V2GroupEventWakeInterestManaging {

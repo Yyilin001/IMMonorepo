@@ -143,7 +143,7 @@ ACK 延迟从原始计划发送时刻计算，包含客户端排队和最终确�
 
 ## 工件与复现
 
-本机证据目录：`/Users/yyl/Desktop/IMV2-ActorRuntime-AB-20261106`。`comparison.json` 为汇总，`existing-sample-diagnostics.json` 为已有采样分析，`provenance.json`、`*-source-sha256.json`、`*-binary-sha256.txt` 记录来源；`baseline/`、`candidate/` 保存最终完整报告、原始日志及资源采样。带 `preflight` / `quorum-failure` 的目录保留失败记录。原始目录包含临时凭据，不提交仓库。
+本机证据目录：`/Users/yyl/Desktop/IMV2-Archive/IMV2-ActorRuntime-AB-20261106`。`comparison.json` 为汇总，`existing-sample-diagnostics.json` 为已有采样分析，`provenance.json`、`*-source-sha256.json`、`*-binary-sha256.txt` 记录来源；`baseline/`、`candidate/` 保存最终完整报告、原始日志及资源采样。带 `preflight` / `quorum-failure` 的目录保留失败记录。原始目录包含临时凭据，不提交仓库。
 
 专用 VM/profile 为 `im-actor-ab-20261106`，Docker context 为 `colima-im-actor-ab-20261106`，全局 context 未改变。镜像为 `im-actor-ab:20261106`（ID 见 provenance）；旧/新冻结二进制分别在 `im-actor-ab-baseline-20261106` 与 `im-actor-ab-candidate-20261106` 卷中。完成后停止专用 VM，保留构建缓存和冻结产品。
 

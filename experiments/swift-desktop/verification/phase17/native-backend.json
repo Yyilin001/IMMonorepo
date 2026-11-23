@@ -1,0 +1,26 @@
+{
+  "realBackend": true,
+  "platform": "macOS native Swift host",
+  "passedTests": 2,
+  "cases": [
+    {
+      "name": "appleLoginMessagesSearchDisconnectRestoreAndAccountExit",
+      "passed": true,
+      "evidenceSHA256": "71c8f9b773be2fb03ab79cf9ade4825600f59ed353efcd2b56a019d6e906ebe1"
+    },
+    {
+      "name": "nativeContactAndGroupFacadeUsesRealBackendAndRetiresWithAccount",
+      "passed": true,
+      "evidenceSHA256": "8950764b1f3444a8781ee3a188bb983c3ef5ff7491168c6c9b9f4d2a1fddee6e"
+    }
+  ],
+  "coverage": [
+    "contacts request/accept/block/unblock",
+    "group creation, member directory, announcement",
+    "invitation creation/preview/revocation",
+    "member leave",
+    "physical TLS disconnect and restore",
+    "old handles rejected and third-account isolation"
+  ],
+  "note": "The final combined run passed the existing message case but timed out in the new contact case before its first stage marker. The new case passed after the test host gained bounded foreground reconnect handling; that successful rerun did not need a reconnect. Exact initial timeout wait was not instrumented."
+}

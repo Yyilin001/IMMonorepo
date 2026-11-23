@@ -13,6 +13,8 @@
 ## 决策
 
 - V2 使用独立 Core、Server、ClientKit、PostgreSQL schema、SQLite schema 和 TLS/protobuf contract。
+- 服务端版本更新使用停机维护窗口：停止业务入口、排空在途工作并停止旧服务，部署同一版本的服务，通过就绪检查后恢复流量。
+- 业务节点名单在启动时从部署配置读取。增删 Gateway / Room Host 在停机维护窗口统一变更所有相关进程的配置，在线扩缩容退出交付范围。恢复流量前须核对每个房间分区和策略分区的负责人均在新名单内，并验证已有房间可读写。
 - PostgreSQL 首次启动只允许在空数据库执行 `IMV2/sql/schema.sql`；仓库不定义其他建库入口。
 - ClientKit 只创建当前主 SQLite 与派生搜索 schema；已有布局不升级，由认证同步重建。
 - `.env.local` 必须完整匹配当前生成格式；脚本不会追加缺失 secret 或修改旧文件。
@@ -40,7 +42,7 @@ PostgreSQL gate 在一次性空库执行 canonical schema、与规范化 `pg_dum
 - 代码与文档不需要承载已经删除的演进时间线，测试矩阵只覆盖当前合同和故障恢复。
 - 任何 retained local volume 都不是升级输入；脚本必须输出明确 reset 命令而非自动修补。
 - 首次真实外部测试版或生产用户出现后，本 ADR 的绿地权限终止。届时所有 schema/wire 破坏性
-  变更必须由新的 ADR 定义数据迁移、客户端窗口、滚动发布、回滚和兼容验证。
+  变更必须由新的 ADR 定义停机期间的数据迁移、客户端版本要求、回滚和数据完整性验证。
 
 ## 复审条件
 

@@ -1,0 +1,109 @@
+{
+  "swift": "6.4.1",
+  "swiftSDK": "swift-6.4.1-RELEASE_android",
+  "triple": "aarch64-unknown-linux-android31",
+  "ndk": "30.0.16248370",
+  "sqlite": "3.51.2",
+  "sqliteArchiveSHA256": "6e2a845a493026bdbad0618b2b5a0cf48584faab47384480ed9f592d912f23ec",
+  "protocolSHA256": "4496cb04be6390661a05b407ee1313f8c0c47b6df59916af58479fdd42dd1ee3",
+  "capabilities": {
+    "foundation_baseline": {
+      "compiles": true,
+      "exitCode": 0
+    },
+    "urlsession_bytes": {
+      "compiles": false,
+      "exitCode": 1
+    },
+    "waits_for_connectivity": {
+      "compiles": false,
+      "exitCode": 1
+    },
+    "background_urlsession": {
+      "compiles": false,
+      "exitCode": 1
+    },
+    "current_search_package": {
+      "compiles": true,
+      "exitCode": 0
+    }
+  },
+  "libraries": {
+    "libBlocksRuntime.so": {
+      "bytes": 14488,
+      "sha256": "3c345b6b82894bf4abc29d52fd0209e6f33b251a8176c23bf232e2befe13f7b8"
+    },
+    "libFoundation.so": {
+      "bytes": 8982200,
+      "sha256": "95135e2a2cd72a1a46ce685f3b0b51f2faf93ebb0406fe4195c33ab36f1c0b1b"
+    },
+    "libFoundationEssentials.so": {
+      "bytes": 10457432,
+      "sha256": "8b05e7d0c51ce6f9575cba34862ba86192df93ff5fdaeee96163b6f4c810dc1a"
+    },
+    "libFoundationInternationalization.so": {
+      "bytes": 3791928,
+      "sha256": "ffa5517b3ffda71acea200cdc051f53022c9bbfdba727ddd6666747d9f8e5f20"
+    },
+    "libFoundationNetworking.so": {
+      "bytes": 16498224,
+      "sha256": "74b9713459facb6fb22198ea6bad8bdede439f8949dc42d85e49df516fee5c50"
+    },
+    "libIMV2SharedSDK.so": {
+      "bytes": 107863240,
+      "sha256": "497124e95db517661c387ce98cb1eaada7cce029d3ab83adf380fd2ea6601c8f"
+    },
+    "lib_FoundationICU.so": {
+      "bytes": 45817552,
+      "sha256": "ba1793edc8c16af89047462e8800150fce1ff34445e1ff2651b9fcb65d0f943b"
+    },
+    "libc++_shared.so": {
+      "bytes": 9485032,
+      "sha256": "7466ed097631a564ed6bff0b47768caa76bf03270d2047b5a65c03f497b824df"
+    },
+    "libdispatch.so": {
+      "bytes": 423312,
+      "sha256": "fa6aa77793c1547ce41b1f0b247e4436fcf96b4e4e6384a5376d88c4ebcfcb8a"
+    },
+    "libswiftAndroid.so": {
+      "bytes": 80568,
+      "sha256": "3b550b7e859f35d9e1e9a9d0255937a120e3c3bd98e2c8a8e576bcf1cc74b27e"
+    },
+    "libswiftCore.so": {
+      "bytes": 11670272,
+      "sha256": "03576f24bf480b6e6693f9e74f1e4e3195e5de86bff5b55c506323a1f5b6e152"
+    },
+    "libswiftDispatch.so": {
+      "bytes": 353096,
+      "sha256": "4debba2a6a9f22da34a4b1bb39a63158175e97cb5b11e65e9c0abd8e3213f13e"
+    },
+    "libswiftObservation.so": {
+      "bytes": 241312,
+      "sha256": "87e3cc8b31b1a09bd5d3a77818d7d1c0ee8aefd86faf2516dcf4f9c26eccb828"
+    },
+    "libswiftSynchronization.so": {
+      "bytes": 125784,
+      "sha256": "922bec1de66a021612f2e4e9183640e1823ab4b7a81391c0ee977385bf53b5dd"
+    },
+    "libswift_Builtin_float.so": {
+      "bytes": 12608,
+      "sha256": "bdeb0553590d748b2a0516c333b5c8037189fd93606c3f00333e5d0a184751c4"
+    },
+    "libswift_Concurrency.so": {
+      "bytes": 1377224,
+      "sha256": "27472ac9124f367a83ea4d30d926e5dd83a07e9cbdaad4e4c8e97e4c45daf0dc"
+    },
+    "libswift_RegexParser.so": {
+      "bytes": 1575416,
+      "sha256": "2d6fdaa4c959198129db47a309e8a6084f5d0724aff3f2ddda66644a3886b39d"
+    },
+    "libswift_StringProcessing.so": {
+      "bytes": 1125104,
+      "sha256": "bbaf06168bb269d84fee67ca2bb1c6e0e98d50cc7ce81d966bb66a169201dd15"
+    },
+    "libswift_math.so": {
+      "bytes": 11384,
+      "sha256": "c0bd4bb1257cb0872770bee7b8a72446e59fe8177aa26e365ac004e483af3ef5"
+    }
+  }
+}

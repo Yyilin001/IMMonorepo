@@ -7,12 +7,10 @@ import IMV2ServerInfrastructure
 extension GatewayBackgroundWorkers {
     func startRealtimeWorkers(on workers: GatewayWorkerSupervisor) {
         let configuration = self.configuration
-        let logger = self.logger
-        let forwardRuntime = delivery.forwardRuntime
-        let directRoomLogEventCache = delivery.directRoomLogEventCache
-        let syncWakeCoalescer = delivery.syncWakeCoalescer
+        let directRoomLogEventCache = self.directRoomLogEventCache
+        let syncWakeCoalescer = self.syncWakeCoalescer
 
-        _ = workers.start { await forwardRuntime.run() }
+        if let forwardRuntime = durable?.delivery.forwardRuntime { _ = workers.start { await forwardRuntime.run() } }
 
         _ = workers.start {
             if let directRoomLogEventCache {

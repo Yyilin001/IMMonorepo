@@ -332,6 +332,12 @@ struct V2AccountDeliveryTCPTests {
                 #expect(subscriptions.withLock { $0 } == rooms.count * registries.count, "subscribed accounts: \(subscribedAccounts.withLock { $0 })")
             }
             if rebuildCoverage {
+                // The foreground subscription stays live across the account reset.
+                func isForegroundBaseline(_ frame: IMV2Envelope) -> Bool {
+                    guard case .groupEventAvailable(let hint) = frame.body else { return false }
+                    return rooms.contains { $0.rawValue == hint.roomID }
+                        && hint.eventPayload.isEmpty && hint.highWatermark == 0
+                }
                 for registry in registries { await registry.invalidateAccountRoomCoverage() }
                 for index in clients.indices {
                     var resetReceived = false
@@ -341,8 +347,7 @@ struct V2AccountDeliveryTCPTests {
                             resetReceived = true; break
                         }
                         if case .realtimeCoverage = frame.body { continue }
-                        guard case .groupEventAvailable(let hint) = frame.body,
-                              hint.eventPayload.isEmpty, hint.highWatermark == 0 else {
+                        guard isForegroundBaseline(frame) else {
                             throw V2RoomRecoveryReadError.corruptPersistence
                         }
                     }
@@ -361,6 +366,7 @@ struct V2AccountDeliveryTCPTests {
                             if case .error(let error) = response.body {
                                 try #require(error.code == "UNAVAILABLE" && error.retryable); break
                             }
+                            if isForegroundBaseline(response) { continue }
                             guard case .realtimeCoverage = response.body else { throw V2RoomRecoveryReadError.corruptPersistence }
                         }
                         start.requestID += 1

@@ -27,6 +27,9 @@ struct V2IndependentRoomSQLDatabase: SQLDatabase {
             var bindings = PostgresBindings(capacity: values.count)
             for value in values {
                 switch value {
+                case let v as [UUID]: try bindings.append(v)
+                case let v as [String]: try bindings.append(v)
+                case let v as [Int64]: try bindings.append(v)
                 case let v as UUID: bindings.append(v)
                 case let v as Data: try bindings.append(v)
                 case let v as String: bindings.append(v)
@@ -58,5 +61,14 @@ struct V2IndependentRoomSQLDatabase: SQLDatabase {
         if let ended = timeline?.marker("write_future_completed") {
             timeline?.record(.ownerWriteResume, from: ended)
         }
+    }
+}
+
+extension V2BorrowedRoomConnection {
+    func independentQueryCycle() -> Self {
+        .init(borrowed: borrowed, control: control,
+            sql: V2IndependentRoomSQLDatabase(base: sql, connection: physical),
+            physical: physical, taskExecutor: taskExecutor, isUsable: isUsable,
+            independentlyConfirmed: true)
     }
 }

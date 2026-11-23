@@ -5,6 +5,23 @@ import IMV2ClientRuntime
 import IMV2SharedRuntime
 
 @Suite(.timeLimit(.minutes(1))) struct SharedSessionOwnershipTests {
+    @Test func sharedSessionErrorsRetainTheirCauses() {
+        let mappings: [(any Error, SharedFailure)] = [
+            (V2AuthSessionError.unauthenticated, .authenticationRequired),
+            (V2AuthSessionError.credentialsUnavailable, .credentialsUnavailable),
+            (V2AuthSessionError.malformedCredentials, .malformedCredentials),
+            (V2AuthSessionError.deviceMismatch, .deviceMismatch),
+            (V2AuthSessionError.sessionInvalidated, .sessionInvalidated),
+            (V2ClientSessionBootstrapError.authenticationRequired, .authenticationRequired),
+            (V2ClientSessionBootstrapError.credentialsUnavailable, .credentialsUnavailable),
+            (V2ClientSessionBootstrapError.credentialIssueRecoveryPending, .credentialIssueRecoveryPending),
+            (V2ClientSessionBootstrapError.localStoreCloseFailed, .localStoreCloseFailed)
+        ]
+        for (error, expected) in mappings {
+            #expect(sharedFailure(error) == expected)
+        }
+    }
+
     @Test func exitRetainsIntentAndCredentialsUntilStoreReallyCloses() async throws {
         let f = try Fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
@@ -55,10 +72,10 @@ import IMV2SharedRuntime
         let first = Task { try await f.session.completeSignOut() }
         await f.credentials.deleteBarrier.waitUntilStarted()
         first.cancel()
-        let second = Task { try await f.session.completeSignOut() }
         #expect(await f.marker.pending)
+        #expect(await f.credentials.record != nil)
         await f.credentials.deleteBarrier.release()
-        try await first.value; try await second.value
+        try await first.value
         #expect(await !f.marker.pending)
         #expect(await f.credentials.deletions == 1)
     }

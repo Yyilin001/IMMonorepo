@@ -1,0 +1,18 @@
+{
+  "debug": {
+    "bytes": 162452918,
+    "sha256": "5eac02d33b47f515da4c2db853e13df2283d2f03e6050ecbff4c92ed67ef3124",
+    "nativeUncompressedBytes": 97394512,
+    "nativeCompressedBytes": 97394512,
+    "allNativeDeflated": false,
+    "isolatedBackendCA": []
+  },
+  "release": {
+    "bytes": 39276214,
+    "sha256": "9541387a6e130e86e2ac9ee074f28dbc87154e2698ef2073921887842645c925",
+    "nativeUncompressedBytes": 97394512,
+    "nativeCompressedBytes": 36171635,
+    "allNativeDeflated": true,
+    "isolatedBackendCA": []
+  }
+}

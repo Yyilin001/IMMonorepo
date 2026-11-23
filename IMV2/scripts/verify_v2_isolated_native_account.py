@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Disposable native HTTPS/account/gateway smoke. Never reads .env or changes trust stores."""
 import argparse, base64, collections, hashlib, http.client, http.server, json, os, re, secrets, signal, socket, ssl
-import shlex, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid
+import shutil, shlex, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
 import yaml
 from v2_native_background_upload_gate import NativeBackgroundUploadGate
@@ -21,6 +21,10 @@ def run(args, **kwargs):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--direct-chat', action='store_true', help='Verify direct message send and recipient history pull on the selected topology.')
+    parser.add_argument('--cross-room-limit', type=int, choices=range(1, 5), default=None,
+                        help='Override the static ordinary private-message batch limit on this isolated Gateway.')
+    parser.add_argument('--fixed-shards',action='store_true',help='Use the initial two room and two user databases on one PostgreSQL primary.')
     parser.add_argument('--check',action='store_true',help='Check dependencies without starting processes or creating configuration.')
     parser.add_argument('--hold-seconds',type=int,default=0,help='Keep only this isolated stack alive for an additional test window (max 900s).')
     parser.add_argument('--author-presentations',action='store_true',help='Enable negotiated author presentation streams only in this isolated gateway.')
@@ -68,6 +72,8 @@ def main():
     os.umask(0o077)
     root=Path(tempfile.mkdtemp(prefix='imv2-native-e2e-'))
     processes=[]; placement_processes=[]; logs=[]; pg_started=False; edge=None; gateway_process=None; push_gate=None; push_cleanup_error=None
+    target_started=False
+    room_port_overrides={}
     http_responses=collections.Counter(); http_lock=threading.Lock()
     app_refresh_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY') == 'true'
     background_download_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_ONLY') == 'true'
@@ -85,12 +91,25 @@ def main():
     print('isolated E2E root='+str(root),flush=True)
     try:
         run([PG/'initdb','-D',root/'pg','--auth=trust','--username=imv2_e2e','--no-locale'])
-        run([PG/'pg_ctl','-D',root/'pg','-l',root/'postgres.log','-o',f'-h 127.0.0.1 -p {ports["pg"]} -k {root}','-w','start']); pg_started=True
+        run([PG/'pg_ctl','-D',root/'pg','-l',root/'postgres.log','-o',f'-h 127.0.0.1 -p {ports["pg"]} -k {root} -c max_connections=512','-w','start']); pg_started=True
         run([PG/'createdb','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','imv2_e2e'])
         run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-f',REPO/'IMV2/sql/schema.sql'])
         run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-f',REPO/'IMV2/sql/realtime-change-journal.sql'])
-        run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-c',f"INSERT INTO im_v2.shard_admission_pools(room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('rooms-primary','standard','{uuid.uuid4()}',1,CURRENT_TIMESTAMP+INTERVAL '1 hour',1000)"])
-        run(['python3',REPO/'IMV2/scripts/prepare_v2_room_actor_configuration.py','--output-dir',root/'actors','--host',f'gateway=localhost:{ports["actor_gateway"]}','--caller',f'account=localhost:{ports["actor_account"]}','--shards','rooms-primary'] + voter_arguments([ports['placement_a'], ports['placement_b'], ports['placement_c']]))
+        room_ids = ['rooms-primary','rooms-01'] if args.fixed_shards else ['rooms-primary']
+        user_ids = ['users-primary','users-01'] if args.fixed_shards else ['users-primary']
+        def db_name(shard):
+            return 'imv2_'+shard.replace('-','_') if args.fixed_shards else 'imv2_e2e'
+        def psql(db, *options):
+            run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d',db,'-v','ON_ERROR_STOP=1',*options])
+        if args.fixed_shards:
+            shutil.copyfile(REPO/'IMV2/sql/schema.sql',root/'01-schema.sql')
+            shutil.copyfile(REPO/'IMV2/sql/realtime-change-journal.sql',root/'02-realtime-change-journal.sql')
+            bootstrap=(REPO/'IMV2/sql/local-fixed-shards.sql').read_text().replace(r'\connect im_v2',r'\connect imv2_e2e')
+            (root/'fixed.sql').write_text(bootstrap)
+            psql('imv2_e2e','-f',root/'fixed.sql')
+        for shard in room_ids:
+            psql(db_name(shard),'-c',f"INSERT INTO im_v2.shard_admission_pools(room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('{shard}','standard','{uuid.uuid4()}',1,CURRENT_TIMESTAMP+INTERVAL '1 hour',1000)")
+        run(['python3',REPO/'IMV2/scripts/prepare_v2_room_actor_configuration.py','--output-dir',root/'actors','--host',f'gateway=localhost:{ports["actor_gateway"]}','--caller',f'account=localhost:{ports["actor_account"]}','--shards',','.join(room_ids),'--user-buckets',','.join(user_ids)] + voter_arguments([ports['placement_a'], ports['placement_b'], ports['placement_c']]))
         ca=root/'actors/ca/cert.pem'; cert=root/'actors/gateway/tls.pem'; key=root/'actors/gateway/tls.key'
         composition=yaml.safe_load((REPO/'IMV2/docker-compose.local-account.yml').read_text())['services']
         secret_names=re.findall(r"printf '([A-Z0-9_]+)=%s",(REPO/'IMV2/scripts/run_v2_local_account_stack.sh').read_text())
@@ -105,12 +124,15 @@ def main():
                 values[k]=re.sub(r'\$\{([A-Z0-9_]+)(?::[-?]([^}]*))?\}',expand,str(v))
             database=f'postgres://imv2_e2e@127.0.0.1:{ports["pg"]}/imv2_e2e'
             values.update(IM_V2_DATABASE_URL=database,
-                IM_V2_ROOM_SHARD_STORES_JSON=json.dumps([{'shard_id':'rooms-primary','database_url':database,'schema':'im_v2'}]),
-                IM_V2_USER_SHARD_STORES_JSON=json.dumps([{'bucket':'users-primary','database_url':database,'schema':'im_v2'}]),
+                IM_V2_DIRECT_ROOM_SHARD_ID=','.join(room_ids), IM_V2_GROUP_ROOM_SHARD_ID=','.join(room_ids),
+                IM_V2_ROOM_SHARD_STORES_JSON=json.dumps([{'shard_id':s,'database_url':f'postgres://imv2_e2e@127.0.0.1:{room_port_overrides.get(s,ports["pg"])}/{db_name(s)}','schema':'im_v2'} for s in room_ids]),
+                IM_V2_USER_SHARD_STORES_JSON=json.dumps([{'bucket':s,'database_url':database.rsplit('/',1)[0]+'/'+db_name(s),'schema':'im_v2'} for s in user_ids]),
                 IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(root/'actors'/service/'configuration.json'),
                 IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY=str(root/'media'),IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL=f'https://localhost:{ports["edge"]}',
                 IM_V2_ACCOUNT_LISTEN_PORT=str(ports['account']),IM_V2_TLS_HOST='127.0.0.1',IM_V2_TLS_PORT=str(ports['gateway']),
                 IM_V2_TLS_CERTIFICATE_CHAIN_PATH=str(cert),IM_V2_TLS_PRIVATE_KEY_PATH=str(key),IM_V2_METRICS_PORT=str(ports['metrics']))
+            if service == 'gateway' and args.cross_room_limit is not None:
+                values['IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT'] = str(args.cross_room_limit)
             if service == 'gateway' and args.author_presentations:
                 values['IM_V2_AUTHOR_PRESENTATIONS_ENABLED']='true'
             return values
@@ -119,8 +141,8 @@ def main():
             log=(root/(name+'.log')).open('wb');logs.append(log)
             process=subprocess.Popen([str(binary)],env=env,stdout=log,stderr=subprocess.STDOUT);processes.append(process);return process
         start_controls(binary=REPO/'IMV2Server/.build/debug/IMV2PlacementControlApp', actors=root/'actors',
-            shards=['rooms-primary'], log_directory=root, spawn=spawn, owned=placement_processes)
-        spawn('account',REPO/'IMV2Server/.build/debug/IMV2AccountServerApp',account_env)
+            shards=room_ids, log_directory=root, spawn=spawn, owned=placement_processes)
+        account_process=spawn('account',REPO/'IMV2Server/.build/debug/IMV2AccountServerApp',account_env)
         gateway_process=spawn('gateway',REPO/'IMV2Server/.build/debug/IMV2ServerApp',environment('gateway'))
         def wait_listener(number):
             deadline=time.monotonic()+90
@@ -149,8 +171,10 @@ def main():
                         self.send_error(403);return
                     try:
                         container=Path(run(['xcrun','simctl','get_app_container',args.receiver_simulator,'com.stskcxfz.imapp','data'],timeout=5).stdout.decode().strip())
-                        if self.command == 'POST' and path == '/__fixture__/background-download/arm':
-                            download_gate.arm(json.loads(self.rfile.read(length))['scope'])
+                        if self.command == 'POST' and path in ('/__fixture__/background-download/arm', '/__fixture__/background-download/arm-foreground'):
+                            download_gate.arm(json.loads(self.rfile.read(length))['scope'], foreground=path.endswith('/arm-foreground'))
+                        elif self.command == 'POST' and path == '/__fixture__/background-download/capture-file' and length == 0:
+                            download_gate.capture_published_file(container)
                         elif self.command == 'POST' and path in ('/__fixture__/background-download/release', '/__fixture__/background-download/capture') and length == 0:
                             download_gate.capture_durable_mapping(container)
                             if path.endswith('/release'): download_gate.release()
@@ -269,6 +293,66 @@ def main():
         config={'httpsBaseURL':f'https://localhost:{ports["edge"]}','gatewayHost':'localhost','gatewayPort':ports['gateway'],'caPath':str(ca)}
         (root/'test-endpoints.json').write_text(json.dumps(config))
         print('PASS independent PG + HTTPS registration + credential issue + native TLS gateway authentication',flush=True)
+        if args.fixed_shards or args.direct_chat:
+            peer_device=str(uuid.uuid4()).upper(); peer_operation=str(uuid.uuid4()).upper(); peer_suffix=uuid.uuid4().hex[:20]
+            peer_account=post('/v2/account-auth/password/register',{'accountHandle':'e2e_'+peer_suffix,'publicHandle':'e2e'+peer_suffix,'displayName':'Shard receiver','password':'isolated-e2e-password','deviceID':peer_device})
+            peer_cancel=dict(cancellation,deviceID={'rawValue':peer_device},operationID=peer_operation,
+                proof='imv2-cancel-registration-v1.'+base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='))
+            peer=post('/v2/device-credentials',{'accountAssertion':peer_account['accountAssertion'],'deviceID':peer_device,'operationID':peer_operation,'cancellation':peer_cancel})
+            binary=REPO/'IMV2Server/.build/debug/IMV2LocalGatewayProbe'
+            sender=dict(probe,IM_V2_GATEWAY_PROBE_MODE='sendDirectMessage',IM_V2_GATEWAY_PROBE_TARGET_USER_ID=peer['userID'])
+            peer_probe=dict(probe,IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=peer['accessToken'],IM_V2_GATEWAY_PROBE_DEVICE_ID=peer_device)
+            run([binary],env=dict(sender,IM_V2_GATEWAY_PROBE_MODE='relationshipRequest'),timeout=45)
+            run([binary],env=dict(peer_probe,IM_V2_GATEWAY_PROBE_MODE='relationshipAccept',
+                IM_V2_GATEWAY_PROBE_TARGET_USER_ID=issued['userID']),timeout=45)
+            original_send = dict(sender, IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID=str(uuid.uuid4()),
+                                 IM_V2_GATEWAY_PROBE_SEND_DEADLINE_MS=str(int(time.time()*1000)+600_000))
+            room,message=run([binary],env=original_send,timeout=45).stdout.decode().strip().split()
+            receiver=dict(probe,IM_V2_GATEWAY_PROBE_MODE='receiveDirectMessage',IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=peer['accessToken'],IM_V2_GATEWAY_PROBE_DEVICE_ID=peer_device,
+                IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID=room,IM_V2_GATEWAY_PROBE_EXPECTED_MESSAGE_ID=message)
+            run([binary],env=receiver,timeout=45)
+            print('PASS direct room creation, send and recipient pull',flush=True)
+        if args.fixed_shards:
+            def room_route():
+                return run([PG/'psql','-XAt','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e',
+                    '-d','imv2_e2e','-c',f"SELECT room_shard_id FROM im_v2.direct_room_owner_routes WHERE room_id='{uuid.UUID(room)}'"]).stdout.decode().strip()
+            shard=room_route()
+            if shard not in room_ids: raise RuntimeError('missing direct room owner')
+            for process in (gateway_process,account_process):
+                process.terminate()
+                process.wait(timeout=75)
+                processes.remove(process)
+            target_port=port()
+            run([PG/'initdb','-D',root/'target','--auth=trust','--username=imv2_e2e','--no-locale'])
+            run([PG/'pg_ctl','-D',root/'target','-l',root/'target.log','-o',
+                 f'-h 127.0.0.1 -p {target_port} -k {root} -c max_connections=512','-w','start'])
+            target_started=True
+            database_name=db_name(shard)
+            run([PG/'createdb','-h','127.0.0.1','-p',target_port,'-U','imv2_e2e',database_name])
+            psql('postgres','-c',f'ALTER DATABASE {database_name} SET default_transaction_read_only=on')
+            services=root/'pg_service.conf'
+            services.write_text(''.join(f'[{name}]\nhost=127.0.0.1\nport={pgport}\ndbname={db}\nuser=imv2_e2e\n'
+                for name,pgport,db in [('control',ports['pg'],'imv2_e2e'),('source',ports['pg'],database_name),('target',target_port,database_name)]))
+            run([sys.executable,REPO/'IMV2/scripts/copy_v2_offline_shard.py','--control','control','--source','source',
+                 '--target','target','--shard',shard],env=dict(os.environ,PGSERVICEFILE=str(services),PATH=str(PG)+os.pathsep+os.environ['PATH']))
+            psql('postgres','-c',f'ALTER DATABASE {database_name} ALLOW_CONNECTIONS false')
+            room_port_overrides[shard]=target_port
+            account_process=spawn('account-migrated',REPO/'IMV2Server/.build/debug/IMV2AccountServerApp',environment('account'))
+            gateway_process=spawn('gateway-migrated',REPO/'IMV2Server/.build/debug/IMV2ServerApp',environment('gateway'))
+            wait_listener(ports['account']);wait_listener(ports['gateway'])
+            if room_route()!=shard: raise RuntimeError('room shard changed during relocation')
+            replay = run([binary], env=original_send, timeout=45).stdout.decode().split()
+            if replay != [room, message]: raise RuntimeError('pre-migration operation returned a different receipt')
+            run([binary],env=receiver,timeout=45)
+            new_ids={message}
+            for writer,target,reader in [(peer_probe,issued['userID'],probe),(probe,peer['userID'],peer_probe)]:
+                sent_room,sent_message=run([binary],env=dict(writer,IM_V2_GATEWAY_PROBE_MODE='sendDirectMessage',
+                    IM_V2_GATEWAY_PROBE_TARGET_USER_ID=target),timeout=45).stdout.decode().strip().split()
+                if sent_room!=room or sent_message in new_ids: raise RuntimeError('unexpected post-migration receipt')
+                new_ids.add(sent_message)
+                run([binary],env=dict(reader,IM_V2_GATEWAY_PROBE_MODE='receiveDirectMessage',
+                    IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID=room,IM_V2_GATEWAY_PROBE_EXPECTED_MESSAGE_ID=sent_message),timeout=45)
+            print(f'PASS relocated {shard} to a second PostgreSQL instance, source inaccessible, original ACK replay, history and both message directions verified',flush=True)
         if args.push_wake_ui:
             sys.path.insert(0,str(REPO/'scripts'))
             from v2_app_room_recovery_snapshot import snapshot as read_push_room
@@ -321,7 +405,7 @@ def main():
             if args.two_install_ui and background_upload_mode:
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
                 ui_environment['IMAPP_BACKGROUND_FIXTURE_TOKEN']=background_fixture_token
-                success_marker='local App native background download E2E: pass' if background_download_mode else 'local App native background upload E2E: pass'
+                success_marker=('local App resource facade E2E: pass' if os.environ.get('IMAPP_LOCAL_TWO_INSTALL_RESOURCE_FACADE_ONLY') == 'true' else 'local App native background download E2E: pass') if background_download_mode else 'local App native background upload E2E: pass'
             if args.two_install_ui and os.environ.get('IMAPP_LOCAL_TWO_INSTALL_MEMBER_DIRECTORY_ONLY') == 'true':
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
                 success_marker='local App member directory E2E: pass'
@@ -421,13 +505,17 @@ def main():
                 for (method,path,status),count in sorted(http_responses.items())],indent=2)+'\n')
         if pg_started:
             try:
-                facts=run([PG/'psql','-X','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-tAc',
+                all_facts=[]
+                for shard in room_ids:
+                    facts=run([PG/'psql','-X','-h','127.0.0.1','-p',room_port_overrides.get(shard,ports['pg']),
+                        '-U','imv2_e2e','-d',db_name(shard),'-tAc',
                     "SELECT COALESCE(json_agg(json_build_object('messageID',m.message_id,'roomID',m.room_id,"
                     "'contentRevision',m.content_revision,'withdrawn',m.withdrawn_at IS NOT NULL,"
                     "'roomHead',r.room_sequence,'eventTypes',(SELECT json_agg(e.event_type ORDER BY e.room_sequence) "
                     "FROM im_v2.room_events e WHERE e.room_id=m.room_id))),'[]'::json) "
                     "FROM im_v2.messages m JOIN im_v2.rooms r USING(room_id)"],timeout=15)
-                (root/'message-facts.json').write_bytes(facts.stdout)
+                    all_facts.extend(json.loads(facts.stdout))
+                (root/'message-facts.json').write_text(json.dumps(all_facts)+'\n')
             except Exception as error:
                 (root/'message-facts-error.log').write_text(type(error).__name__+'\n')
         # Preserve control quorum until all owned business processes settle.
@@ -440,6 +528,7 @@ def main():
                 try: process.wait(timeout=max(.1, deadline-time.monotonic()))
                 except subprocess.TimeoutExpired: process.kill();process.wait()
         for log in logs: log.close()
+        if target_started: run([PG/'pg_ctl','-D',root/'target','-m','fast','-w','stop'])
         if pg_started: run([PG/'pg_ctl','-D',root/'pg','-m','fast','-w','stop'])
         print('owned stack stopped; diagnostics retained at '+str(root),flush=True)
         if push_cleanup_error is not None: raise push_cleanup_error

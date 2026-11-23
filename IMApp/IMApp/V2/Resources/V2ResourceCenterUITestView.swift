@@ -96,9 +96,11 @@ struct V2ResourceCenterUITestView: View {
         do {
             let format = UIGraphicsImageRendererFormat(); format.scale = 1
             let renderer = UIGraphicsImageRenderer(size: CGSize(width: 320, height: 200), format: format)
+            // A solid color makes the decoded image verifiable without adding
+            // rasterized text to the screen's accessibility audit.
             let bytes = renderer.pngData { context in
-                UIColor.systemBlue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 320, height: 200))
-                ("资源中心" as NSString).draw(at: CGPoint(x: 60, y: 80), withAttributes: [.font: UIFont.systemFont(ofSize: 28), .foregroundColor: UIColor.white])
+                UIColor(red: 20.0 / 255, green: 92.0 / 255, blue: 202.0 / 255, alpha: 1).setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 320, height: 200))
             }
             let interruptedBytes = renderer.pngData { context in
                 UIColor.systemOrange.setFill(); context.fill(CGRect(x: 0, y: 0, width: 320, height: 200))

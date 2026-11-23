@@ -8,11 +8,17 @@ public struct PostgresV2RoomDispatchStore: V2RoomDispatchOutbox {
     let database: any Database
     public init(database: any Database) { self.database = database }
 
+    func withWorkerStatement<Result: Sendable>(
+        _ body: @escaping @Sendable (any SQLDatabase) async throws -> Result
+    ) async throws -> Result {
+        try await v2WithBoundedPostgresStatement(database: database, deadline: .now + .seconds(10), body)
+    }
+
     public func claim(now: Date, limit: Int, leaseDuration: TimeInterval = 30) async throws -> [V2RoomDispatchLease] {
         guard (1...256).contains(limit), let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration),
-              leaseDuration > 0, let sql = database as? any SQLDatabase else { throw V2RoomDispatchError.invalidInput }
+              leaseDuration > 0 else { throw V2RoomDispatchError.invalidInput }
         let token = UUID()
-        let rows = try await sql.raw("""
+        let statement: SQLQueryString = """
             WITH candidates AS (
                 SELECT source_event_id FROM im_v2.room_dispatch_outbox
                 WHERE next_attempt_at <= \(bind: now)
@@ -25,7 +31,8 @@ public struct PostgresV2RoomDispatchStore: V2RoomDispatchOutbox {
                 attempt = LEAST(work.attempt::bigint + 1, 2147483647)::integer
             FROM candidates WHERE work.source_event_id = candidates.source_event_id
             RETURNING work.*
-            """).all(decoding: DispatchRow.self)
+            """
+        let rows = try await withWorkerStatement { try await $0.raw(statement).all(decoding: DispatchRow.self) }
         return try rows.map { row in
             guard row.room_sequence > 0, row.membership_revision >= 0 else { throw V2RoomDispatchError.corruptPersistence }
             return .init(eventID: row.source_event_id, messageID: row.message_id, roomID: .init(uuid: row.room_id),
@@ -67,13 +74,12 @@ public struct PostgresV2RoomDispatchStore: V2RoomDispatchOutbox {
     /// Read one bounded cohort in one statement, preserving each lease's fence
     /// and historical membership. A valid empty page differs from a lost lease.
     public func recipientPages(_ leases: [V2RoomDispatchLease], limit: Int, now: Date) async throws -> [[UserID]?] {
-        guard leases.count <= 32, (1...256).contains(limit), v2PostgresTimestampCanEncode(now),
-              let sql = database as? any SQLDatabase else { throw V2RoomDispatchError.invalidInput }
+        guard leases.count <= 32, (1...256).contains(limit), v2PostgresTimestampCanEncode(now) else { throw V2RoomDispatchError.invalidInput }
         guard !leases.isEmpty else { return [] }
         let input = SQLList(leases.enumerated().map { index, lease -> SQLQueryString in
             "(\(bind: index)::integer,\(bind: lease.eventID)::uuid,\(bind: lease.token)::uuid,\(bind: lease.recipientCursor)::uuid)"
         })
-        let rows = try await sql.raw("""
+        let statement: SQLQueryString = """
             WITH requested(ordinal,event_id,token,cursor) AS (VALUES \(input))
             SELECT requested.ordinal, work.source_event_id IS NOT NULL AS owned, audience.user_id
             FROM requested
@@ -90,7 +96,8 @@ public struct PostgresV2RoomDispatchStore: V2RoomDispatchOutbox {
                 ORDER BY membership.user_id LIMIT \(bind: limit)
             ) audience ON true
             ORDER BY requested.ordinal,audience.user_id
-            """).all(decoding: DispatchRecipientPage.self)
+            """
+        let rows = try await withWorkerStatement { try await $0.raw(statement).all(decoding: DispatchRecipientPage.self) }
         var pages = Array<[UserID]?>(repeating: nil, count: leases.count)
         var observed = Set<Int>()
         for row in rows {
@@ -161,14 +168,14 @@ public struct PostgresV2RoomDispatchStore: V2RoomDispatchOutbox {
 
     public func retry(_ lease: V2RoomDispatchLease, now: Date, after delay: TimeInterval) async throws {
         guard delay >= 0, v2PostgresTimestampCanEncode(now),
-              let next = delay == 0 ? now : v2PostgresFutureTimestamp(now: now, interval: delay),
-              let sql = database as? any SQLDatabase else { throw V2RoomDispatchError.invalidInput }
-        try await sql.raw("""
+              let next = delay == 0 ? now : v2PostgresFutureTimestamp(now: now, interval: delay) else { throw V2RoomDispatchError.invalidInput }
+        let statement: SQLQueryString = """
             UPDATE im_v2.room_dispatch_outbox
             SET claim_token = NULL, lease_expires_at = NULL, next_attempt_at = \(bind: next)
             WHERE source_event_id = \(bind: lease.eventID) AND claim_token = \(bind: lease.token)
               AND lease_expires_at > \(bind: now)
-            """).run()
+            """
+        try await withWorkerStatement { try await $0.raw(statement).run() }
     }
 }
 

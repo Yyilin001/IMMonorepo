@@ -19,6 +19,8 @@ package struct V2OwnerConnectionExecutor: Sendable {
 }
 
 package struct V2OwnerConnectionTurn: Sendable {
+    package var executeGroup: (@Sendable ([V2PreparedMessageSendBatch], V2CapacityProfile,
+        V2AcceptanceIDFactory, @escaping @Sendable () -> Date) async throws -> [V2ScheduledSendOutcome]?)? = nil
     package let finalize: @Sendable () async -> Void
     package let execute: @Sendable (V2PreparedMessageSendBatch, V2CapacityProfile,
         V2AcceptanceIDFactory, @escaping @Sendable () -> Date) async throws -> [V2RoomMessagingResult]
@@ -33,11 +35,14 @@ package typealias V2ScheduledSendConnection = @Sendable (ContinuousClock.Instant
 package typealias V2ScheduledSendExecution = @Sendable (V2OwnerConnectionTurn,
     V2PreparedMessageSendBatch) async throws -> [V2RoomMessagingResult]
 
-/// Delivered to the already waiting room task after the database cycle settles.
-/// Finalization carries no borrowed database and never releases room ordering early.
+package typealias V2ScheduledGroupExecution = @Sendable (V2OwnerConnectionTurn,
+    [V2PreparedMessageSendBatch]) async throws -> [V2ScheduledSendOutcome]?
+
+/// Result of one room in a settled cross-room transaction. Its publication
+/// captures only synchronous in-memory state and post-commit notifications.
 package struct V2ScheduledSendOutcome: Sendable {
     let result: Result<[V2RoomMessagingResult], any Error>
-    let finalize: @Sendable () async -> Void
+    let finalize: @Sendable () -> Void
 }
 
 package final class V2OwnerPostCommitWork: Sendable {

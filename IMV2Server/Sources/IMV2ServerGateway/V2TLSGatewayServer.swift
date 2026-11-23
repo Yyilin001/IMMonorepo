@@ -187,16 +187,21 @@ final class V2GatewayChildChannelRegistry: Sendable {
 
     func stopAccepting() { state.withLock { $0.accepting = false } }
 
+    var pendingDrainCount: Int { state.withLock { $0.channels.count } }
+
     func closeAll() async {
         let snapshot = state.withLock { Array($0.channels.values) }
-        await withTaskGroup(of: Void.self) { group in
-            for entry in snapshot {
-                group.addTask {
-                    try? await entry.channel.channel.close().get()
-                    try? await entry.drained.get()
-                }
+        let byLoop = Dictionary(grouping: snapshot) { ObjectIdentifier($0.drained.eventLoop) }
+        let drains = byLoop.values.compactMap { entries -> EventLoopFuture<Void>? in
+            guard let loop = entries.first?.drained.eventLoop else { return nil }
+            let futures = entries.map { entry in
+                entry.channel.channel.close().recover { _ in () }.flatMap { entry.drained }
             }
+            return EventLoopFuture.andAllComplete(futures, on: loop)
         }
+        guard let loop = drains.first?.eventLoop else { return }
+        // Join per-loop completions without launching a Swift task per socket.
+        try? await EventLoopFuture.andAllComplete(drains, on: loop).get()
     }
 }
 
@@ -400,6 +405,8 @@ public final class V2TLSGatewayServer {
         }
         if let listenerError { throw listenerError }
     }
+
+    public var pendingConnectionDrainCount: Int { childChannels.pendingDrainCount }
 
     /// 排空连接后关闭事件循环；生产调用方先完成后台任务及辅助服务的排空。
     public func shutdown(drainTimeout: Duration = .seconds(30)) async throws {

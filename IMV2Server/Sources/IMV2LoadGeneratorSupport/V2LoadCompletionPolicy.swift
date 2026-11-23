@@ -8,3 +8,27 @@ public enum V2LoadCompletionPolicy {
         sent == acknowledged && acknowledged == observed
     }
 }
+
+/// Completion evidence for an unsuccessful load-generator operation.
+public enum V2LoadMessageFailure {
+    case unknown(String)
+    case failed(String)
+
+    public static func retryBudgetExhausted(resubmitting: Bool) -> Self {
+        .unknown(resubmitting ? "DEFERRED_RETRY_EXHAUSTED" : "UNRESOLVED")
+    }
+
+    public var auditOutcome: String {
+        switch self {
+        case .unknown: "unknown"
+        case .failed: "failed"
+        }
+    }
+
+    public var code: String {
+        switch self {
+        case .unknown(let reason): "TCP_OUTCOME_UNKNOWN_" + reason
+        case .failed(let code): code
+        }
+    }
+}

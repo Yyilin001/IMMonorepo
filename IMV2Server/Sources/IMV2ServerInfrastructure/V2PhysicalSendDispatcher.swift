@@ -9,6 +9,18 @@ import Synchronization
 /// hold real connections and execute independent room turns on those connections'
 /// EventLoops. No per-turn connection request or settlement task is created.
 package final class V2PhysicalSendDispatcher: Sendable {
+    private typealias MessageResult = Result<[V2RoomMessagingResult], any Error>
+    private enum Reply: Sendable {
+        case settled(MessageResult)
+        case finishRoom(MessageResult, @Sendable () async -> Void)
+        case publishGroup([Publication])
+    }
+    private struct Publication: Sendable {
+        let id: UUID
+        let trace: V2SendPathTrace?
+        let outcome: V2ScheduledSendOutcome
+        let continuation: CheckedContinuation<Reply, any Error>
+    }
     private struct Pending: Sendable {
         let id: UUID
         let roomID: RoomID
@@ -18,7 +30,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
         let deadline: ContinuousClock.Instant
         let enqueuedAt: ContinuousClock.Instant
         let trace: V2SendPathTrace?
-        let continuation: CheckedContinuation<V2ScheduledSendOutcome, any Error>
+        let continuation: CheckedContinuation<Reply, any Error>
     }
     private struct Selection: Sendable {
         let pending: Pending
@@ -38,14 +50,17 @@ package final class V2PhysicalSendDispatcher: Sendable {
         var busySince: ContinuousClock.Instant?
     }
     private let state: Mutex<State>
+    private let executeGroup: V2ScheduledGroupExecution?
     private let preparationStore: PostgresV2MessageSendOperationStore
     init(store: PostgresV2MessageSendOperationStore,
         configuration: V2SendOperationSchedulingConfiguration,
         maximumRetainedBytes: Int, capacity: Int,
         borrow: @escaping V2ScheduledSendConnection,
+        executeGroup: V2ScheduledGroupExecution? = nil,
         execute: @escaping V2ScheduledSendExecution) {
+        self.executeGroup = configuration.maximumCrossRoomMessages > 1 ? executeGroup : nil
         preparationStore = store
-        state = Mutex(State(store: store, configuration: configuration,
+        state = Mutex(State(configuration: configuration,
             maximumRetainedBytes: maximumRetainedBytes, capacity: capacity,
             borrow: borrow, execute: execute))
         state.withLock { $0.owner = self }
@@ -65,24 +80,54 @@ package final class V2PhysicalSendDispatcher: Sendable {
     func execute(_ prepared: V2PreparedMessageSendBatch) async throws -> [V2RoomMessagingResult] {
         try Task.checkCancellation()
         let prepared = try preparationStore.preparingScheduledCommandPlan(prepared)
+        let replay = Result { try preparationStore.replayedPreparedBatch(prepared) }
         let id = UUID(), trace = V2SendPathTrace.current
         let deadline = min(V2RoomSQLDeadline.current ?? prepared.originalDeadline, prepared.originalDeadline)
         return try await withTaskCancellationHandler {
-            let outcome: V2ScheduledSendOutcome = try await withCheckedThrowingContinuation { continuation in
+            let reply: Reply = try await withCheckedThrowingContinuation { continuation in
                 do {
-                    try update { try $0.enqueue(prepared, id: id, deadline: deadline,
+                    try update { try $0.enqueue(prepared, replay: replay, id: id, deadline: deadline,
                         trace: trace, continuation: continuation) }
                 } catch { continuation.resume(throwing: error) }
             }
-            // The existing room execution task owns committed completion. Do not
-            // check cancellation here: a committed result still requires memory
-            // updates before this room's next turn, even if its client left.
-            let started = ContinuousClock.now
-            await outcome.finalize()
-            trace?.record("post_commit_finalization", from: started)
-            update { $0.roomCompleted(id) }
-            return try outcome.result.get()
+            switch reply {
+            case .settled(let result):
+                return try result.get()
+            case .finishRoom(let result, let finish):
+                let started = ContinuousClock.now
+                await finish()
+                trace?.record("post_commit_finalization", from: started)
+                update { $0.roomCompleted(id) }
+                return try result.get()
+            case .publishGroup(let group):
+                return try publish(group).get()
+            }
         } onCancel: { self.update { $0.cancelQueued(id: id, roomID: prepared.activationToken.roomID) } }
+    }
+    // A confirmed group owns only synchronous memory updates and notifications.
+    // Its first waiting room publishes for the whole group, including after
+    // caller cancellation. The database lane can already execute more work.
+    private func publish(_ group: [Publication]) -> MessageResult {
+        for member in group {
+            if let trace = member.trace {
+                let start = ContinuousClock.now
+                member.outcome.finalize()
+                trace.record("post_commit_finalization", from: start)
+            } else {
+                member.outcome.finalize()
+            }
+        }
+        update { state in
+            for member in group.dropFirst() {
+                state.effects.append { member.continuation.resume(returning: .settled(member.outcome.result)) }
+            }
+            for member in group { state.roomCompleted(member.id) }
+        }
+        return group[0].outcome.result
+    }
+    private static func checked(_ result: MessageResult, items: Int) -> MessageResult {
+        if case .success(let values) = result, values.count != items { return .failure(V2RoomCallFailure.outcomeUnknown) }
+        return result
     }
     func shutdown() async {
         await withCheckedContinuation { continuation in update { $0.close(continuation) } }
@@ -91,7 +136,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
     func metrics() -> V2SendOperationOwnerMetricsSnapshot { update { $0.snapshot() } }
     func pressureSnapshot() -> (retainedItems: Int, retainedBytes: Int, queuedTurns: Int,
         inFlightBatches: Int, occupiedRooms: Int, closed: Bool, drainingWaiters: Int) {
-        update { ($0.retainedItems, $0.retainedBytes, $0.queues.values.reduce(0) { $0 + $1.count },
+        update { ($0.retainedItems, $0.retainedBytes, $0.queuedTurns,
             $0.active.count, $0.occupiedRooms.count, $0.closed, $0.drainWaiters.count) }
     }
     private func flushIfCurrent(_ generation: UUID) { update { $0.flushIfCurrent(generation) } }
@@ -116,33 +161,52 @@ package final class V2PhysicalSendDispatcher: Sendable {
     private func runLane(workerID: UUID, laneID: UUID, executor: V2OwnerConnectionExecutor,
         execute: @escaping V2ScheduledSendExecution) async -> Bool {
         while let selection = await nextTurn(workerID: workerID, laneID: laneID) {
-            let pending = selection.pending
-            let timeline = V2OwnerConnectionTimeline()
-            timeline.configure(self.preparationStore.scheduledSendMetrics)
-            let selectedAt = ContinuousClock.now
-            if let idle = selection.idleSince { timeline.record(.ownerWorkerIdle, from: idle, to: selectedAt) }
-            if let ready = selection.readySince { timeline.record(.ownerWorkerDispatchGap, from: ready, to: selectedAt) }
-            timeline.mark("driver_entered", at: selectedAt)
-            timeline.record(.ownerReadyWait, from: pending.enqueuedAt, to: selectedAt)
-            timeline.attach(trace: pending.trace, enqueuedAt: pending.enqueuedAt)
-            let turn = executor.makeTurn()
-            let result: Result<[V2RoomMessagingResult], any Error>
-            do {
-                result = .success(try await V2SendPathTrace.$current.withValue(pending.trace) {
-                    try await V2OwnerConnectionTimeline.$current.withValue(timeline) {
-                        try await V2RoomSQLDeadline.withDeadline(pending.deadline) {
-                            guard executor.isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
-                            return try await execute(turn, pending.prepared)
+            var reusable: Bool
+            if let executeGroup, selection.pending.prepared.canCombineRoomTurn,
+               let group = update({ $0.selectGroup(starting: selection, workerID: workerID) }) {
+                let selectedAt = ContinuousClock.now
+                let timelines = group.map { timeline(for: $0) }
+                let outcomes: [V2ScheduledSendOutcome]?
+                do {
+                    let deadline = group.map { $0.pending.deadline }.min()!
+                    outcomes = try await V2RoomSQLDeadline.withDeadline(deadline) {
+                        guard executor.isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                        return try await V2OwnerConnectionTimeline.$current.withValue(timelines[0]) {
+                            try await executeGroup(executor.makeTurn(), group.map { $0.pending.prepared })
                         }
                     }
-                })
-            } catch { result = .failure(error) }
-            // ReadyForQuery is a local driver barrier, not another SQL
-            // round trip. Only an idle confirmed connection is reusable.
-            let reusable = executor.independentlySettledTurns ? executor.isUsable() : await executor.confirmIdle()
-            self.update { value in
-                value.turnExecuted(workerID: workerID, pending: pending,
-                    outcome: .init(result: result, finalize: turn.finalize), timeline: timeline)
+                } catch {
+                    outcomes = group.map { _ in .init(result: .failure(error), finalize: {}) }
+                }
+                if let outcomes {
+                    reusable = executor.independentlySettledTurns ? executor.isUsable() : await executor.confirmIdle()
+                    precondition(outcomes.count == group.count)
+                    if let first = outcomes.first, case .success = first.result {
+                        let committed = ContinuousClock.now
+                        timelines[0].record(.ownerCrossRoomHeadToCommit, from: selection.pending.enqueuedAt, to: committed)
+                        timelines[0].record(.ownerCrossRoomExecute, from: selectedAt, to: committed)
+                    }
+                    let publications = zip(group, outcomes).map { selection, outcome in
+                        let pending = selection.pending
+                        return Publication(id: pending.id, trace: pending.trace,
+                            outcome: .init(result: Self.checked(outcome.result, items: pending.items), finalize: outcome.finalize),
+                            continuation: pending.continuation)
+                    }
+                    update { state in
+                        for index in group.indices {
+                            state.finishedWrite(workerID: workerID, id: group[index].pending.id, timeline: timelines[index])
+                        }
+                        state.effects.append { publications[0].continuation.resume(returning: .publishGroup(publications)) }
+                    }
+                } else {
+                    // Only ineligible work or a proven rollback can return here.
+                    reusable = true
+                    for (item, timeline) in zip(group, timelines) {
+                        reusable = await runSingle(item, timeline: timeline, workerID: workerID, executor: executor, execute: execute) && reusable
+                    }
+                }
+            } else {
+                reusable = await runSingle(selection, timeline: timeline(for: selection), workerID: workerID, executor: executor, execute: execute)
             }
             if !reusable {
                 self.update { value in
@@ -156,6 +220,41 @@ package final class V2PhysicalSendDispatcher: Sendable {
             }
         }
         return true
+    }
+    private func timeline(for selection: Selection) -> V2OwnerConnectionTimeline {
+        let pending = selection.pending
+        let timeline = V2OwnerConnectionTimeline()
+        timeline.configure(self.preparationStore.scheduledSendMetrics)
+        let selectedAt = ContinuousClock.now
+        if let idle = selection.idleSince { timeline.record(.ownerWorkerIdle, from: idle, to: selectedAt) }
+        if let ready = selection.readySince { timeline.record(.ownerWorkerDispatchGap, from: ready, to: selectedAt) }
+        timeline.mark("driver_entered", at: selectedAt)
+        timeline.record(.ownerReadyWait, from: pending.enqueuedAt, to: selectedAt)
+        timeline.attach(trace: pending.trace, enqueuedAt: pending.enqueuedAt)
+        return timeline
+    }
+    private func runSingle(_ selection: Selection, timeline: V2OwnerConnectionTimeline, workerID: UUID,
+        executor: V2OwnerConnectionExecutor, execute: @escaping V2ScheduledSendExecution) async -> Bool {
+        let pending = selection.pending
+        let turn = executor.makeTurn()
+        let result: Result<[V2RoomMessagingResult], any Error>
+        do {
+            result = .success(try await V2SendPathTrace.$current.withValue(pending.trace) {
+                try await V2OwnerConnectionTimeline.$current.withValue(timeline) {
+                    try await V2RoomSQLDeadline.withDeadline(pending.deadline) {
+                        guard executor.isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                        return try await execute(turn, pending.prepared)
+                    }
+                }
+            })
+        } catch { result = .failure(error) }
+        let reusable = executor.independentlySettledTurns ? executor.isUsable() : await executor.confirmIdle()
+        self.update { value in
+            value.finishedWrite(workerID: workerID, id: pending.id, timeline: timeline)
+            let checked = Self.checked(result, items: pending.items)
+            value.effects.append { pending.continuation.resume(returning: .finishRoom(checked, turn.finalize)) }
+        }
+        return reusable
     }
     private func runWorker(_ id: UUID) async {
         let (borrow, execute) = update { ($0.borrow, $0.execute) }
@@ -227,7 +326,6 @@ package final class V2PhysicalSendDispatcher: Sendable {
     private final class State {
         weak var owner: V2PhysicalSendDispatcher?
         var effects: [@Sendable () -> Void] = []
-        let store: PostgresV2MessageSendOperationStore
         let configuration: V2SendOperationSchedulingConfiguration
         let maximumRetainedBytes: Int
         let capacity: Int
@@ -248,6 +346,9 @@ package final class V2PhysicalSendDispatcher: Sendable {
         var batchesCompleted: UInt64 = 0
         var commandsSubmitted: UInt64 = 0
         var largestBatch = 0
+        var largestRoomGroup = 0
+        var retainedTurns = 0
+        var queuedTurns: Int { retainedTurns - active.count }
         var retainedItems = 0
         var retainedBytes = 0
         var roomUsage: [RoomID: (items: Int, bytes: Int)] = [:]
@@ -257,24 +358,22 @@ package final class V2PhysicalSendDispatcher: Sendable {
         var queueExpirations: UInt64 = 0
         var closed = false
         var drainWaiters: [CheckedContinuation<Void, Never>] = []
-        init(store: PostgresV2MessageSendOperationStore,
-            configuration: V2SendOperationSchedulingConfiguration,
+        init(configuration: V2SendOperationSchedulingConfiguration,
             maximumRetainedBytes: Int, capacity: Int,
             borrow: @escaping V2ScheduledSendConnection, execute: @escaping V2ScheduledSendExecution) {
-            self.store = store; self.configuration = configuration
+            self.configuration = configuration
             self.maximumRetainedBytes = maximumRetainedBytes
             self.capacity = max(1, min(configuration.maximumPendingRequests, capacity))
             self.borrow = borrow; self.execute = execute
         }
-        func enqueue(_ prepared: V2PreparedMessageSendBatch, id: UUID,
+        func enqueue(_ prepared: V2PreparedMessageSendBatch, replay: Result<[V2RoomMessagingResult]?, any Error>, id: UUID,
             deadline: ContinuousClock.Instant, trace: V2SendPathTrace?,
-            continuation: CheckedContinuation<V2ScheduledSendOutcome, any Error>) throws {
+            continuation: CheckedContinuation<Reply, any Error>) throws {
             guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
-            guard store.ownsPreparedBatch(prepared) else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             guard !closed else { throw V2RoomCallFailure.notAccepted(.retired) }
             guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-            if let replay = try store.replayedPreparedBatch(prepared) {
-                effects.append { continuation.resume(returning: .init(result: .success(replay), finalize: {})) }
+            if let replay = try replay.get() {
+                effects.append { continuation.resume(returning: .settled(.success(replay))) }
                 return
             }
             let items = prepared.commandPayload.count, bytes = prepared.retainedByteBudget
@@ -290,6 +389,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
             queues[roomID, default: .init()].append(.init(id: id, roomID: roomID, prepared: prepared,
                 items: items, bytes: bytes, deadline: deadline, enqueuedAt: .now,
                 trace: trace, continuation: continuation), key: id)
+            retainedTurns += 1
             retainedItems += items; retainedBytes += bytes
             roomUsage[roomID] = (usage.items + items, usage.bytes + bytes)
             nextQueuedDeadline = min(nextQueuedDeadline ?? deadline, deadline)
@@ -305,9 +405,9 @@ package final class V2PhysicalSendDispatcher: Sendable {
             }
             schedule()
         }
-        func take(_ id: UUID) -> Read {
+        func take(_ id: UUID, prune: Bool = true) -> Read {
             guard !closed, let worker = workers[id], !worker.connectionClosed else { return .closed }
-            _ = pruneExpiredQueued(now: .now)
+            if prune { _ = pruneExpiredQueued(now: .now) }
             guard let room = nextReadyRoom(), var queue = queues.removeValue(forKey: room),
                 let pending = queue.removeFirst() else { return .wait }
             worker.phase = .executing
@@ -324,6 +424,28 @@ package final class V2PhysicalSendDispatcher: Sendable {
             let selection = Selection(pending: pending, idleSince: worker.idleSince, readySince: worker.readySince)
             worker.idleSince = nil; worker.readySince = nil
             return .turn(selection)
+        }
+        func selectGroup(starting first: Selection, workerID: UUID) -> [Selection]? {
+            let limit = configuration.maximumCrossRoomMessages
+            let byteLimit = V2SendOperationSchedulingConfiguration.maximumCrossRoomBytes
+            let cutoff = ContinuousClock.now + .milliseconds(5)
+            var items = first.pending.items
+            var bytes = first.pending.bytes
+            guard items < limit, bytes < byteLimit, first.pending.deadline > cutoff else { return nil }
+            var group = [first]
+            while let room = readyRooms.first, let head = queues[room]?.first,
+                  head.items <= limit - items, head.bytes <= byteLimit - bytes,
+                  head.deadline > cutoff, head.prepared.canCombineRoomTurn,
+                  head.prepared.activationToken.owner.shardID == first.pending.prepared.activationToken.owner.shardID {
+                // A selected head costs at most 16 commands + 16 byte credits.
+                // It fits the 32-credit fair quantum, so take claims this head.
+                guard case .turn(let next) = take(workerID, prune: false) else { break }
+                group.append(next)
+                items += next.pending.items
+                bytes += next.pending.bytes
+            }
+            largestRoomGroup = max(largestRoomGroup, group.count)
+            return group.count > 1 ? group : nil
         }
         private func wakeReaders() {
             let now = ContinuousClock.now
@@ -359,8 +481,8 @@ package final class V2PhysicalSendDispatcher: Sendable {
                 for worker in workers.values where worker.phase == .idle { worker.readySince = nil }
             }
         }
-        func turnExecuted(workerID: UUID, pending: Pending, outcome: V2ScheduledSendOutcome, timeline: V2OwnerConnectionTimeline) {
-            finalizing.insert(pending.id)
+        func finishedWrite(workerID: UUID, id: UUID, timeline: V2OwnerConnectionTimeline) {
+            finalizing.insert(id)
             if let worker = workers[workerID] {
                 worker.executingTurns -= 1
                 if worker.executingTurns == 0 {
@@ -371,11 +493,6 @@ package final class V2PhysicalSendDispatcher: Sendable {
                     worker.readySince = readyRooms.isEmpty ? nil : ended
                 }
             }
-            let delivered: V2ScheduledSendOutcome
-            if case .success(let values) = outcome.result, values.count != pending.items {
-                delivered = .init(result: .failure(V2RoomCallFailure.outcomeUnknown), finalize: outcome.finalize)
-            } else { delivered = outcome }
-            effects.append { pending.continuation.resume(returning: delivered) }
         }
         func roomCompleted(_ id: UUID) {
             guard let pending = active.removeValue(forKey: id) else { return }
@@ -385,8 +502,8 @@ package final class V2PhysicalSendDispatcher: Sendable {
             batchesCompleted = Self.add(batchesCompleted, 1)
             if !closed && queues[pending.roomID]?.isEmpty == false {
                 readyRooms.append(pending.roomID, key: pending.roomID)
+                schedule()
             }
-            schedule()
             finishDrainIfSettled()
         }
         func rejectOneForAcquisition(_ error: any Error) {
@@ -495,6 +612,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
         }
 
         func release(_ pending: Pending) {
+            retainedTurns -= 1
             retainedItems -= pending.items
             retainedBytes -= pending.bytes
             let usage = roomUsage[pending.roomID]!
@@ -518,13 +636,13 @@ package final class V2PhysicalSendDispatcher: Sendable {
         func snapshot() -> V2SendOperationOwnerMetricsSnapshot {
             var result = V2SendOperationOwnerMetricsSnapshot()
             result.retainedItems = retainedItems; result.retainedBytes = retainedBytes
-            result.queuedTurns = queues.values.reduce(0) { $0 + $1.count }
+            result.queuedTurns = queuedTurns
             result.inFlightBatches = active.count
             result.stages = [.executing: active.count - finalizing.count,
                 .finalizing: finalizing.count]
             result.batchesStarted = batchesStarted; result.batchesCompleted = batchesCompleted
             result.commandsSubmitted = commandsSubmitted; result.largestBatch = largestBatch
-            result.largestRoomCount = batchesStarted == 0 ? 0 : 1
+            result.largestRoomCount = batchesStarted == 0 ? 0 : max(1, largestRoomGroup)
             result.connectionWorkers = workers.count
             result.acquiringConnectionWorkers = workers.values.filter { $0.phase == .acquiring }.count
             result.idleConnectionWorkers = workers.values.filter { $0.phase == .idle }.count

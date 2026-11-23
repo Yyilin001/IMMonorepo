@@ -457,7 +457,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Rejected sends retain precise private hints without durable send results",
+    @Test("Rejected sends preserve precise private hints and durable receipts",
           arguments: [false, true], ["generic", "system"])
     func denialResponseTimestampPrecision(concurrent: Bool, reason: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, deliveryDB, sql, deliverySQL, _ in
@@ -520,7 +520,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                 #expect(receipt.outcome == .rejected(.directPolicyDenied))
                                 let query = try V2MessageSendOperationRecoveryRequest(identity: denied.identity,
                                     fingerprint: denied.fingerprint, domainFingerprint: denied.command.fingerprint)
-                                #expect(try await store.recover(query, token: deniedToken) == .unresolved)
+                                #expect(try await store.recover(query, token: deniedToken) == result)
                                 struct HintRow: Decodable { let source_event_id: UUID; let created_at: Date }
                                 let hint = try #require(try await sql.raw("SELECT source_event_id,created_at FROM im_v2.room_timeline_activities WHERE room_id=\(bind: rooms[0].uuidValue!) AND recipient_user_id=\(bind: senderUUID) ORDER BY timeline_sequence DESC LIMIT 1").first(decoding: HintRow.self))
                                 let milliseconds = try v2GatewayMilliseconds(hint.created_at)
@@ -539,7 +539,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                 #expect(try await count("im_v2.room_timeline_activities", on: sql) == Int64(dates.firstIndex(of: date)! + 1))
                             }
                             #expect(try await count("im_v2.messages", on: sql) == Int64(dates.count))
-                            #expect(try await count("im_v2.message_send_completions", on: sql) == Int64(dates.count))
+                            #expect(try await count("im_v2.message_send_completions", on: sql) == Int64(dates.count * 2))
                         }
                     }
                     await policies.shutdown()

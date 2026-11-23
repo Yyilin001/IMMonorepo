@@ -1,0 +1,22 @@
+{
+  "phase": 17,
+  "status": "passed",
+  "branch": "codex/shared-contacts-groups-facade",
+  "sharedAndDomainUnitTests": 62,
+  "iosUnitTests": 200,
+  "iosBackendFunctionalStages": 8,
+  "iosScopeCleanupTests": 2,
+  "androidBackendSuites": [
+    6,
+    7
+  ],
+  "nativeBackendCases": 2,
+  "legacyPublicSymbolRecords": 6079,
+  "legacyUnchanged": true,
+  "nativePublicSymbolRecords": 271,
+  "kotlinBusinessAdded": false,
+  "normalReleaseBuildPassed": true,
+  "cleanupPassed": true,
+  "committed": false,
+  "windowsValidated": false
+}

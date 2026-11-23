@@ -8,13 +8,14 @@ import IMV2ServerInfrastructure
 enum GatewayPoolMetricsTopology {
     static func make(
         configuration: V2GatewayRuntimeConfiguration,
-        physicalDatabaseCount: Int
+        physicalDatabaseCount: Int,
+        workloadRoles: [V2PostgresWorkloadPoolBudget.Role]
     ) -> V2DatabasePoolTopologySnapshot {
         let configuredHandleCount = configuration.databaseNonMessagePoolEventLoopThreads * physicalDatabaseCount
         let workloadPoolTopology: V2DatabasePoolTopologySnapshot
         if configuration.databaseWorkloadPoolIsolationEnabled {
             workloadPoolTopology = .init(
-                pools: V2PostgresWorkloadPoolBudget.Role.allCases.filter { configuration.databaseWorkloadPoolBudget.connectionsPerEventLoop(for: $0) > 0 }.map { role in
+                pools: workloadRoles.map { role in
                     .init(
                         poolClass: metricClass(for: role),
                         eventLoopHandles: configuration.databasePoolEventLoopCount(for: role) * physicalDatabaseCount,

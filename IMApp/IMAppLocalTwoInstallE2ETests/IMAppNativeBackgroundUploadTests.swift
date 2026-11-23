@@ -36,7 +36,38 @@ extension IMAppLocalTwoInstallE2ETests {
     }
 
     @MainActor
+    func testResourceFacadeRetiresUploadInstallation() throws {
+        try testCleansOnlyRequestedIndependentInstallationScope()
+    }
+
+    @MainActor
+    func testResourceFacadeLogsIntoFreshDownloadInstallation() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let submit = app.buttons["v2.password.submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 15))
+        submit.tap()
+        try openNativeUploadGroup(in: app)
+        let id = try XCTUnwrap(UUID(uuidString: try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_BACKGROUND_MESSAGE_ID"]))).uuidString
+        XCTAssertTrue(app.buttons["v2.message.media.\(id).0"].waitForExistence(timeout: 30))
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
     func testRealAppUploadsAttachmentWhileSuspended() async throws {
+        try await verifyNativeUpload(requireSuspension: true)
+    }
+
+    /// Prepare a real uploaded message for the independent download scenario.
+    /// Background suspension is asserted by the dedicated upload test above.
+    @MainActor
+    func testResourceFacadeUploadsDownloadFixture() async throws {
+        try await verifyNativeUpload(requireSuspension: false)
+    }
+
+    @MainActor
+    private func verifyNativeUpload(requireSuspension: Bool) async throws {
         let app = XCUIApplication()
         app.activate()
         try openNativeUploadGroup(in: app)
@@ -92,15 +123,17 @@ extension IMAppLocalTwoInstallE2ETests {
         XCTAssertEqual(observation.hits, 1, "必须观察到真实后台授权PUT，不能把前台上传算成系统后台上传。")
         XCTAssertGreaterThan(observation.readBytes, 0)
         XCTAssertFalse(observation.released)
-        XCUIDevice.shared.press(.home)
-        let suspendedBy = ContinuousClock.now.advanced(by: .seconds(90))
-        while app.state != .runningBackgroundSuspended && ContinuousClock.now < suspendedBy {
-            try await Task.sleep(for: .milliseconds(200))
+        if requireSuspension {
+            XCUIDevice.shared.press(.home)
+            let suspendedBy = ContinuousClock.now.advanced(by: .seconds(90))
+            while app.state != .runningBackgroundSuspended && ContinuousClock.now < suspendedBy {
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            XCTAssertEqual(app.state, .runningBackgroundSuspended, "必须实际挂起App后再释放系统上传，不能用进入后台代替挂起。")
+            XCTContext.runActivity(named: "native-background-upload-app-suspended") { _ in }
         }
-        XCTAssertEqual(app.state, .runningBackgroundSuspended, "必须实际挂起App后再释放系统上传，不能用进入后台代替挂起。")
-        XCTContext.runActivity(named: "native-background-upload-app-suspended") { _ in }
         observation = try await nativeUploadObservation(release: true)
-        XCTAssertEqual(observation.durableActiveMappings, 1, "挂起时必须有本次原上传的持久化系统任务映射。")
+        XCTAssertEqual(observation.durableActiveMappings, 1, "释放上传前必须有本次原上传的持久化系统任务映射。")
         let completedBy = ContinuousClock.now.advanced(by: .seconds(45))
         while observation.completed == 0 && ContinuousClock.now < completedBy {
             try await Task.sleep(for: .milliseconds(100))
@@ -156,7 +189,7 @@ extension IMAppLocalTwoInstallE2ETests {
         var request = URLRequest(url: try XCTUnwrap(URL(string: "https://localhost:8443/__fixture__/background-download/" + action)))
         request.httpMethod = action == "state" ? "GET" : "POST"
         request.setValue(token, forHTTPHeaderField: "X-Background-Fixture")
-        if action == "arm" {
+        if action == "arm" || action == "arm-foreground" {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder().encode(["scope": try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_BACKGROUND_SCOPE"])])
         }
@@ -181,10 +214,30 @@ extension IMAppLocalTwoInstallE2ETests {
     }
 
     @MainActor
+    func testResourceFacadeDownloadsAndVerifiesFile() async throws {
+        let app = XCUIApplication()
+        app.activate()
+        let download = try originalDownloadButton(in: app)
+        let downloadedIdentifier = download.identifier + ".open"
+        _ = try await nativeDownloadObservation(action: "arm-foreground")
+        download.tap()
+        XCTAssertTrue(app.buttons[downloadedIdentifier].waitForExistence(timeout: 45))
+        let observation = try await nativeDownloadObservation(action: "capture-file")
+        XCTAssertEqual(observation.hits, 1)
+        XCTAssertEqual(observation.foregroundHits, 1)
+        XCTAssertEqual(observation.persistedBytes, 512 * 1024)
+        XCTAssertTrue(observation.checksumMatches)
+        XCTAssertEqual(observation.artifactCount, 1)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
     func testRealAppDownloadsAttachmentWhileSuspended() async throws {
         let app = XCUIApplication()
         app.activate()
         let download = try originalDownloadButton(in: app)
+        let downloadedIdentifier = download.identifier + ".open"
         _ = try await nativeDownloadObservation(action: "arm")
         download.tap()
         var observation = try await nativeDownloadObservation()
@@ -219,7 +272,7 @@ extension IMAppLocalTwoInstallE2ETests {
         XCTAssertEqual(observation.artifactCount, 1)
         XCTAssertFalse(observation.expired)
         app.activate()
-        let shared = app.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", download.identifier, "分享文件")).firstMatch
+        let shared = app.buttons[downloadedIdentifier]
         XCTAssertTrue(shared.waitForExistence(timeout: 45))
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
@@ -229,10 +282,12 @@ extension IMAppLocalTwoInstallE2ETests {
     func testRealAppColdReusesBackgroundDownloadedAttachment() async throws {
         let app = XCUIApplication()
         app.activate()
-        let download = try originalDownloadButton(in: app)
-        download.tap()
-        let shared = app.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", download.identifier, "分享文件")).firstMatch
+        try openNativeUploadGroup(in: app)
+        let id = try XCTUnwrap(UUID(uuidString: try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_BACKGROUND_MESSAGE_ID"]))).uuidString
+        let shared = app.buttons["v2.message.media.\(id).0.open"]
         XCTAssertTrue(shared.waitForExistence(timeout: 30))
+        shared.tap()
+        XCTAssertTrue(app.buttons["完成"].waitForExistence(timeout: 10))
         let observation = try await nativeDownloadObservation()
         XCTAssertEqual(observation.hits, 1, "冷恢复必须重新授权后复用原校验字节，不能再次GET掩盖恢复失败。")
         XCTAssertEqual(observation.artifactCount, 1)
@@ -298,7 +353,7 @@ extension IMAppLocalTwoInstallE2ETests {
         XCTAssertEqual(observation.persistedBytes, 0)
         XCTAssertEqual(observation.artifactCount, 0)
         XCTAssertEqual(observation.pendingJobs, 0)
-        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", "v2.message.media.\(id).0", "分享文件")).firstMatch.exists)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", "v2.message.media.\(id).0.open", "查看文件")).firstMatch.exists)
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
@@ -346,6 +401,7 @@ extension IMAppLocalTwoInstallE2ETests {
         let app = XCUIApplication()
         app.activate()
         let download = try originalDownloadButton(in: app)
+        let downloadedIdentifier = download.identifier + ".open"
         download.tap()
         var observation = try await nativeDownloadObservation()
         XCTAssertEqual(observation.processKills, 1)
@@ -354,7 +410,7 @@ extension IMAppLocalTwoInstallE2ETests {
         XCTAssertEqual(observation.hits, 1)
         observation = try await nativeDownloadObservation(action: "release")
         XCTAssertEqual(observation.durableActiveMappings, 1)
-        let shared = app.buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", download.identifier, "分享文件")).firstMatch
+        let shared = app.buttons[downloadedIdentifier]
         XCTAssertTrue(shared.waitForExistence(timeout: 45))
         observation = try await nativeDownloadObservation()
         XCTAssertEqual(observation.hits, 1)

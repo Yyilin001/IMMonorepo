@@ -1,0 +1,88 @@
+{
+  "passed": true,
+  "os": "iOS 18.5 simulator",
+  "backend": "isolated PostgreSQL + HTTPS account/edge + native TLS",
+  "stages": [
+    {
+      "test": "CleansOnlyRequestedIndependentInstallationScope",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "test": "RealAppColdRestoresBackgroundAttachment",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "test": "RealAppColdReusesBackgroundDownloadedAttachment",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "test": "ResourceFacadeDownloadsAndVerifiesFile",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "test": "ResourceFacadeLogsIntoFreshDownloadInstallation",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "test": "ResourceFacadeRetiresUploadInstallation",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "test": "ResourceFacadeUploadsDownloadFixture",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "test": "SharedSessionRegistersAndStartsRealtime",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "test": "CleansOnlyRequestedIndependentInstallationScope",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "independentStrictBackgroundUpload": {
+    "test": "RealAppUploadsAttachmentWhileSuspended",
+    "result": "Passed",
+    "passed": 1,
+    "failed": 0
+  },
+  "manualDownload": {
+    "hits": 1,
+    "foregroundHits": 1,
+    "sentBytes": 524288,
+    "released": false,
+    "completed": 1,
+    "expired": false,
+    "durableActiveMappings": 0,
+    "persistedBytes": 524288,
+    "checksumMatches": true,
+    "artifactCount": 1,
+    "pendingJobs": 0,
+    "responseInterrupted": false,
+    "originalIntentPreserved": false,
+    "originalTaskMappingPreserved": false,
+    "processKills": 0
+  },
+  "strictBackgroundDownloadPassed": false,
+  "strictBackgroundDownloadNote": "Current manual download policy uses foreground Range GET; the legacy background-specific assertion is not this functional acceptance.",
+  "ios27UIPassed": false,
+  "sourceLogSHA256": "6e1e0944225b297ced560ffb402af5c1ffb273c6bf4df09d0773c96b8793112c"
+}

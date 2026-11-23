@@ -21,7 +21,6 @@ package actor V2PlacementControlRuntime {
     private var started = false
     private var closing = false
     private var stopping = false
-    private var trustAdmissions: V2ActorTrustAdmissionSource?
 
     package init(configuration: V2RoomActorApplicationConfiguration) { self.configuration = configuration }
 
@@ -29,13 +28,7 @@ package actor V2PlacementControlRuntime {
         guard !started, !closing else { throw V2PlacementRaftError.closed }
         started = true; starting = true
         defer { starting = false }
-        if let directory = configuration.trustAdmissionDirectory {
-            let source = try V2ActorTrustAdmissionSource(directory: directory, trust: configuration.trust)
-            trustAdmissions = source
-            try await source.start()
-            guard !closing else { throw V2PlacementRaftError.closed }
-        }
-        let control = configuration.placementControl
+        guard let control = configuration.placementControl else { throw V2PlacementRaftError.invalidConfiguration }
         let roster = Set(control.roles.values)
         var initial: [String: V2ActorPlacementSnapshot] = [:]
         for shard in control.shards {
@@ -99,6 +92,13 @@ package actor V2PlacementControlRuntime {
                 do { snapshots[shard] = try await reader.load(deadline: min(deadline, .now + .seconds(3))) }
                 catch V2ActorPlacementError.unavailable {}
             }
+            let configured = Set(configuration.discovery.peers.filter { $0.accessibleShardIDs.contains(shard) }.map(\.hostID))
+            guard let snapshot = snapshots[shard], snapshot.slots.allSatisfy({ slot in
+                configured.contains(slot.owner.host.hostID) &&
+                    (slot.transfer.map { configured.contains($0.successor.hostID) } ?? true)
+            }) else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+            }
             logs[shard] = remote
         }
         return try .init(logs: logs, snapshots: snapshots)
@@ -127,10 +127,6 @@ package actor V2PlacementControlRuntime {
         guard !starting, !stopping else { return false }
         stopping = true
         defer { stopping = false }
-        if let trustAdmissions {
-            guard try await trustAdmissions.stop(deadline: deadline) else { return false }
-            self.trustAdmissions = nil
-        }
         for task in drivers { task.cancel() }
         // The RPC transport bounds cancellation while native remote persistence
         // remains owned by the receiving voter until it actually settles.

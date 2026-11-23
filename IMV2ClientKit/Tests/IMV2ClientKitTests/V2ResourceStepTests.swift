@@ -1,5 +1,5 @@
 import Foundation
-import CryptoKit
+import Crypto
 import GRDB
 import Synchronization
 import IMV2Core

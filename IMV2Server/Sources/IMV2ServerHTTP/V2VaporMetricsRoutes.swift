@@ -72,6 +72,7 @@ public enum V2VaporMetricsRoutes {
         connectionMetrics: (any V2ConnectionMetricsSource)? = nil,
         transportMetrics: (any V2GatewayTransportMetricsSource)? = nil,
         durableWorkMetrics: (any V2DurableWorkMetricsSource)? = nil,
+        includesGlobalDurableWork: Bool = true,
         runtimePressureMetrics: (any V2RuntimePressureMetricsSource)? = nil,
         actorRealtimeMetrics: (any V2ActorRealtimeMetricsSource)? = nil,
         recoverySchedulingMetrics: (@Sendable () -> V2RecoverySchedulingSnapshot)? = nil,
@@ -101,7 +102,8 @@ public enum V2VaporMetricsRoutes {
                 document += v2RenderPrometheusGatewayTransportMetrics(await transportMetrics.gatewayTransportMetricsSnapshot())
             }
             if let durableWorkMetrics {
-                document += v2RenderPrometheusDurableWorkMetrics(await durableWorkMetrics.durableWorkMetricsSnapshot())
+                document += v2RenderPrometheusDurableWorkMetrics(
+                    await durableWorkMetrics.durableWorkMetricsSnapshot(), includesGlobalWork: includesGlobalDurableWork)
             }
             if let runtimePressureMetrics {
                 document += v2RenderPrometheusRuntimePressureMetrics(

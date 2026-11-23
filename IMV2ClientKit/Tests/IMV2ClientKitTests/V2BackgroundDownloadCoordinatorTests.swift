@@ -1,4 +1,4 @@
-import CryptoKit
+import Crypto
 import Foundation
 import GRDB
 import IMV2Core
@@ -833,8 +833,13 @@ private actor DownloadDriver: V2BackgroundDownloadSessionDriving, V2BackgroundPr
     }
     func installWake(_ wake: @escaping @Sendable () async -> Void) { self.wake = wake }
     func create(target: V2ClientMediaTransferTarget, mappingID: UUID) async throws -> Int {
+        #if canImport(Darwin)
         let request = try V2BackgroundDownloadRequest.make(target: target)
         networkConstraints.append(.init(allowsCellular: request.allowsCellularAccess, allowsExpensive: request.allowsExpensiveNetworkAccess, allowsConstrained: request.allowsConstrainedNetworkAccess))
+        #else
+        // Simulate the native driver's policy input without relying on Apple URLRequest fields.
+        networkConstraints.append(target.networkConstraints)
+        #endif
         guard try byteInbox.permit(mappingID).state == .prepared else { throw V2BackgroundTransferError.mappingConflict }
         createCount += 1; origin = V2BackgroundResultInbox.originDigest(target.url)
         let identifier = createCount

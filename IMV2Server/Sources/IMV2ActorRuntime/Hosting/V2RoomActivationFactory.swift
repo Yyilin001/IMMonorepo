@@ -7,17 +7,22 @@ public struct V2RoomActivationExecutor<Request: Sendable, Response: Sendable>: S
     public let restore: @Sendable (V2RoomActivationRestorationContext) async throws -> Void
     public let execute: V2RoomTurnLane<Request, Response>.Execute
     public let invalidateReservation: @Sendable (V2RoomReservation) async -> Void
+    /// A live, lifecycle-bound delivery reference keeps a quiet room active.
+    /// Explicit drain and authority loss bypass this idle-only check.
+    public let hasLiveSubscriptions: (@Sendable () async -> Bool)?
     public let close: @Sendable () async -> Void
 
     public init(
         restore: @escaping @Sendable (V2RoomActivationRestorationContext) async throws -> Void,
         execute: @escaping V2RoomTurnLane<Request, Response>.Execute,
         invalidateReservation: @escaping @Sendable (V2RoomReservation) async -> Void,
+        hasLiveSubscriptions: (@Sendable () async -> Bool)? = nil,
         close: @escaping @Sendable () async -> Void
     ) {
         self.restore = restore
         self.execute = execute
         self.invalidateReservation = invalidateReservation
+        self.hasLiveSubscriptions = hasLiveSubscriptions
         self.close = close
     }
 }

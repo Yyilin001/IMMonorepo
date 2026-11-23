@@ -49,11 +49,12 @@ actor V2ConversationListSnapshotBuilder {
 @Observable
 final class V2ConversationSnapshotPresentation {
     private(set) var snapshot = V2ConversationListSnapshot.empty
+    private(set) var presentedInput: V2ConversationListSnapshot.Input?
     @ObservationIgnored private let builder = V2ConversationListSnapshotBuilder()
     @ObservationIgnored private let frames: V2ConversationFrameDriver
     @ObservationIgnored private var latestInput: V2ConversationListSnapshot.Input?
     @ObservationIgnored private var input: AsyncStream<V2ConversationListSnapshot.Input>.Continuation?
-    @ObservationIgnored private var pending: V2ConversationListSnapshot?
+    @ObservationIgnored private var pending: (snapshot: V2ConversationListSnapshot, input: V2ConversationListSnapshot.Input)?
     @ObservationIgnored private var session: UUID?
     @ObservationIgnored private(set) var stagedCount = 0
 
@@ -86,7 +87,7 @@ final class V2ConversationSnapshotPresentation {
                 let ready = try await builder.build(next)
                 try Task.checkCancellation()
                 guard session == token else { return }
-                pending = ready
+                pending = (ready, next)
                 stagedCount &+= 1
                 frames.requestFrame { [weak self] in self?.commitFrame() }
             } catch is CancellationError { return }
@@ -97,7 +98,8 @@ final class V2ConversationSnapshotPresentation {
     private func commitFrame() {
         guard let pending else { return }
         self.pending = nil
-        snapshot = pending
+        snapshot = pending.snapshot
+        presentedInput = pending.input
     }
 }
 

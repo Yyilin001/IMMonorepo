@@ -162,12 +162,36 @@ public protocol V2LivePresenceLeaseManaging: Sendable {
     /// - Throws: 持久化失败时抛出。
     func removePresence(identity: V2AuthenticatedConnection, connectionID: UUID, now: Date) async throws -> Bool
 
+    /// Remove a batch and report remaining published presence by connection ID.
+    func removePresenceBatch(_ requests: [V2LivePresenceLeaseRemovalRequest], now: Date) async throws -> [UUID: Bool]
+
     /// 查询用户的偏好是否允许展示在线状态。
     ///
     /// - Parameter userID: 目标用户。
     /// - Returns: 允许展示时为 `true`。
     /// - Throws: 持久化失败时抛出。
     func allowsOnlinePresence(userID: UserID) async throws -> Bool
+}
+
+public struct V2LivePresenceLeaseRemovalRequest: Sendable {
+    public let identity: V2AuthenticatedConnection
+    public let connectionID: UUID
+
+    public init(identity: V2AuthenticatedConnection, connectionID: UUID) {
+        self.identity = identity
+        self.connectionID = connectionID
+    }
+}
+
+public extension V2LivePresenceLeaseManaging {
+    func removePresenceBatch(_ requests: [V2LivePresenceLeaseRemovalRequest], now: Date) async throws -> [UUID: Bool] {
+        var result: [UUID: Bool] = [:]
+        for request in requests {
+            result[request.connectionID] = try await removePresence(
+                identity: request.identity, connectionID: request.connectionID, now: now)
+        }
+        return result
+    }
 }
 
 /// 一条连接租约的续租请求。

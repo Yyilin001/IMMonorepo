@@ -2,6 +2,8 @@
 
 IM V2 是使用 Swift 构建的即时通信项目，包含 iOS 客户端、客户端 SDK、TLS 消息网关、账户服务和 PostgreSQL 持久化实现。当前运行链路使用下列 V2 模块，不依赖历史协议、数据存储、凭据或本地缓存。
 
+项目工具链固定为 Swift 6.4.2。Apple 平台使用 Xcode 27.2，Linux 服务端和 Android 使用同版本的开源编译器及各自的 SDK。
+
 ## 项目组成
 
 | 路径 | 职责 |
@@ -12,6 +14,7 @@ IM V2 是使用 Swift 构建的即时通信项目，包含 iOS 客户端、客�
 | `ConversationListKit/` | 独立的 Swift 包，提供会话排序索引和 iOS 固定位置列表渲染器。 |
 | `IMV2Core/` | 领域类型、帧与命令规则，以及准入、扇出和同步约束。 |
 | `IMV2ClientKit/` | 设备 Keychain 会话、SQLite 同步投影、持久化客户端发件箱，以及 TLS/HTTPS 传输。 |
+| `IMAdminWeb/` | Web 管理后台：管理员登录、用户查询、账户禁用与操作审计；配置见其 README。 |
 | `IMV2Server/` | TLS 网关、PostgreSQL 存储、账户与设备服务，以及仅监听回环地址的运维服务。 |
 | `IMV2/` | PostgreSQL 权威结构、隔离测试与本地服务的 Compose 配置、脚本、告警规则，以及设计和运维文档。 |
 
@@ -38,11 +41,10 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 
 本地服务仅在 Mac 回环地址发布 `https://localhost:8443` 和 `localhost:7443`。
 
-房间由分布式 Actor 承载，`placement-a`、`placement-b`、`placement-c` 是三个独立的控制进程，负责保存房间分区的归属；Gateway 和 Account 作为控制层客户端。控制端口只在 Compose 内部网络使用。启动脚本先启动控制层，再启动业务服务；停止 Compose 栈时，控制层保留到业务服务退出，供房间完成排空和节点注销。
+本地默认使用一个 Gateway/Core 进程和一个 PostgreSQL 主库。房间和用户数据共用 `im_v2` 库，Gateway 持有独占的房间写入代次，Account 与 Operator 通过固定 Core 地址执行房间命令。普通停机先排空连接、后台任务和房间后再清除写入标记。异常恢复步骤与接入 Gateway 的扩展方式见 [单活 Room Core 部署](IMV2Server/README.md#单活-room-core-部署)。
 
-控制日志压缩后，落后的控制节点通过带摘要校验的 PB 分块接收已提交快照，单块最多 512 KiB、完整快照最多 16 MiB。完整快照持久化后才确认安装，再继续普通日志复制；中断的分块接收不会发布部分状态。控制节点累积 4,096 条新的已提交日志后自动压缩；等待回复的控制命令会阻止提前压缩。控制层已实现有界回执归档、可信排除和自动故障接管，具体边界见[房间 Actor 合同](docs/reviews/room-virtual-actor-contract.md)。
+这个默认拓扑使用独立的 `v2-local-single-core-postgres` 卷和 `IMV2/local-room-actors/single-core` 配置目录，作为新的本地环境启动。
 
-首次启动会初始化全新控制组的投票文件，普通重启保留 `IMV2/local-room-actors/placement-*/placement/` 的持久状态。部分文件缺失会阻止启动，不会通过重新初始化掩盖历史丢失。旧配置需要重新生成，项目不提供旧租约配置的兼容启动路径。自动接管要求可信部署绑定及旧实例、数据库会话的排除证明；生产多机分区和容量验收仍需独立环境证据，本地启动配置不代表完整的高可用交付。
 脚本会在 `IMV2/` 下生成仅用于本机的密钥和 CA。验证 HTTPS 账户流程前，需将
 `IMV2/local-ca/root.crt` 导入所选模拟器并启用信任。
 

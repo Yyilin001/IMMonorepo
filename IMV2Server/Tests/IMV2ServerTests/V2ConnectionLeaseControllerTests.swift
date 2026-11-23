@@ -7,6 +7,23 @@ import Testing
 
 @Suite("Connection lease controller ownership")
 struct V2ConnectionLeaseControllerTests {
+    @Test("cleanup retains the same connection through a failed batch and a missing result")
+    func retriesUnsettledCleanup() async throws {
+        let store = ControllerLeaseStore()
+        await store.simulateIncompleteCleanup()
+        let controller = makeController(store)
+        let id = UUID(), identity = makeIdentity()
+        let policy = V2AuthenticatedConnectionAdmissionPolicy(maximumConnectionsPerDevice: 2, maximumConnectionsPerUser: 8)
+        _ = try await controller.admit(connectionID: id, identity: identity, lifecycle: 1,
+            publicationSuppressed: false, policy: policy)
+        #expect(await controller.retire(connectionID: id, lifecycle: 1, identity: identity) == false)
+        #expect(await store.cleanupAttempts == [[id], [id], [id]])
+        #expect(await store.removedIDs == [id])
+        #expect(try await controller.admit(connectionID: id, identity: identity, lifecycle: 2,
+            publicationSuppressed: false, policy: policy) != nil)
+        await controller.finish()
+    }
+
     @Test("due renewal wakes without scanning idle connections and revoked deadlines never renew")
     func automaticRenewalAndRevocation() async throws {
         let store = ControllerLeaseStore(leaseSeconds: 0.15)
@@ -100,6 +117,34 @@ struct V2ConnectionLeaseControllerTests {
         await controller.finish()
         #expect(await store.removalCount == 1)
         #expect(await controller.snapshot(connectionID: id).deadline == nil)
+    }
+
+    @Test("closing a connection removes its queued renewal behind a blocked batch")
+    func retiringDropsQueuedRenewal() async throws {
+        let store = ControllerLeaseStore(blockRenewal: true)
+        let controller = makeController(store)
+        let running = UUID(), queued = UUID(), identity = makeIdentity()
+        let policy = V2AuthenticatedConnectionAdmissionPolicy(maximumConnectionsPerDevice: 2, maximumConnectionsPerUser: 8)
+        for connection in [running, queued] {
+            _ = try await controller.admit(connectionID: connection, identity: identity, lifecycle: 1,
+                publicationSuppressed: false, policy: policy)
+        }
+        let first = Task { await controller.refreshProjection(connectionID: running, lifecycle: 1) }
+        await store.waitForRenewal()
+        let second = Task { await controller.refreshProjection(connectionID: queued, lifecycle: 1) }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while await controller.metrics().pendingConnections != 1, ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        #expect(await controller.metrics().pendingConnections == 1)
+        #expect(await controller.retire(connectionID: queued, lifecycle: 1, identity: identity) == nil)
+        #expect(await controller.metrics().pendingConnections == 0)
+        await store.releaseRenewal()
+        #expect(await first.value)
+        #expect(!(await second.value))
+        await controller.finish()
+        #expect(await store.renewalCount == 1)
+        #expect(await store.removedIDs == [queued])
     }
 
     @Test("close returns while admission SQL is pending, then owned cleanup drains")
@@ -279,6 +324,19 @@ private actor ControllerLeaseStore: V2LivePresenceLeaseManaging {
         if failRenewal { throw CancellationError() }
         return Dictionary(uniqueKeysWithValues: requests.map {
             ($0.connectionID, .init(outcome: rejectRenewal ? .rejected : .accepted(expiresAt: $0.now.addingTimeInterval(leaseSeconds)), allowsOnlinePresence: true))
+        })
+    }
+    private var simulateCleanupErrors = false
+    private(set) var cleanupAttempts: [[UUID]] = []
+    func simulateIncompleteCleanup() { simulateCleanupErrors = true }
+    func removePresenceBatch(_ requests: [V2LivePresenceLeaseRemovalRequest], now: Date) throws -> [UUID: Bool] {
+        cleanupAttempts.append(requests.map(\.connectionID))
+        if simulateCleanupErrors {
+            if cleanupAttempts.count == 1 { throw CancellationError() }
+            if cleanupAttempts.count == 2 { return [:] }
+        }
+        return Dictionary(uniqueKeysWithValues: requests.map { request in
+            (request.connectionID, removePresence(identity: request.identity, connectionID: request.connectionID, now: now))
         })
     }
     func removePresence(identity: V2AuthenticatedConnection, connectionID: UUID, now: Date) -> Bool {

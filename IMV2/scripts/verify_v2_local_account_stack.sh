@@ -26,11 +26,15 @@ cross_entry_disabled="${V2_LOCAL_CROSS_ENTRY_DISABLED_PATH:-}"
 remote_batch_fixture="${V2_LOCAL_REMOTE_BATCH_FIXTURE_PATH:-}"
 remote_batch_release="${V2_LOCAL_REMOTE_BATCH_RELEASE_PATH:-}"
 phase="preflight"
+compose_arguments=(--file "${compose_file}")
+if [[ -z "${V2_LOCAL_COMPOSE_FILE:-}" && "${V2_LOCAL_ACTOR_CLUSTER:-0}" != 1 ]]; then
+  compose_arguments+=(--file "${v2_dir}/docker-compose.local-account-core.yml")
+fi
 
 source "${script_dir}/local_compose.sh"
 
 compose() {
-  v2_local_compose "${env_file}" --project-name "${compose_project}" --file "${compose_file}" "$@"
+  v2_local_compose "${env_file}" --project-name "${compose_project}" "${compose_arguments[@]}" "$@"
 }
 
 report_failure() {

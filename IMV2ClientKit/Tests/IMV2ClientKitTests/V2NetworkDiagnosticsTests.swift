@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import IMV2ClientKit
 @testable import IMV2ClientRuntime
 @testable import IMV2ClientNetwork

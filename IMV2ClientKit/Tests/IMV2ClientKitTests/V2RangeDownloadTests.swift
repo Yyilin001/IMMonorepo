@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Crypto
 import IMV2Core
 import Testing
@@ -74,6 +77,8 @@ struct V2RangeDownloadTests {
         let expected = V2ResourceDownloadNetworkConstraints(allowsCellular: false, allowsExpensive: false, allowsConstrained: false)
         let restricted = try target(body).restrictingNetwork(to: expected).restrictingNetwork(to: .unrestricted)
         let transport = RangeFixture(body: body)
+        #expect(restricted.networkConstraints == expected)
+        #if canImport(Darwin)
         try await V2URLSessionMediaByteTransfer(transport: transport, chunkBytes: 4).download(target: restricted, destinationURL: destination)
         let requests = await transport.recorded
         #expect(requests.count == 3)
@@ -83,6 +88,13 @@ struct V2RangeDownloadTests {
             #expect(!request.allowsConstrainedNetworkAccess)
         }
         #expect(try Data(contentsOf: destination) == body)
+        #elseif !os(Android)
+        await #expect(throws: V2NetworkPolicyError.unsupportedConstraints) {
+            try await V2URLSessionMediaByteTransfer(transport: transport, chunkBytes: 4)
+                .download(target: restricted, destinationURL: destination)
+        }
+        #expect(await transport.recorded.isEmpty)
+        #endif
     }
     @Test(arguments: ["rebuild", "rebuild-corrupt", "rebuild-changed"])
     func verifiedPrefixRequiresSameEntityAndFinalChecksum(path: String) async throws {

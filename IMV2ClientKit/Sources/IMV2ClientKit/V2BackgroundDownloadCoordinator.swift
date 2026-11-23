@@ -113,7 +113,7 @@ public actor V2BackgroundDownloadCoordinator {
 
     private func performDownload(mediaID: MediaID, message: V2MediaMessageLocation?,
                                  initialTarget: V2ClientMediaTransferTarget, restoringJobID: UUID?) async throws -> V2BackgroundDownloadedFile {
-        _ = try V2BackgroundDownloadRequest.make(target: initialTarget)
+        try V2BackgroundDownloadRequest.validate(target: initialTarget)
         try await initialize()
         guard !closed else { throw V2BackgroundTransferError.closed }
         let job = try await store.beginBackgroundDownload(id: restoringJobID ?? UUID(), mediaID: mediaID, message: message,
@@ -528,7 +528,7 @@ public actor V2BackgroundDownloadCoordinator {
             if automatic { try journal.requireAutomaticDownloadAllowed(mediaID: job.mediaID, message: job.message, target: target) }
             let preferences = try journal.downloadNetworkPreferences()
             target = target.restrictingNetwork(to: preferences.constraints(automatic: automatic))
-            _ = try V2BackgroundDownloadRequest.make(target: target)
+            try V2BackgroundDownloadRequest.validate(target: target)
             try await store.bindBackgroundDownloadBytes(id: job.id, target: target, accountID: accountID)
             guard let grant = target.backgroundDownloadAuthorization, let origin = V2BackgroundResultInbox.originDigest(target.url)
             else { throw V2BackgroundTransferError.invalidAuthorization }

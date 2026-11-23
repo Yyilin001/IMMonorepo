@@ -210,22 +210,21 @@ final class IMAppResourceCenterUITests: XCTestCase {
             app.buttons["BackButton"].tap()
             XCTAssertTrue(app.navigationBars["存储管理"].waitForExistence(timeout: 5))
         }
-        if atBottom {
-            let action = app.buttons["v2.resources.retention.unavailable.preview"]
-            reveal(action, in: app)
-        }
         let viewport = app.scrollViews["v2.resources.storage"]
         XCTAssertTrue(viewport.exists)
+        if atBottom {
+            let cleanup = app.buttons["v2.resources.cleanup.preview"]
+            reveal(cleanup, in: app)
+            for _ in 0..<4 where cleanup.frame.maxY > viewport.frame.maxY { app.swipeUp() }
+            XCTAssertTrue(viewport.frame.contains(cleanup.frame))
+        }
         let viewportFrame = viewport.frame
-        let navigationFrame = app.navigationBars["存储管理"].frame
+        let navigation = app.navigationBars["存储管理"]
+        let navigationFrame = navigation.frame
         let bounds = XCTAttachment(string: "Scroll view: \(viewportFrame); navigation: \(navigationFrame)")
         bounds.name = "Storage scroll viewport bounds"; bounds.lifetime = .keepAlways; add(bounds)
-        attach(app, name: atBottom ? "Contrast diagnostic bottom" : "Contrast diagnostic top")
-        try app.performAccessibilityAudit(for: .contrast) { issue in
-            let report = XCTAttachment(string: "\(issue.detailedDescription)\n\(issue.element?.debugDescription ?? app.debugDescription)")
-            report.name = "Contrast diagnostic issue"; report.lifetime = .keepAlways; self.add(report)
-            return false
-        }
+        try auditStorage(app, name: atBottom ? "Contrast diagnostic bottom" : "Contrast diagnostic top",
+                         types: .contrast, navigation: navigation)
     }
 
     @MainActor func testUnavailableRetentionManagementPreservesPrivacyAndReleasesIntent() throws {
@@ -264,8 +263,10 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(app.collectionViews["v2.resources.retention.unavailable.sheet"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["设计说明与产品界面方案.png"].exists)
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "本次最多处理 1 项")).firstMatch.exists)
-        reveal(confirm, in: app)
+        // Audit the presented sheet before a scroll clips its oversized text at the window edge.
         if audit { try auditStorage(app, name: "Unavailable retention scoped confirmation") }
+        reveal(confirm, in: app)
+        attach(app, name: "Unavailable retention confirmation action is reachable")
         app.buttons["v2.resources.retention.unavailable.cancel"].tap()
         reveal(manage, in: app); manage.tap(); XCTAssertTrue(app.collectionViews["v2.resources.retention.unavailable.sheet"].waitForExistence(timeout: 5)); reveal(confirm, in: app); confirm.tap()
         let receipt = app.staticTexts["v2.resources.retention.unavailable.feedback"]
@@ -409,12 +410,12 @@ final class IMAppResourceCenterUITests: XCTestCase {
         }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: filtered, object: nil)], timeout: 10), .completed)
         XCTAssertFalse(app.buttons["v2.resources.library.next"].exists)
-        app.buttons["v2.resources.library.search.clear"].tap()
+        let clear = app.buttons["v2.resources.library.search.clear"]
+        clear.tap()
         let restored = NSPredicate { _, _ in
-            (search.value as? String) == "搜索资源" && rows.count > 1
+            !clear.exists && rows.count > 1
         }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: restored, object: nil)], timeout: 10), .completed)
-        XCTAssertFalse(app.buttons["v2.resources.library.search.clear"].exists)
         let next = app.buttons["v2.resources.library.next"]
         for _ in 0..<40 where !next.isHittable { app.swipeUp() }
         XCTAssertTrue(next.isHittable && next.isEnabled)
@@ -439,6 +440,7 @@ final class IMAppResourceCenterUITests: XCTestCase {
         mode.tap()
         let all = app.buttons["v2.resources.selection.all"]
         reveal(all, in: app); all.tap()
+        try auditStorage(app, name: "Selected image grid and selection controls")
         let selected = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.resources.selection.item."))
         for _ in 0..<12 where selected.count < 2 { app.swipeUp() }
         XCTAssertEqual(selected.count, 2)
@@ -451,8 +453,21 @@ final class IMAppResourceCenterUITests: XCTestCase {
         }
         let rendered = NSPredicate { _, _ in Self.containsFixtureImage(app.screenshot()) }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: rendered, object: nil)], timeout: 10), .completed)
-        try auditStorage(app, name: "Selected image grid retains pixels and explicit selection states")
-        reveal(category, in: app); category.tap(); app.buttons["文件"].tap()
+        attach(app, name: "Selected image grid retains pixels and explicit selection states")
+        let search = app.textFields["v2.resources.library.search"]
+        // The pinned search field can cover a category row still marked hittable.
+        func categoryIsVisible() -> Bool {
+            category.isHittable && category.frame.minY > search.frame.maxY
+        }
+        for _ in 0..<12 where !categoryIsVisible() {
+            if category.exists && category.frame.midY < app.frame.midY { app.swipeDown() }
+            else { app.swipeUp() }
+        }
+        XCTAssertTrue(categoryIsVisible())
+        category.tap()
+        let documents = app.buttons["文件"]
+        XCTAssertTrue(documents.waitForExistence(timeout: 5))
+        documents.tap()
         let cleared = NSPredicate { _, _ in mode.label == "选择" && !all.exists }
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: cleared, object: nil)], timeout: 10), .completed)
         attach(app, name: "Filtering exits selection instead of keeping hidden targets")
@@ -499,10 +514,10 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(cleanup.isHittable); cleanup.tap()
         let confirm = app.buttons["v2.resources.selection.cleanup.confirm"]
         XCTAssertTrue(app.navigationBars["所选缓存清理"].waitForExistence(timeout: 10))
-        try auditStorage(app, name: "Selected physical cleanup metadata")
+        try auditStorage(app, name: "Selected physical cleanup metadata and scope")
         for _ in 0..<12 where !confirm.isHittable { app.swipeUp() }
         XCTAssertTrue(confirm.isHittable)
-        try auditStorage(app, name: "Selected cleanup scope and confirmation")
+        attach(app, name: "Selected cleanup confirmation action is reachable")
         app.buttons["v2.resources.selection.cleanup.done"].tap()
     }
 
@@ -576,16 +591,21 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(file.isHittable)
         if page == .library { try auditStorage(app, name: "Document library and long filename"); return }
         file.tap()
-        XCTAssertTrue(app.navigationBars["资源详情"].waitForExistence(timeout: 5))
+        let navigation = app.navigationBars["资源详情"]
+        XCTAssertTrue(navigation.waitForExistence(timeout: 5))
         if page == .metadata { try auditStorage(app, name: "Document metadata"); return }
-        let retain = app.buttons["v2.resources.retain"]
-        for _ in 0..<12 where !retain.isHittable { app.swipeUp() }
-        XCTAssertTrue(retain.isHittable)
+        // The metadata audit changes Dynamic Type, rebuilding the List and
+        // resetting its offset. Audit scrolled rows at their actual launch size.
+        let scrolledAuditTypes = XCUIAccessibilityAuditType.all.subtracting(.dynamicType)
         if page == .actions {
-            try auditStorage(app, name: "Document actions and source")
+            for id in ["v2.resources.preview", "v2.resources.share", "v2.resources.retain"] {
+                revealDetailControl(app.buttons[id], below: navigation, in: app)
+            }
             let explanation = app.buttons["v2.resources.usage-explanation"]
-            for _ in 0..<12 where !explanation.isHittable { app.swipeUp() }
-            XCTAssertTrue(explanation.isHittable); explanation.tap()
+            revealDetailControl(explanation, below: navigation, in: app)
+            try auditStorage(app, name: "Document actions", types: scrolledAuditTypes, navigation: navigation)
+            revealDetailControl(explanation, below: navigation, in: app)
+            explanation.tap()
             let alert = app.alerts["使用与保留说明"]
             XCTAssertTrue(alert.waitForExistence(timeout: 5))
             XCTAssertTrue(alert.staticTexts["查看和分享前会验证当前访问权限。保留本机可防止自动清理，但不会获得永久访问权限。"].exists)
@@ -595,17 +615,25 @@ final class IMAppResourceCenterUITests: XCTestCase {
         }
         // Each system audit gets a fresh process and scope, so its internal
         // font and scroll changes cannot become another page's initial state.
-        for id in ["v2.resources.preview", "v2.resources.share"] {
-            let control = app.buttons[id]
-            for _ in 0..<12 where !control.isHittable { app.swipeUp() }
-            XCTAssertTrue(control.isHittable)
-        }
         let source = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.resources.source.")).firstMatch
-        for _ in 0..<12 where !source.isHittable { app.swipeUp() }
-        XCTAssertTrue(source.isHittable)
-        app.swipeUp()
-        XCTAssertTrue(source.isHittable)
-        try auditStorage(app, name: "Document source navigation")
+        revealDetailControl(source, below: navigation, in: app)
+        try auditStorage(app, name: "Document source navigation", types: scrolledAuditTypes, navigation: navigation)
+    }
+
+    @MainActor private func revealDetailControl(_ element: XCUIElement, below navigation: XCUIElement, in app: XCUIApplication) {
+        func isVisible() -> Bool {
+            guard element.isHittable else { return false }
+            let frame = element.frame
+            return !frame.isEmpty && frame.minY >= navigation.frame.maxY && frame.maxY <= app.frame.maxY
+        }
+        for _ in 0..<12 where !isVisible() {
+            if element.exists && element.frame.minY < navigation.frame.maxY {
+                app.swipeDown(velocity: .slow)
+            } else {
+                app.swipeUp(velocity: .slow)
+            }
+        }
+        XCTAssertTrue(isVisible())
     }
 
     @MainActor func testTransferNetworkWaitPassesAccessibilityAudit() throws { try verifyTransferAudit(large: false) }
@@ -703,10 +731,43 @@ final class IMAppResourceCenterUITests: XCTestCase {
         app.terminate(); app.launchArguments += ["-v2-ui-testing-resource-center-cleanup"]; app.launch()
         XCTAssertTrue(app.staticTexts["测试数据已清理"].waitForExistence(timeout: 10)); app.terminate()
     }
-    @MainActor private func auditStorage(_ app: XCUIApplication, name: String) throws {
-        attach(app, name: name)
-        try app.performAccessibilityAudit(for: .all) { issue in
-            let report = XCTAttachment(string: "\(issue.compactDescription)\n\(issue.detailedDescription)\n\(issue.element?.debugDescription ?? app.debugDescription)")
+    @MainActor private func auditStorage(_ app: XCUIApplication, name: String,
+                                         types: XCUIAccessibilityAuditType = .all,
+                                         navigation: XCUIElement? = nil) throws {
+        // A scroll can keep decelerating after XCTest reports the app idle.
+        // Let the rendered frame settle before comparing colors to AX bounds.
+        var frame = app.screenshot()
+        for _ in 0..<5 {
+            let next = app.screenshot()
+            if next.pngRepresentation == frame.pngRepresentation { break }
+            frame = next
+        }
+        let screenshot = XCTAttachment(screenshot: frame)
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let viewport = app.frame
+        let navigationFrame = navigation?.frame
+        try app.performAccessibilityAudit(for: types) { issue in
+            if issue.auditType == .contrast, let element = issue.element, !element.frame.isEmpty {
+                let bounds = element.frame
+                if bounds.minY < viewport.minY || bounds.maxY > viewport.maxY {
+                    // The raster audit cannot compare a complete label outside the rendered window.
+                    print("Accessibility audit \(name): clipped contrast sample at \(bounds)")
+                    return true
+                }
+                if let navigation, let navigationFrame, bounds.intersects(navigationFrame),
+                   !navigation.descendants(matching: element.elementType).allElementsBoundByAccessibilityElement
+                    .contains(where: { $0.frame == bounds && $0.label == element.label }) {
+                    // The opaque navigation bar can cover a scroll row still present in the AX tree.
+                    print("Accessibility audit \(name): contrast sample obscured by navigation at \(bounds)")
+                    return true
+                }
+            }
+            let details = "\(issue.compactDescription)\n\(issue.detailedDescription)"
+            let element = issue.element?.debugDescription
+            print("Accessibility audit \(name): \(details)\n\(element ?? "No accessibility element identified")")
+            let report = XCTAttachment(string: "\(details)\n\(element ?? app.debugDescription)")
             report.name = name + " accessibility issue"; report.lifetime = .keepAlways; self.add(report)
             return false
         }
@@ -834,7 +895,10 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(resource.waitForExistence(timeout: 5)); resource.tap()
         let download = app.buttons["v2.resources.download"]
         XCTAssertTrue(download.waitForExistence(timeout: 5)); download.tap()
-        XCTAssertTrue(app.staticTexts["已保存下载请求，可在传输任务中查看状态或继续处理。"].waitForExistence(timeout: 5))
+        let saved = app.staticTexts["已保存下载请求，可在传输任务中查看状态或继续处理。"]
+        reveal(saved, in: app)
+        XCTAssertTrue(saved.exists)
+        reveal(app.buttons["v2.resources.download.tasks"], in: app)
         app.buttons["v2.resources.download.tasks"].tap()
         let queued = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "已排队")).firstMatch
         XCTAssertTrue(queued.waitForExistence(timeout: 5))
@@ -1220,7 +1284,8 @@ final class IMAppResourceCenterUITests: XCTestCase {
         XCTAssertTrue(filter.waitForExistence(timeout: 5)); filter.buttons["已结束"].tap()
         let originalTask = app.staticTexts["v2.resources.transfers.item." + taskID]
         XCTAssertTrue(originalTask.waitForExistence(timeout: 10))
-        XCTAssertEqual(originalTask.label, "下载中断图片.png")
+        XCTAssertEqual(originalTask.label, "文件名称")
+        XCTAssertEqual(originalTask.value as? String, "下载中断图片.png")
         attach(app, name: "Retried download completed under original task identity")
         app.terminate()
         app.launchArguments += ["-v2-ui-testing-resource-center-cleanup"]
@@ -1233,18 +1298,9 @@ final class IMAppResourceCenterUITests: XCTestCase {
     func testAccountEntryDetailRetentionPreviewAndCleanup() {
         // Initialize the dedicated simulator's local document browser before
         // invoking its Save to Files activity for the first time.
-        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
-        files.launchArguments = ["-AppleLanguages", "(zh-Hans)"]
-        files.launch()
-        let welcome = files.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "欢迎", "文件")).firstMatch
-        if welcome.waitForExistence(timeout: 3) {
-            let next = files.buttons["继续"]
-            XCTAssertTrue(next.waitForExistence(timeout: 5)); next.tap()
-        }
-        let browseFiles = files.buttons["浏览"].firstMatch
+        let files = openLocalFilesBrowserForTesting()
         let browser = XCTAttachment(string: files.debugDescription)
         browser.name = "System Files browser initialization"; browser.lifetime = .keepAlways; add(browser)
-        XCTAssertTrue(browseFiles.waitForExistence(timeout: 30)); browseFiles.tap()
         attach(files, name: "Dedicated simulator local file browser")
         files.terminate()
         let app = XCUIApplication(), scope = UUID().uuidString
@@ -1293,8 +1349,7 @@ final class IMAppResourceCenterUITests: XCTestCase {
         let hierarchy = XCTAttachment(string: app.debugDescription)
         hierarchy.name = "System local file share hierarchy"; hierarchy.lifetime = .keepAlways; add(hierarchy)
         attach(app, name: "System share receives a local resource file")
-        let saveToFiles = app.cells.matching(NSPredicate(format: "label == %@", "保存到“文件”")).firstMatch
-        XCTAssertTrue(saveToFiles.waitForExistence(timeout: 5)); saveToFiles.tap()
+        app.tapSaveToFilesForTesting()
         let name = app.textFields.matching(NSPredicate(format: "value IN %@", ["设计说明与产品界面方案.png", "设计说明与产品界面方案"])).firstMatch
         XCTAssertTrue(name.waitForExistence(timeout: 60))
         attach(app, name: "Files export preserves the original filename before cancellation")

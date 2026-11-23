@@ -509,23 +509,17 @@ public struct V2GatewayDomainCommandHandler:
         } catch is V2MessageSendOperationWireCodecError,
                 is V2MessageOperationValidationError {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        } catch let overload as V2GatewayMessageOverloadFailure {
+        } catch let deferred as V2GatewayMessageDeferredFailure {
             let command: V2MessageSendFailureCommand
             switch envelope.body {
             case .messageSendOperation: command = .submit
             case .messageSendOperationRecover: command = .recover
-            default: throw overload // the decoded operation wrapper is family-specific
-            }
-            let disposition: V2MessageSendFailureDisposition
-            switch overload.failure {
-            case .notAccepted(.overloaded): disposition = .notAccepted
-            case .rolledBack(.overloaded): disposition = .rolledBack
-            default: throw overload // no inferred rollback or generic availability mapping
+            default: throw deferred
             }
             await telemetry.record(.messageSendInternalFailure(command: command,
-                disposition: disposition, reason: .overloaded))
-            let hint = try V2MessageOperationRetryHint(identity: overload.identity,
-                fingerprint: overload.fingerprint, reason: .admissionUnavailable,
+                disposition: deferred.disposition, reason: messageFailureReason(deferred.reason)))
+            let hint = try V2MessageOperationRetryHint(identity: deferred.identity,
+                fingerprint: deferred.fingerprint, reason: .admissionUnavailable,
                 retryAfterMilliseconds: nil)
             var response = IMV2Envelope()
             response.messageSendOperationResult = V2MessageSendOperationWireCodec.encode(result: .deferred(hint))
@@ -561,7 +555,10 @@ public struct V2GatewayDomainCommandHandler:
                 case .notFound: return errorEnvelope(code: "NOT_FOUND", retryable: false)
                 case .invalidRequest: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
                 case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-                default: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+                case .unsupportedVersion: return errorEnvelope(code: "UNSUPPORTED_VERSION", retryable: false)
+                case .staleActivation, .notReady, .retired, .authorityLost, .unavailable,
+                     .overloaded, .roomCapacityExhausted, .deadlineExceeded:
+                    return errorEnvelope(code: "UNAVAILABLE", retryable: true)
                 }
             }
         } catch V2RoomMembershipDirectoryError.revisionConflict(let currentRevision) {
@@ -738,7 +735,7 @@ private func messageFailureReason(_ reason: V2RoomFailureReason) -> V2MessageSen
     case .authorityLost: .authorityLost
     case .unavailable: .unavailable
     case .overloaded: .overloaded
-    case .roomCapacityExhausted: .overloaded
+    case .roomCapacityExhausted: .roomCapacityExhausted
     case .deadlineExceeded: .deadlineExceeded
     case .cancelled: .cancelled
     case .notFound: .notFound

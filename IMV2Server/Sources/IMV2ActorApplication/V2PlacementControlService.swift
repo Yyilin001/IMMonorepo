@@ -7,9 +7,44 @@ import NIOPosix
 /// The three fixed voters run as independent processes. Room applications are
 /// clients and can all retire without removing the control quorum underneath.
 public actor V2PlacementControlService {
+    /// Produce an offline compare-and-swap for the control database, using the
+    /// same normalized digest as Gateway startup. No database connection here.
+    public static func offlinePolicyChange(from oldData: Data, to newData: Data) throws -> String {
+        struct Topology: Decodable {
+            let placementClusterID: UUID
+            let policyPlacement: V2PolicyOwnerPlacementConfiguration
+        }
+        let decoder = JSONDecoder()
+        let old = try decoder.decode(Topology.self, from: oldData)
+        let new = try decoder.decode(Topology.self, from: newData)
+        guard old.placementClusterID == new.placementClusterID,
+              old.policyPlacement.partitionCount == new.policyPlacement.partitionCount,
+              old.policyPlacement.revision < Int64.max,
+              new.policyPlacement.revision == old.policyPlacement.revision + 1 else {
+            throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+        }
+        let previous = try V2PolicyOwnerPlacement(old.policyPlacement).digest.map { String(format: "%02x", $0) }.joined()
+        let next = try V2PolicyOwnerPlacement(new.policyPlacement).digest.map { String(format: "%02x", $0) }.joined()
+        return """
+        DO $maintenance$
+        BEGIN
+          UPDATE im_v2.policy_owner_deployment
+             SET revision = \(new.policyPlacement.revision), snapshot_digest = decode('\(next)', 'hex')
+           WHERE deployment_id = 'active' AND revision = \(old.policyPlacement.revision)
+             AND snapshot_digest = decode('\(previous)', 'hex');
+          IF NOT FOUND AND NOT EXISTS (SELECT 1 FROM im_v2.policy_owner_deployment
+             WHERE deployment_id = 'active' AND revision = \(new.policyPlacement.revision)
+               AND snapshot_digest = decode('\(next)', 'hex')) THEN
+            RAISE EXCEPTION 'unexpected policy placement';
+          END IF;
+        END
+        $maintenance$;
+        """
+    }
+
     private let runtime: V2PlacementControlRuntime
     public init(configuration: V2RoomActorApplicationConfiguration) throws {
-        guard configuration.hostIdentity == nil, configuration.placementControl.identity != nil,
+        guard configuration.hostIdentity == nil, configuration.placementControl?.identity != nil,
               configuration.policyPlacement == nil else { throw V2RoomActorApplicationError.invalidRole }
         runtime = .init(configuration: configuration)
     }
@@ -32,7 +67,7 @@ public actor V2PlacementControlService {
     public static func inspect(configuration: V2RoomActorApplicationConfiguration,
                                deadline: ContinuousClock.Instant = .now + .seconds(30))
         async throws -> [V2PlacementControlInspection] {
-        guard configuration.hostIdentity == nil, configuration.placementControl.identity == nil else {
+        guard configuration.hostIdentity == nil, configuration.placementControl != nil, configuration.placementControl?.identity == nil else {
             throw V2RoomActorApplicationError.invalidRole
         }
         let runtime = V2PlacementControlRuntime(configuration: configuration)
@@ -59,7 +94,7 @@ public actor V2PlacementControlService {
     /// Validate authority before an exclusion backend can stop any process.
     package static func exclusionShards(configuration: V2RoomActorApplicationConfiguration,
                                         host: V2ActorHostIdentity) throws -> Set<String> {
-        guard configuration.hostIdentity == nil, configuration.placementControl.identity == nil,
+        guard configuration.hostIdentity == nil, configuration.placementControl != nil, configuration.placementControl?.identity == nil,
               configuration.policyPlacement == nil,
               try configuration.trust.configuredService(configuration.signer.serviceID).permissions ==
                 Set([.placementRead, .placementWrite, .placementExclude]),
@@ -72,8 +107,8 @@ public actor V2PlacementControlService {
     /// Explicit provisioning creates only fresh voting files. Normal startup
     /// always opens existing history; it never invokes this operation.
     public static func provision(configuration: V2RoomActorApplicationConfiguration) async throws {
-        let control = configuration.placementControl
-        guard configuration.hostIdentity == nil, configuration.policyPlacement == nil, let identity = control.identity else {
+        guard let control = configuration.placementControl, configuration.hostIdentity == nil,
+              configuration.policyPlacement == nil, let identity = control.identity else {
             throw V2RoomActorApplicationError.invalidRole
         }
         let pool = NIOThreadPool(numberOfThreads: 2); pool.start()
@@ -103,7 +138,7 @@ package actor V2RoomHostControlSession {
     private var closed = false
 
     package init(configuration: V2RoomActorApplicationConfiguration) throws {
-        guard configuration.hostIdentity == nil, configuration.placementControl.identity == nil,
+        guard configuration.hostIdentity == nil, configuration.placementControl != nil, configuration.placementControl?.identity == nil,
               configuration.policyPlacement == nil else { throw V2RoomActorApplicationError.invalidRole }
         self.configuration = configuration
     }
@@ -143,7 +178,7 @@ package actor V2RoomHostControlSession {
         try await connection.retireAfterExclusion(proof, deadline: deadline)
         if takeOver {
             try await connection.takeOverRetiredHost(proof.host, shards: proof.settledShardIDs,
-                operationID: proof.operationID, eligibleHosts: configuration.placementControl.roomHosts, deadline: deadline)
+                operationID: proof.operationID, eligibleHosts: configuration.placementControl?.roomHosts ?? [:], deadline: deadline)
         }
         return try await inspect(deadline: deadline)
     }

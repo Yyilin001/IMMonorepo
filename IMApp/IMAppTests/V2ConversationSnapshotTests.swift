@@ -24,11 +24,14 @@ struct V2ConversationSnapshotTests {
         let consumer = Task { await presentation.run() }
         defer { consumer.cancel() }
         try await waitUntil { presentation.stagedCount == 1 }
-        presentation.submit(.init(conversations: [item("new")], pending: [], query: ""))
+        let latest = V2ConversationListSnapshot.Input(conversations: [item("new")], pending: [], query: "")
+        presentation.submit(latest)
         try await waitUntil { presentation.stagedCount == 2 }
         #expect(presentation.snapshot == .empty)
+        #expect(presentation.presentedInput == nil)
         frames.commitFrame()
         #expect(presentation.snapshot.rows.map(\.id) == [.conversation("new")])
+        #expect(presentation.presentedInput == latest)
         #expect(!frames.hasPendingFrame)
         consumer.cancel()
         await consumer.value

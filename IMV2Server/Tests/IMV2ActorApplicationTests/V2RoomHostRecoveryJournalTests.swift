@@ -59,6 +59,22 @@ struct V2RoomHostRecoveryJournalTests {
             #expect(try await final.operation(for: successor) == next)
             #expect(try await final.pendingHosts() == [successor])
             try await final.close(); current = nil
+            let added = try V2ActorHostID("host-b")
+            await #expect(throws: V2RoomHostRecoveryJournalError.pendingIncarnation) {
+                _ = try await V2RoomHostRecoveryJournal.reconfigure(at: path, supervisorID: supervisor,
+                    hostIDs: [added], pool: pool)
+            }
+            let settling = try await V2RoomHostRecoveryJournal.open(at: path, supervisorID: supervisor,
+                hostIDs: [hostID], pool: pool); current = settling
+            try await settling.complete(host: successor, operationID: next)
+            try await settling.close(); current = nil
+            let expanded = try await V2RoomHostRecoveryJournal.reconfigure(at: path, supervisorID: supervisor,
+                hostIDs: [hostID, added], pool: pool); current = expanded
+            #expect(try await expanded.existingOperation(for: successor) == next)
+            try await expanded.close(); current = nil
+            let reduced = try await V2RoomHostRecoveryJournal.reconfigure(at: path, supervisorID: supervisor,
+                hostIDs: [hostID], pool: pool); current = reduced
+            try await reduced.close(); current = nil
             var bytes = try Data(contentsOf: path); bytes[bytes.count - 1] ^= 1
             try bytes.write(to: path)
             await #expect(throws: (any Error).self) {

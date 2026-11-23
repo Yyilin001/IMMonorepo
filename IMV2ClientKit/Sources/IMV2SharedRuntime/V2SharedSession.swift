@@ -21,6 +21,10 @@ public actor V2SharedSession {
     private let registrations: V2DeviceRegistrationStore?
     private var accounts: [ObjectIdentifier: (store: ObjectIdentifier, runtime: V2AccountRuntime)] = [:]
     private var searchServices: [ObjectIdentifier: V2SearchService] = [:]
+    private var profileServices: [ObjectIdentifier: V2ProfileService] = [:]
+    private var resourceServices: [ObjectIdentifier: V2ResourceService] = [:]
+    private var contactServices: [ObjectIdentifier: V2ContactService] = [:]
+    private var groupServices: [ObjectIdentifier: V2GroupService] = [:]
     private var receiptServices: [ObjectIdentifier: V2ReadReceiptService] = [:]
     private var messageServices: [ObjectIdentifier: V2MessageService] = [:]
     private var conversationServices: [ObjectIdentifier: V2ConversationService] = [:]
@@ -128,6 +132,14 @@ public actor V2SharedSession {
     public func closeAccount(_ account: V2AccountRuntime) async {
         if foreground?.account === account { await suspendRealtime() }
         if let key = accounts[ObjectIdentifier(account)]?.store {
+            await profileServices[key]?.close()
+            profileServices.removeValue(forKey: key)
+            await resourceServices[key]?.close()
+            resourceServices.removeValue(forKey: key)
+            await contactServices[key]?.close()
+            contactServices.removeValue(forKey: key)
+            await groupServices[key]?.close()
+            groupServices.removeValue(forKey: key)
             await receiptServices[key]?.close()
             receiptServices.removeValue(forKey: key)
             await messageServices[key]?.close()
@@ -190,15 +202,81 @@ public actor V2SharedSession {
         return service
     }
 
+    public func profiles(for store: GRDBV2LocalSyncStore, accountID: UserID,
+        presentations: V2ProfilePresentationRepository, names: V2NameOperationService) throws -> V2ProfileService {
+        let key = ObjectIdentifier(store)
+        guard !exitRequested, stores[key] != nil else { throw V2SharedSessionError.busy }
+        if let existing = profileServices[key] {
+            guard existing.accountID == accountID else { throw V2SharedSessionError.busy }
+            return existing
+        }
+        let service = V2ProfileService(accountID: accountID, store: store, presentations: presentations, names: names)
+        profileServices[key] = service; return service
+    }
+
+    public func resources(for store: GRDBV2LocalSyncStore, accountID: UserID, library: V2ResourceCenter,
+        uploads: V2ResourceTransferEngine, downloads: V2ResourceDownloadCache, groupAvatars: V2GroupAvatarService) throws -> V2ResourceService {
+        let key = ObjectIdentifier(store)
+        guard !exitRequested, stores[key] != nil else { throw V2SharedSessionError.busy }
+        if let existing = resourceServices[key] {
+            guard existing.accountID == accountID else { throw V2SharedSessionError.busy }
+            return existing
+        }
+        let service = V2ResourceService(accountID: accountID, store: store, library: library,
+            uploads: uploads, downloads: downloads, groupAvatars: groupAvatars)
+        resourceServices[key] = service; return service
+    }
+
+    public func contacts(for store: GRDBV2LocalSyncStore, accountID: UserID,
+        social: V2SocialOperationService, direct: V2DirectRoomOperationService,
+        directory: any V2PublicIdentityResolving & V2PublicIdentityPresentationResolving) throws -> V2ContactService {
+        let key = ObjectIdentifier(store)
+        guard !exitRequested, stores[key] != nil else { throw V2SharedSessionError.busy }
+        if let existing = contactServices[key] {
+            guard existing.accountID == accountID else { throw V2SharedSessionError.busy }
+            return existing
+        }
+        let service = V2ContactService(accountID: accountID, store: store, social: social, direct: direct, directory: directory)
+        contactServices[key] = service
+        return service
+    }
+
+    public func groups(for store: GRDBV2LocalSyncStore, accountID: UserID,
+        transport: any V2ClientMembershipDirectoryTransport, invitationReader: any V2ClientGroupInvitationManaging,
+        creation: V2GroupCreationOperationService, membership: V2MembershipOperationService,
+        capabilities: V2GroupCapabilityOperationService, invitations: V2InvitationOperationService,
+        administration: V2MemberAdministrationOperationService,
+        closeQueries: @escaping @Sendable () async -> Void = {}) throws -> V2GroupService {
+        let key = ObjectIdentifier(store)
+        guard !exitRequested, stores[key] != nil else { throw V2SharedSessionError.busy }
+        if let existing = groupServices[key] {
+            guard existing.accountID == accountID else { throw V2SharedSessionError.busy }
+            return existing
+        }
+        let service = V2GroupService(accountID: accountID, store: store, transport: transport,
+            invitationReader: invitationReader, creation: creation, membership: membership,
+            capabilities: capabilities, invitations: invitations, administration: administration, closeQueries: closeQueries)
+        groupServices[key] = service
+        return service
+    }
+
     public func closeLocalStore(_ store: GRDBV2LocalSyncStore) async throws {
         guard !accounts.values.contains(where: { $0.store == ObjectIdentifier(store) }) else {
             throw V2SharedSessionError.accountResourcesStillOpen
         }
+        await profileServices[ObjectIdentifier(store)]?.close()
+        await resourceServices[ObjectIdentifier(store)]?.close()
+        await contactServices[ObjectIdentifier(store)]?.close()
+        await groupServices[ObjectIdentifier(store)]?.close()
         await receiptServices[ObjectIdentifier(store)]?.close()
         await searchServices[ObjectIdentifier(store)]?.close()
         await messageServices[ObjectIdentifier(store)]?.close()
         await conversationServices[ObjectIdentifier(store)]?.close()
         try await bootstrap.closeLocalStore(store)
+        profileServices.removeValue(forKey: ObjectIdentifier(store))
+        resourceServices.removeValue(forKey: ObjectIdentifier(store))
+        contactServices.removeValue(forKey: ObjectIdentifier(store))
+        groupServices.removeValue(forKey: ObjectIdentifier(store))
         receiptServices.removeValue(forKey: ObjectIdentifier(store))
         searchServices.removeValue(forKey: ObjectIdentifier(store))
         messageServices.removeValue(forKey: ObjectIdentifier(store))

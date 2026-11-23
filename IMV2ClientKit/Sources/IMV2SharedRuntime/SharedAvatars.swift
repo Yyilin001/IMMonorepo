@@ -2,20 +2,16 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import Crypto
 import IMV2Core
 import IMV2ClientRuntime
 
 private struct SharedProfileUpload: V2ProfileAvatarPreparing {
-    let resources: V2ResourceCenter; let engine: V2ResourceTransferEngine
+    let business: V2ResourceService
     func ensureReady(_ source: V2ProfileAvatarUpload) async throws -> V2AvatarReference {
-        guard let asset = try await resources.localAsset(source.localAssetID), asset.purpose == .personalAvatar else { throw SharedFailure.invalidInput }
-        let request = try V2ResourceUploadRequest(operationID: .init(uuid: source.id), mediaID: .init(uuid: source.id), usage: .userAvatar,
-            contentType: asset.contentType.value, byteCount: asset.byteCount, checksum: asset.checksum, clientModes: [.httpPut], displayName: asset.displayName, clientImageDimensions: asset.imageDimensions)
-        _ = try await engine.prepare(id: source.id, request: request, localAssetID: asset.id)
-        let job = try await engine.resume(id: source.id)
+        let id = try await business.prepareUpload(id: source.id, localAssetID: source.localAssetID, usage: .userAvatar)
+        let job = try await business.uploads.resume(id: id)
         guard job.stage == .ready else { throw V2ClientMediaTransferError.scanPending }
-        return .init(mediaID: request.mediaID)
+        return .init(mediaID: job.request.mediaID)
     }
 }
 struct SharedAvatarEditor: Encodable, Sendable {
@@ -30,7 +26,10 @@ actor SharedAvatars {
     let resources: V2ResourceCenter
     let transfers: V2ResourceTransferEngine
     private let capabilities: V2ResourceCapabilitiesCache
-    private let profile: V2ProfileIntentService
+    private let profile: V2OwnProfileService
+    let business: V2ResourceService
+    let profiles: V2ProfileService
+    let resolver: SharedMediaResolver
     private let group: V2GroupAvatarIntentEngine
     private let groups: V2GroupAvatarPresentationRepository
     private let people: V2ProfilePresentationRepository
@@ -42,33 +41,35 @@ actor SharedAvatars {
     private var profilePage: V2ProfilePageActivation?
     private var view: (room: RoomID?, revision: UInt64, canManage: Bool, hasAvatar: Bool, deadline: ContinuousClock.Instant, name: String?, handle: String?)?
     private var image: (V2AvatarReadGrant, Data)?
-    private let imageHTTP: any V2AuthHTTPTransport
     private var failure: SharedFailure?
-    init(account: UserID, device: DeviceID, store: GRDBV2LocalSyncStore, resources: V2ResourceCenter, base: URL, http: V2SessionHTTPAuthorization, imageHTTP: any V2AuthHTTPTransport, uploader: any V2ResourcePlanExecuting) throws {
-        self.imageHTTP = imageHTTP
+    init(session: V2SharedSession, profiles: V2ProfileService, account: UserID, device: DeviceID, store: GRDBV2LocalSyncStore, resources: V2ResourceCenter, base: URL, http: V2SessionHTTPAuthorization, uploader: any V2ResourcePlanExecuting, rangeTransport: any V2RangeDownloadTransport) async throws {
+        self.profiles = profiles
         self.account = account; self.store = store; self.resources = resources
         let control = try V2HTTPResourceUploadClient(endpoint: base.appendingPathComponent("v2/resource-uploads"), credentials: http, transport: http)
         capabilities = .init(reader: control)
         let engine = V2ResourceTransferEngine(store: store, control: control, executor: uploader, resources: resources, capabilities: capabilities)
         transfers = engine
-        profile = .init(store: store, accountID: account,
-            manager: try V2HTTPOwnProfileClient(endpoint: base.appendingPathComponent("v2/profile/me"), credentials: http, transport: http),
-            avatars: SharedProfileUpload(resources: resources, engine: engine))
         let commands = try V2HTTPGroupAvatarCommandClient(roomsEndpoint: base.appendingPathComponent("v2/rooms"), actorUserID: account, credentials: http, transport: http)
         group = .init(actorUserID: account, store: store, transfers: engine, submissions: commands, recovery: commands)
-        groups = .init(actorUserID: account, deviceID: device,
-            reader: try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: base.appendingPathComponent("v2/rooms"), actorUserID: account, credentials: http, transport: http),
-            minimumRevision: { try await store.groupAvatarRevision(roomID: $0) })
-        people = .init(actorUserID: account, deviceID: device,
-            reader: try V2HTTPProfilePresentationClient(endpoint: base.appendingPathComponent("v2/profile-presentations/batch"), credentials: http, transport: http))
+        let manager = V2GroupAvatarService(actorUserID: account, deviceID: device, store: store, intents: group,
+            reader: try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: base.appendingPathComponent("v2/rooms"), actorUserID: account, credentials: http, transport: http), capabilities: control, resources: resources)
+        groups = manager.presentations; people = profiles.presentations
+        resolver = try SharedMediaResolver(base: base, http: http)
+        let cache = try await resources.downloadCache(using: .init(targetResolver: resolver,
+            byteTransfer: V2URLSessionMediaByteTransfer(transport: rangeTransport)))
+        business = try await session.resources(for: store, accountID: account, library: resources, uploads: engine, downloads: cache, groupAvatars: manager)
+        profile = try await profiles.ownProfile(using: .init(store: store, accountID: account,
+            manager: try V2HTTPOwnProfileClient(endpoint: base.appendingPathComponent("v2/profile/me"), credentials: http, transport: http),
+            avatars: SharedProfileUpload(business: business)))
     }
+
     func start() async throws {
         try await resources.attachUploads(transfers)
         tasks = [Task { do { try await transfers.runRecovery() } catch is CancellationError {} catch { failure = sharedFailure(error) } },
             Task { do { try await profile.runPreparation() } catch is CancellationError {} catch { failure = sharedFailure(error) } },
             Task { while !Task.isCancelled { do { try await group.recoverOnce(); try await Task.sleep(for: .seconds(1)) } catch is CancellationError { return } catch { failure = sharedFailure(error); try? await Task.sleep(for: .seconds(2)) } } }]
     }
-    func handlers() -> [V2OperationWorkDispatcher.Handler] { [.init(kind: .profileUpdate) { [profile] in try await profile.execute($0) }] }
+    func handlers() -> [V2OperationWorkDispatcher.Handler] { profile.handlers() }
     func clear() async {
         view = nil; image = nil
         if let page = groupPage { await groups.deactivate(page) }; groupPage = nil
@@ -77,9 +78,8 @@ actor SharedAvatars {
     }
     func close() async {
         tasks.forEach { $0.cancel() }; await clear()
-        await group.close(); await transfers.close()
+        await profiles.close(); await business.close()
         for task in tasks { await task.value }; tasks = []
-        await groups.close(); await people.close(); await resources.close()
     }
     private func observe(_ intent: V2ProfileIntent) async {
         observation?.cancel(); await observation?.value
@@ -88,15 +88,7 @@ actor SharedAvatars {
         } } catch is CancellationError {} catch { failure = sharedFailure(error) } }
     }
     private func bytes(_ grant: V2AvatarReadGrant) async throws {
-        guard let plan = grant.avatar.plan, plan.mode == .httpGet, (1...2_097_152).contains(plan.expectedByteCount) else { return }
-        try await grant.requireValid()
-        var request = URLRequest(url: plan.url); request.httpMethod = "GET"
-        for h in plan.headers { request.setValue(h.value, forHTTPHeaderField: h.name) }
-        let (data, response) = try await imageHTTP.data(for: request)
-        try await grant.requireValid()
-        guard plan.expiresAt > Date(), response.statusCode == 200, data.count == grant.avatar.byteCount,
-              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == grant.avatar.checksum.value else { throw SharedFailure.operationFailed }
-        image = (grant, data)
+        image = (grant, try await business.avatarBytes(grant))
     }
     func open(room: RoomID?) async throws {
         await clear()
@@ -141,14 +133,8 @@ actor SharedAvatars {
         }
         do {
             if let room {
-                let job = UUID()
-                let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: room, expectedRevision: revision, mutation: asset == nil ? .remove : .set(.init(uuid: job)))
-                if let asset {
-                    let upload = try V2ResourceUploadRequest(operationID: .init(uuid: job), mediaID: .init(uuid: job), usage: .groupAvatar(room), contentType: asset.contentType.value, byteCount: asset.byteCount, checksum: asset.checksum, clientModes: [.httpPut], displayName: asset.displayName, clientImageDimensions: asset.imageDimensions)
-                    try await capabilities.validateNewUpload(upload)
-                    _ = try await store.freezeGroupAvatarUploadIntent(actorUserID: account, command: command, uploadJobID: job, request: upload, localAssetID: asset.id)
-                } else { _ = try await store.freezeGroupAvatarIntent(actorUserID: account, command: command, uploadJobID: nil) }
-                groupID = command.operationID; try? await group.start(command.operationID)
+                groupID = try await business.groupAvatars.change(roomID: room, expectedRevision: revision,
+                    image: asset.map { .init(id: $0.id.value, localAssetID: $0.id, contentType: $0.contentType.value, byteCount: $0.byteCount) })
             } else {
                 guard let expected = V2ProfileRevision(rawValue: revision) else { throw SharedFailure.invalidInput }
                 let id = UUID()
@@ -170,14 +156,17 @@ actor SharedAvatars {
         if let room = request.roomID {
             let id = try GroupAvatarOperationID(request.intentID ?? "")
             guard let intent = try await store.groupAvatarIntent(id), intent.actorUserID == account, intent.command.roomID.rawValue == room else { throw SharedFailure.invalidInput }
+            let action: V2GroupAvatarManagementAction
             switch request.action {
-            case "retry": _ = try await group.retry(id)
-            case "query": _ = try await group.resolve(id, action: .query)
-            case "cancel": try await group.cancel(id)
-            case "close": _ = try await group.resolve(id, action: .closeIfAbsent)
-            case "discard": try await group.abandonClosed(id)
+            case "retry": action = .retry
+            case "query": action = .query
+            case "cancel": action = .cancel
+            case "close": action = .closeIfAbsent
+            case "discard": action = .abandon
             default: throw SharedFailure.invalidInput
             }
+            try await business.groupAvatars.act(roomID: RoomID(room), operationID: id, action: action)
+
         } else {
             guard let id = UUID(uuidString: request.intentID ?? ""), let intent = try await store.profileIntent(id: id), intent.accountID == account else { throw SharedFailure.invalidInput }
             if request.action == "discard" { try await profile.discard(intentID: id) }

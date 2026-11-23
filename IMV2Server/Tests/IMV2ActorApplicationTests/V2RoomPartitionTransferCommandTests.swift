@@ -29,11 +29,11 @@ struct V2RoomPartitionTransferCommandTests {
         let configs = try ["control-a", "control-b", "control-c"].map { try configuration($0, storage: true) }
         let services = try configs.map(V2PlacementControlService.init)
         let controller = try configuration("placement-controller")
-        let membershipController = try configuration("membership-controller")
+        let account = try configuration("account")
         #expect(controller.allowedShards.isEmpty)
         #expect(controller.transferShardIDs == ["rooms-primary"])
         #expect(try configuration("account").transferShardIDs.isEmpty)
-        #expect(membershipController.transferShardIDs.isEmpty)
+        #expect(account.transferShardIDs.isEmpty)
         var runtimes: [V2PlacementControlRuntime] = []
         var nodes: [(V2RoomClusterNode, V2RoomActorPlacementRuntime)] = []
         var hosts: [V2RoomActivationHost<V2RoomRequest, V2RoomResponse>] = []
@@ -46,15 +46,6 @@ struct V2RoomPartitionTransferCommandTests {
                 for service in services { group.addTask { try await service.start() } }
                 try await group.waitForAll()
             }
-            let inspection = try await V2PlacementControlService.inspect(configuration: controller)
-            let membership = try V2ActorServiceMembershipRecord(revision: 1,
-                current: controller.realtimePeers.map(\.nodeID), peers: controller.realtimePeers,
-                roomPeers: controller.discovery.peers)
-            let proposal: [String: Any] = ["deploymentID": controller.placementControl.clusterID.uuidString,
-                "shardID": "rooms-primary", "requestID": UUID().uuidString, "originRevision": inspection[0].revision,
-                "membership": try JSONSerialization.jsonObject(with: JSONEncoder().encode(membership))]
-            _ = try await V2PlacementControlService.installServiceMembership(configuration: membershipController,
-                request: JSONSerialization.data(withJSONObject: proposal))
             for name in ["gateway", "new-gateway"] {
                 let config = try configuration(name), identity = try #require(config.hostIdentity)
                 let runtime = V2PlacementControlRuntime(configuration: config); runtimes.append(runtime)
@@ -88,15 +79,16 @@ struct V2RoomPartitionTransferCommandTests {
                 throw V2RoomCallFailure.notAccepted(.notReady)
             }
             #expect(await hosts[0].snapshot().activeRooms == 1)
-            let shape = try V2RoomActorPlacementRuntime.initialSnapshot(deploymentID: controller.placementControl.clusterID,
+            let control = try #require(controller.placementControl)
+            let shape = try V2RoomActorPlacementRuntime.initialSnapshot(deploymentID: control.clusterID,
                 shard: "rooms-primary", peers: controller.discovery.peers)
             let partition = shape.partition(for: room)
             let before = try await V2PlacementControlService.inspect(configuration: controller)[0]
-            let command = V2RoomPartitionTransferCommand(deploymentID: controller.placementControl.clusterID,
+            let command = V2RoomPartitionTransferCommand(deploymentID: control.clusterID,
                 shardID: "rooms-primary", partition: partition, expectedHost: identities[0], expectedEpoch: grant.epoch,
                 successor: identities[1], transferID: UUID(), originRevision: before.revision)
             try command.validate(configuration: controller)
-            #expect(throws: V2RoomActorApplicationError.invalidRole) { try command.validate(configuration: membershipController) }
+            #expect(throws: V2RoomActorApplicationError.invalidRole) { try command.validate(configuration: account) }
             #expect(throws: V2RoomActorApplicationError.invalidRole) { try command.validate(configuration: configuration("account")) }
             let fields = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(command)) as? [String: Any])
             let invalid: [(String, Any)] = [("deploymentID", UUID().uuidString), ("shardID", "other"),

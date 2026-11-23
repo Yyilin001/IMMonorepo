@@ -101,18 +101,28 @@ public struct V2PostgresUserShardRouter: V2UserShardRouter {
     /// - Throws: 日期无效、SQL 能力缺失或数据库错误。
     ///
     /// 使用冲突忽略插入，不通过进程环境变化覆盖已持久化的受控路由决策。
-    public func bootstrap(defaultRoute: V2UserShardRoute, now: Date = Date()) async throws {
+    public func bootstrap(defaultRoute: V2UserShardRoute, fixedBuckets: [String] = [], now: Date = Date()) async throws {
         guard v2PostgresTimestampCanEncode(now) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let buckets = fixedBuckets.sorted()
+        guard buckets.isEmpty || (buckets.count <= 256 && Set(buckets).count == buckets.count &&
+              buckets.contains(defaultRoute.bucket)) else { throw V2UserShardRouterError.invalidRoute }
+        let encoded = String(decoding: try JSONEncoder().encode(buckets), as: UTF8.self)
         try await sql.raw("""
             INSERT INTO im_v2.user_shard_router_configuration
-                (configuration_key, router_epoch, default_write_bucket, updated_at)
+                (configuration_key, router_epoch, default_write_bucket, fixed_buckets, updated_at)
             VALUES (TRUE, \(bind: defaultRoute.observedRouterEpoch), \(bind: defaultRoute.bucket),
-                    \(bind: now))
+                    ARRAY(SELECT jsonb_array_elements_text(\(bind: encoded)::jsonb)), \(bind: now))
             ON CONFLICT (configuration_key) DO NOTHING
             """).run()
+        guard let match = try await sql.raw("""
+            SELECT fixed_buckets = ARRAY(SELECT jsonb_array_elements_text(\(bind: encoded)::jsonb)) AS matches
+            FROM im_v2.user_shard_router_configuration WHERE configuration_key
+            """).first(), try match.decode(column: "matches", as: Bool.self) else {
+            throw V2UserShardRouterError.invalidRoute
+        }
     }
 
     /// 查询整批用户的当前路由，保留输入顺序和重复项。
@@ -134,7 +144,9 @@ public struct V2PostgresUserShardRouter: V2UserShardRouter {
         let requestedJSON = try String(data: JSONEncoder().encode(users.map(\.rawValue)), encoding: .utf8)
         guard let requestedJSON else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let rows = try await sql.raw("""
-            SELECT requested.ordinal, COALESCE(override.write_bucket, config.default_write_bucket) AS write_bucket,
+            SELECT requested.ordinal, COALESCE(override.write_bucket,
+                   config.fixed_buckets[1 + get_byte(uuid_send(requested.user_id::uuid), 15)
+                     % NULLIF(cardinality(config.fixed_buckets), 0)], config.default_write_bucket) AS write_bucket,
                    COALESCE(override.router_epoch, config.router_epoch) AS router_epoch
             FROM jsonb_array_elements_text(\(bind: requestedJSON)::jsonb) WITH ORDINALITY AS requested(user_id, ordinal)
             CROSS JOIN im_v2.user_shard_router_configuration AS config
@@ -183,23 +195,30 @@ extension V2PostgresUserShardRouter: V2UserShardRouteBatchFencing {
         for userIDs: [UserID],
         _ operation: @escaping @Sendable ([V2UserShardRoute], any Database) async throws -> Result
     ) async throws -> Result {
-        guard !userIDs.isEmpty else {
-            return try await database.transaction { transaction in
-                try await operation([], transaction)
-            }
-        }
+        try await withCurrentRoutes(for: userIDs, deadline: nil, operation)
+    }
+
+    func withCurrentRoutes<Result: Sendable>(
+        for userIDs: [UserID], deadline: ContinuousClock.Instant?,
+        _ operation: @escaping @Sendable ([V2UserShardRoute], any Database) async throws -> Result
+    ) async throws -> Result {
         let uniqueUserIDs = Array(Set(userIDs.map(\.rawValue))).sorted()
         guard uniqueUserIDs.count <= 1_024,
               uniqueUserIDs.allSatisfy({ UUID(uuidString: $0) != nil })
         else { throw V2UserShardRouterError.invalidRoute }
 
-        return try await database.transaction { transaction in
+        let readAndApply: @Sendable (any Database) async throws -> Result = { transaction in
+            if userIDs.isEmpty { return try await operation([], transaction) }
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             let routes = try await routes(for: userIDs, sql: sql)
             return try await operation(routes, transaction)
         }
+        if let deadline {
+            return try await v2WithRoomActivationTransaction(database: database, deadline: deadline, readAndApply)
+        }
+        return try await database.transaction(readAndApply)
     }
 }
 

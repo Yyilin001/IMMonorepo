@@ -1,0 +1,8 @@
+{
+  "sharedRuntimeTests": 24,
+  "domainTests": 38,
+  "total": 62,
+  "failed": 0,
+  "sourceLogSHA256": "4b9ba9356dbc187971591a0b165f6ed505e27469b88983eddfffc2646b30c591",
+  "command": "xcrun swift test --package-path IMV2ClientKit --filter 'FacadeTests|SharedSessionOwnershipTests|V2SocialOperation|V2Membership|V2GroupCapability|V2Invitation|V2MemberAdministration|V2GroupCreation|V2DirectRoom'"
+}

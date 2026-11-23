@@ -62,6 +62,21 @@ struct V2RoomActivationHostTests {
         }
     }
 
+    @Test("single Core metrics observe revoked qualification before the Host receives its notification")
+    func metricsFollowSharedQualification() async throws {
+        let qualification = V2ActorServiceQualification.standalone()
+        let fixture = try Fixture(sharedAdmission: true, qualification: qualification)
+        await fixture.host.start()
+        _ = try await fixture.activate().value
+        #expect(await fixture.host.snapshot().activeRooms == 1)
+        qualification.revoke()
+        #expect(await fixture.host.snapshot().activeRooms == 0)
+        _ = qualification.update(witnesses: [:], membershipRevision: 1)
+        #expect(await fixture.host.snapshot().activeRooms == 0)
+        #expect((await fixture.host.stop(deadline: .now + .seconds(2))).completed)
+        #expect(await fixture.host.snapshot().retiringRooms == 0)
+    }
+
     @Test("idle deadline hints retain executing ownership and disappear after actual retirement")
     func idleIndexKeepsBusyRoom() async throws {
         let gate = Gate()
@@ -86,6 +101,61 @@ struct V2RoomActivationHostTests {
         } catch {
             await gate.open()
             _ = await executing.result
+            _ = await fixture.host.stop(deadline: .now + .seconds(2))
+            throw error
+        }
+    }
+
+    @Test("an idle probe leaves live subscriptions intact and reclaims a disconnected room")
+    func idleRetirementHonorsSubscriptions() async throws {
+        let live = Mutex(true)
+        let inspections = Mutex(0)
+        let fixture = try Fixture(idleMilliseconds: 100, hasLiveSubscriptions: {
+            inspections.withLock { $0 += 1 }
+            return live.withLock { $0 }
+        })
+        await fixture.host.start()
+        do {
+            _ = try await fixture.activate().value
+            try await waitUntil { inspections.withLock { $0 >= 2 } }
+            #expect(await fixture.host.snapshot().completedIdleRetirements == 0)
+            live.withLock { $0 = false }
+            try await waitUntil { await fixture.host.snapshot().completedIdleRetirements == 1 }
+            live.withLock { $0 = true }
+            _ = try await fixture.activate().value
+            #expect((await fixture.host.stop(deadline: .now + .seconds(2))).completed)
+        } catch {
+            _ = await fixture.host.stop(deadline: .now + .seconds(2))
+            throw error
+        }
+    }
+
+    @Test("an expired room cohort uses bounded retirement slots until physical close completes")
+    func idleRetirementWaitsForCapacity() async throws {
+        let gate = Gate()
+        let fixture = try Fixture(maximumActiveRooms: 12, waiters: 13, closeGate: gate,
+                                  idleMilliseconds: 1000)
+        await fixture.host.start()
+        do {
+            for _ in 0..<12 {
+                _ = try await fixture.activate(roomID: .init(uuid: UUID())).value
+            }
+            try await gate.waitForEntries(8, deadline: .now + .seconds(4))
+            #expect(await fixture.host.snapshot().retiringRooms == 8)
+            #expect(await fixture.host.scheduledIdleRoomCount == 4)
+            // A later pass must also leave the remaining cohort queued.
+            let pass = await fixture.host.idleMaintenancePassCount
+            try await waitUntil { await fixture.host.idleMaintenancePassCount > pass }
+            #expect(await fixture.host.snapshot().retiringRooms == 8)
+            await gate.open()
+            // The next batch must finish before the one-second maintenance cadence.
+            try await waitUntil(deadline: .now + .milliseconds(800)) {
+                await fixture.host.snapshot().completedIdleRetirements == 12
+            }
+            #expect(await fixture.host.scheduledIdleRoomCount == 0)
+            #expect((await fixture.host.stop(deadline: .now + .seconds(2))).completed)
+        } catch {
+            await gate.open()
             _ = await fixture.host.stop(deadline: .now + .seconds(2))
             throw error
         }
@@ -927,9 +997,10 @@ struct V2RoomActivationHostTests {
 
         init(maximumActiveRooms: Int = 2, waiters: Int = 3, shortLease: Bool = false,
              restoreGate: Gate? = nil, executeGate: Gate? = nil,
-             invalidationGate: Gate? = nil,
+             invalidationGate: Gate? = nil, closeGate: Gate? = nil,
              idleMilliseconds: Int64 = 2_000, failRestore: Bool = false,
-             unknownCompletion: Bool = false,
+             hasLiveSubscriptions: (@Sendable () async -> Bool)? = nil,
+             unknownCompletion: Bool = false, sharedAdmission: Bool = false,
              qualification: V2ActorServiceQualification = .standalone(),
              restoreObserver: (@Sendable (V2RoomActivationRestorationContext) async throws -> Void)? = nil) throws {
             owner = try .init(shardID: "test", epoch: 0)
@@ -949,9 +1020,9 @@ struct V2RoomActivationHostTests {
                 reservationTimeoutMilliseconds: shortLease ? 80 : 200
             )
             let identity = V2ActorHostIdentity(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
-            store = FakePlacement(host: identity)
+            store = FakePlacement(host: identity, qualification: sharedAdmission ? qualification : nil)
             probe = Probe(restoreGate: restoreGate, executeGate: executeGate,
-                          invalidationGate: invalidationGate,
+                          invalidationGate: invalidationGate, closeGate: closeGate,
                           failRestore: failRestore, unknownCompletion: unknownCompletion)
             budget = V2RoomCommandBudget(configuration: config)
             let probe = probe
@@ -965,6 +1036,7 @@ struct V2RoomActivationHostTests {
                     },
                           execute: { await probe.execute($0) },
                           invalidateReservation: { _ in await probe.invalidate() },
+                          hasLiveSubscriptions: hasLiveSubscriptions,
                           close: { await probe.close() })
                 }, qualification: qualification
             )
@@ -989,7 +1061,11 @@ struct V2RoomActivationHostTests {
         let host: V2ActorHostIdentity
         private let count = Mutex(0)
         var acquireCount: Int { count.withLock { $0 } }
-        init(host: V2ActorHostIdentity) { self.host = host }
+        let sharedAdmissionQualification: V2ActorServiceQualification?
+        init(host: V2ActorHostIdentity, qualification: V2ActorServiceQualification? = nil) {
+            self.host = host
+            sharedAdmissionQualification = qualification
+        }
         func grant(roomID: RoomID, owner: V2RoomDataOwner) throws -> V2RoomActorPlacementGrant {
             count.withLock { $0 += 1 }
             return try .init(host: host, epoch: 1)
@@ -1006,17 +1082,19 @@ struct V2RoomActivationHostTests {
         private let restoreGate: Gate?
         private let executeGate: Gate?
         private let invalidationGate: Gate?
+        private let closeGate: Gate?
         private let failRestore: Bool
         private let unknownCompletion: Bool
         var closeCount = 0
         var invalidations = 0
         var restoreCount = 0
 
-        init(restoreGate: Gate?, executeGate: Gate?, invalidationGate: Gate?,
+        init(restoreGate: Gate?, executeGate: Gate?, invalidationGate: Gate?, closeGate: Gate?,
              failRestore: Bool, unknownCompletion: Bool) {
             self.restoreGate = restoreGate
             self.executeGate = executeGate
             self.invalidationGate = invalidationGate
+            self.closeGate = closeGate
             self.failRestore = failRestore
             self.unknownCompletion = unknownCompletion
         }
@@ -1038,7 +1116,10 @@ struct V2RoomActivationHostTests {
             invalidations += 1
             if let invalidationGate { await invalidationGate.wait() }
         }
-        func close() { closeCount += 1 }
+        func close() async {
+            if let closeGate { await closeGate.wait() }
+            closeCount += 1
+        }
     }
 
     private actor Gate {
@@ -1059,8 +1140,7 @@ struct V2RoomActivationHostTests {
             for waiter in pending { waiter.resume() }
         }
 
-        func waitForEntries(_ count: Int) async throws {
-            let deadline = ContinuousClock.now + .seconds(2)
+        func waitForEntries(_ count: Int, deadline: ContinuousClock.Instant = .now + .seconds(2)) async throws {
             while entries < count {
                 guard ContinuousClock.now < deadline else { throw TestFailure.timeout }
                 try await Task.sleep(for: .milliseconds(2))

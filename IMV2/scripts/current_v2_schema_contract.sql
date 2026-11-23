@@ -5,7 +5,14 @@ WITH schema_visibility AS MATERIALIZED (
  SELECT pg_catalog.set_config('search_path', '', true) AS active_path
 )
 SELECT (
-EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='user_projection_ready'
+EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2'
+        AND table_name='user_shard_router_configuration' AND column_name='fixed_buckets'
+        AND udt_name='_text' AND is_nullable='NO')
+AND to_regclass('im_v2.deployment_shard_sources') IS NOT NULL
+AND to_regclass('im_v2.mention_push_wake_intents') IS NULL
+AND NOT EXISTS (SELECT FROM pg_constraint WHERE conrelid=to_regclass('im_v2.push_wake_outbox')
+                AND confrelid=to_regclass('im_v2.room_events') AND contype='f')
+AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='user_projection_ready'
        AND column_name='revision' AND data_type='bigint' AND is_nullable='NO')
 AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
        WHERE t.tgrelid=to_regclass('im_v2.user_sync_log') AND t.tgname='user_sync_log_snapshot_v8_projection'
@@ -773,7 +780,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-82''::text'
+       AND column_default = '''im-v2-current-84''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -783,7 +790,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-82%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-84%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns

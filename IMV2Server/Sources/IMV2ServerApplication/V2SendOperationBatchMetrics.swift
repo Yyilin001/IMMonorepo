@@ -141,9 +141,12 @@ public final class V2SendOperationBatchMetrics: V2SendOperationBatchMetricsReadi
     }
 
     /// Only a confirmed COMMIT records its new acceptances and permanent replays.
-    public func recordOwnerCohortCommitted(acceptedCommandCount: Int, replayedCommandCount: Int) {
+    public func recordOwnerCohortCommitted(acceptedCommandCount: Int, replayedCommandCount: Int, roomCount: Int = 1) {
         precondition(acceptedCommandCount >= 0 && replayedCommandCount >= 0)
         state.withLock {
+            if roomCount > 1 {
+                $0.crossRoomCommitsByRoomCount[roomCount] = Self.add($0.crossRoomCommitsByRoomCount[roomCount] ?? 0, 1)
+            }
             $0.ownerCohortCommits = Self.add($0.ownerCohortCommits, 1)
             $0.ownerCohortAcceptedCommands = Self.add($0.ownerCohortAcceptedCommands, UInt64(acceptedCommandCount))
             $0.ownerCohortReplayedCommands = Self.add($0.ownerCohortReplayedCommands, UInt64(replayedCommandCount))
@@ -232,6 +235,9 @@ public struct V2AggregatedSendOperationBatchMetrics: V2SendOperationBatchMetrics
             result.ownerCohortAttempts = V2SendOperationBatchMetrics.add(result.ownerCohortAttempts, item.ownerCohortAttempts)
             result.ownerCohortHandles = V2SendOperationBatchMetrics.add(result.ownerCohortHandles, item.ownerCohortHandles)
             result.ownerCohortCommands = V2SendOperationBatchMetrics.add(result.ownerCohortCommands, item.ownerCohortCommands)
+            for (rooms, count) in item.crossRoomCommitsByRoomCount {
+                result.crossRoomCommitsByRoomCount[rooms] = V2SendOperationBatchMetrics.add(result.crossRoomCommitsByRoomCount[rooms] ?? 0, count)
+            }
             result.ownerCohortCommits = V2SendOperationBatchMetrics.add(result.ownerCohortCommits, item.ownerCohortCommits)
             result.ownerCohortAcceptedCommands = V2SendOperationBatchMetrics.add(result.ownerCohortAcceptedCommands, item.ownerCohortAcceptedCommands)
             result.ownerCohortReplayedCommands = V2SendOperationBatchMetrics.add(result.ownerCohortReplayedCommands, item.ownerCohortReplayedCommands)

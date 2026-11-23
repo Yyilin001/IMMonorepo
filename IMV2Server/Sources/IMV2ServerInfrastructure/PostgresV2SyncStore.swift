@@ -9,6 +9,10 @@ import SQLKit
 ///
 /// 拉取与确认绝不信任客户端提供的序号超出设备游标的代次范围或持久化日志水位。
 public struct PostgresV2SyncStore: V2SyncStore {
+    package static let preparedSQLPrefixes = [
+        "/* imv2_sync_pull_page */", "/* imv2_sync_issue_capabilities */", "/* imv2_sync_ack */"
+    ]
+
     private let database: any Database
     private let schema: String
     private let makeUUID: @Sendable () -> UUID
@@ -179,6 +183,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
             let nextToken = try V2SyncToken(makeUUID().uuidString)
             let receipt = try V2SyncReceipt(makeUUID().uuidString)
             try await sql.raw("""
+                /* imv2_sync_issue_capabilities */
                 WITH issued_token AS (
                     INSERT INTO \(unsafeRaw: table("sync_tokens"))
                         (token, user_id, device_id, reset_generation, watermark, expires_at, created_at)
@@ -223,6 +228,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
             // so revocation is checked against a fresh authority snapshot.
             try await lockDevice(sql: sql, userID: userUUID, deviceID: deviceUUID)
             guard let row = try await sql.raw("""
+                /* imv2_sync_ack */
                 WITH active AS MATERIALIZED (
                     SELECT NOT EXISTS (
                         SELECT 1 FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
@@ -497,6 +503,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
         // the modifying CTE, never read back from its older statement snapshot.
         // The device advisory lock serializes every supported cursor creator.
         let rows = try await sql.raw("""
+            /* imv2_sync_pull_page */
             WITH active AS MATERIALIZED (
                 SELECT NOT EXISTS (
                     SELECT 1 FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))

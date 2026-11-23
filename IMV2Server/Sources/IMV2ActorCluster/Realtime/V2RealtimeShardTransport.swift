@@ -25,16 +25,25 @@ struct ShardDiscoveryRequest: Codable, Sendable {
     let membershipRevision: UInt64
 }
 
-func v2RealtimeMembershipDigest(roster: [String: String], membership: V2ActorServiceQualification.Membership) throws -> Data {
+func v2RealtimeMembershipDigest(roster: [String: String], membership: V2ActorServiceQualification.Membership,
+                                fixedOwnerNodeID: String? = nil) throws -> Data {
     guard Set(roster.keys) == membership.nodes else { throw V2ActorAuthenticationError.invalidConfiguration }
     struct Binding: Encodable {
         let revision: UInt64
         let current: [String]
         let next: [String]?
         let services: [[String]]
+        let fixedOwnerNodeID: String?
+    }
+    if let fixedOwnerNodeID {
+        guard let owner = roster[fixedOwnerNodeID] else { throw V2ActorAuthenticationError.invalidConfiguration }
+        let binding = Binding(revision: membership.revision, current: [fixedOwnerNodeID], next: nil,
+            services: [[fixedOwnerNodeID, owner]], fixedOwnerNodeID: fixedOwnerNodeID)
+        return Data(SHA256.hash(data: try V2ActorProtobuf.encode(binding)))
     }
     let binding = Binding(revision: membership.revision, current: membership.current.sorted(),
-        next: membership.next?.sorted(), services: roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] })
+        next: membership.next?.sorted(), services: roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] },
+        fixedOwnerNodeID: fixedOwnerNodeID)
     return Data(SHA256.hash(data: try V2ActorProtobuf.encode(binding)))
 }
 
@@ -76,6 +85,10 @@ actor V2RealtimeShardPublisher {
         self.trust = trust; self.roster = roster; self.rosterDigest = rosterDigest; self.membershipRevision = membershipRevision
         self.identity = identity; self.signer = signer; self.endpointID = endpointID; self.endpointReference = endpointReference
     }
+    func addGateways(_ additions: [V2RealtimeShardDiscoveryPeer]) {
+        for peer in additions { roster[peer.nodeID] = peer.serviceID }
+    }
+
     func installMembership(roster: [String: String], digest: Data, revision: UInt64) throws {
         guard accepting, revision > membershipRevision else { throw V2ActorAuthenticationError.invalidConfiguration }
         self.roster = roster; rosterDigest = digest; membershipRevision = revision
@@ -230,10 +243,13 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         let timer: Task<Void, Never>
     }
     private var resolutionWaiters: [UUID: ResolutionWaiter] = [:]
+    private let fixedOwnerNodeID: String?
     init(system: IMActorSystem, identity: V2GatewayRealtimeIdentity, trust: V2ActorTrustStore, signer: V2ActorSigningIdentity, rosterDigest: Data, membershipRevision: UInt64, qualification: V2ActorServiceQualification,
          localPeer: V2RealtimeShardDiscoveryPeer, peers: [V2RealtimeShardDiscoveryPeer], sender: V2RealtimeShardSender,
          endpoint: V2RealtimeShardEndpoint, inbound: V2RealtimeShardInbound,
-         publisher: V2RealtimeShardPublisher, beacon: V2RealtimeShardDiscoveryBeacon, resolutionTimeout: Duration) {
+         publisher: V2RealtimeShardPublisher, beacon: V2RealtimeShardDiscoveryBeacon, resolutionTimeout: Duration,
+         fixedOwnerNodeID: String?) {
+        self.fixedOwnerNodeID = fixedOwnerNodeID
         self.serviceQualification = qualification; self.signer = signer; self.rosterDigest = rosterDigest; self.membershipRevision = membershipRevision
         self.system = system; self.identity = identity; self.trust = trust; self.peers = peers; self.resolutionTimeout = resolutionTimeout
         self.localPeer = localPeer
@@ -246,7 +262,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         await notify()
     }
     private func publishQualification() async {
-        guard !stopped, !changingMembership, !membershipReadSuspended else { return }
+        guard fixedOwnerNodeID == nil, !stopped, !changingMembership, !membershipReadSuspended else { return }
         serviceQualification.update(witnesses: reachable, membershipRevision: membershipRevision)
         await qualificationObserver?()
     }
@@ -267,7 +283,8 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     private func workerFinished() { worker = nil }
     public func installPartitions(_ values: [V2RealtimeShardLeaseAdvertisement]) async throws {
         guard !stopped, !changingMembership else { throw V2ActorAuthenticationError.overloaded }
-        guard values.isEmpty || (!membershipReadSuspended && serviceQualification.membership.nodes.contains(identity.nodeID)) else {
+        guard values.isEmpty || (!membershipReadSuspended &&
+              (fixedOwnerNodeID.map { $0 == identity.nodeID } ?? serviceQualification.membership.nodes.contains(identity.nodeID))) else {
             throw V2ActorAuthenticationError.forbidden
         }
         try await publisher.install(values, membershipRevision: membershipRevision)
@@ -275,13 +292,35 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     /// Called only with control-plane-authorized membership. Peer reachability
     /// cannot author a change. Cancellation of a caller does not abandon the
     /// transition's owned discovery work halfway through.
+    package func extendFixedGateways(peers proposed: [V2RealtimeShardDiscoveryPeer],
+                                     gateways: [V2ActorTrustedService]) async throws {
+        guard fixedOwnerNodeID != nil, !stopped, proposed.count <= 64,
+              Set(peers).isSubset(of: proposed), Set(proposed.map(\.nodeID)).count == proposed.count,
+              Set(proposed.map { "\($0.address.lowercased()):\($0.port)" }).count == proposed.count else {
+            throw V2ActorAuthenticationError.invalidConfiguration
+        }
+        let additions = proposed.filter { !peers.contains($0) }
+        guard Set(gateways.map { $0.serviceID.rawValue }) == Set(proposed.filter { $0.nodeID != fixedOwnerNodeID }.map(\.serviceID)),
+              additions.allSatisfy({ peer in
+                  guard let id = try? V2ActorServiceID(peer.serviceID) else { return false }
+                  return peer.nodeID == peer.serviceID && (try? trust.configuredService(id)) == nil
+              }) else { throw V2ActorAuthenticationError.forbidden }
+        try trust.admitConfiguredGateways(gateways)
+        guard !additions.isEmpty else { return }
+        peers = proposed
+        await publisher.addGateways(additions)
+        for peer in additions { system.connect(host: peer.address, port: peer.port) }
+    }
+
     package func installMembership(_ membership: V2ActorServiceQualification.Membership,
                                    peers proposedPeers: [V2RealtimeShardDiscoveryPeer]) async throws {
+        guard fixedOwnerNodeID == nil else { throw V2ActorAuthenticationError.invalidConfiguration }
         let changed = membership.revision != membershipRevision
         try await installMembership(membership, peers: proposedPeers, committed: false)
         if changed { ensurePollStarted(foreground: false) }
     }
     package func installCommittedMembership(_ record: V2ActorServiceMembershipRecord) async throws {
+        guard fixedOwnerNodeID == nil else { throw V2ActorAuthenticationError.invalidConfiguration }
         let needsFreshEvidence = membershipReadSuspended || record.revision != membershipRevision
         try await installMembership(record.membership, peers: record.peers, committed: true)
         membershipReadSuspended = false
@@ -344,7 +383,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     }
     public func reachableNodeIDs() -> Set<String> {
         guard !stopped else { return [] }
-        let members = serviceQualification.membership.nodes
+        let members = fixedOwnerNodeID == nil ? serviceQualification.membership.nodes : Set(peers.map(\.nodeID))
         return Set(reachable.filter { $0.value > .now }.keys).union([identity.nodeID]).intersection(members)
     }
     public func resolve(partitionID: Int) async throws -> V2RealtimeShardDescriptor {
@@ -426,11 +465,11 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     }
     private func ensurePollStarted(foreground: Bool) {
         guard !stopped, !changingMembership, !membershipReadSuspended, poll == nil,
-              serviceQualification.membership.nodes.contains(identity.nodeID) else { return }
+              fixedOwnerNodeID != nil || serviceQualification.membership.nodes.contains(identity.nodeID) else { return }
         pollGeneration += 1
         let generation = pollGeneration
         let system = system, trust = trust, signer = signer, localIdentity = identity, rosterDigest = rosterDigest
-        let membershipRevision = membershipRevision
+        let membershipRevision = membershipRevision, fixedOwnerNodeID = fixedOwnerNodeID
         // Rotating the bounded pass prevents an unavailable prefix in a large
         // roster from excluding the same later peers on every budget expiry.
         let peers = Array(self.peers[peerCursor...] + self.peers[..<peerCursor])
@@ -466,6 +505,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                                       advertisement.endpointID.node == beacon.id.node,
                                       beacon.id.node.endpoint.host == peer.address, beacon.id.node.endpoint.port == peer.port,
                                       advertisement.partitions.count <= 256,
+                                      advertisement.partitions.isEmpty || fixedOwnerNodeID == nil || fixedOwnerNodeID == peer.nodeID,
                                       Set(advertisement.partitions.map { $0.token.partitionID }).count == advertisement.partitions.count else { throw V2ActorAuthenticationError.wrongRecipient }
                                 // Preserve the exact opaque bytes bound by the host. Re-encoding
                                 // the ActorID is unnecessary and would replace the signed byte identity.
@@ -556,7 +596,9 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
             // the watch await. The periodic reaper may run during that await; a
             // partially installed new reference must never appear expired.
             reachable[nodeID] = sameReference ? max(reachable[nodeID] ?? healthDeadline, healthDeadline) : healthDeadline
-            serviceQualification.update(witnesses: reachable, membershipRevision: membershipRevision)
+            if fixedOwnerNodeID == nil {
+                serviceQualification.update(witnesses: reachable, membershipRevision: membershipRevision)
+            }
             watchedReferences[nodeID] = id
             watchedIdentities[nodeID] = discoveredIdentity
             watchedDescriptors[nodeID] = descriptor
@@ -685,7 +727,7 @@ func buildRealtimeShardTransport(system: IMActorSystem, identity: V2GatewayRealt
     address: String, port: Int, signer: V2ActorSigningIdentity, trust: V2ActorTrustStore,
     serving: any V2RealtimeShardServing, serviceOwnerAccess: [V2ActorServiceID: Set<String>],
     discoveryPeers: [V2RealtimeShardDiscoveryPeer], limits: V2RealtimeTransportLimits,
-    serviceQualification: V2ActorServiceQualification? = nil) throws -> V2RealtimeShardTransportHandle {
+    serviceQualification: V2ActorServiceQualification? = nil, fixedOwnerNodeID: String? = nil) throws -> V2RealtimeShardTransportHandle {
     guard identity.serviceID == signer.serviceID.rawValue, !serviceOwnerAccess.isEmpty,
           discoveryPeers.count <= 64, Set(discoveryPeers.map(\.nodeID)).count == discoveryPeers.count,
           discoveryPeers.allSatisfy({ !$0.nodeID.isEmpty && !$0.serviceID.isEmpty && !$0.address.isEmpty && (1...65_535).contains($0.port) }) else { throw V2ActorAuthenticationError.invalidConfiguration }
@@ -700,10 +742,24 @@ func buildRealtimeShardTransport(system: IMActorSystem, identity: V2GatewayRealt
     let endpointReference = try V2ActorProtobuf.encode(endpoint.id)
     inbound.bindEndpointReference(endpointReference)
     let roster = Dictionary(uniqueKeysWithValues: discoveryPeers.map { ($0.nodeID, $0.serviceID) })
-    guard serviceQualification?.matches(localNodeID: identity.nodeID, roster: Set(roster.keys)) != false else { throw V2ActorAuthenticationError.invalidConfiguration }
-    let qualification = try serviceQualification ?? V2ActorServiceQualification(localNodeID: identity.nodeID, roster: Set(roster.keys))
-    let membership = qualification.membership
-    let digest = try v2RealtimeMembershipDigest(roster: roster, membership: membership)
+    let nodes = Set(roster.keys)
+    let qualificationRoster: Set<String>
+    if let fixedOwnerNodeID {
+        guard nodes.contains(fixedOwnerNodeID), nodes.contains(identity.nodeID) else {
+            throw V2ActorAuthenticationError.invalidConfiguration
+        }
+        qualificationRoster = [identity.nodeID]
+    } else {
+        qualificationRoster = nodes
+    }
+    guard serviceQualification?.matches(localNodeID: identity.nodeID, roster: qualificationRoster) != false else {
+        throw V2ActorAuthenticationError.invalidConfiguration
+    }
+    let qualification = try serviceQualification ?? V2ActorServiceQualification(localNodeID: identity.nodeID, roster: qualificationRoster)
+    // Fixed-owner discovery binds the Core. Each ingress still requires explicit local trust.
+    // A fixed Core grants publication independently of Gateway reachability.
+    let membership = try fixedOwnerNodeID == nil ? qualification.membership : .init(revision: 1, current: nodes)
+    let digest = try v2RealtimeMembershipDigest(roster: roster, membership: membership, fixedOwnerNodeID: fixedOwnerNodeID)
     let membershipRevision = membership.revision
     let publisher = V2RealtimeShardPublisher(identity: identity, signer: signer, endpointID: endpoint.id, endpointReference: endpointReference, trust: trust, roster: roster, rosterDigest: digest, membershipRevision: membershipRevision)
     let beacon = V2RealtimeShardDiscoveryBeacon(actorSystem: system, publisher: publisher)
@@ -711,5 +767,6 @@ func buildRealtimeShardTransport(system: IMActorSystem, identity: V2GatewayRealt
         localPeer: .init(nodeID: identity.nodeID, serviceID: identity.serviceID, address: address, port: port), peers: discoveryPeers,
         sender: try V2RealtimeShardSender(system: system, signer: signer, trust: trust, limits: limits, incarnation: identity.incarnationID,
             initialReference: .init(identity: identity, endpointReference: endpointReference, address: address, port: port)),
-        endpoint: endpoint, inbound: inbound, publisher: publisher, beacon: beacon, resolutionTimeout: limits.callTimeout)
+        endpoint: endpoint, inbound: inbound, publisher: publisher, beacon: beacon, resolutionTimeout: limits.callTimeout,
+        fixedOwnerNodeID: fixedOwnerNodeID)
 }

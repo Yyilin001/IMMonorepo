@@ -22,17 +22,17 @@ final class V2PinnedLocalMediaFile: @unchecked Sendable {
             throw V2LocalFilesystemMediaProviderError.objectUnavailable
         }
         let directory = open(file.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard directory >= 0 else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+        guard directory >= 0 else { throw Self.fileFailure(errno) }
         defer { _ = close(directory) }
         if let purgeMarkerDirectory {
             try Self.requireNotPurged(in: directory, state: purgeMarkerDirectory, name: file.lastPathComponent)
         }
         let opened = openat(directory, file.lastPathComponent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
-        guard opened >= 0 else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+        guard opened >= 0 else { throw Self.fileFailure(errno) }
         do {
             var attributes = stat()
-            guard fstat(opened, &attributes) == 0,
-                  attributes.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+            guard fstat(opened, &attributes) == 0 else { throw Self.fileFailure(errno) }
+            guard attributes.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
                   attributes.st_size >= 0, attributes.st_nlink == 1 else {
                 throw V2LocalFilesystemMediaProviderError.objectUnavailable
             }
@@ -49,16 +49,27 @@ final class V2PinnedLocalMediaFile: @unchecked Sendable {
 
     deinit { _ = close(descriptor) }
 
+    private static func fileFailure(_ code: Int32) -> any Error {
+        switch code {
+        case ENOENT, ENOTDIR, ELOOP: V2LocalFilesystemMediaProviderError.objectUnavailable
+        case EACCES, EPERM: V2ResourceProviderError.configurationInvalid
+        default: V2ResourceProviderError.temporarilyUnavailable
+        }
+    }
+
     private static func requireNotPurged(in directory: Int32, state: String, name: String) throws {
         let stateDirectory = openat(directory, state, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         if stateDirectory < 0 {
-            guard errno == ENOENT else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+            let code = errno
+            guard code == ENOENT else { throw Self.fileFailure(code) }
             return
         }
         defer { _ = close(stateDirectory) }
         var attributes = stat()
         let result = fstatat(stateDirectory, name + ".purged", &attributes, AT_SYMLINK_NOFOLLOW)
-        guard result < 0, errno == ENOENT else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+        guard result < 0 else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+        let code = errno
+        guard code == ENOENT else { throw Self.fileFailure(code) }
     }
 
     /// A short read is allowed; an early EOF or changed length is never accepted.
@@ -68,16 +79,20 @@ final class V2PinnedLocalMediaFile: @unchecked Sendable {
             throw V2LocalFilesystemMediaProviderError.objectUnavailable
         }
         var attributes = stat()
-        guard fstat(descriptor, &attributes) == 0, Int64(attributes.st_size) == byteCount else {
-            throw V2LocalFilesystemMediaProviderError.objectUnavailable
-        }
+        guard fstat(descriptor, &attributes) == 0 else { throw Self.fileFailure(errno) }
+        guard Int64(attributes.st_size) == byteCount else { throw V2ResourceProviderError.integrityMismatch }
         guard offset < byteCount else { return Data() }
         var data = Data(count: Int(min(Int64(min(maximumBytes, 65_536)), byteCount - offset)))
         let count: Int = try data.withUnsafeMutableBytes { buffer in
             while true {
                 let count = pread(descriptor, buffer.baseAddress, buffer.count, off_t(offset))
-                if count < 0, errno == EINTR { try Task.checkCancellation(); continue }
-                guard count > 0 else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+                if count < 0 {
+                    let code = errno
+                    guard code == EINTR else { throw Self.fileFailure(code) }
+                    try Task.checkCancellation()
+                    continue
+                }
+                guard count > 0 else { throw V2ResourceProviderError.integrityMismatch }
                 return count
             }
         }

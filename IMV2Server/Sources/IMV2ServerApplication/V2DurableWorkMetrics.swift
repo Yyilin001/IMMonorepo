@@ -272,8 +272,10 @@ private func v2AggregateDurableWorkMetrics(
     )
 }
 
-public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetricsSnapshot) -> String {
-    [
+public func v2RenderPrometheusDurableWorkMetrics(
+    _ snapshot: V2DurableWorkMetricsSnapshot, includesGlobalWork: Bool = true
+) -> String {
+    let nodeMetrics = [
         "# HELP im_v2_durable_work_metrics_available Whether the durable-work scrape completed against PostgreSQL.",
         "# TYPE im_v2_durable_work_metrics_available gauge",
         "im_v2_durable_work_metrics_available \(snapshot.isAvailable ? 1 : 0)",
@@ -283,6 +285,12 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# HELP im_v2_durable_work_metrics_last_success_age_seconds Age of the last complete durable-work refresh when serving stale data.",
         "# TYPE im_v2_durable_work_metrics_last_success_age_seconds gauge",
         "im_v2_durable_work_metrics_last_success_age_seconds \(snapshot.lastSuccessfulRefreshAgeSeconds)",
+        "# HELP im_v2_device_revocation_events_pending Durable device-revocation events not yet consumed by this gateway node.",
+        "# TYPE im_v2_device_revocation_events_pending gauge",
+        "im_v2_device_revocation_events_pending \(snapshot.pendingDeviceRevocationEvents)",
+    ].joined(separator: "\n") + "\n"
+    guard includesGlobalWork else { return nodeMetrics }
+    return nodeMetrics + [
         "# HELP im_v2_user_state_event_backlog Durable personal event rows across configured source databases.",
         "# TYPE im_v2_user_state_event_backlog gauge",
         "im_v2_user_state_event_backlog{state=\"ready\"} \(snapshot.readyUserStateEventRows)",
@@ -373,9 +381,6 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "im_v2_push_wake_backlog{state=\"ready\"} \(snapshot.readyPushWakes)",
         "im_v2_push_wake_backlog{state=\"leased\"} \(snapshot.leasedPushWakes)",
         "im_v2_push_wake_backlog{state=\"suppressed\"} \(snapshot.suppressedPushWakes)",
-        "# HELP im_v2_device_revocation_events_pending Durable device-revocation events not yet consumed by this gateway node.",
-        "# TYPE im_v2_device_revocation_events_pending gauge",
-        "im_v2_device_revocation_events_pending \(snapshot.pendingDeviceRevocationEvents)",
         "# HELP im_v2_revoked_device_projection_cleanup_events_pending Durable revocations awaiting user-shard capability cleanup.",
         "# TYPE im_v2_revoked_device_projection_cleanup_events_pending gauge",
         "im_v2_revoked_device_projection_cleanup_events_pending \(snapshot.pendingRevokedDeviceProjectionCleanupEvents)",

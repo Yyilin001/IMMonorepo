@@ -14,7 +14,7 @@ import Testing
 @Suite(.serialized)
 struct V2SingleStatementRoomWriteTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE"] == "1"),
-        arguments: ["success", "constraint", "late", "validation", "deadline", "cancel"])
+        arguments: ["success", "constraint", "late", "validation", "deadline", "cancel", "notSubmitted", "independentUnknown"])
     func atomicWriteAndConfirmation(mode: String) async throws {
         let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_DATABASE_URL"])
         let resources = makeV2DatabaseTestResources()
@@ -61,12 +61,17 @@ struct V2SingleStatementRoomWriteTests {
             }
             let before = sqlCount()
             let started = ContinuousClock.now
+            let injectedIndependentFailure = mode == "notSubmitted" || mode == "independentUnknown"
             let task = Task {
                 try await v2WithOwnerBatchConnection(database: pool.database, deadline: .now + .seconds(5),
                     metrics: nil, interrupted: { _ in }) { _, _ -> Int64 in
-                    let connection = try #require(V2BorrowedRoomConnectionScope.current)
+                    var configured = try #require(V2BorrowedRoomConnectionScope.current)
+                    configured.independentlyConfirmed = injectedIndependentFailure
+                    let connection = configured
                     return try await v2ExecuteSingleStatementRoomWrite(connection: connection,
                         deadline: .now + (mode == "deadline" ? .milliseconds(150) : .seconds(5)), metrics: metrics) {
+                        if mode == "notSubmitted" { throw PostgresIndependentQueryError.notSubmitted }
+                        if mode == "independentUnknown" { throw PostgresIndependentQueryError.outcomeUnknown }
                         let row = try #require(try await connection.sql.raw(statement).first(decoding: ImplicitValue.self))
                         if mode == "validation" { throw ImplicitProbe.invalidResult }
                         return row.value
@@ -90,23 +95,27 @@ struct V2SingleStatementRoomWriteTests {
             let result = await task.result
             switch (mode, result) {
             case ("success", .success(let value)): #expect(value == 1)
+            case ("notSubmitted", .failure(let error)):
+                #expect(error as? V2RoomCallFailure == .rolledBack(.unavailable))
             case ("constraint", .failure(let error)):
                 #expect((error as? PSQLError)?.serverInfo?[.sqlState] == "23514")
             case ("late", .failure(let error)), ("validation", .failure(let error)),
-                 ("deadline", .failure(let error)), ("cancel", .failure(let error)):
+                 ("deadline", .failure(let error)), ("cancel", .failure(let error)),
+                 ("independentUnknown", .failure(let error)):
                 #expect(error is V2RoomTransactionOutcomeUnknown)
             default: Issue.record("unexpected implicit outcome for \(mode)")
             }
             if mode == "deadline" { #expect(started.duration(to: .now) < .seconds(2)) }
             #expect(metrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count == 1)
-            #expect(sqlCount() - before == 1) // No BEGIN, COMMIT, or SQL confirmation probe.
+            // An entirely local refusal uses no SQL, normal implicit writes use one statement.
+            #expect(sqlCount() - before == (injectedIndependentFailure ? 0 : 1))
             let counts = try #require(try await control.raw("""
                 SELECT (SELECT count(*) FROM \(unsafeRaw: message)) AS messages,
                        (SELECT count(*) FROM \(unsafeRaw: completion)) AS completions
                 """).first(decoding: ImplicitCounts.self))
             #expect(counts.messages == counts.completions)
             if mode == "success" || mode == "validation" { #expect(counts.messages == 1) }
-            if mode == "constraint" || mode == "late" { #expect(counts.messages == 0) }
+            if mode == "constraint" || mode == "late" || injectedIndependentFailure { #expect(counts.messages == 0) }
             try await control.raw("DROP TABLE \(unsafeRaw: completion), \(unsafeRaw: message)").run()
             tablesCreated = false
             if mode == "late" { try await control.raw("DROP FUNCTION \(unsafeRaw: trigger)()").run() }

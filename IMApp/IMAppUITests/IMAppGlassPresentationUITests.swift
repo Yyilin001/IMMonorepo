@@ -51,6 +51,8 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let entry = app.buttons["v2.conversation.performance.open"]
         XCTAssertTrue(entry.waitForExistence(timeout: 10))
         entry.tap()
+        app.buttons["v2.performance.duration"].tap()
+        app.buttons["60 秒"].tap()
         let start = app.buttons["v2.performance.start"]
         XCTAssertTrue(start.waitForExistence(timeout: 5))
         start.tap()
@@ -120,13 +122,24 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         app.buttons["v2.conversation.performance.open"].tap()
         app.buttons["v2.performance.scenario"].tap()
         app.buttons[scenario].tap()
+        if scenario == "持续新增会话" {
+            app.buttons["v2.performance.rate"].tap()
+            app.buttons["20"].tap()
+        }
+        app.buttons["v2.performance.duration"].tap()
+        app.buttons["60 秒"].tap()
         app.buttons["v2.performance.start"].tap()
         let list = app.collectionViews["v2.performance.list"]
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         let slot = list.cells.element(boundBy: 1)
-        slot.swipeLeft()
+        XCTAssertTrue(slot.wait(for: \.isHittable, toEqual: true, timeout: 5))
         let archive = app.buttons["隐藏"]
-        XCTAssertTrue(archive.waitForExistence(timeout: 3))
+        for _ in 0..<4 where !archive.exists {
+            // Resolve the visible position again if a live insertion interrupted the gesture.
+            slot.swipeLeft()
+            if archive.waitForExistence(timeout: 2) { break }
+        }
+        XCTAssertTrue(archive.exists)
         let owner = slot.identifier
         XCTAssertTrue(owner.hasPrefix("v2.performance.cell."))
         let events = app.staticTexts["v2.performance.events"]
@@ -252,7 +265,7 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["v2.conversation.group-feedback"].exists)
         app.buttons["通过公开 ID 添加"].tap()
         let handle = app.textFields["v2.conversation.group-members"]
-        XCTAssertTrue(handle.waitForExistence(timeout: 5)); handle.tap(); handle.typeText("@alice")
+        XCTAssertTrue(handle.waitForExistence(timeout: 5)); handle.tap(); handle.typeText("@alice\n")
         app.buttons["添加成员"].tap()
         let remove = app.buttons["移除 @alice"]
         XCTAssertTrue(remove.waitForExistence(timeout: 5)); remove.tap()

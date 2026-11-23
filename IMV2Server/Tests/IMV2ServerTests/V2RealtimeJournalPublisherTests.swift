@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import Synchronization
 import Testing
 import IMV2ActorContracts
@@ -7,6 +8,25 @@ import IMV2ServerApplication
 
 @Suite("Journal publisher actual work and recovery")
 struct V2RealtimeJournalPublisherTests {
+    @Test func journalDiscoveryFailureIsVisibleAndDoesNotLosePendingWork() async throws {
+        let store = JournalPublisherTestStore()
+        await store.failNextDiscovery()
+        await store.disableUnknownCommit()
+        let capture = CapturedHTTPLogs()
+        let logger = Logger(label: "journal-discovery", factory: { _ in CapturingHTTPLogHandler(capture: capture) })
+        let applied = JournalAppliedBatches()
+        let worker = try V2RealtimeJournalPublisher(sources: [.init(id: "room", store: store)], logger: logger) {
+            _, lease, batch in await applied.record(lease: lease, batch: batch)
+        }
+        try await worker.setLeases(sourceID: "room", leases: [routeLease()])
+        #expect(await worker.runOnce() == false)
+        #expect(capture.rendered().contains("journal_discover"))
+        #expect(capture.rendered().contains("journal_corrupt_persistence"))
+        _ = await worker.runOnce()
+        #expect(await applied.sequences == [1])
+        await worker.close()
+    }
+
     @Test func uncertainCommittedAppendReplaysBeforeCheckpointAdvances() async throws {
         let store = JournalPublisherTestStore()
         let applied = JournalAppliedBatches()
@@ -70,7 +90,7 @@ struct V2RealtimeJournalPublisherTests {
         _ = await worker.runOnce()
         // The append committed and consumed the outbox. Expiry must retain
         // local replay responsibility even though indexed discovery is empty.
-        #expect(await store.pendingPartitions(partitionIDs: [2], limit: 256).isEmpty)
+        #expect(try await store.pendingPartitions(partitionIDs: [2], limit: 256).isEmpty)
         _ = await worker.runOnce()
         #expect(await policy.seen == [[1], [1]])
         await worker.close()
@@ -145,7 +165,15 @@ private actor JournalPublisherTestStore: V2RealtimeChangeJournalStore {
     private var entries: [V2RealtimeJournalEntry] = []
     func disableUnknownCommit() { unknownCommit = false }
     func clearPending() { pending = false }
-    func pendingPartitions(partitionIDs: [Int], limit: Int) -> [Int] { pending && partitionIDs.contains(2) ? [2] : [] }
+    private var discoveryFails = false
+    func failNextDiscovery() { discoveryFails = true }
+    func pendingPartitions(partitionIDs: [Int], limit: Int) throws -> [Int] {
+        if discoveryFails {
+            discoveryFails = false
+            throw V2RealtimeJournalError.corruptPersistenceState
+        }
+        return pending && partitionIDs.contains(2) ? [2] : []
+    }
     func claim(partitionIDs: [Int], identity: V2GatewayRealtimeIdentity, token: UUID,
                leaseDuration: TimeInterval) -> [V2RealtimePartitionLease] {
         partitionIDs.map { .init(partitionID: $0, identity: identity, epoch: 77, token: token, remainingLeaseSeconds: leaseDuration) }

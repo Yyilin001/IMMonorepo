@@ -82,6 +82,13 @@ public struct V2RoomDirectoryCallMetricsSnapshot: Equatable, Sendable {
 
 
 public struct V2RoomTransportCallMetricsSnapshot: Equatable, Sendable {
+    public var localSendDispatches: UInt64 = 0
+    public var remoteSendDispatches: UInt64 = 0
+    public var sendReferenceEvictions: UInt64 = 0
+    public var unsentMessageSubmits: UInt64 = 0
+    public var unsentMessageRecoveries: UInt64 = 0
+    public var messageCreditWaits: [String: UInt64] = [:]
+    public var rpcAdmissionRejections: [String: UInt64] = [:]
     public let cachedLocalCalls: UInt64
     public let cachedRemoteCalls: UInt64
     public let roomLookups: UInt64

@@ -106,7 +106,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
         _ body: @escaping @Sendable (any SQLDatabase, ContinuousClock.Instant) async throws -> Value
     ) async throws -> Value {
         try await lifetime.withPin(deadline: V2RoomSQLDeadline.boundedTransactionDeadline()) { bounds in
-            try await v2WithRoomSnapshotConnection(database: database, deadline: bounds.deadline) { sql in
+            try await v2WithBoundedPostgresStatement(database: database, deadline: bounds.deadline) { sql in
                 try await body(sql, bounds.authorizationValidUntil)
             }
         }

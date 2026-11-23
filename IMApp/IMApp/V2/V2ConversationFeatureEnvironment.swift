@@ -82,7 +82,7 @@ struct V2ConversationGroupDependencies {
     let memberMuter: (any V2GroupMemberMuting)?
     let moderatedMemberRemover: (any V2ModeratedGroupMemberRemoving)?
     let avatarManager: (any V2GroupAvatarManaging)?
-    let nameOperations: V2NameOperationService?
+    let nameOperations: V2ProfileNameService?
 
     init(
         announcementManager: (any V2GroupAnnouncementManaging)? = nil,
@@ -95,7 +95,8 @@ struct V2ConversationGroupDependencies {
         memberMuter: (any V2GroupMemberMuting)? = nil,
         moderatedMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
         avatarManager: (any V2GroupAvatarManaging)? = nil,
-        nameOperations: V2NameOperationService? = nil
+        nameOperations: V2NameOperationService? = nil,
+        profileNames: V2ProfileNameService? = nil
     ) {
         self.announcementManager = announcementManager
         self.memberRoleChanger = memberRoleChanger
@@ -107,7 +108,7 @@ struct V2ConversationGroupDependencies {
         self.memberMuter = memberMuter
         self.moderatedMemberRemover = moderatedMemberRemover
         self.avatarManager = avatarManager
-        self.nameOperations = nameOperations
+        self.nameOperations = profileNames ?? nameOperations.map { V2ProfileNameService(service: $0) }
     }
 }
 

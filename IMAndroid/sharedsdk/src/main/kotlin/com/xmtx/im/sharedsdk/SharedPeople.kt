@@ -27,7 +27,7 @@ internal fun decodeCommunity(value: JSONObject) = SharedCommunity(value.optional
     SharedInvite(it.getString("id"), it.getString("url"), it.getLong("expires"), it.getInt("used"), it.getInt("maximum"))
 }, value.getJSONArray("requests").rows { SharedJoinRequest(it.getString("id"), it.getString("userID"), it.getString("note"), it.getString("state")) }, value.getBoolean("hasMore"),
     value.optJSONObject("preview")?.let { SharedInvitePreview(it.getString("roomID"), it.getString("title"), it.optional("requestID"), it.optional("state"), it.getBoolean("member"), it.getBoolean("canSubmit"), it.getBoolean("canCancel")) },
-    value.optional("failure")?.let { raw -> SharedError.entries.firstOrNull { it.name.equals(raw, true) } ?: SharedError.OperationFailed })
+    value.optional("failure")?.let(::decodeSharedError))
 
 data class SharedAvatarEditor(val roomID: String?, val revision: Long, val canManage: Boolean, val expiresAtElapsed: Long,
     val image: String?, val hasAvatar: Boolean, val works: PersistentList<SharedWork>, val failure: SharedError?,
@@ -37,6 +37,6 @@ data class SharedAvatarEditor(val roomID: String?, val revision: Long, val canMa
 internal fun decodeAvatarEditor(value: JSONObject, startedAt: Long) = SharedAvatarEditor(value.optional("roomID"), value.getLong("revision"),
     value.getBoolean("canManage"), startedAt + value.getLong("remainingMilliseconds"), value.optional("image"), value.getBoolean("hasAvatar"),
     value.getJSONArray("works").rows { SharedWork(it.getString("id"), it.getString("kind"), it.getString("target"), it.getString("status"), it.getBoolean("retryable"), it.optional("roomID")) },
-    value.optional("failure")?.let { SharedError.OperationFailed }, value.optional("name"), value.optional("handle"))
+    value.optional("failure")?.let(::decodeSharedError), value.optional("name"), value.optional("handle"))
 
 enum class SharedAvatarAction(val wire: String) { Retry("retry"), Reapply("reapply"), Query("query"), Cancel("cancel"), CloseIfAbsent("close"), Discard("discard") }

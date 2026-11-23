@@ -56,23 +56,33 @@ private func v2CurrentPolicySnapshot(
 package final class V2RoomPolicyAuthorizationService: Sendable {
     private let directory: PostgresV2RoomPolicyAuthorizationDirectory
 
-    init(directory: PostgresV2RoomPolicyAuthorizationDirectory) { self.directory = directory }
+    private let prefetch: V2DirectRoomPolicyPrefetch?
+
+    init(directory: PostgresV2RoomPolicyAuthorizationDirectory, prefetch: V2DirectRoomPolicyPrefetch? = nil) {
+        self.directory = directory
+        self.prefetch = prefetch
+    }
 
     package var endpoint: String { directory.endpoint }
 
     package convenience init(roomDatabase: any Database,
         policyOwners: PostgresV2RemotePolicyOwners, locator: V2RoomPolicyEndpointLocator, maximumRooms: Int,
+        prefetchDirectRooms: Bool = false,
         roomPreparationAdmission: V2DatabaseWorkAdmissionController? = nil,
         sendOperationMetrics: V2SendOperationBatchMetrics? = nil) {
         self.init(roomDatabase: roomDatabase, policyOwners: policyOwners,
-            endpoint: locator.encoded, maximumRooms: maximumRooms,
+            endpoint: locator.encoded, maximumRooms: maximumRooms, prefetchDirectRooms: prefetchDirectRooms,
             roomPreparationAdmission: roomPreparationAdmission, sendOperationMetrics: sendOperationMetrics)
     }
 
     package convenience init(roomDatabase: any Database,
         policyOwners: PostgresV2RemotePolicyOwners, endpoint: String, maximumRooms: Int,
+        prefetchDirectRooms: Bool = false,
         roomPreparationAdmission: V2DatabaseWorkAdmissionController? = nil,
         sendOperationMetrics: V2SendOperationBatchMetrics? = nil) {
+        let prefetch = prefetchDirectRooms ? V2DirectRoomPolicyPrefetch { lower, higher in
+            _ = try await policyOwners.registrationSnapshots(scopes: [.account(lower), .account(higher), .pair(lower, higher)])
+        } : nil
         self.init(directory: .init(database: roomDatabase, endpoint: endpoint, maximumRooms: maximumRooms,
             databaseWorkAdmission: roomPreparationAdmission, currentLoader: { _, sender, recipient, replied in
                 try await v2CurrentPolicySnapshot(sender: sender, recipient: recipient,
@@ -80,7 +90,7 @@ package final class V2RoomPolicyAuthorizationService: Sendable {
                     cachedRead: { try await policyOwners.cachedSnapshots(scopes: $0) },
                     read: { try await policyOwners.registrationSnapshots(scopes: $0) },
                     metrics: sendOperationMetrics)
-            }))
+            }), prefetch: prefetch)
     }
 
     package convenience init(roomDatabase: any Database,
@@ -125,8 +135,48 @@ package final class V2RoomPolicyAuthorizationService: Sendable {
 
     package func installRoomInitialization(_ initialization: V2RoomSendInitialization) async throws {
         try await directory.install(initialization)
+        if initialization.kind == "direct", let pair = initialization.directState {
+            prefetch?.offer(pair.lower, pair.higher)
+        }
     }
 
     package func retire(token: V2RoomActivationToken) async { await directory.retire(token: token) }
-    package func shutdown() async { await directory.shutdown() }
+    package func shutdown() async {
+        prefetch?.stop()
+        await directory.shutdown()
+        await prefetch?.join()
+    }
+}
+
+/// Reads the existing versioned account and pair snapshots after a direct room
+/// restores. Foreground sends still validate current policy and commit normally.
+final class V2DirectRoomPolicyPrefetch: Sendable {
+    private let pending: AsyncStream<(UUID, UUID)>.Continuation
+    private let worker: Task<Void, Never>
+
+    init(maximumPending: Int = 1_024, read: @escaping @Sendable (UUID, UUID) async throws -> Void) {
+        let work = AsyncStream<(UUID, UUID)>.makeStream(bufferingPolicy: .bufferingOldest(maximumPending))
+        pending = work.continuation
+        worker = Task.detached(priority: .utility) {
+            for await (lower, higher) in work.stream {
+                guard !Task.isCancelled else { break }
+                // Failed or dropped hints are loaded on the ordinary send path.
+                try? await read(lower, higher)
+            }
+        }
+    }
+
+    func offer(_ lower: UUID, _ higher: UUID) { pending.yield((lower, higher)) }
+
+    func stop() {
+        pending.finish()
+        worker.cancel()
+    }
+
+    func join() async { await worker.value }
+
+    deinit {
+        pending.finish()
+        worker.cancel()
+    }
 }

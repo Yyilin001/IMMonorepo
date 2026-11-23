@@ -155,8 +155,9 @@ final class GatewayJournalRuntime: Sendable {
     func install(_ values: [GatewayRealtimePartitionControl.Installed]) async throws {
         for alias in aliases { try await publisher.setLeases(sourceID: alias, leases: values.map(\.lease)) }
     }
-    func start() async {
-        authority.start(); await publisher.start()
+    func start(publishes: Bool = true) async {
+        authority.start()
+        if publishes { await publisher.start() }
         let task = Task { [weak self, stream = wakes.stream] in
             for await _ in stream {
                 guard !Task.isCancelled, let self else { return }
@@ -296,7 +297,7 @@ final class GatewayJournalRuntime: Sendable {
         case .snapshot(let cut, _): payload = .snapshot(cut: cut, rooms: [])
         case .heads: payload = .heads([])
         }
-        return .init(source: batch.source, fence: batch.fence, payload: payload)
+        return .init(batchID: batch.batchID, source: batch.source, fence: batch.fence, payload: payload)
     }
     static func matchesSourceLease(_ lease: V2RealtimePartitionLease, fence: V2RealtimeJournalProjectionFence,
                                    host: V2GatewayRealtimeIdentity) -> Bool {

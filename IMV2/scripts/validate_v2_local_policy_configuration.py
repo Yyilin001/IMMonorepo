@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 
-def validate(root: Path) -> None:
+def validate(root: Path, *, single_core: bool = False) -> None:
     documents = {}
     for name in ("gateway", "account", "operator"):
         document = json.loads((root / name / "configuration.json").read_text(encoding="utf-8"))
@@ -39,7 +39,22 @@ def validate(root: Path) -> None:
                 required |= {"policyRegistration"}
             if not required.issubset(services.get(service, {}).get("permissions", [])):
                 raise ValueError(f"{name} does not authorize {service}'s policy calls")
-    validate_placement(root, documents)
+    if single_core:
+        peers = documents["gateway"].get("peers")
+        if not isinstance(peers, list) or len(peers) != 1:
+            raise ValueError("local configuration requires one Room Core")
+        peer = peers[0]
+        if (not isinstance(peer, dict) or peer.get("hostID") != gateway_id
+                or peer.get("serviceID") != "gateway"
+                or peer.get("shardIDs") != ["rooms-primary"]):
+            raise ValueError("the local Gateway must own rooms-primary")
+        for name, document in documents.items():
+            if (document.get("singleCore") is not True or "placementControl" in document
+                    or document.get("peers") != peers
+                    or (name != "gateway" and document.get("hostID") is not None)):
+                raise ValueError(f"{name} uses a different Room Core")
+    else:
+        validate_placement(root, documents)
 
 
 def validate_placement(root: Path, documents: dict) -> None:
@@ -54,7 +69,7 @@ def validate_placement(root: Path, documents: dict) -> None:
     if ({item.get("serviceID") for item in voters} != set(names)
             or len({item.get("hostID") for item in voters}) != 3
             or any(not item.get("hostID") or item.get("address") != item.get("serviceID")
-                   or item.get("port") != 7336 or item.get("shardIDs") != ["rooms-primary"] for item in voters)):
+                   or item.get("port") != 7336 or set(item.get("shardIDs", [])) != {"rooms-primary", "rooms-01"} for item in voters)):
         raise ValueError("placement voter identities, endpoints or shards are inconsistent")
     identities = {item["serviceID"]: item["hostID"] for item in voters}
     for name in names:
@@ -70,7 +85,8 @@ def validate_placement(root: Path, documents: dict) -> None:
             raise ValueError(f"{name} uses a different placement quorum")
         if name in names:
             if (control.get("localVoterID") != identities[name] or control.get("port") != 7336
-                    or control.get("storagePaths") != {"rooms-primary": "/run/im-v2-room-actor/placement/0.pb"}):
+                    or control.get("storagePaths") != {"rooms-primary": "/run/im-v2-room-actor/placement/0.pb",
+                                                       "rooms-01": "/run/im-v2-room-actor/placement/1.pb"}):
                 raise ValueError(f"{name} has inconsistent durable voter configuration")
         elif control.get("localVoterID") is not None or control.get("storagePaths") != {}:
             raise ValueError("room applications must not own voting files")
@@ -85,14 +101,14 @@ def validate_placement(root: Path, documents: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--single-core", action="store_true")
     args = parser.parse_args()
     try:
-        validate(args.directory)
+        validate(args.directory, single_core=args.single_core)
     except (OSError, ValueError, KeyError, TypeError):
         # Configuration includes key paths and identities. Keep diagnostics bounded.
         parser.exit(1, "Local Actor configuration is incomplete or inconsistent. "
-                    "Generate a fresh directory with gateway, account, operator, three independent "
-                    "--placement-voter nodes and --policy-partitions 16.\n")
+                    "Regenerate gateway, account and operator identities for this deployment.\n")
 
 
 if __name__ == "__main__":

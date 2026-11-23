@@ -50,7 +50,7 @@ struct V2InvocationReplyShutdownTests {
         }
     }
 }
-private actor LateReplyGate {
+actor LateReplyGate {
     var started = false
     var finished = false
     var released = false

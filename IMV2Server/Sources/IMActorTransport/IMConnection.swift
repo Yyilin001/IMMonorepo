@@ -3,9 +3,19 @@ import Synchronization
 import NIOCore
 import IMActorWire
 
+/// Message operations use bounded credit admission. Its local refusal has no wire encoding.
+package enum IMRPCAdmission {
+    package struct Refusal: Error, Equatable {
+        package let reason: IMRPCRejection
+        package init(reason: IMRPCRejection) { self.reason = reason }
+    }
+    @TaskLocal package static var usesMessageWindow = false
+}
+
 private final class IMCancellation: Sendable {
     private struct State { var cancelled = false; var id: UInt64? }
     private let state = Mutex(State())
+    var isCancelled: Bool { state.withLock { $0.cancelled } }
     func install(_ id: UInt64) -> Bool { state.withLock { $0.id = id; return $0.cancelled } }
     func cancel() -> UInt64? { state.withLock { $0.cancelled = true; return $0.id } }
 }
@@ -42,6 +52,25 @@ final class IMConnection: ChannelInboundHandler, @unchecked Sendable {
         let continuation: CheckedContinuation<IMTransportReply, any Error>
         let deadline: NIODeadline
     }
+    private struct OutboundCall: Sendable {
+        let frame: IMFrame
+        let expectedNode: IMNode?
+        let deadline: ContinuousClock.Instant
+        let cancellation: IMCancellation
+        let messageAdmission: Bool
+        let result: CheckedContinuation<IMTransportReply, any Error>
+        var bytes: Int { frame.body.readableBytes + IMFrame.headerBytes }
+    }
+    private struct CreditWaiter {
+        let call: OutboundCall
+        let expires: NIODeadline
+        let timer: Scheduled<Void>
+    }
+    private var creditWaiters: [ObjectIdentifier: CreditWaiter] = [:]
+    private var creditOrder = CircularBuffer<IMCancellation>()
+    private var creditWaitBytes = 0
+    // Leave a fraction of this shared lane available for dependency and delivery RPCs.
+    private var messageCreditReserve: Int { maximumSendCredits / 8 }
     private var pending: [UInt64: Pending] = [:]
     private var deadlines = DeadlineHeap()
     private var deadlineTimer: Scheduled<Void>?
@@ -96,9 +125,10 @@ final class IMConnection: ChannelInboundHandler, @unchecked Sendable {
                 try body.imRequireEnd()
                 guard count <= maximumSendCredits - sendCredits, bytes <= maximumSendBytes - sendBytes else { throw IMActorError.malformed }
                 sendCredits += count; sendBytes += bytes
+                if !creditWaiters.isEmpty { dispatchCreditWaiters() }
             case .ping: try write(.init(kind: .pong, callID: frame.callID), immediate: true)
             case .pong: break
-            case .drain: draining = true
+            case .drain: draining = true; failCreditWaiters(IMActorError.shuttingDown)
             case .retired:
                 guard frame.actorID > 0 else { throw IMActorError.malformed }
                 transport.referenceRetired(.init(node: remote, localID: frame.actorID))
@@ -134,38 +164,117 @@ final class IMConnection: ChannelInboundHandler, @unchecked Sendable {
 
     func request(_ original: IMFrame, expectedNode: IMNode?, deadline: ContinuousClock.Instant) async throws -> IMTransportReply {
         let cancellation = IMCancellation()
+        let messageAdmission = IMRPCAdmission.usesMessageWindow
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                channel.eventLoop.execute { [self] in
-                    do {
-                        guard !closed, authenticated, !draining else { throw IMActorError.connectionLost }
-                        guard expectedNode == nil || remote == expectedNode else { throw IMActorError.staleIncarnation }
-                        let duration = ContinuousClock.now.duration(to: deadline)
-                        let parts = duration.components
-                        guard duration > .zero, parts.seconds <= 3600 else { throw IMActorError.deadlineExceeded }
-                        let ms = max(1, parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
-                        let bytes = original.body.readableBytes + IMFrame.headerBytes
-                        guard sendCredits > 0, sendBytes >= bytes, bytes <= peerMaximumFrame,
-                              pending.count < transport.configuration.maximumCallsPerConnection,
-                              channel.isWritable else { throw IMActorError.overloaded }
-                        guard nextID < UInt64.max else { throw IMActorError.shuttingDown }
-                        let id = nextID; nextID += 1
-                        guard !cancellation.install(id) else { throw IMActorError.cancelled }
-                        var frame = original; frame.callID = id; frame.budgetMilliseconds = UInt32(ms)
-                        let expires = NIODeadline.now() + .milliseconds(ms)
-                        pending[id] = Pending(continuation: continuation, deadline: expires)
-                        deadlines.push(.init(id: id, deadline: expires)); sendCredits -= 1; sendBytes -= bytes
-                        do { try write(frame); scheduleDeadline() }
-                        catch { fail(error) }
-                    } catch { continuation.resume(throwing: error) }
-                }
+                let call = OutboundCall(frame: original, expectedNode: expectedNode, deadline: deadline,
+                    cancellation: cancellation, messageAdmission: messageAdmission, result: continuation)
+                channel.eventLoop.execute { self.submit(call, mayWait: true) }
             }
         } onCancel: {
-            if let id = cancellation.cancel() {
-                self.channel.eventLoop.execute { self.cancel(id, reason: .cancelled) }
+            let id = cancellation.cancel()
+            self.channel.eventLoop.execute {
+                if let id { self.cancel(id, reason: .cancelled) }
+                else if let waiter = self.removeCreditWaiter(cancellation) {
+                    waiter.call.result.resume(throwing: IMActorError.cancelled)
+                }
             }
         }
     }
+
+    private func submit(_ call: OutboundCall, mayWait: Bool) {
+        do {
+            guard !closed, authenticated, !draining else { throw IMActorError.connectionLost }
+            guard call.expectedNode == nil || remote == call.expectedNode else { throw IMActorError.staleIncarnation }
+            let duration = ContinuousClock.now.duration(to: call.deadline)
+            let parts = duration.components
+            guard duration > .zero, parts.seconds <= 3600 else { throw IMActorError.deadlineExceeded }
+            let ms = max(1, parts.seconds * 1000 + parts.attoseconds / 1_000_000_000_000_000)
+            let bytes = call.bytes
+            if let reason = requestRejection(bytes: bytes, messageAdmission: call.messageAdmission) {
+                if call.messageAdmission, lane == .rpc {
+                    guard !call.cancellation.isCancelled else { throw IMActorError.cancelled }
+                    if mayWait, reason == .sendCallCredit || reason == .messageCreditReserve,
+                       enqueueForCredit(call, remainingMilliseconds: ms) { return }
+                    transport.recordRejection(reason, lane: lane)
+                    throw IMRPCAdmission.Refusal(reason: reason)
+                }
+                transport.recordRejection(reason, lane: lane)
+                throw IMActorError.overloaded
+            }
+            guard nextID < UInt64.max else { throw IMActorError.shuttingDown }
+            let id = nextID; nextID += 1
+            guard !call.cancellation.install(id) else { throw IMActorError.cancelled }
+            var frame = call.frame; frame.callID = id; frame.budgetMilliseconds = UInt32(ms)
+            let expires = NIODeadline.now() + .milliseconds(ms)
+            pending[id] = Pending(continuation: call.result, deadline: expires)
+            deadlines.push(.init(id: id, deadline: expires)); sendCredits -= 1; sendBytes -= bytes
+            if !mayWait { transport.recordMessageCreditWait(.dispatched) }
+            do { try write(frame); scheduleDeadline() } catch { fail(error) }
+        } catch { call.result.resume(throwing: error) }
+    }
+
+    private func requestRejection(bytes: Int, messageAdmission: Bool) -> IMRPCRejection? {
+        if messageAdmission, lane == .rpc, bytes > peerMaximumFrame { return .peerFrame }
+        if sendCredits == 0 { return .sendCallCredit }
+        if sendBytes < bytes { return .sendByteCredit }
+        if bytes > peerMaximumFrame { return .peerFrame }
+        if pending.count >= transport.configuration.maximumCallsPerConnection { return .pendingOnConnection }
+        if !channel.isWritable { return .channelWritable }
+        if messageAdmission, lane == .rpc, sendCredits <= messageCreditReserve { return .messageCreditReserve }
+        return nil
+    }
+
+    private func enqueueForCredit(_ call: OutboundCall, remainingMilliseconds: Int64) -> Bool {
+        guard creditWaiters.count < maximumSendCredits, call.bytes <= peerMaximumFrame,
+              call.bytes <= maximumSendBytes - creditWaitBytes else { return false }
+        let ticket = call.cancellation
+        // Keep at most one window of waiters and honor earlier caller deadlines.
+        // A short credit stall during a send burst should not cost a client retry.
+        let expires = NIODeadline.now() + .milliseconds(min(100, remainingMilliseconds))
+        let timer = channel.eventLoop.scheduleTask(deadline: expires) { [self] in
+            if let waiter = removeCreditWaiter(ticket) { expireCreditWaiter(waiter) }
+        }
+        creditWaiters[ObjectIdentifier(ticket)] = .init(call: call, expires: expires, timer: timer)
+        creditOrder.append(ticket); creditWaitBytes += call.bytes
+        transport.recordMessageCreditWait(.enqueued)
+        return true
+    }
+
+    private func removeCreditWaiter(_ ticket: IMCancellation) -> CreditWaiter? {
+        guard let waiter = creditWaiters.removeValue(forKey: ObjectIdentifier(ticket)) else { return nil }
+        waiter.timer.cancel(); creditWaitBytes -= waiter.call.bytes
+        while let first = creditOrder.first, creditWaiters[ObjectIdentifier(first)] == nil {
+            creditOrder.removeFirst()
+        }
+        // Cancelled tickets behind the head retain only their identity, never a payload.
+        if creditOrder.count > 2 * maximumSendCredits {
+            creditOrder = CircularBuffer(creditOrder.filter { creditWaiters[ObjectIdentifier($0)] != nil })
+        }
+        return waiter
+    }
+
+    private func expireCreditWaiter(_ waiter: CreditWaiter) {
+        transport.recordMessageCreditWait(.expired)
+        transport.recordRejection(.messageCreditWaitTimeout, lane: lane)
+        waiter.call.result.resume(throwing: IMRPCAdmission.Refusal(reason: .messageCreditWaitTimeout))
+    }
+
+    private func dispatchCreditWaiters() {
+        while sendCredits > messageCreditReserve, let ticket = creditOrder.first,
+              let waiter = removeCreditWaiter(ticket) {
+            if waiter.expires <= .now() { expireCreditWaiter(waiter) }
+            else { submit(waiter.call, mayWait: false) }
+        }
+    }
+
+    private func failCreditWaiters(_ error: any Error) {
+        for waiter in creditWaiters.values {
+            waiter.timer.cancel(); waiter.call.result.resume(throwing: error)
+        }
+        creditWaiters.removeAll(); creditOrder.removeAll(); creditWaitBytes = 0
+    }
+
     private func cancel(_ id: UInt64, reason: IMActorError) {
         guard let call = pending.removeValue(forKey: id) else { return }
         call.continuation.resume(throwing: reason)
@@ -202,6 +311,7 @@ final class IMConnection: ChannelInboundHandler, @unchecked Sendable {
         guard !draining, executing.count < transport.configuration.maximumCallsPerConnection,
               bytes <= transport.configuration.maximumBytesPerConnection - executingBytes,
               transport.acquireExecution(bytes: reservation, lane: lane ?? .rpc) else {
+            transport.recordRejection(.receiverAdmission, lane: lane)
             try sendReply(.failure(.overloaded), id: frame.callID); try returnCredit(bytes: bytes); return
         }
         executingBytes += bytes
@@ -273,6 +383,7 @@ final class IMConnection: ChannelInboundHandler, @unchecked Sendable {
             guard !closed else { return }
             guard authenticated else { fail(IMActorError.shuttingDown); return }
             draining = true
+            failCreditWaiters(IMActorError.shuttingDown)
             if authenticated { do { try write(.init(kind: .drain), immediate: true) } catch { fail(error) } }
         }
     }
@@ -286,6 +397,7 @@ final class IMConnection: ChannelInboundHandler, @unchecked Sendable {
     }
     private func finish(_ error: any Error) {
         guard !closed else { return }; closed = true
+        failCreditWaiters(error)
         handshakeTimer?.cancel(); deadlineTimer?.cancel(); heartbeat?.cancel()
         if !authenticated { ready.fail(error) }
         let calls = pending.values; pending.removeAll(); deadlines = DeadlineHeap()

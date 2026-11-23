@@ -1,6 +1,7 @@
 import Foundation
 import IMV2ServerContracts
 import IMV2ActorContracts
+import Logging
 
 public struct V2RealtimeJournalPublisherSource: Sendable {
     public let id: String
@@ -44,6 +45,7 @@ public actor V2RealtimeJournalPublisher {
     }
     private let sources: [V2RealtimeJournalPublisherSource]
     private let apply: Apply
+    private let logger: Logger
     private let idlePollInterval: Duration
     private let monotonicNow: @Sendable () -> ContinuousClock.Instant
     private var activeWork: [Key: Task<Void, Never>] = [:]
@@ -63,6 +65,7 @@ public actor V2RealtimeJournalPublisher {
 
     public init(sources: [V2RealtimeJournalPublisherSource], idlePollInterval: Duration = .seconds(1),
                 monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
+                logger: Logger = Logger(label: "im.v2.realtime-journal"),
                 apply: @escaping Apply) throws {
         guard !sources.isEmpty, sources.count <= 256,
               Set(sources.map(\.id)).count == sources.count,
@@ -71,6 +74,7 @@ public actor V2RealtimeJournalPublisher {
             throw V2RealtimeJournalError.invalidInput
         }
         self.sources = sources; self.apply = apply; self.idlePollInterval = idlePollInterval; self.monotonicNow = monotonicNow
+        self.logger = logger
     }
 
     /// Actual source-local claims, not the routing candidates supplied by runtime.
@@ -159,7 +163,10 @@ public actor V2RealtimeJournalPublisher {
             do {
                 pending = Set(try await source.store.pendingPartitions(partitionIDs: Array(routed.keys), limit: 256))
             }
-            catch { continue }
+            catch {
+                Self.logFailure(error, stage: "journal_discover", logger: logger)
+                continue
+            }
             guard !isClosed else { break }
             let existing = states.filter { $0.key.sourceID == source.id && $0.value.deadline > monotonicNow() }
             if lastRenewal[source.id].map({ monotonicNow() - $0 >= .seconds(5) }) ?? true {
@@ -183,6 +190,7 @@ public actor V2RealtimeJournalPublisher {
                     }
                     lastRenewal[source.id] = renewalStarted
                 } catch {
+                    Self.logFailure(error, stage: "journal_renew", logger: logger)
                     for (key, stored) in existing {
                         guard var current = states[key], Self.sameGeneration(current.lease, stored.lease) else { continue }
                         current.deadline = monotonicNow()
@@ -223,7 +231,10 @@ public actor V2RealtimeJournalPublisher {
                         states[key] = State(lease: lease, deadline: claimStarted + .seconds(lease.remainingLeaseSeconds),
                                             checkpoint: checkpoint, needsReplay: true)
                     }
-                } catch { continue }
+                } catch {
+                    Self.logFailure(error, stage: "journal_claim", logger: logger)
+                    continue
+                }
             }
             for (key, state) in states where activeWork[key] == nil && state.deadline > monotonicNow() && key.sourceID == source.id && (state.needsReplay || pending.contains(key.partitionID)) {
                 candidates.append(Work(key: key, state: state, store: source.store))
@@ -236,9 +247,9 @@ public actor V2RealtimeJournalPublisher {
         let selected = count == 0 ? [] : (0..<min(capacity, count)).map { candidates[(rotation + $0) % count] }
         if count > 0 { rotation = (rotation + selected.count) % count }
         for work in selected {
-            let callback = apply, clock = monotonicNow
+            let callback = apply, clock = monotonicNow, log = logger
             activeWork[work.key] = Task {
-                let completion = await Self.perform(work, now: clock, apply: callback)
+                let completion = await Self.perform(work, now: clock, apply: callback, logger: log)
                 self.finish(completion)
             }
         }
@@ -287,17 +298,26 @@ public actor V2RealtimeJournalPublisher {
         }
     }
 
-    private static func perform(_ work: Work, now: @Sendable () -> ContinuousClock.Instant, apply: Apply) async -> Completion {
+    private static func logFailure(_ error: any Error, stage: String, logger: Logger) {
+        guard !(error is CancellationError), !Task.isCancelled else { return }
+        logger.warning("Realtime journal worker failed",
+            metadata: V2SafeLogMetadata.failure(error, stage: stage, worker: "realtime_journal"))
+    }
+
+    private static func perform(_ work: Work, now: @Sendable () -> ContinuousClock.Instant,
+                                apply: Apply, logger: Logger) async -> Completion {
         var checkpoint = work.state.checkpoint
         func checkLease() throws {
             try Task.checkCancellation()
-            guard now() < work.state.deadline else { throw V2RealtimeJournalError.invalidInput }
+            guard now() < work.state.deadline else { throw V2RealtimeJournalError.authorityLost }
         }
+        var stage = "journal_replay"
         do {
             try checkLease()
             let replay = try await work.store.replay(partitionID: work.key.partitionID, after: checkpoint, limit: 128)
             try checkLease()
             if replay.requiresSnapshot || !replay.entries.isEmpty {
+                stage = "journal_apply_replay"
                 let result = try await apply(work.key.sourceID, work.state.lease, replay)
                 try checkLease()
                 try validateApplied(result, work: work, batch: replay)
@@ -306,18 +326,21 @@ public actor V2RealtimeJournalPublisher {
             if checkpoint < replay.publishedThrough {
                 return Completion(work: work, checkpoint: checkpoint, needsReplay: true)
             }
+            stage = "journal_publish"
             try checkLease()
             let appended = try await work.store.publishPending(lease: work.state.lease, limit: 128)
             try checkLease()
             if !appended.entries.isEmpty || appended.requiresSnapshot {
+                stage = "journal_apply_published"
                 let result = try await apply(work.key.sourceID, work.state.lease, appended)
                 try checkLease()
                 try validateApplied(result, work: work, batch: appended)
                 checkpoint = appended.requiresSnapshot ? appended.publishedThrough : (appended.entries.last?.sequence ?? checkpoint)
             }
-                return Completion(work: work, checkpoint: checkpoint,
+            return Completion(work: work, checkpoint: checkpoint,
                 needsReplay: checkpoint < appended.publishedThrough)
         } catch {
+            logFailure(error, stage: stage, logger: logger)
             // Do not checkpoint partially applied batches or uncertain commits.
             // Retain a successfully completed earlier replay, if any.
             return Completion(work: work, checkpoint: checkpoint, needsReplay: true)

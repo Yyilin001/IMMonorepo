@@ -12,11 +12,11 @@ struct GatewayInfrastructure {
     let application: Application
     let databases: V2DatabaseWorkloadResources
 
-    static func start(configuration: V2GatewayRuntimeConfiguration, logger: Logger) async throws -> Self {
-        try configuration.requirePersistentMessageWritePool()
+    static func start(configuration: V2GatewayRuntimeConfiguration, ownsMessageWrites: Bool, logger: Logger) async throws -> Self {
+        if ownsMessageWrites { try configuration.requirePersistentMessageWritePool() }
         let databases = V2DatabaseWorkloadResources(
             controlEventLoopThreads: configuration.databaseNonMessagePoolEventLoopThreads,
-            messageEventLoopThreads: configuration.databasePolicy.eventLoopThreads,
+            messageEventLoopThreads: ownsMessageWrites ? configuration.databasePolicy.eventLoopThreads : nil,
             logger: logger)
         do {
             let application = try await V2HTTPService.makeApplication(

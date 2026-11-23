@@ -20,7 +20,7 @@ struct V2OSSSignerTests {
                 allocate: { _ in try storage.allocate() })
             let capabilities = try service.capabilities()
             #expect(capabilities.version == 2 && capabilities.backgroundTransfer)
-            #expect(capabilities.uploadModes == [.httpPut] && capabilities.maximumParts == 0)
+            #expect(Set(capabilities.uploadModes) == [.httpPut, .httpPartPut] && capabilities.maximumParts == 32)
             #expect(try JSONDecoder().decode(V2ResourceCapabilities.self, from: JSONEncoder().encode(capabilities)) == capabilities)
             let session = MediaUploadSessionID(uuid: UUID()), bytes: Int64 = 9 * 1_024 * 1_024
             let checksum = try V2ResourceChecksum(value: String(repeating: "a", count: 64)), now = Date()
@@ -35,7 +35,7 @@ struct V2OSSSignerTests {
             #expect(grant.sessionID == session && grant.generation == 2 && grant.mediaID == media)
             #expect(plan.url.query?.contains("x-oss-signature=") == true)
             await #expect(throws: V2ResourceProviderError.unsupportedCapability) {
-                try await transport.backgroundPlans(mode: .httpPartPut, mediaID: media,
+                try await transport.backgroundPlans(mode: .httpPut, mediaID: media,
                     contentType: "application/octet-stream", byteCount: bytes, checksum: checksum,
                     requestedParts: [1], sessionID: session, generation: 2, issuedAt: now, expiresAt: now.addingTimeInterval(300))
             }

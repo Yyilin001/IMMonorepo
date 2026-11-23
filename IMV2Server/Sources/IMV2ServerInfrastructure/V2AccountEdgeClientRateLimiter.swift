@@ -138,13 +138,13 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
     ///   ``V2AccountEdgeClientRateLimitError/unavailable``。
     @discardableResult
     public func purgeExpired(limit: Int) async throws -> Int {
-        guard limit > 0, let sql = database as? any SQLDatabase else {
+        guard limit > 0 else {
             throw V2AccountEdgeClientRateLimitError.unavailable
         }
         guard let expiredBefore = v2PostgresPastTimestamp(now: now(), interval: policy.window) else {
             throw V2AccountEdgeClientRateLimitError.unavailable
         }
-        let row = try await sql.raw("""
+        let statement: SQLQueryString = """
             WITH expired AS (
                 SELECT client_key
                 FROM im_v2.account_edge_client_rate_limits
@@ -159,8 +159,11 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
                 RETURNING 1
             )
             SELECT COUNT(*)::bigint AS value FROM deleted
-            """).first(decoding: RateLimitCountRow.self)
-        return Int(row?.value ?? 0)
+            """
+        return try await v2WithBoundedPostgresStatement(database: database, deadline: .now + .seconds(10)) { sql in
+            let row = try await sql.raw(statement).first(decoding: RateLimitCountRow.self)
+            return Int(row?.value ?? 0)
+        }
     }
 }
 

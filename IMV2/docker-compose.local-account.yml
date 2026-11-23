@@ -4,6 +4,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=512"]
     environment:
       POSTGRES_DB: im_v2
       POSTGRES_USER: im_v2
@@ -16,6 +17,7 @@ services:
       - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./sql/realtime-change-journal.sql:/docker-entrypoint-initdb.d/02-realtime-change-journal.sql:ro
+      - ./sql/local-fixed-shards.sql:/docker-entrypoint-initdb.d/03-local-fixed-shards.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
       interval: 1s
@@ -30,7 +32,7 @@ services:
     stop_grace_period: 45s
     environment:
       IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
-      IMV2_PLACEMENT_SHARD_IDS: rooms-primary
+      IMV2_PLACEMENT_SHARD_IDS: rooms-primary,rooms-01
     # Only the voting directory is writable; private identities stay read-only.
     volumes:
       - ./local-room-actors/placement-a:/run/im-v2-room-actor:ro
@@ -68,12 +70,14 @@ services:
     environment:
       IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
-      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-primary
-      IM_V2_GROUP_ROOM_SHARD_ID: rooms-primary
+      IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_rooms_primary","schema":"im_v2"},{"shard_id":"rooms-01","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_rooms_01","schema":"im_v2"}]'
+      IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_users_primary","schema":"im_v2"},{"bucket":"users-01","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_users_01","schema":"im_v2"}]'
+      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-primary,rooms-01
+      IM_V2_GROUP_ROOM_SHARD_ID: rooms-primary,rooms-01
       IM_V2_DATABASE_EVENT_LOOP_THREADS: 2
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 4
-      IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS: 16
-      IM_V2_MAX_USER_SHARD_STORES: 1
+      IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS: 128
+      IM_V2_MAX_USER_SHARD_STORES: 4
       IM_V2_DATABASE_CONNECT_TIMEOUT_MS: 5000
       IM_V2_DATABASE_POOL_TIMEOUT_MS: 3000
       IM_V2_DATABASE_STATEMENT_TIMEOUT_MS: 5000
@@ -102,8 +106,6 @@ services:
       # Explicit local-only filesystem substitute for an object store. The
       # signed targets still traverse Nginx over HTTPS, so the iOS upload and
       # download path exercises the same client boundary as production.
-      IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
-      IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
       IM_V2_LOCAL_MEDIA_MODE: filesystem
       IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY: "1"
       IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY: /var/lib/im-v2-local-media
@@ -157,10 +159,13 @@ services:
       IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL: https://localhost:8443
       IM_V2_LOCAL_MEDIA_MAXIMUM_BYTES: 52428800
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
+      IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_rooms_primary","schema":"im_v2"},{"shard_id":"rooms-01","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_rooms_01","schema":"im_v2"}]'
+      IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_users_primary","schema":"im_v2"},{"bucket":"users-01","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_users_01","schema":"im_v2"}]'
       # Message writes use 4 dedicated EventLoops with 2 connections each.
       # Other workload connection budgets stay unchanged.
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 9
       IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP: 2
+      IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT: ${IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT:-1}
       IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP: 2
       IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP: 1
       IM_V2_DATABASE_DELIVERY_CONNECTIONS_PER_EVENT_LOOP: 1
@@ -242,8 +247,8 @@ services:
       IM_V2_GATEWAY_REPLICA_COUNT: "1"
       IM_V2_USER_SHARD_BUCKET: users-primary
       IM_V2_USER_SHARD_ROUTER_EPOCH: 1
-      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-primary
-      IM_V2_GROUP_ROOM_SHARD_ID: rooms-primary
+      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-primary,rooms-01
+      IM_V2_GROUP_ROOM_SHARD_ID: rooms-primary,rooms-01
       IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 3
       IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS: 86400
       IM_V2_CONTENT_REVIEW_MODE: disabled
@@ -294,9 +299,11 @@ services:
     environment:
       IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
+      IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_rooms_primary","schema":"im_v2"},{"shard_id":"rooms-01","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_rooms_01","schema":"im_v2"}]'
+      IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_users_primary","schema":"im_v2"},{"bucket":"users-01","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/imv2_users_01","schema":"im_v2"}]'
       IM_V2_DATABASE_EVENT_LOOP_THREADS: 2
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 4
-      IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS: 32
+      IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS: 128
       IM_V2_MAX_USER_SHARD_STORES: 16
       IM_V2_DATABASE_CONNECT_TIMEOUT_MS: 5000
       IM_V2_DATABASE_POOL_TIMEOUT_MS: 3000
@@ -308,8 +315,6 @@ services:
       IM_V2_OPERATOR_REPLAY_PRINCIPAL: local-operator-replay
       IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL: local-account-safety
       IM_V2_CAPABILITY_PROFILE: base
-      IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
-      IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
     volumes:
       - ./local-room-actors/operator:/run/im-v2-room-actor:ro
     depends_on:

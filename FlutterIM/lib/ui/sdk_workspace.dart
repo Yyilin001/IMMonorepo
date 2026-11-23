@@ -583,6 +583,12 @@ String _errorText(Object error) {
     'identityUnavailable' => '未找到该公开账号',
     'previewUnavailable' => '图片预览已失效，请重新查看',
     'storageUnavailable' => '本地存储暂不可用',
+    'credentialsUnavailable' => '暂时无法读取本地凭据，请稍后重试',
+    'credentialIssueRecoveryPending' => '凭据签发结果正在确认，请稍后重试',
+    'localStoreCloseFailed' => '本地会话暂时无法关闭，请重试',
+    'malformedCredentials' => '本地凭据格式异常',
+    'deviceMismatch' => '设备身份与当前会话不匹配',
+    'sessionInvalidated' => '会话已变更，请刷新后重试',
     'busy' => '当前会话正忙，请重试',
     _ =>
       error is FormatException ||

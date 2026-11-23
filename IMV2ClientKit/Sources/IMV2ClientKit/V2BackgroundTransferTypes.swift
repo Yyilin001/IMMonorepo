@@ -47,6 +47,7 @@ public protocol V2BackgroundSessionDriving: V2BackgroundTaskSessionDriving {
 }
 public protocol V2BackgroundDownloadSessionDriving: V2BackgroundTaskSessionDriving {
     /// Only an explicit provider delegation permits the OS to persist this request.
+    /// The driver must enforce `target.networkConstraints` or reject the task.
     func create(target: V2ClientMediaTransferTarget, mappingID: UUID) async throws -> Int
 }
 public struct V2BackgroundTaskMapping: Sendable, Equatable {

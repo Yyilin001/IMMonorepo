@@ -139,7 +139,7 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
               maximumActiveInvitesPerRoom > 0,
               let expiresAt = v2PostgresFutureTimestamp(now: now, interval: lease)
         else { throw V2GroupInviteDirectoryError.invalidRequest }
-        return try await database.transaction { transaction in
+        return try await v2WithRoomActivationTransaction(database: database, deadline: .now + .seconds(10)) { transaction in
             let sql = try directorySQL(transaction)
             var result: [V2GroupInviteCreationRecoveryClaim] = []
             // 每个分支使用各自按到期时间建立的部分索引。先回收失活进程；
@@ -187,16 +187,17 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
         guard v2PostgresTimestampCanEncode(now), retryAt.map({ v2PostgresTimestampPrecedes(now, $0) }) ?? true,
               let actor = claim.intent.request.actorUserID.uuidValue, let operation = claim.intent.request.operationID.uuidValue
         else { throw V2GroupInviteDirectoryError.invalidRequest }
-        let sql = try directorySQL(database)
-        let row = try await sql.raw("""
+        let statement: SQLQueryString = """
             UPDATE im_v2.group_invite_creation_recovery
             SET state = \(bind: retryAt == nil ? "paused" : "pending"), claim_token = NULL, lease_expires_at = NULL,
                 last_error_code = \(bind: reason.rawValue), next_attempt_at = \(bind: retryAt ?? now), updated_at = \(bind: now)
             WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation)
               AND state = 'claimed' AND claim_token = \(bind: claim.claimToken) AND lease_expires_at > \(bind: now)
             RETURNING actor_user_id
-            """).first()
-        return row != nil
+            """
+        return try await v2WithBoundedPostgresStatement(database: database, deadline: .now + .seconds(10)) { sql in
+            try await sql.raw(statement).first() != nil
+        }
     }
 
     /// 筛选出某一房间中已就绪的邀请。

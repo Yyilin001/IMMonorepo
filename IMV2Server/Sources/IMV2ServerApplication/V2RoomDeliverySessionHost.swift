@@ -1,6 +1,7 @@
 import Foundation
 import IMV2Core
 import IMV2ActorContracts
+import IMV2ServerContracts
 import Synchronization
 import Logging
 
@@ -73,7 +74,10 @@ public actor V2RoomDeliverySessionHost {
                 throw V2RoomCallFailure.notAccepted(.invalidRequest)
             }
         }
-        guard !closed, send != nil, let hostReady, await hostReady() else { throw V2RoomCallFailure.notAccepted(.notReady) }
+        guard !closed, send != nil, let hostReady, await hostReady() else {
+            V2RoomSubscriptionOwnerFailureMetrics.shared.record(.deliverySessionHostNotReady)
+            throw V2RoomCallFailure.notAccepted(.notReady)
+        }
         guard !closed else { throw V2RoomCallFailure.notAccepted(.retired) }
         let key = Key(host: activation.host, gateway: gateway.identity)
         // Native reachability can fail on only one side. A signed recovery
@@ -105,12 +109,14 @@ public actor V2RoomDeliverySessionHost {
         let task = Task {
             do {
                 guard try await send(.init(session: session, kind: .open, sequence: 1), shard, descriptor) == .accepted else {
+                    V2RoomSubscriptionOwnerFailureMetrics.shared.record(.deliverySessionOpenRefused)
                     throw V2RoomCallFailure.notAccepted(.unavailable)
                 }
                 guard !closed, entries[key]?.session == session, entries[key]?.invalidated == false else { throw V2RoomCallFailure.notAccepted(.retired) }
                 control.opened(); entries[key]?.ready = true; openings.removeValue(forKey: key)
                 return session
             } catch {
+                V2RoomSubscriptionOwnerFailureMetrics.shared.record(.deliverySessionOpenFailed)
                 if entries[key]?.session == session { entries[key]?.ready = false; openings.removeValue(forKey: key) }
                 throw error
             }
@@ -118,6 +124,12 @@ public actor V2RoomDeliverySessionHost {
         openings[key] = task
         return task
     }
+    package func hasLiveSubscription(for activation: V2RoomActivationToken) -> Bool {
+        entries.contains { key, entry in
+            key.host == activation.host && entry.ready && !entry.invalidated && entry.control.hasLiveGrant(activation)
+        }
+    }
+
     public func release(activation: V2RoomActivationToken, gateway: V2GatewayRealtimeIdentity) async {
         let key = Key(host: activation.host, gateway: gateway)
         guard let entry = entries[key] else { return }
@@ -286,6 +298,13 @@ private final class V2RoomDeliveryControlProgress: Sendable {
     init(now: @escaping @Sendable () -> ContinuousClock.Instant) { self.now = now }
     var hasRooms: Bool { state.withLock { !$0.rooms.isEmpty } }
     func retain(_ token: V2RoomActivationToken) { state.withLock { $0.rooms.insert(token) } }
+    func hasLiveGrant(_ token: V2RoomActivationToken) -> Bool {
+        state.withLock { value in
+            guard !value.invalidated, let current = value.latest[token] else { return false }
+            return current.transmissionStarted && !current.invalidated && !current.isUnreferenced
+                && !value.ignoredFences.contains(current.fence)
+        }
+    }
     func release(_ token: V2RoomActivationToken) -> Bool {
         state.withLock { value in
             let previous = value.latest[token]

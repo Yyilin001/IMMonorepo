@@ -111,29 +111,44 @@ public actor V2RoomSubscriptionOwner {
         try enter(token: token, deadline: deadline); defer { leave() }
         guard batch.activation == activation else { throw V2RoomSubscriptionOwnerError.stale }
         var cursor = await relay.committedSequence()
-        let head = max(batch.dirtyHighWatermark ?? cursor, batch.messages.map(\.roomSequence).max() ?? cursor)
-        guard batch.messages.count <= 64 else { throw V2RoomSubscriptionOwnerError.overloaded }
-        var records: [V2RoomSubscriptionSourceRecord] = []
-        for message in batch.messages {
-            guard message.roomID == roomID else { throw V2RoomSubscriptionOwnerError.stale }
-            if message.roomSequence <= cursor { continue }
-            guard message.roomSequence == cursor + 1, let eventID = message.sourceEventID,
-                  let revision = message.acceptedMembershipRevision, revision <= UInt64(Int64.max),
-                  message.media.isEmpty, message.mediaPresentations.isEmpty, message.mentions.isEmpty,
-                  message.entities.isEmpty, message.replyTo == nil,
-                  let bytes = V2DirectRoomLogPayloadCodec.encode(message) else { break }
-            let hasBody = bytes.count <= 262_144
-            records.append(.init(event: .init(roomID: roomID, highWatermark: head, sourceEventID: eventID,
-                roomSequence: message.roomSequence, projectionKind: "message", payload: hasBody ? bytes : Data(),
-                recipientUserIDs: [], groupMembershipRevision: revision, acceptedMembershipRevision: revision),
-                hasOnlineBody: hasBody, membershipControl: nil, recipientPolicy: .currentAuthorized))
-            cursor = message.roomSequence
+        let head = max(batch.dirtyHighWatermark ?? cursor, batch.facts.map(\.roomSequence).max() ?? cursor)
+        guard batch.facts.count <= 64 else { throw V2RoomSubscriptionOwnerError.overloaded }
+        var prefix: [(header: V2CommittedRoomMessageHeader, body: Data?)] = []
+        prefix.reserveCapacity(batch.facts.count)
+        consumeFacts: for fact in batch.facts {
+            guard fact.roomID == roomID else { throw V2RoomSubscriptionOwnerError.stale }
+            if fact.roomSequence <= cursor { continue }
+            guard fact.roomSequence == cursor + 1 else { break }
+            let header: V2CommittedRoomMessageHeader
+            let body: Data?
+            switch fact {
+            case .body(let message):
+                guard let metadata = V2CommittedRoomMessageHeader(message),
+                      let encoded = V2DirectRoomLogPayloadCodec.encode(message) else { break consumeFacts }
+                header = metadata
+                body = encoded.count <= 262_144 ? encoded : nil
+            case .header(let metadata):
+                header = metadata
+                body = nil
+            }
+            prefix.append((header, body))
+            cursor = header.roomSequence
         }
         do {
             try checkDeadline()
             let before = await relay.committedSequence()
-            if !records.isEmpty {
-                try await relay.ingest(.init(roomID: roomID, owner: owner, afterRoomSequence: before, highWatermark: head, records: records))
+            if !prefix.isEmpty {
+                // A gap can leave later facts beyond a membership change.
+                // Only advertise the prefix whose records the Relay validates.
+                let records = prefix.map { item in
+                    V2RoomSubscriptionSourceRecord(event: .init(roomID: roomID, highWatermark: cursor,
+                        sourceEventID: item.header.sourceEventID, roomSequence: item.header.roomSequence,
+                        projectionKind: "message", payload: item.body ?? Data(), recipientUserIDs: [],
+                        groupMembershipRevision: item.header.membershipRevision,
+                        acceptedMembershipRevision: item.header.membershipRevision),
+                        hasOnlineBody: item.body != nil, membershipControl: nil, recipientPolicy: .currentAuthorized)
+                }
+                try await relay.ingest(.init(roomID: roomID, owner: owner, afterRoomSequence: before, highWatermark: cursor, records: records))
                 changed = true
             }
             return .init(consumedThrough: await relay.committedSequence(), observedHighWatermark: head)
@@ -418,11 +433,15 @@ public actor V2RoomSubscriptionOwner {
         if busy || activePermissionOperations > 0 { await withCheckedContinuation { closeWaiters.append($0) } }
         let targets = Set(deliveryBindings.keys)
         var acknowledged = false
-        do {
-            try await relay.prepareRetirement(gateways: targets)
-            for (gateway, pump) in deliveryBindings { await pump.signal(.init(roomID: roomID, gateway: gateway)) }
-            acknowledged = await relay.awaitRetirement(gateways: targets, deadline: deadline)
-        } catch { }
+        // Once the shared receipt budget expires, invalidate outstanding grants
+        // without issuing new terminal RPCs. Existing calls are still joined below.
+        if deadline > .now {
+            do {
+                try await relay.prepareRetirement(gateways: targets)
+                for (gateway, pump) in deliveryBindings { await pump.signal(.init(roomID: roomID, gateway: gateway)) }
+                acknowledged = await relay.awaitRetirement(gateways: targets, deadline: deadline)
+            } catch { }
+        }
         // Unreachable or failed peers retain the shared-session fail-closed
         // path. Healthy retirement affects only this room's authorization.
         if !acknowledged { await relay.invalidate() }

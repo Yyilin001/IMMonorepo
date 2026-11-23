@@ -271,7 +271,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         now: Date
     ) async throws -> V2LivePresenceLeaseRefresh {
         _ = try validatedLeaseExpiry(now: now)
-        return try await admissionDatabase.transaction { transaction in
+        return try await v2WithRoomActivationTransaction(database: admissionDatabase, deadline: .now + .seconds(5)) { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2LiveActivityStoreError.corruptPersistenceState
             }
@@ -377,7 +377,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         let users = try ordered.map { try v2PersistenceUUID($0.identity.userID, invalid: V2LiveActivityStoreError.corruptPersistenceState) }
         let devices = try ordered.map { try v2PersistenceUUID($0.identity.deviceID, invalid: V2LiveActivityStoreError.corruptPersistenceState) }
         let ids = ordered.map(\.connectionID)
-        let refreshed = try await renewalDatabase.transaction { transaction in
+        let refreshed = try await v2WithRoomActivationTransaction(database: renewalDatabase, deadline: .now + .seconds(5)) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
             // Fully consume sorted locks before a new statement samples time.
             // Missing rows are rejected, never recreated by a heartbeat.
@@ -432,7 +432,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     /// - Throws: 时间戳无法编码或持久化失败时抛出。
     public func setPresencePublication(identity: V2AuthenticatedConnection, connectionID: UUID,
         suppressed: Bool, now: Date) async throws -> V2PresencePublicationLeaseObservation {
-        try await database.transaction { tx in
+        try await v2WithRoomActivationTransaction(database: database, deadline: .now + .seconds(5)) { tx in
             guard let sql=tx as? any SQLDatabase,v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
             let user=try v2PersistenceUUID(identity.userID, invalid: V2LiveActivityStoreError.corruptPersistenceState);let device=try v2PersistenceUUID(identity.deviceID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             try await lockConnectionIdentity(user:user,device:device,sql:sql)
@@ -449,7 +449,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         now: Date
     ) async throws -> Bool {
         guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
-        return try await database.transaction { transaction in
+        return try await v2WithRoomActivationTransaction(database: database, deadline: .now + .seconds(5)) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
             let user = try v2PersistenceUUID(identity.userID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             let device = try v2PersistenceUUID(identity.deviceID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
@@ -472,6 +472,53 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
                       AND expires_at > \(bind: now)
                 ) AS exists
                 """).first(decoding: LiveActivityBooleanRow.self)?.exists ?? false
+        }
+    }
+
+    public func removePresenceBatch(_ requests: [V2LivePresenceLeaseRemovalRequest], now: Date) async throws -> [UUID: Bool] {
+        guard requests.count <= 256, v2PostgresTimestampCanEncode(now) else {
+            throw V2LiveActivityStoreError.corruptPersistenceState
+        }
+        guard let first = requests.first else { return [:] }
+        if requests.count == 1 {
+            let online = try await removePresence(identity: first.identity, connectionID: first.connectionID, now: now)
+            return [first.connectionID: online]
+        }
+        let ids = requests.map(\.connectionID)
+        guard Set(ids).count == ids.count else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        let users = try requests.map { try v2PersistenceUUID($0.identity.userID, invalid: V2LiveActivityStoreError.corruptPersistenceState) }
+        let devices = try requests.map { try v2PersistenceUUID($0.identity.deviceID, invalid: V2LiveActivityStoreError.corruptPersistenceState) }
+        return try await v2WithRoomActivationTransaction(database: database, deadline: .now + .seconds(5)) { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            // Follow the same user-before-device order as admission. Lock rows in
+            // the order used by batched renewal before deleting from the table.
+            try await sql.raw("""
+                SELECT pg_advisory_xact_lock(hashtextextended('v2-live-user:' || id::text, 0))
+                FROM (SELECT DISTINCT id FROM unnest(\(bind: users)::uuid[]) AS input(id) ORDER BY id OFFSET 0) AS ordered
+                """).run()
+            try await sql.raw("""
+                SELECT pg_advisory_xact_lock(hashtextextended('v2-live-device:' || id::text, 0))
+                FROM (SELECT DISTINCT id FROM unnest(\(bind: devices)::uuid[]) AS input(id) ORDER BY id OFFSET 0) AS ordered
+                """).run()
+            _ = try await sql.raw("""
+                SELECT connection_id FROM im_v2.user_live_presence_leases
+                WHERE connection_id = ANY(\(bind: ids)::uuid[]) ORDER BY connection_id FOR UPDATE
+                """).all(decoding: LiveActivityConnectionIDRow.self)
+            try await sql.raw("""
+                DELETE FROM im_v2.user_live_presence_leases AS lease
+                USING unnest(\(bind: ids)::uuid[], \(bind: users)::uuid[], \(bind: devices)::uuid[])
+                    AS requested(connection_id, user_id, device_id)
+                WHERE lease.connection_id = requested.connection_id AND lease.user_id = requested.user_id
+                    AND lease.device_id = requested.device_id
+                """).run()
+            // A separate statement sees the completed deletes for every user in this batch.
+            let online = try await sql.raw("""
+                SELECT DISTINCT user_id FROM im_v2.user_live_presence_leases
+                WHERE user_id = ANY(\(bind: users)::uuid[])
+                    AND NOT publication_suppressed AND expires_at > \(bind: now)
+                """).all(decoding: LiveActivityUserRow.self)
+            let onlineUsers = Set(online.map(\.userID))
+            return Dictionary(uniqueKeysWithValues: zip(ids, users).map { ($0, onlineUsers.contains($1)) })
         }
     }
 

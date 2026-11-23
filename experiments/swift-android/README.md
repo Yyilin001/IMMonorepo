@@ -6,7 +6,7 @@
 
 ## 固定环境
 
-- 开源 Swift 工具链和 Android Swift SDK：6.4.1，不能用 Xcode 自带 Swift 替代。
+- 开源 Swift 工具链和 Android Swift SDK：6.4.2，不能用 Xcode 自带 Swift 替代。
 - Android NDK：30.0.16248370；目标为 `aarch64-unknown-linux-android31`。
 - Android App：minSdk 31，compileSdk/targetSdk 36；沿用仓库 Gradle、AGP 和 Kotlin。
 - GRDB 7.11.1、swift-crypto 3.15.1、swift-protobuf 1.38.1；传递依赖由 `Package.resolved` 固定。
@@ -15,13 +15,13 @@
 
 ## 执行
 
-已有对应工具链时不要重复安装。所有构建通过 `swiftly run ... +6.4.1` 选择工具链，不修改全局 Swift 选择。
+已有对应工具链时不要重复安装。所有构建通过 `swiftly run ... +6.4.2` 选择工具链，不修改全局 Swift 选择。
 
 ```sh
-swiftly install 6.4.1
+swiftly install 6.4.2
 swiftly run swift sdk install \
-  https://download.swift.org/swift-6.4.1-release/android-sdk/swift-6.4.1-RELEASE/swift-6.4.1-RELEASE_android.artifactbundle.tar.gz \
-  --checksum a356b79f8f1daa6ae3a66f4c556966ca20c0208b3659805cf30a83a0a31d6772 +6.4.1
+  https://download.swift.org/swift-6.4.2-release/android-sdk/swift-6.4.2-RELEASE/swift-6.4.2-RELEASE_android.artifactbundle.tar.gz \
+  --checksum 4d6ad63ea74becd58e123ff58b1b48c3be5ec0db0dff0ea5abe37ac007dd3233 +6.4.2
 
 # 用已安装的 Android CLI，或 Android Studio SDK Manager 安装指定 NDK。
 "$ANDROID_HOME/cmdline-tools/23.0/bin/android" sdk install ndk/30.0.16248370

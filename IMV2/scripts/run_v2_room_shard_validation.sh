@@ -37,7 +37,7 @@ done
 
 # Build the three local Swift binaries and bootstrap the control-plane schema.
 # The base helper neither removes a volume nor alters a remote environment.
-V2_LOCAL_COMPOSE_PROJECT="${project}" "${script_dir}/run_v2_local_account_stack.sh"
+V2_LOCAL_ACTOR_CLUSTER=1 V2_LOCAL_COMPOSE_PROJECT="${project}" "${script_dir}/run_v2_local_account_stack.sh"
 compose up -d --wait --force-recreate postgres-room-00 postgres-room-01 postgres-user-projection account nginx
 # Retained source volumes receive the repeatable extension before gateway boot.
 for journal_source_service in postgres-room-00 postgres-room-01 postgres-user-projection; do

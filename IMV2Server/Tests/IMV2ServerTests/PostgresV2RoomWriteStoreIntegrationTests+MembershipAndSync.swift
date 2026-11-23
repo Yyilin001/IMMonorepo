@@ -1193,7 +1193,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await installSchema(on: sql); try await seedRoom(on: sql)
             let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(.psql),
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(receiptControlPool),
                 store: PostgresV2RoomWriteStore(database: resources.database(.psql)), shardID: "room-a", epoch: 0), capacityProfile: try .init(id: "standard", limits: profile), limits: try .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "read me")) else { Issue.record("expected accepted message"); return }
             let receipt = PostgresV2ReadReceiptStore(database: resources.database(.psql))

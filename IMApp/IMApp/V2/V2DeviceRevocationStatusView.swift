@@ -10,6 +10,8 @@ enum V2DeviceRevocationPresentation: Equatable {
     case pending
     /// 确认流程已暂停。
     case paused
+    /// 服务端已拒绝此前会话的撤销凭据。
+    case credentialRejected
     /// 暂时无法读取退出任务。
     case unavailable
     /// 正在重试确认。
@@ -41,7 +43,7 @@ struct V2DeviceRevocationStatusView: View {
                     heading
                     explanation
                 }
-                if state == .paused || state == .unavailable || state == .retrying {
+                if state == .paused || state == .credentialRejected || state == .unavailable || state == .retrying {
                     Button {
                         guard retryTask == nil else { return }
                         retryTask = Task { await retry(); retryTask = nil }
@@ -79,7 +81,8 @@ struct V2DeviceRevocationStatusView: View {
     private var title: LocalizedStringKey {
         switch state {
         case .hidden, .pending: "退出等待确认"
-        case .paused: "退出确认已暂停"
+        case .paused: "上次退出仍待确认"
+        case .credentialRejected: "上次退出凭据已被拒绝"
         case .unavailable: "暂时无法读取退出任务"
         case .retrying: "正在重试退出确认"
         }
@@ -88,7 +91,8 @@ struct V2DeviceRevocationStatusView: View {
     private var message: LocalizedStringKey {
         switch state {
         case .hidden, .pending: "此前的设备退出尚未得到服务器确认。应用打开并联网时会自动重试。"
-        case .paused: "此前的设备退出尚未得到服务器确认。请稍后重试。"
+        case .paused: "你可以继续登录。服务器尚未确认此前的设备退出，可在此重试。"
+        case .credentialRejected: "你可以继续登录。如需核对此前的会话，请登录原账号，在「我的 → 登录设备」中查看并退出旧设备。"
         case .unavailable: "请解锁设备后重试。已保存的退出任务会继续保留。"
         case .retrying: "正在恢复此前的退出任务。"
         }

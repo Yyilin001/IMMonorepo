@@ -593,6 +593,7 @@ public actor V2RealtimeClusterSender {
         let call = JournalProjectionCall(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation,
             recipient: target.identity, sessionID: session.id, sequence: session.sequence, attemptID: UUID(), batch: batch)
         let packet = try session.mac.seal(call, reply: false, maximumBytes: limits.maximumPacketBytes)
+        let result: V2RealtimeJournalProjectionResult
         do {
             let endpoint = session.endpoint
             let response = try await IMRemoteCall.with(timeout: limits.callTimeout) { try await endpoint.projectJournal(packet) }
@@ -601,8 +602,7 @@ public actor V2RealtimeClusterSender {
             try validatePeer(peer, target: target)
             guard reply.recipient == target.identity, reply.sessionID == call.sessionID,
                   reply.sequence == call.sequence, reply.attemptID == call.attemptID else { throw V2ActorAuthenticationError.wrongRecipient }
-            try validateJournalProjectionReceipt(reply.result, batch: batch)
-            return reply.result
+            result = reply.result
         } catch {
             if let auth = error as? V2ActorAuthenticationError,
                auth == .sessionExpired || auth == .wrongRecipient, sessions[target]?.id == session.id {
@@ -610,6 +610,10 @@ public actor V2RealtimeClusterSender {
             }
             throw error
         }
+        // A rejected journal receipt must not discard the authenticated
+        // transport session shared with room subscriptions.
+        try validateJournalProjectionReceipt(result, batch: batch)
+        return result
     }
     public func sendRoomSubscription(_ delivery: V2RoomSubscriptionDelivery, sourceShardID: String,
                                      to target: V2GatewayRealtimeDescriptor) async throws -> V2RoomSubscriptionDeliveryResult {

@@ -45,7 +45,9 @@ struct V2BackgroundSessionDirectoryTests {
         let text = try String(contentsOf: f.route(id), encoding: .utf8)
         #expect(!text.contains("private message") && !text.contains("auth token") && !text.contains("https://") && !text.contains("V2.sqlite"))
         #expect(!text.contains(f.root.path))
+        #if canImport(Darwin)
         #expect(try f.route(id).resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        #endif
     }
 
     @Test func removingOneKindDoesNotDisableTheOtherAndCloseIsIdempotent() throws {

@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "host": "macOS arm64 native Swift with IMV2SharedApple",
+  "backend": "isolated PostgreSQL + HTTPS account/edge + native TLS gateway",
+  "test": "nativeProfilesAvatarsAndResourcesUseRealBackend",
+  "checks": [
+    "own profile display name",
+    "contact alias",
+    "independent presentation windows",
+    "own avatar upload and authorized peer bytes",
+    "retired avatar grant rejected",
+    "group avatar upload and peer display",
+    "file send and byte-identical download",
+    "retained profile/resource handles rejected after sign out"
+  ],
+  "sourceLogSHA256": "703615c054c761c2f5a89f04c4edf970c284eb282b0ad4b4a72e34e12fb8cb08"
+}

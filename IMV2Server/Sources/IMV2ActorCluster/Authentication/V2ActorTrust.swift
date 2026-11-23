@@ -104,6 +104,20 @@ public struct V2ActorTrustStore: Sendable {
             throw V2ActorAuthenticationError.invalidRequest
         }
         let additions = try authorization.services.map { try $0.trustedService() }
+        try addServices(additions)
+    }
+
+    package func admitConfiguredGateways(_ gateways: [V2ActorTrustedService]) throws {
+        let permissions: Set<V2ActorServicePermission> = [.userRoomCalls, .roomCoordination,
+            .realtimeReceive, .realtimePublish, .policyMutation]
+        guard gateways.allSatisfy({ $0.permissions == permissions && $0.hostedIDs.isEmpty
+            && $0.gatewayNodeIDs == [$0.serviceID.rawValue] }) else {
+            throw V2ActorAuthenticationError.forbidden
+        }
+        try addServices(gateways)
+    }
+
+    private func addServices(_ additions: [V2ActorTrustedService]) throws {
         try state.entries.withLock { installed in
             var next = installed.services
             var admitted = installed.admitted

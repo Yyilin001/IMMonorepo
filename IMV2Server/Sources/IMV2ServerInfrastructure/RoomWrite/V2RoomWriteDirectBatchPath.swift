@@ -7,6 +7,7 @@ import SQLKit
 /// Prepares a locked direct-room append and writes policy, messages, then
 /// projections on the connection borrowed from the Store transaction.
 struct V2RoomWriteDirectBatchPath: Sendable {
+    var profileDatabase: (any SQLDatabase)? = nil
     let strangerMessagePolicy: V2StrangerMessagePolicy
 
     /// 在所有受影响的房间、成员、单聊配对与策略行都已完成预检加锁之后，
@@ -81,7 +82,7 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         do {
             projectionChanges = try await v2MeasureSendOperationStage(.ownerProjection, metrics: sendOperationMetrics) {
                 try await V2RoomWriteDirectProjectionPath.appendBatch(
-                    for: prepared,
+                    for: prepared, profileDatabase: profileDatabase,
                     sql: sql
                 )
             }
@@ -108,30 +109,14 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         }
     }
 
-    func completeSingleStatement(_ prepared: [PreparedDirectRoomLogAppend],
-        connection: V2BorrowedRoomConnection, combinedWrite: V2DurableOwnerCombinedWrite,
+    static func persistSingleStatement(_ prepared: [PreparedDirectRoomLogAppend],
+        connection: V2BorrowedRoomConnection, receipts: [V2DurableSendBatchPermanentReceipt],
         metrics: V2SendOperationBatchMetrics?
-    ) async throws -> [OrderedRoomWriteCommit] {
-        guard Self.supportsSingleStatement(prepared) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        var commits: [OrderedRoomWriteCommit] = []
-        var inputs: [PlainRoomLogMessageInput] = []
-        var receipts: [V2DurableSendBatchPermanentReceipt] = []
-        commits.reserveCapacity(prepared.count)
-        inputs.reserveCapacity(prepared.count)
-        receipts.reserveCapacity(prepared.count)
-        for append in prepared {
-            // Eligibility excludes policy/projection changes. Build only the
-            // ordered result and the two arrays required by persistence.
-            commits.append(.init(originalIndex: append.originalIndex, cacheKey: append.cacheKey,
-                commit: .init(outcome: append.commit.outcome, directPolicyCacheUpdate: nil,
-                    reciprocalDirectReplyCacheUpdate: nil)))
-            inputs.append(append.input.withOrdinal(inputs.count))
-            receipts.append(try combinedWrite.receipt(for: append))
-        }
-        try await Self.persistMessages(inputs: inputs,
-            sql: connection.sql, operationReceipts: receipts,
+    ) async throws {
+        guard supportsSingleStatement(prepared) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let inputs = prepared.enumerated().map { $1.input.withOrdinal($0) }
+        try await persistMessages(inputs: inputs, sql: connection.sql, operationReceipts: receipts,
             prevalidatedDirectMemberships: true, implicitConnection: connection, metrics: metrics)
-        return commits
     }
 
     private func makeCommits(_ prepared: [PreparedDirectRoomLogAppend],
@@ -262,6 +247,7 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         operationReceipts: [V2DurableSendBatchPermanentReceipt]? = nil,
         prevalidatedDirectMemberships: Bool = false,
         implicitConnection: V2BorrowedRoomConnection? = nil,
+        ownerScope: V2RoomActivationWriteScope? = nil,
         metrics: V2SendOperationBatchMetrics? = nil
     ) async throws {
         guard !inputs.isEmpty,
@@ -273,7 +259,7 @@ struct V2RoomWriteDirectBatchPath: Sendable {
             try await assertDirectMemberships(roomIDs: inputs.map(\.roomID), sql: sql)
         }
         try await PlainDirectRoomLogBatchWritePath.persist(inputs: inputs, sql: sql, operationReceipts: operationReceipts,
-            implicitConnection: implicitConnection, metrics: metrics)
+            implicitConnection: implicitConnection, ownerScope: ownerScope, metrics: metrics)
     }
 
 }

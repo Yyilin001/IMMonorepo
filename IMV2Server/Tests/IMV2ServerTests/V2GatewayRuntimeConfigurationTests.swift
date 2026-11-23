@@ -1028,6 +1028,20 @@ struct V2GatewayRuntimeConfigurationTests {
     func messagePipelineConfiguration() throws {
         let defaults = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(runtimeValues))
         #expect(defaults.messageWritePipelineDepth == 2)
+        #expect(defaults.durableSendSchedulingConfiguration().maximumCrossRoomMessages == 1)
+        for limit in 1...16 {
+            var values = runtimeValues
+            values["IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT"] = String(limit)
+            let config = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+            #expect(config.durableSendSchedulingConfiguration().maximumCrossRoomMessages == limit)
+        }
+        for raw in ["0", "17", "invalid"] {
+            var values = runtimeValues
+            values["IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT"] = raw
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT")) {
+                _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+            }
+        }
         #expect(defaults.messageWriteUnixSockets.isEmpty)
         for depth in [1, 2] {
             var values = runtimeValues
