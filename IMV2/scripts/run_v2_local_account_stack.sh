@@ -7,6 +7,12 @@ repo_root="$(cd "${v2_dir}/.." && pwd)"
 compose_file="${v2_dir}/docker-compose.local-account.yml"
 env_file="${v2_dir}/.env.local"
 compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
+core_compose_file="${v2_dir}/docker-compose.local-account-core.yml"
+cluster_mode="${V2_LOCAL_ACTOR_CLUSTER:-0}"
+compose_arguments=(--file "${compose_file}")
+if [[ "${cluster_mode}" != 1 ]]; then
+  compose_arguments+=(--file "${core_compose_file}")
+fi
 local_account_build_stage_label="com.imv2.local-account-build-stage=true"
 
 # Keep `.env.local` authoritative even when the invoking terminal exported an
@@ -16,7 +22,7 @@ source "${script_dir}/local_compose.sh"
 source "${script_dir}/local_admission_pool.sh"
 
 compose() {
-  v2_local_compose "${env_file}" --project-name "${compose_project}" --file "${compose_file}" "$@"
+  v2_local_compose "${env_file}" --project-name "${compose_project}" "${compose_arguments[@]}" "$@"
 }
 
 require_command() {
@@ -84,18 +90,28 @@ fi
 # Room Actor transport has a separate private CA and stable process signing
 # identities. Existing identities are retained across ordinary local restarts.
 actor_configuration_directory="${v2_dir}/local-room-actors"
+if [[ "${cluster_mode}" == 1 ]]; then
+  actor_topology=(
+    --placement-voter placement-a=placement-a:7336
+    --placement-voter placement-b=placement-b:7336
+    --placement-voter placement-c=placement-c:7336
+    --shards rooms-primary,rooms-01 --user-buckets users-primary,users-01
+  )
+else
+  actor_configuration_directory="${actor_configuration_directory}/single-core"
+  actor_topology=(--single-core --shards rooms-primary --user-buckets users-primary)
+fi
 if [[ ! -d "${actor_configuration_directory}" ]]; then
   python3 "${script_dir}/prepare_v2_room_actor_configuration.py" \
     --output-dir "${actor_configuration_directory}" \
     --host gateway=gateway:7337 --caller account=account:7338 --caller operator=operator:7339 \
-    --placement-voter placement-a=placement-a:7336 \
-    --placement-voter placement-b=placement-b:7336 \
-    --placement-voter placement-c=placement-c:7336 \
-    --shards rooms-primary,rooms-01 --user-buckets users-primary,users-01 --mount-root /run/im-v2-room-actor \
-    --policy-partitions 16
+    "${actor_topology[@]}" --mount-root /run/im-v2-room-actor --policy-partitions 16
 fi
-python3 "${script_dir}/validate_v2_local_policy_configuration.py" "${actor_configuration_directory}"
-
+if [[ "${cluster_mode}" == 1 ]]; then
+  python3 "${script_dir}/validate_v2_local_policy_configuration.py" "${actor_configuration_directory}"
+else
+  python3 "${script_dir}/validate_v2_local_policy_configuration.py" --single-core "${actor_configuration_directory}"
+fi
 
 # Older local Docker installations can lack Buildx and therefore ignore a
 # Dockerfile-specific .dockerignore. Build from a temporary, allow-listed
@@ -140,6 +156,24 @@ prune_unreferenced_local_build_stages
 # Recreate the PostgreSQL container so its read-only canonical schema mount is
 # current. A retained database must already match the current contract; this
 # greenfield stack never upgrades it in place.
+# Stop the existing Gateway while its PostgreSQL session is still live.
+old_gateway="$(compose ps --status running -q gateway)"
+if [[ -n "${old_gateway}" ]]; then
+  compose stop gateway
+  if [[ "$(docker inspect --format '{{.State.ExitCode}}' "${old_gateway}")" != 0 ]]; then
+    printf 'Gateway drain failed. PostgreSQL was left running for recovery.\n' >&2
+    exit 1
+  fi
+fi
+if [[ -n "$(compose ps --status running -q nginx account operator)" ]]; then
+  compose stop nginx account operator
+fi
+if [[ "${cluster_mode}" != 1 ]]; then
+  # A previous local cluster may still have voters running under this project.
+  if [[ -n "$(compose --profile cluster ps --status running -q placement-a placement-b placement-c)" ]]; then
+    compose --profile cluster stop placement-a placement-b placement-c
+  fi
+fi
 compose up -d --wait --force-recreate postgres
 # `pg_isready` can become true while the official PostgreSQL entrypoint is
 # still running its first-boot SQL files against the temporary server. Wait
@@ -158,8 +192,9 @@ for _ in {1..45}; do
 done
 test "${schema_is_current}" = 't' || {
   printf 'local PostgreSQL volume does not match the current canonical schema.\n' >&2
-  printf 'Reset it explicitly with: docker compose --project-name %s --env-file %s --file %s down --volumes\n' \
-    "${compose_project}" "${env_file}" "${compose_file}" >&2
+  printf 'Reset it explicitly with: docker compose --project-name %q --env-file %q' "${compose_project}" "${env_file}"
+  printf ' %q' "${compose_arguments[@]}"
+  printf ' down --volumes\n'
   printf 'Then rerun this script. No automatic schema or data migration was attempted.\n' >&2
   exit 1
 }
@@ -180,24 +215,26 @@ fi
 "${script_dir}/install_v2_realtime_journal.sh" --print-sql |
   compose exec -T postgres psql -X --set=ON_ERROR_STOP=1 -U im_v2 -d im_v2 > /dev/null
 v2_seed_local_admission_pool
-# Provision only a wholly fresh control group. A partially missing group must
-# be recovered explicitly; restarting must never erase a voter's history.
-placement_files=0
-for voter in placement-a placement-b placement-c; do
-  for slot in 0 1; do
-    [[ ! -e "${actor_configuration_directory}/${voter}/placement/${slot}.pb" ]] || placement_files=$((placement_files + 1))
-  done
-done
-if [[ "${placement_files}" == 0 ]]; then
+if [[ "${cluster_mode}" == 1 ]]; then
+  # Provision only a wholly fresh control group. A partially missing group must
+  # be recovered explicitly; restarting must never erase a voter's history.
+  placement_files=0
   for voter in placement-a placement-b placement-c; do
-    compose run --rm --no-deps "${voter}" \
-      /workspace/IMV2Server/.build/release/IMV2PlacementControlApp --provision
+    for slot in 0 1; do
+      [[ ! -e "${actor_configuration_directory}/${voter}/placement/${slot}.pb" ]] || placement_files=$((placement_files + 1))
+    done
   done
-elif [[ "${placement_files}" != 6 ]]; then
-  printf 'Incomplete placement control history; restore the missing voter before starting this stack.\n' >&2
-  exit 1
+  if [[ "${placement_files}" == 0 ]]; then
+    for voter in placement-a placement-b placement-c; do
+      compose run --rm --no-deps "${voter}" \
+        /workspace/IMV2Server/.build/release/IMV2PlacementControlApp --provision
+    done
+  elif [[ "${placement_files}" != 6 ]]; then
+    printf 'Incomplete placement control history; restore the missing voter before starting this stack.\n' >&2
+    exit 1
+  fi
+  compose up -d --wait --force-recreate placement-a placement-b placement-c
 fi
-compose up -d --wait --force-recreate placement-a placement-b placement-c
 python3 "${script_dir}/prepare_local_edge_tls.py" "${v2_dir}/local-ca"
 ca_path="${v2_dir}/local-ca/root.crt"
 # Remove the retired edge before its account network namespace is recreated.
@@ -211,5 +248,7 @@ compose up -d --wait --force-recreate gateway
 printf 'V2 local account stack ready at https://localhost:8443\n'
 printf 'V2 local TLS gateway is ready at localhost:7443\n'
 printf 'Trust %s in the iOS Simulator before using the app.\n' "${ca_path}"
-printf 'To stop it: docker compose --project-name %s --env-file %s --file %s down\n' "${compose_project}" "${env_file}" "${compose_file}"
+printf 'To stop it: docker compose --project-name %q --env-file %q' "${compose_project}" "${env_file}"
+printf ' %q' "${compose_arguments[@]}"
+printf ' down\n'
 printf 'Repository root: %s\n' "${repo_root}"

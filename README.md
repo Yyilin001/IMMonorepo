@@ -41,11 +41,10 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 
 本地服务仅在 Mac 回环地址发布 `https://localhost:8443` 和 `localhost:7443`。
 
-房间由分布式 Actor 承载，`placement-a`、`placement-b`、`placement-c` 是三个独立的控制进程，负责保存房间分区的归属；Gateway 和 Account 作为控制层客户端。控制端口只在 Compose 内部网络使用。启动脚本先启动控制层，再启动业务服务；停止 Compose 栈时，控制层保留到业务服务退出，供房间完成排空和节点注销。
+本地默认使用一个 Gateway/Core 进程和一个 PostgreSQL 主库。房间和用户数据共用 `im_v2` 库，Gateway 持有独占的房间写入代次，Account 与 Operator 通过固定 Core 地址执行房间命令。普通停机先排空连接、后台任务和房间后再清除写入标记。异常恢复步骤与接入 Gateway 的扩展方式见 [单活 Room Core 部署](IMV2Server/README.md#单活-room-core-部署)。
 
-控制日志压缩后，落后的控制节点通过带摘要校验的 PB 分块接收已提交快照，单块最多 512 KiB、完整快照最多 16 MiB。完整快照持久化后才确认安装，再继续普通日志复制；中断的分块接收不会发布部分状态。控制节点累积 4,096 条新的已提交日志后自动压缩；等待回复的控制命令会阻止提前压缩。控制层已实现有界回执归档、可信排除和自动故障接管，具体边界见[房间 Actor 合同](docs/reviews/room-virtual-actor-contract.md)。
+这个默认拓扑使用独立的 `v2-local-single-core-postgres` 卷和 `IMV2/local-room-actors/single-core` 配置目录，作为新的本地环境启动。
 
-首次启动会初始化全新控制组的投票文件，普通重启保留 `IMV2/local-room-actors/placement-*/placement/` 的持久状态。部分文件缺失会阻止启动，不会通过重新初始化掩盖历史丢失。旧配置需要重新生成，项目不提供旧租约配置的兼容启动路径。自动接管要求可信部署绑定及旧实例、数据库会话的排除证明；生产多机分区和容量验收仍需独立环境证据，本地启动配置不代表完整的高可用交付。
 脚本会在 `IMV2/` 下生成仅用于本机的密钥和 CA。验证 HTTPS 账户流程前，需将
 `IMV2/local-ca/root.crt` 导入所选模拟器并启用信任。
 

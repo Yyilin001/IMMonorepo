@@ -50,8 +50,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--host", action="append", type=node, required=True, dest="hosts")
-    parser.add_argument("--placement-voter", action="append", type=node, required=True, dest="voters",
+    parser.add_argument("--single-core", action="store_true", help="One Room Core with no Placement voters")
+    parser.add_argument("--placement-voter", action="append", type=node, default=[], dest="voters",
                         help="Exactly three independent control nodes, name=DNS:port")
+    parser.add_argument("--gateway", action="append", type=node, default=[], dest="gateways",
+                        help="Connection-only Gateway for a single-Core deployment")
     parser.add_argument("--caller", action="append", type=node, default=[], dest="callers")
     parser.add_argument("--worker-caller", action="append", default=[],
                         help="Caller identity also running authorized room maintenance/safety workers")
@@ -77,19 +80,30 @@ def main() -> None:
     previous_root = args.extend_from.resolve() if args.extend_from else None
     if previous_root:
         previous = json.loads((previous_root / "topology.json").read_text())
-        for item in previous["hosts"] + previous["callers"] + previous["voters"]:
+        for item in previous["hosts"] + previous.get("gateways", []) + previous["callers"] + previous["voters"]:
             previous_docs[item[0]] = json.loads((previous_root / item[0] / "configuration.json").read_text())
         existing_id = uuid.UUID(previous["placementClusterID"])
         if args.placement_cluster_id and args.placement_cluster_id != existing_id:
             parser.error("extension must retain the existing placement cluster ID")
+        if args.single_core != (next(iter(previous_docs.values())).get("singleCore") is True):
+            parser.error("extension must retain the deployment mode")
+        if args.single_core:
+            if (set(args.hosts) != set(map(tuple, previous["hosts"]))
+                    or set(args.callers) != set(map(tuple, previous["callers"]))
+                    or not set(map(tuple, previous.get("gateways", []))).issubset(args.gateways)):
+                parser.error("single-core extension may only add Gateways")
         args.placement_cluster_id = existing_id
     cluster_id = args.placement_cluster_id or (uuid.uuid5(args.identity_seed, 'placement-cluster')
                                                if args.identity_seed else uuid.uuid4())
     if not 128 <= args.maximum_rooms_per_host <= 65536:
         parser.error("maximum rooms per host must be within 128..65536")
-    if len(args.voters) != 3:
-        parser.error("exactly three placement voters are required")
-    nodes = args.hosts + args.callers + args.voters
+    if args.single_core:
+        if (len(args.hosts) != 1 or args.voters or args.placement_controller
+                or args.exclusion_supervisor or (args.placement_cluster_id and not previous)):
+            parser.error("single-core requires exactly one host and no placement control")
+    elif len(args.voters) != 3 or args.gateways:
+        parser.error("cluster mode requires three placement voters; --gateway requires --single-core")
+    nodes = args.hosts + args.gateways + args.callers + args.voters
     shards = args.shards.split(",")
     user_buckets = args.user_buckets.split(",")
     if not 1 <= len(user_buckets) <= 256 or len(set(user_buckets)) != len(user_buckets) or any(
@@ -133,7 +147,7 @@ def main() -> None:
                 or set(args.exclusion_supervisor) != set(previous.get("exclusionSupervisors", []))):
             parser.error("extension must retain shards, policy partition count and exclusion authority")
         reference_services = next(iter(previous_docs.values()))["services"]
-        if any(doc["services"] != reference_services or doc["placementControl"]["clusterID"] != str(cluster_id)
+        if any(doc["services"] != reference_services or (not args.single_core and doc["placementControl"]["clusterID"] != str(cluster_id))
                for doc in previous_docs.values()):
             parser.error("existing deployment configurations disagree on trust or cluster identity")
         if any(service.get("userBucketIDs", []) != user_buckets for service in reference_services
@@ -142,7 +156,7 @@ def main() -> None:
         if args.policy_endpoint is not None and any(
                 owner["endpoint"] != args.policy_endpoint for owner in previous["policyPlacement"]["owners"]):
             parser.error("extension cannot change existing policy endpoints")
-        old_control = {(doc["address"], doc["placementControl"]["port"]) for doc in previous_docs.values()}
+        old_control = {(doc["address"], doc["placementControl"]["port"]) for doc in previous_docs.values() if not args.single_core}
         if any((address, port) in old_control for name, address, port in nodes if name not in previous_docs):
             parser.error("new endpoint collides with an existing control endpoint")
     # An explicit new output directory prevents accidental rotation of a live
@@ -170,10 +184,10 @@ def main() -> None:
     if previous:
         host_ids.update({n: i for n, i in previous["hostIDs"].items() if n in host_names}); voter_ids.update(previous["voterIDs"])
     occupied = {(address, port) for _, address, port in nodes}
-    if previous:
+    if previous and not args.single_core:
         occupied.update((doc["address"], doc["placementControl"]["port"]) for doc in previous_docs.values())
     client_ports = {}
-    for name, address, port in args.hosts + args.callers:
+    for name, address, port in ([] if args.single_core else args.hosts + args.callers):
         if name in previous_docs:
             client_ports[name] = previous_docs[name]["placementControl"]["port"]
             continue
@@ -241,9 +255,10 @@ def main() -> None:
         permissions += ["policyMutation"]
         if name in host_names:
             permissions += ["policyRegistration"]
-        permissions += ["placementRead"]
-        if name in host_names:
-            permissions += ["placementWrite"]
+        if not args.single_core:
+            permissions += ["placementRead"]
+            if name in host_names:
+                permissions += ["placementWrite"]
         if name in voter_names:
             permissions = ["placementVote", "placementRead", "realtimePublish", "realtimeReceive"]
         if name in args.exclusion_supervisor:
@@ -258,10 +273,9 @@ def main() -> None:
     if previous:
         old_peers = {peer["serviceID"]: peer for peer in next(iter(previous_docs.values()))["peers"]}
         peers = [old_peers.get(peer["serviceID"], peer) for peer in peers]
-    # Only Gateway hosts run realtime discovery/voting. A caller such as Account
-    # remains trusted for RPC, but must not create an unreachable quorum vote.
     realtime_peers = [dict(nodeID=name, serviceID=name, address=address, port=port)
-                      for name, address, port in sorted(args.hosts)]
+                      for name, address, port in sorted(args.hosts + args.gateways)]
+    gateway_names = {peer["nodeID"] for peer in realtime_peers}
     ordered_hosts = sorted(host_names)
     placement = dict(revision=1, partitionCount=args.policy_partitions, owners=[
         dict(hostID=host_ids[name], endpoint=args.policy_endpoint or shards[0],
@@ -280,9 +294,9 @@ def main() -> None:
     for name, address, port in nodes:
         directory = root / name
         visible = Path(args.mount_root) if args.mount_root else directory
-        # Caller configurations retain their required local identity. Gateway
-        # hosts share only the Gateway voter roster; callers do not vote there.
-        local_realtime_peers = realtime_peers if name in host_names or name in args.exclusion_supervisor + args.placement_controller else realtime_peers + [
+        # Gateway configurations share a realtime roster. Other callers keep
+        # a local entry for configuration validation.
+        local_realtime_peers = realtime_peers if name in gateway_names or name in args.exclusion_supervisor + args.placement_controller else realtime_peers + [
             dict(nodeID=name, serviceID=name, address=address, port=port)]
         document = dict(previous_docs.get(name, {}))
         for obsolete in ("serviceMembershipShard", "trustAdmissionAuthorityServiceID", "trustAdmissionDirectory"):
@@ -300,12 +314,15 @@ def main() -> None:
                 (directory / "placement").mkdir(mode=0o700)
                 storage_paths = {shard: str(visible / "placement" / (str(index) + ".pb"))
                                  for index, shard in enumerate(shards)}
-        document["placementControl"] = dict(clusterID=str(cluster_id), port=port if name in voter_names else client_ports[name],
-            threadPoolSize=1, localVoterID=voter_ids.get(name), storagePaths=storage_paths, voters=control_peers)
+        if args.single_core:
+            document["singleCore"] = True
+        else:
+            document["placementControl"] = dict(clusterID=str(cluster_id), port=port if name in voter_names else client_ports[name],
+                threadPoolSize=1, localVoterID=voter_ids.get(name), storagePaths=storage_paths, voters=control_peers)
         if name not in voter_names and name not in args.exclusion_supervisor + args.placement_controller:
             document["policyPlacement"] = placement
         write_json(directory / "configuration.json", document)
-    write_json(root / "topology.json", dict(placementClusterID=str(cluster_id), hosts=args.hosts, callers=args.callers, voters=args.voters, shards=shards, hostIDs=host_ids, voterIDs=voter_ids, identitySeed=str(args.identity_seed) if args.identity_seed else None, policyPlacement=placement, exclusionSupervisors=args.exclusion_supervisor, placementControllers=args.placement_controller))
+    write_json(root / "topology.json", dict(placementClusterID=str(cluster_id), hosts=args.hosts, gateways=args.gateways, callers=args.callers, voters=args.voters, shards=shards, hostIDs=host_ids, voterIDs=voter_ids, identitySeed=str(args.identity_seed) if args.identity_seed else None, policyPlacement=placement, exclusionSupervisors=args.exclusion_supervisor, placementControllers=args.placement_controller))
     print(f"Created {len(nodes)} local/test node configurations in {root}")
     print("Mount only each process's own node directory; keep the CA private key outside application containers.")
 

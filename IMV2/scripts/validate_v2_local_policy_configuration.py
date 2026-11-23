@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 
-def validate(root: Path) -> None:
+def validate(root: Path, *, single_core: bool = False) -> None:
     documents = {}
     for name in ("gateway", "account", "operator"):
         document = json.loads((root / name / "configuration.json").read_text(encoding="utf-8"))
@@ -39,7 +39,22 @@ def validate(root: Path) -> None:
                 required |= {"policyRegistration"}
             if not required.issubset(services.get(service, {}).get("permissions", [])):
                 raise ValueError(f"{name} does not authorize {service}'s policy calls")
-    validate_placement(root, documents)
+    if single_core:
+        peers = documents["gateway"].get("peers")
+        if not isinstance(peers, list) or len(peers) != 1:
+            raise ValueError("local configuration requires one Room Core")
+        peer = peers[0]
+        if (not isinstance(peer, dict) or peer.get("hostID") != gateway_id
+                or peer.get("serviceID") != "gateway"
+                or peer.get("shardIDs") != ["rooms-primary"]):
+            raise ValueError("the local Gateway must own rooms-primary")
+        for name, document in documents.items():
+            if (document.get("singleCore") is not True or "placementControl" in document
+                    or document.get("peers") != peers
+                    or (name != "gateway" and document.get("hostID") is not None)):
+                raise ValueError(f"{name} uses a different Room Core")
+    else:
+        validate_placement(root, documents)
 
 
 def validate_placement(root: Path, documents: dict) -> None:
@@ -86,14 +101,14 @@ def validate_placement(root: Path, documents: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--single-core", action="store_true")
     args = parser.parse_args()
     try:
-        validate(args.directory)
+        validate(args.directory, single_core=args.single_core)
     except (OSError, ValueError, KeyError, TypeError):
         # Configuration includes key paths and identities. Keep diagnostics bounded.
         parser.exit(1, "Local Actor configuration is incomplete or inconsistent. "
-                    "Generate a fresh directory with gateway, account, operator, three independent "
-                    "--placement-voter nodes and --policy-partitions 16.\n")
+                    "Regenerate gateway, account and operator identities for this deployment.\n")
 
 
 if __name__ == "__main__":

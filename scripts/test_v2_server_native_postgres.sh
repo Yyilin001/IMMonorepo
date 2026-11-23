@@ -37,7 +37,7 @@ cleanup() {
   exit "$result"
 }
 trap cleanup EXIT
-for suffix in primary secondary control resource resource_target resource_staging actor_cancel actor_overload actor_control actor_owner; do
+for suffix in primary secondary control resource resource_target resource_staging actor_cancel actor_overload actor_control actor_owner actor_transaction; do
   database="${prefix}_${suffix}"
   createdb --template=template0 "$database"
   created+=("$database")
@@ -66,6 +66,8 @@ for suffix in resource resource_target resource_staging; do
   psql -Xq -v ON_ERROR_STOP=1 -d "${prefix}_${suffix}" -f "${root_dir}/IMV2/sql/schema.sql" > /dev/null
 done
 export IMV2_REQUIRE_CROSS_STORE_POSTGRES_TESTS=1
+export IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE=1
+export IMV2_ACTOR_TRANSACTION_DATABASE_URL="$(connection_url "${prefix}_actor_transaction")"
 export IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE=1
 export IMV2_ACTOR_CANCEL_MAINT_DATABASE_URL="$(connection_url "${prefix}_actor_cancel")"
 export IMV2_ACTOR_HOST_OVERLOAD_DATABASE_IS_DISPOSABLE=1

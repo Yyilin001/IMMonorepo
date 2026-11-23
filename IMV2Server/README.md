@@ -25,6 +25,86 @@
 ./scripts/check_v2_runtime_env_examples.sh
 ```
 
+## 单活 Room Core 部署
+
+用一个 `IMV2ServerApp` 进程同时运行 TCP Gateway 和 Room Core。Room、用户和控制存储共用一个 PostgreSQL database 的 `im_v2` schema。所有进程使用相同的 Room、用户存储 ID，业务侧只配置一个 Room 存储和一个用户存储。按上文安装当前 schema，再安装实时 journal。
+
+```sh
+bash IMV2/scripts/install_v2_realtime_journal.sh -- "$IM_V2_DATABASE_URL"
+python3 IMV2/scripts/prepare_v2_room_actor_configuration.py --single-core \
+  --identity-seed "$IMV2_DEPLOYMENT_UUID" \
+  --output-dir /run/imv2-actors --mount-root /run/im-v2-room-actor \
+  --host gateway=gateway.internal:7337 \
+  --caller account=account.internal:7338 \
+  --caller operator=operator.internal:7339 \
+  --shards rooms-primary --user-buckets users-primary
+```
+
+首次部署时为 `IMV2_DEPLOYMENT_UUID` 生成并保存一个 UUID，后续生成配置时沿用该值和 Core 名称，以保留数据库记录的 Core 逻辑身份。每个进程只挂载自己的凭据目录。配置 Gateway 的 `IM_V2_GATEWAY_NODE_ID=gateway`，Room 创建池为 `rooms-primary`，用户写入桶为 `users-primary`。空库写入 epoch 1 的 `im_v2.user_shard_router_configuration`，并按部署容量预置 `rooms-primary` 的准入租约。Room、用户和控制存储使用安装到主库中的同一个 journal 源。数据库总连接预算要给 Core 权限会话留一条连接。
+
+生成的 `singleCore` 文档固定一个 Core，并包含各调用方的 mTLS 身份。调用方在固定地址验证 Core 的当前进程身份。收件游标和同步数据保存在主库。
+
+### 单台独立接入 Gateway
+
+Core 与接入层分开部署时，可以只运行一台面向客户端的 Gateway。首次生成配置的示例如下。
+
+```sh
+python3 IMV2/scripts/prepare_v2_room_actor_configuration.py --single-core \
+  --output-dir /run/imv2-actors --mount-root /run/im-v2-room-actor \
+  --host room-core=room-core.internal:7337 \
+  --gateway gateway-0=gateway-0.internal:7337 \
+  --caller account=account.internal:7338 \
+  --shards rooms-primary --user-buckets users-primary
+```
+
+把客户端 TLS 流量全部送到 `gateway-0`，Core 的客户端监听只绑定回环地址。两个进程分别使用自己的节点身份和凭据目录。按目标连接数设置 Gateway 的 `IM_V2_MAX_CONNECTIONS`，并将 `IM_V2_RATE_LIMIT_MAX_TRACKED_IDENTITIES` 至少设为该上限的两倍。例如 5 万在线的测试可设为 60,000 和 120,000，环境变量中填写不带逗号的十进制整数。为监听器、内部 RPC 和数据库连接预留文件描述符。单台接入节点重启时，其全部客户端都要重连并恢复订阅。
+
+### 增加接入 Gateway
+
+独立部署 Core 时，配置中的唯一 `--host` 指向该 Core，每台接入节点使用各自的 `--gateway`。已有 TCP 连接继续由原 Gateway 持有，负载均衡器将新连接分给就绪的节点。扩容前后应看到相同的 Core 写入代次和实例标记，房间仍归原 Core。
+
+以下示例给上一节的单台独立接入部署新增 `gateway-2`。先让现有节点能通过内部 DNS 解析它的地址。在保管完整私有部署目录的主机上运行配置工具，列出原有 Core、所有调用方、所有已登记的 Gateway，再追加新节点。沿用首次部署的存储 ID、策略分区数、房间容量和进程内凭据挂载路径。
+
+```sh
+python3 IMV2/scripts/prepare_v2_room_actor_configuration.py --single-core \
+  --extend-from /run/imv2-actors --output-dir /run/imv2-actors-next \
+  --mount-root /run/im-v2-room-actor \
+  --host room-core=room-core.internal:7337 \
+  --gateway gateway-0=gateway-0.internal:7337 \
+  --caller account=account.internal:7338 \
+  --gateway gateway-2=gateway-2.internal:7340 \
+  --shards rooms-primary --user-buckets users-primary
+```
+
+1. 输出目录必须是新路径。工具会沿用 CA、既有节点的签名身份和 TLS 凭据，并为新增 Gateway 签发凭据。为每个既有节点分发它自己的新 `configuration.json`，在已挂载的节点目录中写入临时文件后原子重命名。Core 和接入 Gateway 会重新读取已授权的 Gateway 名单，扩容期间可继续处理现有连接。
+2. 启动新 Gateway，使用相同的 `IMV2ServerApp`、主库和存储 ID，将新节点专属目录挂载到 `/run/im-v2-room-actor`，设置 `IMV2_ROOM_ACTOR_CONFIGURATION_FILE=/run/im-v2-room-actor/configuration.json` 和 `IM_V2_GATEWAY_NODE_ID=gateway-2`，配置客户端 TLS、访问令牌密钥和指标端口。
+3. 在 Core 和各 Gateway 的 `/metrics` 检查 `im_v2_actor_realtime_reachable_nodes` 已覆盖新增节点，确认新 Gateway 的 TLS 就绪后再将其接入负载均衡。全局持久任务指标由 Core 导出，各 Gateway 导出本机连接、设备撤销积压、同步准入和连接池指标。保存完整的新私有目录，作为下一次扩容的 `--extend-from` 输入。
+
+热更新支持追加接入节点。替换既有节点的身份或地址、轮换证书或替换 Core，需单独安排部署。
+
+### Core 停机和异常恢复
+
+正常替换 Core 时，给持有房间写入权的进程发 TERM，等待进程和业务 SQL 全部退出。成功排空后 Core 会清除当前标记，后续进程使用递增的 epoch。异常退出或 PG 权限会话断开时，数据库保留旧进程标记并阻止新 Core 接管。
+
+崩溃恢复前，先确认旧进程退出且不会被编排器重拉，再确认主库已无该进程的 SQL 会话。旧进程的标记来自 `im_v2.room_core_writer.incarnation`，会话的 `application_name` 为 `imva:` 加去掉连字符的小写 UUID。用有写权限的维护会话执行以下事务，绑定已排除的 UUID。只在返回一行且提交成功后启动新的 Core。
+
+```sql
+BEGIN;
+SELECT pg_advisory_xact_lock(1229805106, 1);
+UPDATE im_v2.room_core_writer
+   SET incarnation = NULL
+ WHERE singleton AND incarnation = :'excluded_incarnation'::uuid
+   AND NOT EXISTS (
+       SELECT 1 FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND application_name = 'imva:' || replace(incarnation::text, '-', '')
+   )
+RETURNING epoch;
+COMMIT;
+```
+
+性能对照使用[改造前基线](../IMV2/docs/09-capacity/single-room-core-baseline.md)。原生测试工具的 `--single-core --nodes 2 --kind candidate --allow-small-canary` 参数可运行双 Gateway 收发验证。第一个 Gateway 承担 Core，其余 Gateway 使用接入身份。
+
 ## 持久任务的运维重放
 
 `IMV2OperatorServerApp` 是独立、仅监听回环地址的控制面程序，每次重放一条明确暂停的房间发件箱或扇出投递记录。它使用专属访问令牌密钥和操作主体，不共享公开网关监听器，并将重放审计证据与状态变更原子写入。
@@ -67,7 +147,7 @@ swift run --package-path IMV2Server IMV2AccountServerApp
 bash IMV2/scripts/run_v2_local_account_stack.sh
 ```
 
-脚本在被 Git 忽略的 `IMV2/.env.local` 中创建本地专用密钥，启动 PostgreSQL、账户进程和原生 V2 TLS 网关。macOS 回环地址仅发布 `https://localhost:8443` 和 TLS 网关 `localhost:7443`。Nginx 与账户进程共享容器网络命名空间，因此账户进程仍仅绑定 `127.0.0.1:8444`；数据库和内部 HTTP 端口不发布到 macOS。
+脚本在被 Git 忽略的 `IMV2/.env.local` 中创建本地专用密钥，默认启动一个 Gateway/Core、一个 PostgreSQL 主库以及 Account、Operator 和 Nginx。房间与用户数据共用 `im_v2`，配置与数据库卷分别使用 `IMV2/local-room-actors/single-core` 和 `v2-local-single-core-postgres`。macOS 回环地址仅发布 `https://localhost:8443` 和 TLS 网关 `localhost:7443`。Nginx 与账户进程共享容器网络命名空间，账户进程绑定 `127.0.0.1:8444`，数据库和内部 HTTP 端口留在容器网络。
 
 开发脚本在宿主机保管开发 CA 私钥，Nginx 和网关仅挂载叶证书、叶私钥与公开根证书。首次运行或从旧代理迁移后，将生成的 `IMV2/local-ca/root.crt` 导入所选 iOS 模拟器并启用完全信任。Debug App 已默认使用 `https://localhost:8443`。辅助脚本会输出准确的停止命令，不创建 Python 虚拟环境，也不修改宿主机数据库。
 
@@ -83,7 +163,7 @@ bash IMV2/scripts/verify_v2_local_account_stack.sh
 
 ## 普通私聊跨房间合批
 
-Room Host 启动时读取 `IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT`，取值为 1 到 4，默认 1。设为 4 时，空闲写连接可从同一逻辑房间分片的就绪队列领取最多四条消息，整个房间轮次保持完整。只有一个就绪房间时立即执行。跨房间事务只包含已授权且无需变更策略的普通私聊，沿用请求的截止时间和 64 KiB 保留字节预算。
+Room Host 启动时读取 `IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT`，取值为 1 到 16，默认 1。空闲写连接从同一分片的就绪队列领取完整的房间轮次，单批消息数受该参数限制。只有一个就绪房间时立即执行。跨房间事务只包含已授权且无需变更策略的普通私聊，沿用请求的截止时间和 64 KiB 保留字节预算。
 
 每个房间的序号、消息、永久完成记录和投递 outbox 在同一 PostgreSQL 事务中提交。确认提交后分别返回各自的 ACK。停机把上限改回 1 即可回退，无需改动分片映射或数据库 schema。`im_v2_send_operation_store_cross_room_commits_total` 按同一事务中的房间数计数。
 

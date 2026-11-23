@@ -1,0 +1,50 @@
+# Default local account stack. Standalone topology diagnostics use the base file.
+x-core-stores: &core-stores
+  IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
+  IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
+services:
+  postgres:
+    volumes: !override
+      - v2-local-single-core-postgres:/var/lib/postgresql/data
+      - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/realtime-change-journal.sql:/docker-entrypoint-initdb.d/02-realtime-change-journal.sql:ro
+  placement-a:
+    profiles: [cluster]
+  placement-b:
+    profiles: [cluster]
+  placement-c:
+    profiles: [cluster]
+  account:
+    environment:
+      <<: *core-stores
+      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-primary
+      IM_V2_GROUP_ROOM_SHARD_ID: rooms-primary
+    volumes:
+      - ./local-room-actors/single-core/account:/run/im-v2-room-actor:ro
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+  gateway:
+    environment:
+      <<: *core-stores
+      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-primary
+      IM_V2_GROUP_ROOM_SHARD_ID: rooms-primary
+    volumes:
+      - ./local-room-actors/single-core/gateway:/run/im-v2-room-actor:ro
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      nginx:
+        condition: service_started
+  operator:
+    environment:
+      <<: *core-stores
+    volumes:
+      - ./local-room-actors/single-core/operator:/run/im-v2-room-actor:ro
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+volumes: !override
+  v2-local-single-core-postgres:
+  v2-local-media-objects:

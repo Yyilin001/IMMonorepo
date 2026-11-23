@@ -1,0 +1,387 @@
+{
+  "services": {
+    "postgres": {
+      "image": "postgres:16-alpine",
+      "command": [
+        "postgres",
+        "-c",
+        "max_connections=320",
+        "-c",
+        "shared_buffers=512MB",
+        "-c",
+        "wal_compression=lz4"
+      ],
+      "environment": {
+        "POSTGRES_USER": "imv2_sim",
+        "POSTGRES_PASSWORD_FILE": "/run/secrets/postgres-password"
+      },
+      "volumes": [
+        "simulation-data:/var/lib/postgresql/data",
+        {
+          "type": "bind",
+          "source": "./postgres-password",
+          "target": "/run/secrets/postgres-password",
+          "read_only": true
+        }
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U imv2_sim -d postgres"
+        ],
+        "interval": "1s",
+        "timeout": "3s",
+        "retries": 40
+      },
+      "cpus": 2,
+      "mem_limit": "2g",
+      "networks": {
+        "backend-fixed": {
+          "ipv4_address": "10.78.43.14"
+        }
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "12m",
+          "max-file": "3"
+        }
+      }
+    },
+    "account": {
+      "image": "improject-facade-ci-tools:latest",
+      "extra_hosts": {
+        "room-core": "10.78.43.10",
+        "gateway-0": "10.78.43.11",
+        "gateway-1": "10.78.43.12",
+        "account": "10.78.43.13",
+        "postgres": "10.78.43.14"
+      },
+      "stop_grace_period": "75s",
+      "init": true,
+      "cpus": 2,
+      "mem_limit": "2g",
+      "ulimits": {
+        "nofile": {
+          "soft": 32768,
+          "hard": 32768
+        }
+      },
+      "entrypoint": [
+        "/run/imv2/bin/IMV2AccountServerApp"
+      ],
+      "env_file": [
+        "./account.env"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "./bin",
+          "target": "/run/imv2/bin",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./actors/account",
+          "target": "/run/imv2/actor",
+          "read_only": true
+        }
+      ],
+      "depends_on": {
+        "postgres": {
+          "condition": "service_healthy"
+        }
+      },
+      "networks": {
+        "backend-fixed": {
+          "ipv4_address": "10.78.43.13"
+        },
+        "frontend-fixed": {
+          "ipv4_address": "10.78.42.13"
+        }
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "12m",
+          "max-file": "3"
+        }
+      }
+    },
+    "https-edge": {
+      "image": "improject-facade-ci-tools:latest",
+      "network_mode": "service:account",
+      "init": true,
+      "mem_limit": "256m",
+      "entrypoint": [
+        "python3",
+        "/run/imv2/https.py",
+        "--configuration",
+        "/run/imv2/https.json",
+        "--metrics",
+        "/tmp/imv2-https-metrics.jsonl"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "./edge-certificate/tls",
+          "target": "/run/imv2/client-tls",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./https.py",
+          "target": "/run/imv2/https.py",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./https.json",
+          "target": "/run/imv2/https.json",
+          "read_only": true
+        }
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "12m",
+          "max-file": "3"
+        }
+      }
+    },
+    "gateway-0": {
+      "image": "improject-facade-ci-tools:latest",
+      "extra_hosts": {
+        "room-core": "10.78.43.10",
+        "gateway-0": "10.78.43.11",
+        "gateway-1": "10.78.43.12",
+        "account": "10.78.43.13",
+        "postgres": "10.78.43.14"
+      },
+      "stop_grace_period": "165s",
+      "init": true,
+      "cpus": 2,
+      "mem_limit": "3g",
+      "ulimits": {
+        "nofile": {
+          "soft": 100000,
+          "hard": 100000
+        }
+      },
+      "entrypoint": [
+        "/run/imv2/bin/IMV2ServerApp"
+      ],
+      "env_file": [
+        "./gateway-0.env"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "./bin",
+          "target": "/run/imv2/bin",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./edge-certificate/tls",
+          "target": "/run/imv2/client-tls",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./actors/gateway-0",
+          "target": "/run/imv2/actor",
+          "read_only": true
+        }
+      ],
+      "networks": {
+        "frontend-fixed": {
+          "ipv4_address": "10.78.42.10"
+        },
+        "backend-fixed": {
+          "ipv4_address": "10.78.43.11"
+        }
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "12m",
+          "max-file": "3"
+        }
+      }
+    },
+    "gateway-1": {
+      "image": "improject-facade-ci-tools:latest",
+      "extra_hosts": {
+        "room-core": "10.78.43.10",
+        "gateway-0": "10.78.43.11",
+        "gateway-1": "10.78.43.12",
+        "account": "10.78.43.13",
+        "postgres": "10.78.43.14"
+      },
+      "stop_grace_period": "165s",
+      "init": true,
+      "cpus": 2,
+      "mem_limit": "3g",
+      "ulimits": {
+        "nofile": {
+          "soft": 100000,
+          "hard": 100000
+        }
+      },
+      "entrypoint": [
+        "/run/imv2/bin/IMV2ServerApp"
+      ],
+      "env_file": [
+        "./gateway-1.env"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "./bin",
+          "target": "/run/imv2/bin",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./edge-certificate/tls",
+          "target": "/run/imv2/client-tls",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./actors/gateway-1",
+          "target": "/run/imv2/actor",
+          "read_only": true
+        }
+      ],
+      "networks": {
+        "frontend-fixed": {
+          "ipv4_address": "10.78.42.11"
+        },
+        "backend-fixed": {
+          "ipv4_address": "10.78.43.12"
+        }
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "12m",
+          "max-file": "3"
+        }
+      }
+    },
+    "room-core": {
+      "image": "improject-facade-ci-tools:latest",
+      "extra_hosts": {
+        "room-core": "10.78.43.10",
+        "gateway-0": "10.78.43.11",
+        "gateway-1": "10.78.43.12",
+        "account": "10.78.43.13",
+        "postgres": "10.78.43.14"
+      },
+      "stop_grace_period": "165s",
+      "init": true,
+      "cpus": 2,
+      "mem_limit": "6g",
+      "ulimits": {
+        "nofile": {
+          "soft": 32768,
+          "hard": 32768
+        }
+      },
+      "entrypoint": [
+        "/run/imv2/bin/IMV2ServerApp"
+      ],
+      "env_file": [
+        "./room-core.env"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "./bin",
+          "target": "/run/imv2/bin",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./edge-certificate/tls",
+          "target": "/run/imv2/client-tls",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "./actors/room-core",
+          "target": "/run/imv2/actor",
+          "read_only": true
+        }
+      ],
+      "networks": {
+        "backend-fixed": {
+          "ipv4_address": "10.78.43.10"
+        }
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "12m",
+          "max-file": "3"
+        }
+      }
+    },
+    "ingress": {
+      "image": "haproxy:3.0-alpine",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "./haproxy.cfg",
+          "target": "/usr/local/etc/haproxy/haproxy.cfg",
+          "read_only": true
+        }
+      ],
+      "cpus": 1,
+      "mem_limit": "768m",
+      "networks": {
+        "frontend-fixed": {
+          "ipv4_address": "10.78.42.12"
+        }
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "12m",
+          "max-file": "3"
+        }
+      },
+      "ulimits": {
+        "nofile": {
+          "soft": 200000,
+          "hard": 200000
+        }
+      }
+    }
+  },
+  "volumes": {
+    "simulation-data": {}
+  },
+  "networks": {
+    "frontend-fixed": {
+      "ipam": {
+        "config": [
+          {
+            "subnet": "10.78.42.0/24"
+          }
+        ]
+      }
+    },
+    "backend-fixed": {
+      "ipam": {
+        "config": [
+          {
+            "subnet": "10.78.43.0/24"
+          }
+        ]
+      }
+    }
+  }
+}

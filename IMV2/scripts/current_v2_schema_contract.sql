@@ -780,7 +780,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-83''::text'
+       AND column_default = '''im-v2-current-84''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -790,7 +790,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-83%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-84%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns

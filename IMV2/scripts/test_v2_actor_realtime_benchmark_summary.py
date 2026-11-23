@@ -17,6 +17,20 @@ class MergedLatencyHistogramTests(unittest.TestCase):
         return dict(count=sum(values.values()), maximum=max(values, default=0),
             histogramBuckets=[dict(lowerBoundMilliseconds=k, count=v) for k, v in values.items()])
 
+    def test_retry_attribution_includes_first_attempt_acks_in_global_p99_bucket(self):
+        from run_v2_separate_core_benchmark import retry_wait_at_p99
+        samples = [self.sample({20: 97, 1250: 2}), self.sample({1250: 1})]
+        cohorts = [dict(messageEndToEndLatency=h, retryWaitByEndToEndMillisecond={}) for h in samples]
+        cohorts[0]["retryWaitByEndToEndMillisecond"]["1250"] = {
+            "operations": 1, "withServerBusy": 1, "busyMilliseconds": 1200,
+        }
+        histogram = benchmark.merge_latency_histograms(samples)
+        result = retry_wait_at_p99(cohorts, histogram)
+        self.assertEqual((result["acknowledged"], result["retried"], result["meanServerBusyWaitMilliseconds"]),
+                         (3, 1, 400))
+        del cohorts[1]["retryWaitByEndToEndMillisecond"]
+        self.assertIsNone(retry_wait_at_p99(cohorts, histogram))
+
     def test_global_rank_weights_samples_instead_of_shard_percentiles(self):
         result = benchmark.merge_latency_histograms([self.sample({10: 999}), self.sample({1400: 1})])
         self.assertEqual(result['count'], 1000)
@@ -237,6 +251,23 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
             for key in ('IM_V2_USER_PROJECTION_CONCURRENCY', 'IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT',
                         'IM_V2_SYNC_DATABASE_WORK_LIMIT', 'IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS'):
                 self.assertEqual(one[key], two[key])
+
+    def test_candidate_sync_connections_keep_pool_and_admission_aligned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            (fixture / 'access-token-hmac-key.base64').write_text('test-fixture')
+            args = SimpleNamespace(baseline_checkout=None, fixture=fixture,
+                gateway_port=21453, metrics_port=23464, account_port=8444,
+                pg_user='test', pg_host='localhost', pg_port=24533, candidate_sync_connections=2)
+            manifest = dict(userBucket='user-a', shardID='room-a', capacityProfileID='standard', commandWindowLimit=100)
+            gateway = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertEqual(gateway['IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP'], '2')
+            self.assertEqual(gateway['IM_V2_SYNC_DATABASE_WORK_LIMIT'], '2')
+            self.assertEqual(gateway['IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP'], '12')
+            self.assertEqual(gateway['IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP'], '2')
+            account = benchmark.account_env(args, 'candidate', 'test_database', fixture, manifest)
+            self.assertEqual(account['IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP'], '1')
+            self.assertEqual(account['IM_V2_SYNC_DATABASE_WORK_LIMIT'], '1')
 
     def test_candidate_send_window_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,6 +1,8 @@
 # 原生房间 Actor 的 Host 监督
 
-部署目标为固定业务节点名单，增删节点采用停机维护窗口。以往的[在线扩容测量](../09-capacity/horizontal-user-growth.md)记录既有实现。持久 Placement 记录在重启时继续生效；仅从配置删除 Host 会留下指向旧 Host 的分区。停机增删流程需先完成归属调整并核对策略分区，再开放业务入口。
+本手册适用于使用三个 Placement 投票节点、固定 Room Host 名单的部署。默认单活 Core 的接入节点可以在线追加，操作见[增加接入 Gateway](../../../IMV2Server/README.md#增加接入-gateway)。
+
+增删固定名单中的 Room Host 需安排停机维护窗口。持久 Placement 记录在重启时继续生效，直接从配置删除 Host 会留下指向旧 Host 的分区。先完成归属调整并核对策略分区，再开放业务入口。以往多 Host 的测量见[在线扩容记录](../09-capacity/horizontal-user-growth.md)。
 
 房间执行资格来自三个独立 Placement 投票节点的已提交归属。消息路径不使用数据库房间租约、逐房间续租或 SQL 执行围栏。Host 网络不可达不会自动产生后继 Owner；崩溃接管必须先准确排除旧进程，再结束其数据库会话。
 

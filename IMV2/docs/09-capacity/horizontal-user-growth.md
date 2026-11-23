@@ -1,6 +1,8 @@
 # 增加服务器承载更多用户
 
-常规验收沿用现有节点准入、入口连接均衡、房间分区迁移、路由及消息正确性机制。以增加业务服务器后的用户承载表现为主线，故障注入、崩溃接管和缩容另行安排。消息幂等、权限与唯一归属检查继续生效。
+默认部署使用单活 Room Core 和单 PostgreSQL 主库。扩容时追加只负责接入的 Gateway，将新连接分流到新节点。现有房间继续由原 Core 持有。生成和分发配置、核对节点可达性以及接入负载均衡的步骤见[增加接入 Gateway](../../../IMV2Server/README.md#增加接入-gateway)。
+
+以下测量针对使用 Placement 的多 Room Host 拓扑，包含入口连接均衡、房间分区迁移和路由验证。同拓扑的历史数据供该模式复测时对照。
 
 ## 固定每用户活跃度的规模对照
 
@@ -29,7 +31,7 @@ python3 IMV2/scripts/run_v2_multiserver_capacity.py \
 
 ## 历史在线扩容记录
 
-以下命令对应历史版本。当前版本采用停机调整固定名单，操作见[节点管理手册](../10-operations/room-host-supervision.md)。
+以下命令对应历史版本的多 Host 在线扩容实验。使用固定 Placement 名单的部署通过维护窗口变更 Room Host，操作见[节点管理手册](../10-operations/room-host-supervision.md)。
 
 在线扩容另用 `run_v2_multiserver_case.py` 已有的连续增长流程：
 
