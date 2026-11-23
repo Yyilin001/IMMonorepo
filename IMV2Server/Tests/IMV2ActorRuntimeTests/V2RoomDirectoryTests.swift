@@ -451,6 +451,22 @@ struct V2RoomDirectoryTests {
         await directory.drain()
     }
 
+    @Test("single Core callers resolve only their pinned host without Placement")
+    func fixedCoreCallerResolvesPinnedHost() async throws {
+        let fixture = try Fixture()
+        let other = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let hosts = PlacementHosts(values: [
+            .init(identity: other, accessibleShardIDs: [fixture.owner.shardID], availableRooms: 100, isHealthy: true),
+            .init(identity: fixture.host, accessibleShardIDs: [fixture.owner.shardID], availableRooms: 1, isHealthy: true),
+        ])
+        let directory = V2RoomDirectory(owners: fixture.owners, fixedHostID: fixture.host.hostID,
+            hosts: hosts, transport: fixture.transport, configuration: try .init())
+        let resolved = try await directory.resolve(fixture.room, deadline: .now + .seconds(2))
+        #expect(resolved == fixture.token)
+        #expect(await fixture.transport.activations == 1)
+        await directory.drain()
+    }
+
     @Test("concurrent callers share one bounded resolution", arguments: [2, 100])
     func singleflight(callers: Int) async throws {
         let gate = Gate()

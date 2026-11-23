@@ -781,8 +781,8 @@ public actor V2RealtimeInterestCoordinator {
             if partition.snapshot || !partition.dirty.isEmpty || partition.descriptorDeadline <= .now + .seconds(10) { enqueue(id) }
         }
     }
-    public func shutdown() async {
-        if let shutdownTask { await shutdownTask.value; return }
+    package func closeAdmission() {
+        guard !closed else { return }
         closed = true; periodic?.cancel(); fences.withLock { $0.removeAll() }
         let journalPartitions = journalCoverages.withLock { value in
             let ids = Array(value.keys); value.removeAll(); return ids
@@ -790,6 +790,11 @@ public actor V2RealtimeInterestCoordinator {
         for id in journalPartitions { journalObserver.withLock { $0?.callback }?(.invalidated(partitionID: id)) }
         recoveryQueue.removeAll(); recoveryQueued.removeAll()
         finishWaiters(failure: Failure.closed)
+    }
+
+    public func shutdown() async {
+        if let shutdownTask { await shutdownTask.value; return }
+        closeAdmission()
         let task = Task { await self.drain() }; shutdownTask = task; await task.value
     }
     private func drain() async {

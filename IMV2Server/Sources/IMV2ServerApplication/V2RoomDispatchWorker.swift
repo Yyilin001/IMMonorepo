@@ -90,6 +90,7 @@ public struct V2RoomDispatchWorker: Sendable {
         let ready = leases.indices.filter { !failed.contains($0) && audiences[$0] != nil }
         let confirmed: Set<UUID>
         do {
+            try Task.checkCancellation()
             confirmed = try await outbox.acknowledgePages(ready.map {
                 .init(lease: leases[$0], through: audiences[$0]?.last?.uuidValue)
             }, now: now())

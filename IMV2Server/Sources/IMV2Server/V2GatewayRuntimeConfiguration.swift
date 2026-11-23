@@ -71,6 +71,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let messageWriteCrossRoomLimit: Int
     public let messageWritePipelineDepth: Int
     public let databasePolicy: V2PostgresRuntimePolicy
+    package let databaseAllocatedConnectionLimit: Int
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
     public let databaseWorkloadPoolIsolationEnabled: Bool
     /// Control/background group size when pool isolation is enabled.
@@ -308,7 +309,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             messageWriteUnixSockets = paths
         } else { messageWriteUnixSockets = [:] }
         messageWriteCrossRoomLimit = try Self.positiveWithDefault(
-            "IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT", defaultValue: 1, maximum: 4, environment: environment)
+            "IM_V2_MESSAGE_WRITE_CROSS_ROOM_LIMIT", defaultValue: 1,
+            maximum: V2SendOperationSchedulingConfiguration.supportedCrossRoomMessageLimit.upperBound, environment: environment)
         if let raw = Self.optional("IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH", environment: environment) {
             guard let depth = Int(raw), (1...2).contains(depth) else {
                 throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH")
@@ -971,19 +973,20 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         guard Set(messageWriteUnixSockets.keys).isSubset(of: messageDatabaseURLs) else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON")
         }
+        let workloadPerLoop = databaseWorkloadPoolIsolationEnabled
+            ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
+            : databasePolicy.maximumConnectionsPerEventLoop
+        let workloadPerDatabase = databaseWorkloadPoolIsolationEnabled
+            ? databasePolicy.eventLoopThreads * databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop
+                + databaseNonMessagePoolEventLoopThreads * (workloadPerLoop - databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop)
+            : databasePolicy.eventLoopThreads * workloadPerLoop
         try databasePolicy.validate(
-            databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL),
-            connectionsPerEventLoopPerPhysicalStore:
-                databaseWorkloadPoolIsolationEnabled
-                    ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
-                    : databasePolicy.maximumConnectionsPerEventLoop,
-            // 用户路由、策略控制和房间身份读取均使用专用控制连接。
+            databaseURLs: Array(messageDatabaseURLs),
+            connectionsPerEventLoopPerPhysicalStore: workloadPerLoop,
             additionalConnections: allDedicatedConnections,
-            workloadConnectionsPerPhysicalStore: databaseWorkloadPoolIsolationEnabled
-                ? databasePolicy.eventLoopThreads * databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop
-                    + databaseNonMessagePoolEventLoopThreads * (databaseWorkloadPoolBudget.totalConnectionsPerEventLoop - databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop)
-                : nil
+            workloadConnectionsPerPhysicalStore: workloadPerDatabase
         )
+        databaseAllocatedConnectionLimit = messageDatabaseURLs.count * workloadPerDatabase + allDedicatedConnections
         strangerMessagePolicy = try .init(
             maximumMessagesPerWindow: try Self.positive("IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW", environment: environment),
             window: TimeInterval(try Self.positive("IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS", environment: environment))

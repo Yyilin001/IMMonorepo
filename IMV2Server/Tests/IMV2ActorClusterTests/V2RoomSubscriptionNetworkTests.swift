@@ -287,6 +287,57 @@ struct V2RoomSubscriptionNetworkTests {
         if let failure { throw failure }
     }
 
+    @Test("repeated rejected journal receipts leave room delivery authentication available")
+    func rejectedJournalReceiptsDoNotExhaustRoomSessions() async throws {
+        let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
+        let keys = try Keys()
+        let callerSystem = try await makeSystem(name: "journal-receipt-owner", port: callerPort)
+        let peerSystem = try await makeSystem(name: "journal-receipt-gateway", port: peerPort)
+        let caller = try buildRealtimeTransport(system: callerSystem,
+            identity: .init(nodeID: "publisher", serviceID: "publisher", incarnationID: UUID()),
+            address: "127.0.0.1", port: callerPort, signer: keys.publisher, trust: keys.trust,
+            ingress: RejectingIngress(), serviceOwnerAccess: [keys.publisher.serviceID: ["rooms"]], limits: .init())
+        let peer = try makePeer(system: peerSystem, port: peerPort, keys: keys)
+        let authority = V2GatewayRoomSubscriptionAuthority()
+        let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, offerEvent: { _, _ in }, offerHead: { _, _ in })
+        let sessionHost = V2RoomDeliverySessionHost()
+        var failure: (any Error)?
+        do {
+            try await peer.configureRoomSubscription(ingress)
+            try await peer.configureJournalProjection(AheadJournalReceipt())
+            await sessionHost.configure(send: { pulse, shard, target in
+                try await caller.sendDeliverySession(pulse, sourceShardID: shard, to: target)
+            }, hostReady: { true })
+            let token = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: try .init(shardID: "rooms", epoch: 0),
+                activationEpoch: try .init(1), host: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()))
+            let first = try await sessionHost.retain(activation: token, gateway: peer.descriptor)
+            let source = V2RealtimeJournalSource(sourceID: "rooms", incarnationID: UUID(), partitionID: 0)
+            let fence = V2RealtimeJournalProjectionFence(publisherIncarnationID: token.host.incarnationID,
+                sourceLeaseEpoch: 1, sourceLeaseToken: UUID(), sourceLeaseExpiresAt: .distantFuture,
+                routingPartitionEpoch: 1, routingLeaseToken: UUID(), sessionID: UUID(), interestGeneration: 1,
+                gatewayIncarnationID: peer.descriptor.identity.incarnationID)
+            let batch = V2RealtimeJournalProjectionBatch(source: source, fence: fence,
+                payload: .changes(fromExclusive: 0, throughInclusive: 1, entries: []))
+            for _ in 0..<8 {
+                await #expect(throws: V2ActorAuthenticationError.wrongRecipient) {
+                    try await caller.sendJournalProjection(batch, to: peer.descriptor)
+                }
+            }
+            // An old implementation spends one of the Gateway's eight
+            // authentication slots after each wrong journal checkpoint.
+            await sessionHost.controlFailed(host: first.host, gateway: first.gateway)
+            let replacement = try await sessionHost.retain(activation: token, gateway: peer.descriptor)
+            #expect(replacement.generation > first.generation)
+            #expect(authority.sessionGate(replacement, serviceID: "publisher")?.isReady() == true)
+        } catch { failure = error }
+        await sessionHost.close()
+        #expect(await peer.stop(deadline: .now + .seconds(2)))
+        #expect(await caller.stop(deadline: .now + .seconds(2)))
+        await authority.shutdown()
+        try await peerSystem.shutdown(); try await callerSystem.shutdown()
+        if let failure { throw failure }
+    }
+
     @Test("native peer loss retires idle authorization; recovery requires a successor and new baseline", arguments: [false, true])
     func nativePeerLifecycleRetiresIdleSession(unilateral: Bool) async throws {
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
@@ -511,6 +562,14 @@ struct V2RoomSubscriptionNetworkTests {
                       permissions: [.realtimePublish, .realtimeReceive]),
                 .init(serviceID: gateway.serviceID, publicKey: g.publicKey.rawRepresentation, permissions: [.realtimeReceive])
             ])
+        }
+    }
+    private struct AheadJournalReceipt: V2RealtimeJournalProjectionHandler {
+        func applyJournalProjection(_ batch: V2RealtimeJournalProjectionBatch,
+                                    authenticatedServiceID: String) -> V2RealtimeJournalProjectionResult {
+            guard case .changes(_, let through, _) = batch.payload else { return .stale }
+            return .applied(.init(batchID: batch.batchID, source: batch.source, fence: batch.fence,
+                appliedThrough: through + 1, snapshotInstalled: false))
         }
     }
     private struct RejectingIngress: V2RealtimeIngress {

@@ -229,8 +229,9 @@ final class IMConnection: ChannelInboundHandler, @unchecked Sendable {
         guard creditWaiters.count < maximumSendCredits, call.bytes <= peerMaximumFrame,
               call.bytes <= maximumSendBytes - creditWaitBytes else { return false }
         let ticket = call.cancellation
-        // One advertised window of waiting work, with at most 25 ms of added queue time.
-        let expires = NIODeadline.now() + .milliseconds(min(25, remainingMilliseconds))
+        // Keep at most one window of waiters and honor earlier caller deadlines.
+        // A short credit stall during a send burst should not cost a client retry.
+        let expires = NIODeadline.now() + .milliseconds(min(100, remainingMilliseconds))
         let timer = channel.eventLoop.scheduleTask(deadline: expires) { [self] in
             if let waiter = removeCreditWaiter(ticket) { expireCreditWaiter(waiter) }
         }

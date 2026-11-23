@@ -11,6 +11,7 @@ enum PlainDirectRoomLogBatchWritePath {
         sql: any SQLDatabase,
         operationReceipts: [V2DurableSendBatchPermanentReceipt]? = nil,
         implicitConnection: V2BorrowedRoomConnection? = nil,
+        ownerScope: V2RoomActivationWriteScope? = nil,
         metrics: V2SendOperationBatchMetrics? = nil
     ) async throws {
         guard !inputs.isEmpty, inputs.count <= 256 else {
@@ -51,6 +52,40 @@ enum PlainDirectRoomLogBatchWritePath {
         if let operationReceipts {
             try PostgresV2DurableSendBatchReceipts().validateAcknowledgments(operationReceipts, messages: inputs)
         }
+        let ownerLocks: SQLQueryString
+        let validOwners: SQLQueryString
+        if let ownerScope {
+            // Rows are locked in the same UUID order across overlapping batches.
+            // Consume the entire locked set before allowing any cursor update.
+            let rooms = Array(Set(inputs.map(\.roomID)))
+            let owners = try rooms.map { try ownerScope.token(for: $0).owner }
+            ownerLocks = """
+                , locked_owners AS MATERIALIZED (
+                    SELECT room.room_id, (room.room_shard_id = expected.shard
+                        AND room.owner_epoch = expected.epoch AND room.room_kind = 'direct') AS matches
+                    FROM unnest(\(bind: rooms)::uuid[], \(bind: owners.map(\.shardID))::text[],
+                                \(bind: owners.map(\.epoch))::bigint[]) AS expected(room_id, shard, epoch)
+                    JOIN im_v2.rooms room ON room.room_id = expected.room_id
+                    ORDER BY room.room_id FOR NO KEY UPDATE OF room
+                )
+                """
+            validOwners = "AND (SELECT count(*) = \(bind: expectedRoomCount) AND bool_and(matches) FROM locked_owners)"
+        } else {
+            ownerLocks = ""
+            validOwners = ""
+        }
+        let checkGroup: SQLQueryString
+        if ownerScope != nil, implicitConnection != nil {
+            let expectedEvents = Int64(inputs.lazy.filter { $0.roomSequence != $0.timelineSequence }.count)
+            let eventCount: SQLQueryString = expectedEvents == 0 ? "0::bigint" : "(SELECT count(*) FROM event_insert)"
+            checkGroup = """
+                , ((SELECT count(*) FROM room_update) = \(bind: expectedRoomCount)
+                   AND (SELECT count(*) FROM message_insert) = \(bind: expectedCount)
+                   AND (SELECT count(*) FROM dispatch_insert) = \(bind: expectedCount)
+                   AND (SELECT count(*) FROM completion_insert) = \(bind: expectedCount)
+                   AND \(eventCount) = \(bind: expectedEvents))::im_v2.complete_room_append AS complete_room_append
+                """
+        } else { checkGroup = "" }
         let statement: SQLQueryString = """
             /* imv2_plain_direct_append */
             WITH typed_input(
@@ -74,13 +109,13 @@ enum PlainDirectRoomLogBatchWritePath {
                 ORDER BY room_id, ordinal DESC
             ), first_room_input AS MATERIALIZED (
                 SELECT DISTINCT ON (room_id) * FROM input ORDER BY room_id, ordinal
-            ), room_update AS (
+            ) \(ownerLocks), room_update AS (
                 UPDATE im_v2.rooms AS room
                 SET room_sequence = input.room_sequence,
                     timeline_sequence = input.timeline_sequence
                 FROM final_room_input AS input
                 JOIN first_room_input AS first ON first.room_id=input.room_id
-                WHERE room.room_id = input.room_id
+                WHERE room.room_id = input.room_id \(validOwners)
                   AND (NOT input.has_runtime_guard OR (
                       room.room_sequence=first.room_sequence-1
                       AND room.timeline_sequence=first.timeline_sequence-1
@@ -121,6 +156,7 @@ enum PlainDirectRoomLogBatchWritePath {
                    -- callers still reject a partial set append.
                    (SELECT count(*) FROM message_insert) AS event_count,
                    (SELECT count(*) FROM completion_insert) AS completion_count
+                   \(checkGroup)
             """
         let execute: @Sendable () async throws -> Void = {
             guard let row = try await sql.raw(statement).first() else { throw V2RoomWriteStoreError.corruptPersistenceState }

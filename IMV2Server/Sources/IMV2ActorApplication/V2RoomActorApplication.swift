@@ -33,19 +33,11 @@ public struct V2PolicyHostedServices: Sendable {
     }
 }
 
-/// Runtime acknowledgement of certified room routing. A committed control
-/// receipt alone does not prove that a running consumer applied that version.
-public struct V2RoomMembershipStatus: Sendable {
-    public let revision: UInt64?
-    public let confirmed: Bool
-    public let configuredHosts: Set<V2ActorHostID>
-    public let healthyHosts: Set<V2ActorHostID>
-}
-
 /// Gateway Host 与 Account/Operator 调用方共用的启动和停机组合入口。
 /// 领域服务接收 RoomDirectory；集群 ActorID 仅保留在此边界内。
 public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     public nonisolated let callerIncarnation: UUID
+    public nonisolated let isSingleCore: Bool
     public nonisolated let directory: V2RoomDirectory
     public nonisolated let reservations: V2RoomReservationCoordinator
     public nonisolated let configuration: V2RoomRuntimeConfiguration
@@ -56,13 +48,13 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     private let client: V2RoomClusterClient
     private let trust: V2ActorTrustStore
     private let node: Node
-    private let control: V2PlacementControlRuntime
-    private let placement: V2RoomActorPlacementRuntime
+    private let control: V2PlacementControlRuntime?
+    private let placement: V2RoomActorPlacementRuntime?
     private let placementShards: Set<String>
     private let transferShards: Set<String>
     private let placementPeers: [V2RoomDiscoveryPeer]
     private var creatingRealtimeTransport = false
-    private let placementRefresh: Task<Void, Never>
+    private let placementRefresh: Task<Void, Never>?
     private let qualificationChanged: @Sendable () async -> Void
     private let metrics: @Sendable () async -> V2RoomRuntimeMetricsSnapshot
 
@@ -72,7 +64,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     }
 
     private init(policyPlacement: V2PolicyOwnerPlacement?, forwardPairs: V2RoomForwardPairService?, client: V2RoomClusterClient, trust: V2ActorTrustStore, callerIncarnation: UUID, directory: V2RoomDirectory, reservations: V2RoomReservationCoordinator,
-                 configuration: V2RoomRuntimeConfiguration, node: Node, control: V2PlacementControlRuntime, placement: V2RoomActorPlacementRuntime, placementShards: Set<String>, transferShards: Set<String>, placementPeers: [V2RoomDiscoveryPeer],
+                 configuration: V2RoomRuntimeConfiguration, node: Node, control: V2PlacementControlRuntime?, placement: V2RoomActorPlacementRuntime?, placementShards: Set<String>, transferShards: Set<String>, placementPeers: [V2RoomDiscoveryPeer],
                  qualificationChanged: @escaping @Sendable () async -> Void,
                  serviceQualification: V2ActorServiceQualification?,
                  realtimeDiscoveryPeers: [V2RealtimeShardDiscoveryPeer],
@@ -83,6 +75,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         self.trust = trust
         self.callerIncarnation = callerIncarnation
         self.control = control
+        self.isSingleCore = control == nil
         self.directory = directory
         self.reservations = reservations
         self.configuration = configuration
@@ -91,16 +84,18 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         self.placementShards = placementShards
         self.transferShards = transferShards
         self.placementPeers = placementPeers
-        self.placementRefresh = Task {
-            while !Task.isCancelled {
-                do {
-                    try await ContinuousClock().sleep(for: .seconds(1))
-                    try Task.checkCancellation()
-                    try await placement.refresh()
-                } catch {
-                    if Task.isCancelled { return }
-                    // Retain the last committed snapshot. Refresh failure never
-                    // supplies exclusion evidence or publishes another owner.
+        self.placementRefresh = placement.map { placement in
+            Task {
+                while !Task.isCancelled {
+                    do {
+                        try await ContinuousClock().sleep(for: .seconds(1))
+                        try Task.checkCancellation()
+                        try await placement.refresh()
+                    } catch {
+                        if Task.isCancelled { return }
+                        // Retain the last committed snapshot. Refresh failure
+                        // does not supply exclusion evidence.
+                    }
                 }
             }
         }
@@ -125,6 +120,10 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     }
 
     package func probePlacement(deadline: ContinuousClock.Instant) async throws -> (shards: Int, healthy: Int, expected: Int) {
+        guard let placement else {
+            let healthy = client.routingSnapshot().healthyHostIDs()
+            return (0, healthy.count, placementPeers.count)
+        }
         let committed = try await placement.committedInspections(deadline: deadline)
         let routes = client.routingSnapshot()
         let healthy = placementPeers.filter { peer in
@@ -162,7 +161,8 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                              roomDatabases: [String: any Database],
                              factory: V2RoomServerActivationFactory? = nil,
                              qualification: V2ActorServiceQualification? = nil,
-                             policyServices: V2PolicyHostedServices? = nil) async throws -> V2RoomActorApplication {
+                             policyServices: V2PolicyHostedServices? = nil,
+                             singleCoreEpoch: UInt64? = nil) async throws -> V2RoomActorApplication {
         if let services = policyServices {
             guard configuration.hostIdentity != nil, configuration.policyPlacement == services.placement,
                   factory != nil else { throw V2RoomActorApplicationError.invalidRole }
@@ -172,11 +172,11 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         let policyPlacement = try configuration.policyPlacement.map(V2PolicyOwnerPlacement.init)
         // Fixed control voters have independent process lifetimes. Stopping
         // room applications must not dismantle quorum before other Hosts retire.
-        guard configuration.placementControl.identity == nil else { throw V2RoomActorApplicationError.invalidRole }
+        guard configuration.placementControl?.identity == nil else { throw V2RoomActorApplicationError.invalidRole }
         try await configuration.awaitSupervisedStartup()
-        let control = V2PlacementControlRuntime(configuration: configuration)
+        let control = configuration.isSingleCore ? nil : V2PlacementControlRuntime(configuration: configuration)
         do {
-        let placement = try await control.start()
+        let placement = try await control?.start()
         let roomDiscovery = configuration.discovery
         let client: V2RoomClusterClient
         let node: Node
@@ -191,8 +191,17 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
             }
             let runtime = configuration.runtime
             let budget = V2RoomCommandBudget(configuration: runtime)
+            let roomPlacement: any V2RoomActorPlacementRouting
+            if let placement {
+                roomPlacement = placement
+            } else {
+                guard let singleCoreEpoch else { throw V2RoomActorApplicationError.invalidRole }
+                roomPlacement = V2SingleRoomCorePlacement(
+                    authority: try .init(host: identity, epoch: singleCoreEpoch),
+                    allowedShards: configuration.allowedShards, qualification: qualification)
+            }
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
-                placement: placement, configuration: runtime, budget: budget,
+                placement: roomPlacement, configuration: runtime, budget: budget,
                 classify: { $0.turnSchedulingClass }, factory: factory.runtimeFactory(), qualification: qualification)
             runtimeHost = host
             runtimeBudget = budget
@@ -203,16 +212,20 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                 signer: configuration.signer, trust: configuration.trust,
                 authenticationLimits: configuration.authentication, runtimeConfiguration: runtime,
                 policyOwnership: policyServices?.ownership, policyMutations: policyServices?.mutations,
-                forwardPairs: policyServices?.forwardPairs, placementDrain: placement.drainageService(host: host))
+                forwardPairs: policyServices?.forwardPairs, placementDrain: placement?.drainageService(host: host))
             do {
-                try await placement.register(identity, shards: configuration.allowedShards)
-                _ = try await hostNode.start()
+                try await placement?.register(identity, shards: configuration.allowedShards)
+                let descriptor = try await hostNode.start()
                 client = try await hostNode.makeClient(signer: configuration.signer,
                     trust: configuration.trust, limits: configuration.authentication)
-                _ = try await hostNode.startDiscovery(client: client, configuration: roomDiscovery)
+                if placement != nil {
+                    _ = try await hostNode.startDiscovery(client: client, configuration: roomDiscovery)
+                } else {
+                    try await client.installDiscovered(descriptor)
+                }
                 try await policyServices?.clientBinding?.bind(client, qualified: { await hostNode.readiness() })
                 directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: ownerRouter),
-                    placement: placement, hosts: client, transport: client, configuration: configuration.runtime)
+                    placement: roomPlacement, hosts: client, transport: client, configuration: configuration.runtime)
                 reservations = V2RoomReservationCoordinator(operations: await directory.reservationOperations(),
                     configuration: configuration.runtime)
                 try await policyServices?.forwardPairs?.bind(reservations)
@@ -225,7 +238,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                     guard drained.completed, let proof = drained.proof else {
                         throw V2RoomActorApplicationError.incompleteShutdown
                     }
-                    try await placement.retireAfterDrain(proof, shards: configuration.allowedShards)
+                    try await placement?.retireAfterDrain(proof, shards: configuration.allowedShards)
                 } catch { throw V2RoomActorApplicationError.incompleteShutdown }
                 throw startupError
             }
@@ -240,8 +253,14 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                 runtimeConfiguration: configuration.runtime)
             do {
                 client = try await caller.start(discovery: roomDiscovery)
-                directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: ownerRouter),
-                    placement: placement, hosts: client, transport: client, configuration: configuration.runtime)
+                let owners = V2RoomServerOwnerResolver(router: ownerRouter)
+                if let placement {
+                    directory = V2RoomDirectory(owners: owners, placement: placement,
+                        hosts: client, transport: client, configuration: configuration.runtime)
+                } else {
+                    directory = V2RoomDirectory(owners: owners, fixedHostID: roomDiscovery.peers[0].hostID,
+                        hosts: client, transport: client, configuration: configuration.runtime)
+                }
                 reservations = V2RoomReservationCoordinator(operations: await directory.reservationOperations(),
                     configuration: configuration.runtime)
                 node = .caller(caller)
@@ -271,7 +290,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         return application
         } catch {
             let startupError = error
-            guard try await control.stop(deadline: .now + configuration.runtime.drainTimeout.duration) else {
+            guard try await control?.stop(deadline: .now + configuration.runtime.drainTimeout.duration) != false else {
                 throw V2RoomActorApplicationError.incompleteShutdown
             }
             throw startupError
@@ -285,7 +304,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     public func transferRoomPartition(shardID: String, partition: Int,
         expectedHost: V2ActorHostIdentity, expectedEpoch: UInt64,
         successor: V2ActorHostIdentity, transferID: UUID, originRevision: UInt64, deadline: ContinuousClock.Instant) async throws {
-        guard transferShards.contains(shardID), expectedEpoch > 0, originRevision > 0,
+        guard let placement, transferShards.contains(shardID), expectedEpoch > 0, originRevision > 0,
               expectedEpoch <= V2RoomActorPlacementGrant.maximumEpoch else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
@@ -328,13 +347,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         try await client.unsubscribeRoom(command, token: token, deadline: deadline)
     }
 
-    public func roomMembershipStatus() -> V2RoomMembershipStatus {
-        let routes = client.routingSnapshot()
-        return .init(revision: nil, confirmed: true,
-            configuredHosts: Set(placementPeers.map(\.hostID)),
-            healthyHosts: routes.healthyHostIDs())
-    }
-
     private func authorizeRoomSuccessor(_ identity: V2ActorHostIdentity, shardID: String) throws {
         guard placementPeers.contains(where: { $0.hostID == identity.hostID && $0.accessibleShardIDs.contains(shardID) }),
               try client.resolvePolicyHost(hostID: identity.hostID, endpoint: shardID) == identity else {
@@ -348,7 +360,8 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         serviceOwnerAccess: [V2ActorServiceID: Set<String>],
         discoveryPeers: [V2RealtimeShardDiscoveryPeer],
         limits: V2RealtimeTransportLimits = .init(),
-        serviceQualification: V2ActorServiceQualification? = nil) async throws -> V2RealtimeShardTransportHandle {
+        serviceQualification: V2ActorServiceQualification? = nil,
+        fixedOwnerNodeID: String? = nil) async throws -> V2RealtimeShardTransportHandle {
         guard !creatingRealtimeTransport else { throw V2RoomActorApplicationError.invalidRole }
         creatingRealtimeTransport = true
         defer { creatingRealtimeTransport = false }
@@ -357,11 +370,11 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         case .host(let host):
             handle = try await host.makeRealtimeShardTransport(identity: identity, serving: serving,
                 serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits,
-                serviceQualification: serviceQualification)
+                serviceQualification: serviceQualification, fixedOwnerNodeID: fixedOwnerNodeID)
         case .caller(let caller):
             handle = try await caller.makeRealtimeShardTransport(identity: identity, serving: serving,
                 serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits,
-                serviceQualification: serviceQualification)
+                serviceQualification: serviceQualification, fixedOwnerNodeID: fixedOwnerNodeID)
         }
         return handle
     }
@@ -428,9 +441,9 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         let resolutionsStopped = await directoryStopped
         guard nodeStopped && resolutionsStopped else { return false }
         await forwardPairs?.close()
-        if let proof { try await placement.retireAfterDrain(proof, shards: placementShards) }
-        placementRefresh.cancel()
-        await placementRefresh.value
-        return try await control.stop(deadline: deadline)
+        if let proof { try await placement?.retireAfterDrain(proof, shards: placementShards) }
+        placementRefresh?.cancel()
+        await placementRefresh?.value
+        return try await control?.stop(deadline: deadline) ?? true
     }
 }

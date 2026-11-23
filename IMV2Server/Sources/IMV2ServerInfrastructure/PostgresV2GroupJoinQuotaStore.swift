@@ -181,8 +181,8 @@ package struct PostgresV2GroupJoinQuotaStore: Sendable {
         guard (1...100).contains(limit), let until = v2PostgresFutureTimestamp(now: now, interval: lease) else {
             throw V2GroupInvitationServiceError.invalidRequest
         }
-        let sql = try quotaSQL(database), token = UUID()
-        return try await sql.raw("""
+        let token = UUID()
+        let statement: SQLQueryString = """
             WITH candidates AS (
                 SELECT applicant_user_id, operation_id FROM \(unsafeRaw: schema).group_join_quota_intents
                 WHERE phase IN ('held', 'tracking') AND next_check_at <= \(bind: now)
@@ -196,21 +196,26 @@ package struct PostgresV2GroupJoinQuotaStore: Sendable {
             FROM candidates
             WHERE intent.applicant_user_id = candidates.applicant_user_id AND intent.operation_id = candidates.operation_id
             RETURNING intent.*
-            """).all(decoding: V2GroupJoinQuotaIntent.self)
+            """
+        return try await v2WithBoundedPostgresStatement(database: database, deadline: .now + .seconds(10)) { sql in
+            try await sql.raw(statement).all(decoding: V2GroupJoinQuotaIntent.self)
+        }
     }
 
     package func deferClaim(_ intent: V2GroupJoinQuotaIntent, now: Date) async throws {
         guard let token = intent.leaseToken,
               let next = v2PostgresFutureTimestamp(now: now, interval: min(60, Double(min(intent.attemptCount, 6)) * 10))
         else { throw V2GroupInvitationServiceError.invalidRequest }
-        let sql = try quotaSQL(database)
-        try await sql.raw("""
+        let statement: SQLQueryString = """
             UPDATE \(unsafeRaw: schema).group_join_quota_intents
             SET lease_token = NULL, lease_until = NULL, next_check_at = \(bind: next)
             WHERE applicant_user_id = \(bind: intent.applicantUserID) AND operation_id = \(bind: intent.operationID)
               AND generation = \(bind: intent.generation) AND lease_token = \(bind: token)
               AND phase IN ('held', 'tracking')
-            """).run()
+            """
+        try await v2WithBoundedPostgresStatement(database: database, deadline: .now + .seconds(10)) { sql in
+            try await sql.raw(statement).run()
+        }
     }
 
     func releaseTerminal(_ request: V2GroupJoinRequestRecord, now: Date) async throws {

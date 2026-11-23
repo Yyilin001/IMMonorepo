@@ -5,7 +5,25 @@ import IMV2Server
 import IMV2ServerInfrastructure
 
 extension GatewayBackgroundWorkers {
-    func startMaintenanceWorkers(on workers: GatewayWorkerSupervisor, maintenanceCadence: V2MaintenanceCadence) {
+    func startLocalDeviceRevocation(on workers: GatewayWorkerSupervisor) {
+        let worker = self.deviceRevocationWorker
+        let interval = configuration.workerPollIntervalMilliseconds
+        let limit = configuration.workerBatchSize
+        let logger = logger
+        _ = workers.start {
+            var cadence = V2AdaptiveWorkerCadence(minimumIntervalMilliseconds: interval)
+            while !Task.isCancelled {
+                var didWork = false
+                do { didWork = try await worker.runOnce(limit: limit) > 0 }
+                catch is CancellationError { break }
+                catch { V2ServiceLogging.logWorkerFailure(logger, worker: "device_revocation_worker", error: error) }
+                do { try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork)) }
+                catch { break }
+            }
+        }
+    }
+
+    func startMaintenanceWorkers(_ maintenance: Maintenance, on workers: GatewayWorkerSupervisor, maintenanceCadence: V2MaintenanceCadence) {
         let configuration = self.configuration
         let logger = self.logger
         let revokedDeviceProjectionCleanupWorker = maintenance.revokedDeviceProjectionCleanupWorker
@@ -19,7 +37,7 @@ extension GatewayBackgroundWorkers {
         let forwardBackgroundDatabases = maintenance.forwardBackgroundDatabases
         let profileSecurityInvalidationWorker = maintenance.profileSecurityInvalidationWorker
         let readReceiptPreferencePropagationWorker = maintenance.readReceiptPreferencePropagationWorker
-        let deviceRevocationWorker = maintenance.deviceRevocationWorker
+        let deviceRevocationWorker = self.deviceRevocationWorker
         let moderationAuditRetentionWorker = maintenance.moderationAuditRetentionWorker
         let mediaRetentionWorker = maintenance.mediaRetentionWorker
 

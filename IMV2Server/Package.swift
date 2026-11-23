@@ -240,7 +240,10 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Configuration", package: "swift-configuration"),
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+                .product(name: "PostgresKit", package: "postgres-kit"),
+                .product(name: "PostgresNIO", package: "postgres-nio"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+                .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),

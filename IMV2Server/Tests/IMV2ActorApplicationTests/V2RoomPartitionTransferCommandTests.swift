@@ -79,11 +79,12 @@ struct V2RoomPartitionTransferCommandTests {
                 throw V2RoomCallFailure.notAccepted(.notReady)
             }
             #expect(await hosts[0].snapshot().activeRooms == 1)
-            let shape = try V2RoomActorPlacementRuntime.initialSnapshot(deploymentID: controller.placementControl.clusterID,
+            let control = try #require(controller.placementControl)
+            let shape = try V2RoomActorPlacementRuntime.initialSnapshot(deploymentID: control.clusterID,
                 shard: "rooms-primary", peers: controller.discovery.peers)
             let partition = shape.partition(for: room)
             let before = try await V2PlacementControlService.inspect(configuration: controller)[0]
-            let command = V2RoomPartitionTransferCommand(deploymentID: controller.placementControl.clusterID,
+            let command = V2RoomPartitionTransferCommand(deploymentID: control.clusterID,
                 shardID: "rooms-primary", partition: partition, expectedHost: identities[0], expectedEpoch: grant.epoch,
                 successor: identities[1], transferID: UUID(), originRevision: before.revision)
             try command.validate(configuration: controller)

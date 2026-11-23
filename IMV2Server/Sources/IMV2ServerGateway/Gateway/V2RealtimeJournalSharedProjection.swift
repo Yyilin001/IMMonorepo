@@ -98,7 +98,8 @@ public final class V2RealtimeJournalSharedProjection: Sendable {
                   zip(entries, entries.dropFirst()).allSatisfy({ $0.sequence < $1.sequence }) else {
                 block(partition, in: &value, minimumCut: max(0, through)); return .invalid
             }
-            if through <= checkpoint { return receipt(batch, checkpoint: checkpoint, snapshot: false) }
+            // An already applied range still acknowledges this batch's exact end.
+            if through <= checkpoint { return receipt(batch, checkpoint: through, snapshot: false) }
             guard from == checkpoint else { block(partition, in: &value, minimumCut: through); return .snapshotRequired }
             var touched: [RoomID: V2RealtimeJournalRoomAuthorization] = [:]
             for entry in entries {

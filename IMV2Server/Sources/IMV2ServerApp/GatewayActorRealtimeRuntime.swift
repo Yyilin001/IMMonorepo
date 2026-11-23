@@ -49,6 +49,8 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
         guard let serviceQualification = actors.serviceQualification else {
             throw V2ActorContractError.invalidConfiguration("missing Gateway service qualification")
         }
+        let ownsPublication = !actor.isSingleCoreIngress
+        let fixedOwnerNodeID = actor.fixedRealtimeOwnerNodeID
         let registry = prepared.frontdoor.connectionRegistry
         let identity = V2GatewayRealtimeIdentity(nodeID: configuration.gatewayNodeID,
             serviceID: actor.signer.serviceID.rawValue, incarnationID: actors.callerIncarnation)
@@ -173,7 +175,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             do {
                 return try await actors.makeRealtimeShardTransport(identity: identity, serving: service,
                     serviceOwnerAccess: actor.realtimeServiceOwnerAccess, discoveryPeers: actors.realtimeDiscoveryPeers,
-                    serviceQualification: serviceQualification)
+                    serviceQualification: serviceQualification, fixedOwnerNodeID: fixedOwnerNodeID)
             } catch {
                 await service.shutdown()
                 _ = await handle.stop(deadline: .now + .seconds(60))
@@ -199,17 +201,25 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             shutdownLogger.notice("Actor transport drain finished", metadata: ["stage": "gateway", "drained": .string(String(gatewayStopped))])
             return shardStopped && gatewayStopped
         }
-        let control = try await {
+        let control: GatewayRealtimePartitionControl?
+        if ownsPublication {
             do {
                 guard let database = prepared.topology.maintenanceDatabase as? V2EventLoopBalancedDatabase else {
                     throw V2RealtimeDirectoryError.invalidInput
                 }
-                return try GatewayRealtimePartitionControl(identity: identity,
-                    roster: Set(actors.realtimeDiscoveryPeers.map(\.nodeID)),
-                    store: GatewayObservedRealtimeLeaseStore(
-                        underlying: try PostgresV2RealtimePartitionLeaseStore(database: database.usingLoanClass(.renewal)), metrics: metrics),
-                    qualification: serviceQualification,
-                    availableHosts: { await shardHandle.reachableNodeIDs() },
+                let availableHosts: (@Sendable () async -> Set<String>)?
+                let roster: Set<String>
+                if fixedOwnerNodeID == nil {
+                    availableHosts = { await shardHandle.reachableNodeIDs() }
+                    roster = Set(actors.realtimeDiscoveryPeers.map(\.nodeID))
+                } else {
+                    availableHosts = nil
+                    roster = [identity.nodeID]
+                }
+                let leases = try PostgresV2RealtimePartitionLeaseStore(database: database.usingLoanClass(.renewal))
+                control = try GatewayRealtimePartitionControl(identity: identity,
+                    roster: roster, store: GatewayObservedRealtimeLeaseStore(underlying: leases, metrics: metrics),
+                    qualification: serviceQualification, availableHosts: availableHosts,
                     rotatePartitions: { await service.partitionsNeedingRollover() },
                     install: { try await installer.install($0) })
             } catch {
@@ -218,10 +228,12 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
                 await roomRouter.shutdown()
                 throw error
             }
-        }()
+        } else {
+            control = nil
+        }
         await shardHandle.setQualificationObserver {
             await actors.qualificationDidChange()
-            await control.qualificationDidChange()
+            await control?.qualificationDidChange()
         }
         // Filled exactly once before subscriptions/listeners start. Clearing it
         // during drain breaks the owned callback cycle.
@@ -262,7 +274,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             await actorFactory?.shutdownRoomSubscriptionDelivery()
             shutdownLogger.notice("Realtime component drain finished", metadata: ["stage": "room_delivery"])
             shutdownLogger.notice("Realtime component drain started", metadata: ["stage": "partition_control"])
-            do { try await control.shutdown() } catch { success = false }
+            do { try await control?.shutdown() } catch { success = false }
             shutdownLogger.notice("Realtime component drain finished", metadata: ["stage": "partition_control", "drained": .string(String(success))])
             shutdownLogger.notice("Realtime component drain started", metadata: ["stage": "journal"])
             await journal.close()
@@ -280,8 +292,8 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             return success && transportsStopped
         }
         do {
-            await journal.start()
-            try await control.start()
+            await journal.start(publishes: ownsPublication)
+            try await control?.start()
             try await coordinator.start()
         } catch {
             await userInterests.shutdown(); await coordinator.shutdown()
@@ -297,8 +309,13 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
         await registry.configureUserSyncInterests(userInterests)
         await registry.configureLiveActivityBroker(publisher, routesLocalActivity: true)
         let refresh = Task {
+            var rosterBytes: Data?
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(15)) } catch { break }
+                if fixedOwnerNodeID != nil {
+                    do { rosterBytes = try await actor.reloadGatewayRoster(on: shardHandle, previous: rosterBytes) }
+                    catch { shutdownLogger.error("Gateway roster reload failed", metadata: ["error": "\(type(of: error))"]) }
+                }
                 await registry.refreshAllObservedPresence()
             }
         }
@@ -315,9 +332,9 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
                 value.recoveryQueued = pressure.recoveryQueued
                 value.activationWaiters = pressure.activationWaiters
                 value.desiredPartitions = pressure.partitions
-                let leases = await control.pressureSnapshot()
-                value.installedPartitions = leases.installed
-                value.partitionControlFailedTicks = leases.failedTicks
+                let leases = await control?.pressureSnapshot()
+                value.installedPartitions = leases?.installed ?? 0
+                value.partitionControlFailedTicks = leases?.failedTicks ?? 0
                 if let proof = serviceQualification.snapshot() {
                     let remaining = ContinuousClock.now.duration(to: proof.validUntil).components
                     value.serviceQualified = 1
@@ -330,8 +347,14 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
 
     func actorRealtimeMetricsSnapshot() async -> V2ActorRealtimeMetricsSnapshot { await snapshot() }
 
+    func closeRecoveryAdmission() async {
+        refresh.cancel()
+        await coordinator.closeAdmission()
+    }
+
     func shutdown() async -> Bool {
-        refresh.cancel(); await refresh.value
+        await closeRecoveryAdmission()
+        await refresh.value
         await userInterests.shutdown()
         await coordinator.shutdown(); await fanout.shutdown(); await ingress.shutdown()
         return await stopTransport()

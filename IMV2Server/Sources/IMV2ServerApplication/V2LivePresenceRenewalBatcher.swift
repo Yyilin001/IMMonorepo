@@ -170,6 +170,13 @@ public actor V2LivePresenceRenewalBatcher {
         return true
     }
 
+    /// Discard a lease that has not reached the database. A submitted batch
+    /// still owns its callbacks until SQL settles.
+    public func cancelQueuedRenewal(connectionID: UUID) async {
+        guard let item = pending.removeValue(forKey: connectionID) else { return }
+        await cancel(item)
+    }
+
     /// Closes admission and shares one drain through actual SQL and callbacks.
     public func finish() async {
         if let finishTask { await finishTask.value; return }
@@ -185,12 +192,14 @@ public actor V2LivePresenceRenewalBatcher {
         scheduledFlushIsImmediate = false
         let remaining = Array(pending.values)
         pending.removeAll(); order.removeAll(); orderOffset = 0
-        for item in remaining {
-            for continuation in item.continuations.values { continuation.resume(throwing: CancellationError()) }
-            await item.completion?(.failure(CancellationError()))
-        }
+        for item in remaining { await cancel(item) }
         guard active else { return }
         await withCheckedContinuation { drainWaiters.append($0) }
+    }
+
+    private func cancel(_ item: PendingRenewal) async {
+        for continuation in item.continuations.values { continuation.resume(throwing: CancellationError()) }
+        await item.completion?(.failure(CancellationError()))
     }
 
     /// 安排一次延迟或立即刷新。
@@ -221,17 +230,13 @@ public actor V2LivePresenceRenewalBatcher {
         scheduledFlushID = nil
         scheduledFlush = nil
         scheduledFlushIsImmediate = false
-        var connectionIDs: [UUID] = []
-        while orderOffset < order.count && connectionIDs.count < configuration.maximumBatchSize {
+        var batch: [UUID: PendingRenewal] = [:]
+        batch.reserveCapacity(min(pending.count, configuration.maximumBatchSize))
+        while orderOffset < order.count && batch.count < configuration.maximumBatchSize {
             let id = order[orderOffset]; orderOffset += 1
-            if pending[id] != nil { connectionIDs.append(id) }
+            if let item = pending.removeValue(forKey: id) { batch[id] = item }
         }
         if orderOffset > 512 && orderOffset * 2 > order.count { order.removeFirst(orderOffset); orderOffset = 0 }
-        var batch: [UUID: PendingRenewal] = [:]
-        batch.reserveCapacity(connectionIDs.count)
-        for connectionID in connectionIDs {
-            batch[connectionID] = pending.removeValue(forKey: connectionID)
-        }
         guard !batch.isEmpty else { return }
         active = true
 
@@ -274,7 +279,7 @@ public actor V2LivePresenceRenewalBatcher {
         guard var item = pending[connectionID],
               let continuation = item.continuations.removeValue(forKey: continuationID)
         else { return }
-        if item.continuations.isEmpty {
+        if item.continuations.isEmpty, item.completion == nil {
             pending.removeValue(forKey: connectionID)
         } else {
             pending[connectionID] = item

@@ -5,7 +5,7 @@ import IMV2Server
 import IMV2ServerInfrastructure
 
 extension GatewayBackgroundWorkers {
-    func startProjectionWorkers(on workers: GatewayWorkerSupervisor) {
+    func startProjectionWorkers(_ projection: Projection, on workers: GatewayWorkerSupervisor) {
         let configuration = self.configuration
         let logger = self.logger
         let userProjectionWorkers = projection.userProjectionWorkers
@@ -13,7 +13,7 @@ extension GatewayBackgroundWorkers {
         let messageWritesAreBusy = projection.messageWritesAreBusy
         let snapshotArtifactBuilders = projection.snapshotArtifactBuilders
         let messageProjectionStateBodyCompactionWorkers = projection.messageProjectionStateBodyCompactionWorkers
-        let userStateWorkers = delivery.userStateWorkers
+        let userStateWorkers = projection.userStateWorkers
 
         // 使用 `SKIP LOCKED` 领取检查点，可让每个物理存储运行多个有界 worker，
         // 同时保持单个用户的严格顺序。快照发布的工件构建更重且有独立栅栏，

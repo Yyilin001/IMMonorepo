@@ -26,7 +26,13 @@ public struct V2RoomActorPlacementGrant: Equatable, Sendable {
 /// Synchronous immutable snapshot access only. Implementations never perform
 /// database/network work here; lifecycle owns loading committed control state.
 public protocol V2RoomActorPlacementRouting: Sendable {
+    /// Non-nil only if every issued placement remains valid for this entire service qualification.
+    var sharedAdmissionQualification: V2ActorServiceQualification? { get }
     func grant(roomID: RoomID, owner: V2RoomDataOwner) throws -> V2RoomActorPlacementGrant
     /// Capture the room's partition once; warm calls only compare current owner.
     func admission(for token: V2RoomActivationToken) throws -> @Sendable () -> Bool
+}
+
+public extension V2RoomActorPlacementRouting {
+    var sharedAdmissionQualification: V2ActorServiceQualification? { nil }
 }

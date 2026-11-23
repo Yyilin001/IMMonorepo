@@ -665,7 +665,7 @@ public func v2RenderPrometheusRuntimePressureMetrics(
         let groupCommits = "im_v2_send_operation_store_cross_room_commits_total"
         lines.append("# HELP \(groupCommits) Confirmed cross-room transactions by number of rooms.")
         lines.append("# TYPE \(groupCommits) counter")
-        for rooms in 2...4 {
+        for rooms in 2...V2SendOperationSchedulingConfiguration.supportedCrossRoomMessageLimit.upperBound {
             lines.append("\(groupCommits){rooms=\"\(rooms)\"} \(operations.crossRoomCommitsByRoomCount[rooms] ?? 0)")
         }
         for (suffix, value, help) in counters {

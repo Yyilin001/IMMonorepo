@@ -86,6 +86,8 @@ struct IMRuntimeLifecycleTests {
                 try await IMRPCAdmission.$usesMessageWindow.withValue(true) { try await remote.run(false) }
             }
             try await waitForEnqueue(3)
+            // A delayed credit can still dispatch this same waiter without a second wire request.
+            try await Task.sleep(for: .milliseconds(35))
             await gate.release()
             #expect(try await waiting.value == 42)
             #expect(caller.transportMetrics?.messageCreditWaits[.dispatched] == 1)

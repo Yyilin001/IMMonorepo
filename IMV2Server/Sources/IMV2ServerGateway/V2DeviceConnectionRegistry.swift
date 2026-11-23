@@ -508,8 +508,12 @@ public actor V2DeviceConnectionRegistry {
         // Admission ownership ends with the physical connection. Room release
         // and recovery-task joins must not keep a closed socket in the durable
         // connection quota while its replacement authenticates.
-        await leaseController?.revoke(connectionID: connectionID, lifecycle: revokedLifecycle)
-        let remainsOnline = await removePresenceLease(identity: identity, connectionID: connectionID)
+        let remainsOnline: Bool?
+        if let leaseController {
+            remainsOnline = await leaseController.retire(connectionID: connectionID, lifecycle: revokedLifecycle, identity: identity)
+        } else {
+            remainsOnline = directory.streamsByUser[identity.userID] != nil
+        }
         if let roomReference { await roomSubscriptionCoordinator?.release(reference: roomReference) }
         let revokedScopes = recoveryCoordinator.revokeConnection(connectionID, lifecycle: revokedLifecycle)
         directoryGenerations.removeValue(forKey: connectionID)
@@ -703,10 +707,15 @@ public actor V2DeviceConnectionRegistry {
     }
 
     public func shutdownRealtimeRecovery() async {
+        await shutdownRealtimeRecovery(onDrained: { _ in })
+    }
+
+    package func shutdownRealtimeRecovery(onDrained: @escaping @Sendable (String) -> Void) async {
         if let shutdown = realtimeRecoveryShutdown { await shutdown.value; return }
         realtimeRecoveryClosed = true
         recoveryCoordinator.revokeAllWrites()
         await roomSubscriptionAuthority.withLock { $0 }?.shutdown()
+        onDrained("room_authority")
         onlineRoomStreams.withLock { $0.removeAll() }
         let localHeads = roomSubscriptionHeadWorker.withLock { $0 }
         let localSubscriptions = roomSubscriptionCoordinator
@@ -729,9 +738,18 @@ public actor V2DeviceConnectionRegistry {
         let shutdown = Task.detached {
             let nextStream = Mutex(0)
             await withTaskGroup(of: Void.self) { group in
-                group.addTask { await observations?.finish() }
-                group.addTask { await self.recoveryCoordinator.shutdown() }
-                group.addTask { await self.lifecycleSupervisor.finish() }
+                group.addTask {
+                    await observations?.finish()
+                    onDrained("presence_observation")
+                }
+                group.addTask {
+                    await self.recoveryCoordinator.shutdown()
+                    onDrained("recovery")
+                }
+                group.addTask {
+                    await self.lifecycleSupervisor.finish()
+                    onDrained("connection_lifecycle")
+                }
                 for _ in 0..<min(16, drainingStreams.count) {
                     group.addTask {
                         while true {
@@ -751,8 +769,11 @@ public actor V2DeviceConnectionRegistry {
             // while those physical roots drain. Join their final callbacks too.
             await self.lifecycleSupervisor.finish()
             await presence?.value
+            onDrained("presence_publication")
             await localHeads?.shutdown()
+            onDrained("room_heads")
             await localSubscriptions?.shutdown()
+            onDrained("room_subscriptions")
             await self.clearRealtimeScopes()
         }
         realtimeRecoveryShutdown = shutdown
@@ -1191,6 +1212,11 @@ public actor V2DeviceConnectionRegistry {
     public func finishLivePresenceRenewals() async {
         leaseRenewalsClosed = true
         await leaseController?.finish()
+    }
+
+    public func stopLivePresenceRenewals() async {
+        leaseRenewalsClosed = true
+        await leaseController?.stopRenewals()
     }
 
     public func configureLiveActivityObservationAuthorizer(_ authorizer: any V2LiveActivityObservationAuthorizing) {

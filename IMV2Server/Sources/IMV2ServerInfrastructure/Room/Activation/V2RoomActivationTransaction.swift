@@ -82,10 +82,10 @@ private func v2WithRoomActivationTransactionCore<Value: Sendable>(
     }
 }
 
-/// A single SELECT carries the complete committed room cut. Its implicit
-/// statement snapshot needs no BEGIN or separate owner read. Keep the same
-/// physical-loan deadline, cancellation and actual completion ownership.
-func v2WithRoomSnapshotConnection<Value: Sendable>(database: any Database,
+/// A single SQL statement uses an implicit transaction. Retain the physical
+/// loan through completion and close it if the client stops receiving replies.
+/// Writes retried after ambiguous outcomes must be idempotent.
+func v2WithBoundedPostgresStatement<Value: Sendable>(database: any Database,
     deadline: ContinuousClock.Instant,
     _ body: @escaping @Sendable (any SQLDatabase) async throws -> Value
 ) async throws -> Value {

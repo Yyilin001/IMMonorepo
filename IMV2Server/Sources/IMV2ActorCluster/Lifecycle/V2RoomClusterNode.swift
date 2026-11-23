@@ -4,6 +4,17 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import NIOSSL
 
+extension IMActorSystemSettings {
+    /// Both endpoints use the advertised per-connection call window. The
+    /// transport reserves one eighth for dependencies and delivery RPCs.
+    mutating func configureRoomRPC(threadPoolSize: Int, limits: V2ActorAuthenticationLimits) {
+        self.threadPoolSize = threadPoolSize
+        maximumCallsPerConnection = 512
+        maximumInboundFrameBytes = max(limits.maximumRequestBytes, limits.maximumReplyBytes) + 65_536
+        errorTypes = [V2ActorAuthenticationError.self]
+    }
+}
+
 /// 只由拥有此精确入站 Actor 和物理端点的节点创建。
 /// 接待组件匹配或共享 IMActorSystem 都不构成权限。
 struct V2RoomLocalPort: Sendable {
@@ -112,15 +123,7 @@ public actor V2RoomClusterNode {
         defer { starting = false }
         var settings = IMActorSystemSettings(name: configuration.name, host: configuration.host,
                                              port: configuration.port, tls: configuration.tls)
-        settings.threadPoolSize = configuration.threadPoolSize
-
-        // 集群成员关系只用于发现。对等节点超时不能让本进程
-        // 放弃或认领由已提交归属和原生生命周期管理的房间激活。
-        // 二进制参数不再 base64 膨胀；为签名、身份与帧头保留固定空间。
-        settings.maximumInboundFrameBytes = ( max(authenticationLimits.maximumRequestBytes,
-                       authenticationLimits.maximumReplyBytes) + 65_536
-        )
-        settings.errorTypes = [V2ActorAuthenticationError.self]
+        settings.configureRoomRPC(threadPoolSize: configuration.threadPoolSize, limits: authenticationLimits)
 
         settings.methods = try await V2ActorRPCManifest.methods()
         let system = try await IMActorSystem(configuration.name, settings: settings)
@@ -213,11 +216,12 @@ public actor V2RoomClusterNode {
         serviceOwnerAccess: [V2ActorServiceID: Set<String>],
         discoveryPeers: [V2RealtimeShardDiscoveryPeer],
         limits: V2RealtimeTransportLimits = .init(),
-        serviceQualification: V2ActorServiceQualification? = nil) async throws -> V2RealtimeShardTransportHandle {
+        serviceQualification: V2ActorServiceQualification? = nil,
+        fixedOwnerNodeID: String? = nil) async throws -> V2RealtimeShardTransportHandle {
         guard let system, realtimeShards == nil, acceptingDiscoveries else { throw V2ActorAuthenticationError.invalidConfiguration }
         let handle = try buildRealtimeShardTransport(system: system, identity: identity,
             address: configuration.host, port: configuration.port, signer: signer, trust: trust,
-            serving: serving, serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits, serviceQualification: serviceQualification)
+            serving: serving, serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits, serviceQualification: serviceQualification, fixedOwnerNodeID: fixedOwnerNodeID)
         realtimeShards = handle
         try await handle.start()
         if !acceptingDiscoveries { _ = await handle.stop(deadline: .now + .seconds(2)); throw V2ActorAuthenticationError.overloaded }
@@ -296,6 +300,4 @@ public actor V2RoomClusterNode {
         system = nil
         return result
     }
-
-    public func hostedActorCount() async -> Int { await inbound?.actorCount() ?? 0 }
 }

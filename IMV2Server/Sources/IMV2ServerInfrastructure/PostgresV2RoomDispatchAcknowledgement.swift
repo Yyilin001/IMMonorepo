@@ -5,14 +5,14 @@ import SQLKit
 extension PostgresV2RoomDispatchStore {
     public func acknowledgePages(_ pages: [V2RoomDispatchAcknowledgement], now: Date) async throws -> Set<UUID> {
         guard pages.count <= 32, Set(pages.map { $0.lease.eventID }).count == pages.count,
-              v2PostgresTimestampCanEncode(now), let sql = database as? any SQLDatabase else { throw V2RoomDispatchError.invalidInput }
+              v2PostgresTimestampCanEncode(now) else { throw V2RoomDispatchError.invalidInput }
         guard !pages.isEmpty else { return [] }
         var values: SQLQueryString = ""
         for (index, page) in pages.enumerated() {
             if index > 0 { values += "," }
             values += "(\(bind: page.lease.eventID)::uuid,\(bind: page.lease.token)::uuid,\(bind: page.lease.recipientCursor)::uuid,\(bind: page.through)::uuid)"
         }
-        let rows = try await sql.raw("""
+        let statement: SQLQueryString = """
             WITH requested(event_id,token,old_cursor,through) AS (VALUES \(values)), owned AS MATERIALIZED (
                 SELECT work.source_event_id,requested.through, NOT EXISTS (
                     SELECT 1 FROM im_v2.room_memberships membership
@@ -38,7 +38,8 @@ extension PostgresV2RoomDispatchStore {
                 RETURNING work.source_event_id
             )
             SELECT source_event_id FROM finished UNION ALL SELECT source_event_id FROM advanced
-            """).all(decoding: DispatchAcknowledgedRow.self)
+            """
+        let rows = try await withWorkerStatement { try await $0.raw(statement).all(decoding: DispatchAcknowledgedRow.self) }
         return Set(rows.map(\.source_event_id))
     }
 }

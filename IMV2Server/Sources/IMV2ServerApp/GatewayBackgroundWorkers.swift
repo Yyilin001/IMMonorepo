@@ -9,15 +9,23 @@ import Logging
 import IMV2ServerGateway
 
 /// 后台工作所需的依赖集合，按投递、投影、维护三类组织。
-/// `assemble` 只连接依赖；`start` 才在同一个监督器内登记可取消的任务。
+/// 接入节点只保留本机任务，持久任务由负责写入的节点装配。
 struct GatewayBackgroundWorkers {
     let configuration: V2GatewayRuntimeConfiguration
     let logger: Logger
+    let directRoomLogEventCache: V2DirectRoomLogEventCache?
+    let syncWakeCoalescer: V2SyncWakeCoalescer
+    let deviceRevocationWorker: V2DeviceRevocationWorker
+    let durable: DurableWork?
+
+    struct DurableWork {
+        let delivery: Delivery
+        let projection: Projection
+        let maintenance: Maintenance
+    }
+
     struct Delivery {
         let forwardRuntime: V2ForwardDeliveryRuntime
-        let directRoomLogEventCache: V2DirectRoomLogEventCache?
-        let syncWakeCoalescer: V2SyncWakeCoalescer
-        let userStateWorkers: [V2UserStateEventWorker]
         let roomDispatchWorkers: [V2RoomDispatchWorker]
         let userSyncWakeRelays: [V2UserSyncWakeRelay]
         let contentReviewWorker: V2RoutedContentReviewWorker?
@@ -25,17 +33,14 @@ struct GatewayBackgroundWorkers {
         let accountNotificationWorkers: [V2AccountNotificationWorker]
     }
 
-    let delivery: Delivery
-
     struct Projection {
+        let userStateWorkers: [V2UserStateEventWorker]
         let userProjectionWorkers: [PostgresV2UserProjectionWorker]
         let databaseWorkAdmission: V2DatabaseWorkAdmissionController
         let messageWritesAreBusy: @Sendable () async -> Bool
         let snapshotArtifactBuilders: [PostgresV2SnapshotArtifactBuilder]
         let messageProjectionStateBodyCompactionWorkers: [PostgresV2MessageProjectionStateBodyCompactionWorker]
     }
-
-    let projection: Projection
 
     struct Maintenance {
         let revokedDeviceProjectionCleanupWorker: V2RevokedDeviceProjectionCleanupWorker
@@ -49,39 +54,27 @@ struct GatewayBackgroundWorkers {
         let forwardBackgroundDatabases: [String: any Database]
         let profileSecurityInvalidationWorker: V2ProfileSecurityInvalidationWorker
         let readReceiptPreferencePropagationWorker: V2ReadReceiptPreferencePropagationWorker
-        let deviceRevocationWorker: V2DeviceRevocationWorker
         let moderationAuditRetentionWorker: V2ModerationAuditRetentionWorker
         let mediaRetentionWorker: V2MediaRetentionWorker
     }
 
-    let maintenance: Maintenance
-
     /// 汇集各装配阶段的后台依赖，并建立持久唤醒 outbox 的转发器。
     /// 返回值尚无运行中的 Worker；`GatewayRuntime` 会在 HTTP 服务运行时调用 `start`。
-    static func assemble(
-        configuration: V2GatewayRuntimeConfiguration,
-        logger: Logger,
+    static func assembleDurableWork(
         prepared: GatewayPreparedAssembly,
-        roomServices: GatewayRoomServicesAssembly,
+        ownerMaintenance: GatewayOwnerMaintenanceAssembly,
         realtime: GatewayActorRealtimeRuntime,
         commands: GatewayCommandAssembly,
         maintenance: GatewayMaintenanceAssembly,
         forwardDelivery: GatewayForwardDeliveryAssembly
-    ) -> Self {
-        let userShardWork = prepared.userShardWork
+    ) -> DurableWork {
+        let userShardWork = ownerMaintenance.userShardWork
         let frontdoor = prepared.frontdoor
-        let ownerMaintenance = prepared.ownerMaintenance
-        let projection = prepared.projection
         let messageOwners = Array(prepared.roomOwners.physicalResources.values)
         return .init(
-            configuration: configuration,
-            logger: logger,
             delivery: .init(
                 forwardRuntime: forwardDelivery.runtime,
-                directRoomLogEventCache: projection.directRoomLogEventCache,
-                syncWakeCoalescer: frontdoor.syncWakeCoalescer,
-                userStateWorkers: projection.userStateWorkers,
-                roomDispatchWorkers: projection.roomDispatchWorkers,
+                roomDispatchWorkers: ownerMaintenance.roomDispatchWorkers,
                 userSyncWakeRelays: realtime.userSyncWakeStores.map {
                     V2UserSyncWakeRelay(store: $0, publisher: realtime.publisher)
                 },
@@ -90,6 +83,7 @@ struct GatewayBackgroundWorkers {
                 accountNotificationWorkers: maintenance.accountNotificationWorkers
             ),
             projection: .init(
+                userStateWorkers: ownerMaintenance.userStateWorkers,
                 userProjectionWorkers: userShardWork.userProjectionWorkers,
                 databaseWorkAdmission: frontdoor.databaseWorkAdmission,
                 messageWritesAreBusy: {
@@ -115,7 +109,6 @@ struct GatewayBackgroundWorkers {
                 forwardBackgroundDatabases: forwardDelivery.backgroundDatabases,
                 profileSecurityInvalidationWorker: maintenance.profileSecurityInvalidationWorker,
                 readReceiptPreferencePropagationWorker: maintenance.readReceiptPreferencePropagationWorker,
-                deviceRevocationWorker: maintenance.deviceRevocationWorker,
                 moderationAuditRetentionWorker: maintenance.moderationAuditRetentionWorker,
                 mediaRetentionWorker: maintenance.mediaRetentionWorker
             )
@@ -124,14 +117,19 @@ struct GatewayBackgroundWorkers {
 
     /// 启动全部后台任务，返回供停机时统一取消与排空的监督器。
     func start() throws -> GatewayWorkerSupervisor {
+        let workers = GatewayWorkerSupervisor()
+        guard let durable else {
+            startRealtimeWorkers(on: workers)
+            startLocalDeviceRevocation(on: workers)
+            return workers
+        }
         let maintenanceCadence = try V2MaintenanceCadence(
             intervalMilliseconds: configuration.maintenancePollIntervalMilliseconds
         )
-        let workers = GatewayWorkerSupervisor()
         startRealtimeWorkers(on: workers)
-        startProjectionWorkers(on: workers)
-        startDeliveryWorkers(on: workers)
-        startMaintenanceWorkers(on: workers, maintenanceCadence: maintenanceCadence)
+        startProjectionWorkers(durable.projection, on: workers)
+        startDeliveryWorkers(durable.delivery, on: workers)
+        startMaintenanceWorkers(durable.maintenance, on: workers, maintenanceCadence: maintenanceCadence)
         return workers
     }
 }

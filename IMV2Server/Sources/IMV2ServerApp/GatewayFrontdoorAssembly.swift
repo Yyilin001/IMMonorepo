@@ -1,6 +1,7 @@
 import IMV2ServerApplication
 import IMV2ServerContracts
 import Foundation
+import Logging
 import IMV2Server
 import IMV2ServerInfrastructure
 import IMV2ServerGateway
@@ -15,6 +16,7 @@ struct GatewayFrontdoorAssembly {
     let liveSyncNotifier: any V2LiveSyncNotifier
     let databaseWorkAdmission: V2DatabaseWorkAdmissionController
     let databasePoolTopology: V2DatabasePoolTopologySnapshot
+    let telemetry: V2CompositeTelemetrySink
     let prometheusTelemetry: V2PrometheusTelemetrySink
     let transportMetrics: V2GatewayTransportMetrics
     let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics
@@ -25,7 +27,8 @@ struct GatewayFrontdoorAssembly {
     /// 根据网关配置建立前台限流和可观测性依赖，供后续装配阶段复用。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        topology: GatewayDatabaseTopology
+        topology: GatewayDatabaseTopology,
+        logger: Logger
     ) -> Self {
         let database = topology.database
         let authenticator = V2PostgresGatewayAuthenticator(database: database, tokenKey: configuration.accessTokenKey)
@@ -69,9 +72,22 @@ struct GatewayFrontdoorAssembly {
         )
         let databasePoolTopology = GatewayPoolMetricsTopology.make(
             configuration: configuration,
-            physicalDatabaseCount: topology.physicalDatabaseURLs.count
+            physicalDatabaseCount: topology.physicalDatabaseURLs.count, workloadRoles: topology.workloadRoles
         )
         let prometheusTelemetry = V2PrometheusTelemetrySink()
+        let telemetry = V2CompositeTelemetrySink([
+            GatewayApplicationTelemetrySink(
+                logger: logger,
+                successSamplePermille: configuration.commandSuccessLogSamplePermille,
+                slowCommandThresholdMilliseconds:
+                    configuration.commandSlowLogThresholdMilliseconds,
+                diagnosticLogLimiter: .init(
+                    maximumPerSecond:
+                        configuration.commandDiagnosticLogMaximumPerSecond
+                )
+            ),
+            prometheusTelemetry,
+        ])
         let transportMetrics = V2GatewayTransportMetrics()
         let directRoomLogAppendStageMetrics = V2DirectRoomLogAppendStageMetrics()
         let messageSendBudget = V2GatewayMessageSendBudget(
@@ -89,6 +105,7 @@ struct GatewayFrontdoorAssembly {
             liveSyncNotifier: liveSyncNotifier,
             databaseWorkAdmission: databaseWorkAdmission,
             databasePoolTopology: databasePoolTopology,
+            telemetry: telemetry,
             prometheusTelemetry: prometheusTelemetry,
             transportMetrics: transportMetrics,
             directRoomLogAppendStageMetrics: directRoomLogAppendStageMetrics,

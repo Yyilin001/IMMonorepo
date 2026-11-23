@@ -27,9 +27,9 @@ enum GatewayRuntime {
     /// - Throws: 带故障阶段的 `V2StagedOperationalError`。
     static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
-        let (configuration, resourceConfiguration) = try loadConfigurations()
+        let (configuration, actorConfiguration, resourceConfiguration) = try loadConfigurations()
         logger.notice("IM V2 startup stage started", metadata: ["stage": "infrastructure"])
-        let infrastructure = try await startInfrastructure(configuration: configuration, logger: logger)
+        let infrastructure = try await startInfrastructure(configuration: configuration, ownsMessageWrites: !actorConfiguration.isSingleCoreIngress, logger: logger)
         logger.notice("IM V2 startup stage completed", metadata: ["stage": "infrastructure"])
         // 只登记已完整组装的组件，供外层失败路径清理。
         var startedComposition: GatewayComposition?
@@ -39,6 +39,7 @@ enum GatewayRuntime {
             logger.notice("IM V2 startup stage started", metadata: ["stage": "composition"])
             let composition = try await GatewayComposition.build(
                 configuration: configuration,
+                actorConfiguration: actorConfiguration,
                 resourceConfiguration: resourceConfiguration,
                 resources: infrastructure.databases,
                 app: infrastructure.application,
@@ -75,14 +76,18 @@ enum GatewayRuntime {
     /// 从同一进程环境读取网关与可选本地媒体配置。
     /// 配置解析失败时标记为 `gateway_configuration`，此时尚未创建运行时资源。
     private static func loadConfigurations() throws -> (
-        V2GatewayRuntimeConfiguration, V2ResourceRuntimeConfiguration?
+        V2GatewayRuntimeConfiguration, V2RoomActorApplicationConfiguration, V2ResourceRuntimeConfiguration?
     ) {
         let environment = ProcessRuntimeEnvironment()
         do {
-            return (
-                try V2GatewayRuntimeConfiguration(environment: environment),
-                try V2ResourceRuntimeConfiguration(environment: environment)
-            )
+            let configuration = try V2GatewayRuntimeConfiguration(environment: environment)
+            // The same process identity tags SQL sessions and Room activation.
+            let actorConfiguration = try V2RoomActorApplicationConfiguration(
+                environment: environment, hostsRooms: nil,
+                configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)),
+                batchWaitMilliseconds: Int64(max(configuration.roomTurnBatchMaximumDelayMilliseconds,
+                    configuration.readReceiptBatchMaximumDelayMilliseconds)))
+            return (configuration, actorConfiguration, try V2ResourceRuntimeConfiguration(environment: environment))
         } catch {
             throw V2StagedOperationalError(stage: "gateway_configuration", error: error)
         }
@@ -91,10 +96,10 @@ enum GatewayRuntime {
     /// 创建 HTTP 应用、数据库资源和事件循环，并标记启动失败阶段。
     /// `GatewayInfrastructure.start` 负责清理自身创建过程中未完成的资源。
     private static func startInfrastructure(
-        configuration: V2GatewayRuntimeConfiguration, logger: Logger
+        configuration: V2GatewayRuntimeConfiguration, ownsMessageWrites: Bool, logger: Logger
     ) async throws -> GatewayInfrastructure {
         do {
-            return try await GatewayInfrastructure.start(configuration: configuration, logger: logger)
+            return try await GatewayInfrastructure.start(configuration: configuration, ownsMessageWrites: ownsMessageWrites, logger: logger)
         } catch {
             throw V2StagedOperationalError(stage: "gateway_infrastructure_start", error: error)
         }
@@ -128,11 +133,17 @@ enum GatewayRuntime {
                         await shutdown.wait()
                         logger.notice("IM V2 shutdown signal received")
 
+                        // Disconnects release coverage and lease work. Close
+                        // renewal admission while the connection owners drain.
+                        let connectionRegistry = composition.connectionRegistry
+                        async let leaseRenewals: Void = connectionRegistry.stopLivePresenceRenewals()
+                        await composition.actorRealtime.closeRecoveryAdmission()
                         let connectionDrainError = await drainConnections(
                             server: server,
                             timeout: .milliseconds(configuration.shutdownGraceMilliseconds),
                             logger: logger
                         )
+                        await leaseRenewals
                         let listenerShutdownError = await stopAcceptingAndDrainWorkers(
                             composition: composition,
                             workers: workers,
@@ -162,8 +173,7 @@ enum GatewayRuntime {
                         guard await workers.drain(
                             timeout: .milliseconds(configuration.shutdownGraceMilliseconds)
                         ) else {
-                            logger.critical("IM V2 service-task drain exceeded its shutdown deadline",
-                                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_worker_shutdown"))
+                            reportWorkerDrainTimeout(workers: workers, logger: logger)
                             exit(EXIT_FAILURE)
                         }
                         throw error
@@ -201,8 +211,9 @@ enum GatewayRuntime {
             try await server.closeConnectionsAndDrain(timeout: timeout)
             return nil
         } catch V2TLSGatewayServerError.drainTimedOut {
-            logger.critical("IM V2 connection drain exceeded its shutdown deadline",
-                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_connection_shutdown"))
+            var metadata = V2SafeLogMetadata.drainTimeout(stage: "gateway_connection_shutdown")
+            metadata["pending_connections"] = .stringConvertible(server.pendingConnectionDrainCount)
+            logger.critical("IM V2 connection drain exceeded its shutdown deadline", metadata: metadata)
             exit(EXIT_FAILURE)
         } catch {
             return error
@@ -234,12 +245,17 @@ enum GatewayRuntime {
         )
         guard drained else {
             // 活动 worker 可能仍持有事务，不能释放其下层的连接池或 EventLoop。
-            logger.critical("IM V2 service-task drain exceeded its shutdown deadline",
-                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_worker_shutdown"))
+            reportWorkerDrainTimeout(workers: workers, logger: logger)
             exit(EXIT_FAILURE)
         }
         logger.notice("IM V2 service-task drain finished", metadata: ["drained": "\(drained)"])
         return listenerShutdownError
+    }
+
+    private static func reportWorkerDrainTimeout(workers: GatewayWorkerSupervisor, logger: Logger) {
+        var metadata = V2SafeLogMetadata.drainTimeout(stage: "gateway_worker_shutdown")
+        metadata["unfinished_workers"] = .array(workers.unfinishedSources.map { .string($0) })
+        logger.critical("IM V2 service-task drain exceeded its shutdown deadline", metadata: metadata)
     }
 
     /// 在后台任务排空后断开在线状态管理，并关闭相关 broker 等辅助服务。

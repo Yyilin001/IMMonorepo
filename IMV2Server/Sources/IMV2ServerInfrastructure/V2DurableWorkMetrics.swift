@@ -233,12 +233,7 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                 revocation_metrics AS (
                     SELECT
                         CASE WHEN \(bind: includesGatewayRevocationMetrics) THEN COUNT(*) FILTER (
-                            WHERE event.event_id > COALESCE((
-                                SELECT cursor.last_event_id
-                                FROM im_v2.gateway_worker_cursors AS cursor
-                                WHERE cursor.worker_name = \(bind: V2DeviceRevocationCursorNamespace.workerName)
-                                  AND cursor.node_id = \(bind: scopedGatewayNodeID)
-                            ), 0)
+                            WHERE event.event_id > \(deviceRevocationCursor(for: scopedGatewayNodeID))
                         ) ELSE 0 END AS pending_device_revocation_events,
                         CASE WHEN \(bind: includesGatewayRevocationMetrics) THEN COUNT(*) FILTER (
                             WHERE event.event_id > COALESCE((
@@ -313,6 +308,40 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         } catch {
             // PostgreSQL 不可用时，/metrics 仍可被抓取；
             // 可用性测量值是明确的告警信号。错误文本不能泄漏为指标标签或响应体。
+            return .unavailable
+        }
+    }
+}
+
+private func deviceRevocationCursor(for nodeID: String) -> SQLQueryString {
+    """
+    COALESCE((
+        SELECT last_event_id FROM im_v2.gateway_worker_cursors
+        WHERE worker_name = \(bind: V2DeviceRevocationCursorNamespace.workerName)
+          AND node_id = \(bind: nodeID)
+    ), 0)
+    """
+}
+
+public struct PostgresV2GatewayRevocationMetricsSource: V2DurableWorkMetricsSource {
+    private let database: any Database
+    private let nodeID: String
+
+    public init(database: any Database, nodeID: String) {
+        self.database = database
+        self.nodeID = nodeID
+    }
+
+    public func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot {
+        guard let sql = database as? any SQLDatabase else { return .unavailable }
+        do {
+            guard let row = try await sql.raw("""
+                SELECT COUNT(*) AS pending FROM im_v2.device_revocation_events
+                WHERE event_id > \(deviceRevocationCursor(for: nodeID))
+                """).first() else { return .unavailable }
+            let pending = try row.decode(column: "pending", as: Int64.self)
+            return .init(isAvailable: true, pendingDeviceRevocationEvents: v2MetricCount(pending))
+        } catch {
             return .unavailable
         }
     }

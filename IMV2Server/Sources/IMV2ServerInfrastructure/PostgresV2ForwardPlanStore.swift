@@ -32,13 +32,16 @@ public struct PostgresV2ForwardPlanStore: V2ForwardPlanStoring, Sendable {
         self.database = database; self.clock = clock
     }
     public func dueCommands(limit:Int=16) async throws -> [V2ForwardPlanOperationCommand] {
-        guard (1...64).contains(limit),let sql=database as? any SQLDatabase else { throw V2ForwardPlanValidationError.invalidPlan }
-        let rows=try await sql.raw("SELECT command_json::text AS command_json FROM im_v2.forward_plan_operations WHERE resolved_json IS NULL AND next_action_at<=\(bind:clock()) ORDER BY next_action_at,actor_user_id,operation_id LIMIT \(bind:limit)").all(decoding:CommandRow.self)
+        guard (1...64).contains(limit) else { throw V2ForwardPlanValidationError.invalidPlan }
+        let rows = try await v2WithBoundedPostgresStatement(database: database, deadline: .now + .seconds(10)) { sql in
+            try await sql.raw("SELECT command_json::text AS command_json FROM im_v2.forward_plan_operations WHERE resolved_json IS NULL AND next_action_at<=\(bind:clock()) ORDER BY next_action_at,actor_user_id,operation_id LIMIT \(bind:limit)").all(decoding: CommandRow.self)
+        }
         return try rows.map { try JSONDecoder().decode(V2ForwardPlanOperationCommand.self,from:Data($0.command_json.utf8)) }
     }
     public func deferNextAction(_ command:V2ForwardPlanOperationCommand) async throws {
-        guard let sql=database as? any SQLDatabase else { throw V2ForwardPlanValidationError.invalidProgress }
-        try await sql.raw("UPDATE im_v2.forward_plan_operations SET next_action_at=\(bind:clock().addingTimeInterval(2)) WHERE actor_user_id=\(bind:command.actorUserID.uuidValue!) AND operation_id=\(bind:command.operationID.uuidValue!) AND resolved_json IS NULL").run()
+        try await v2WithBoundedPostgresStatement(database: database, deadline: .now + .seconds(10)) { sql in
+            try await sql.raw("UPDATE im_v2.forward_plan_operations SET next_action_at=\(bind:clock().addingTimeInterval(2)) WHERE actor_user_id=\(bind:command.actorUserID.uuidValue!) AND operation_id=\(bind:command.operationID.uuidValue!) AND resolved_json IS NULL").run()
+        }
     }
     private struct CommandRow:Decodable { let command_json:String }
     public func submit(_ command: V2ForwardPlanOperationCommand) async throws -> V2ForwardPlanRecoveryResult {
@@ -127,7 +130,7 @@ public struct PostgresV2ForwardPlanStore: V2ForwardPlanStoring, Sendable {
     }
     private func locked<T: Sendable>(_ command: V2ForwardPlanOperationCommand,
         operation: @escaping @Sendable (any SQLDatabase, Row?) async throws -> T) async throws -> T {
-        try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0) { transaction in
+        try await v2WithRoomActivationTransaction(database: database, deadline: .now + .seconds(10)) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardPlanValidationError.invalidProgress }
             let identity = try command.identity
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "forward-plan:" + identity.storageKey),0))").run()

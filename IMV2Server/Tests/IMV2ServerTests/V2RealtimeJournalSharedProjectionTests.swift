@@ -30,6 +30,11 @@ struct V2RealtimeJournalSharedProjectionTests {
             Issue.record("head did not commit"); return
         }
         #expect(receipt.appliedThrough == 12)
+        guard case .applied(let replay) = projection.apply(filtered, isCurrent: { _, _ in true }) else {
+            Issue.record("already applied range was rejected"); return
+        }
+        #expect(replay.batchID == filtered.batchID && replay.appliedThrough == 9 && !replay.snapshotInstalled)
+        #expect(projection.controlCheckpoint(source: fixture.source, isCurrent: { _, _ in true }) == 12)
         for _ in 0..<1000 {
             #expect(projection.room(fixture.room, isCurrent: { _, _ in true })?.highWatermark == 8)
         }

@@ -14,9 +14,9 @@ import IMV2ServerInfrastructure
 /// 此阶段只准备依赖并配置指标地址，不启动房间 Actor 或 Broker。
 struct GatewayPreparedAssembly {
     let topology: GatewayDatabaseTopology
-    let userShardWork: GatewayUserShardWork
     let frontdoor: GatewayFrontdoorAssembly
-    let ownerMaintenance: GatewayOwnerMaintenanceAssembly
+    let ownerMaintenance: GatewayOwnerMaintenanceAssembly?
+    let durableWorkMetrics: V2CachedDurableWorkMetricsSource
     let projection: GatewayProjectionAssembly
     let roomOwners: GatewayRoomOwnerAssembly
     let coLocatedControlBuckets: Set<String>
@@ -26,18 +26,11 @@ struct GatewayPreparedAssembly {
     /// 这里的失败无需清理 Actor 或 Broker；数据库连接池仍由 `GatewayInfrastructure` 持有。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
+        actorConfiguration: V2RoomActorApplicationConfiguration,
         resources: V2DatabaseWorkloadResources,
         app: Application,
         logger: Logger
     ) async throws -> Self {
-        // Issue one process identity before opening any SQL pool. The same
-        // incarnation tags its sessions and later registers the native Host.
-        let actorConfiguration = try V2RoomActorApplicationConfiguration(
-            environment: ProcessRuntimeEnvironment(), hostsRooms: nil,
-            configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)),
-            batchWaitMilliseconds: Int64(max(
-                configuration.roomTurnBatchMaximumDelayMilliseconds,
-                configuration.readReceiptBatchMaximumDelayMilliseconds)))
         try await actorConfiguration.awaitSupervisedStartup()
         let topology = try await GatewayDatabaseTopology.build(
             configuration: configuration, resources: resources, logger: logger,
@@ -48,30 +41,30 @@ struct GatewayPreparedAssembly {
             storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2"
                 ? storage.bucket : nil
         })
-        let userShardWork = GatewayUserShardWork.build(
-            configuration: configuration,
-            projectionShardLocations: topology.projectionShardLocations,
-            maintenanceShardLocations: topology.maintenanceShardLocations
-        )
-
         // 指标端口仅监听配置的运维地址，不由客户端 TLS 监听器暴露。
         app.serverConfiguration.hostname = configuration.metrics.host
         app.serverConfiguration.port = configuration.metrics.port
         let frontdoor = GatewayFrontdoorAssembly.build(
-            configuration: configuration, topology: topology
+            configuration: configuration, topology: topology, logger: logger
         )
-        let ownerMaintenance = try GatewayOwnerMaintenanceAssembly.build(
-            configuration: configuration,
-            topology: topology,
-            userShardMetricsSources: userShardWork.userShardMetricsSources,
-            prometheusTelemetry: frontdoor.prometheusTelemetry,
-            logger: logger
+        let ownerMaintenance = actorConfiguration.isSingleCoreIngress ? nil
+            : try GatewayOwnerMaintenanceAssembly.build(configuration: configuration, topology: topology)
+        let metricsSource: any V2DurableWorkMetricsSource
+        if let ownerMaintenance {
+            metricsSource = ownerMaintenance.durableWorkMetrics
+        } else {
+            metricsSource = PostgresV2GatewayRevocationMetricsSource(
+                database: topology.maintenanceDatabase, nodeID: configuration.gatewayNodeID)
+        }
+        let durableWorkMetrics = V2CachedDurableWorkMetricsSource(
+            source: metricsSource,
+            minimumRefreshInterval: TimeInterval(configuration.metricsMinimumRefreshIntervalMilliseconds) / 1_000,
+            maximumRefreshDuration: TimeInterval(configuration.metricsRefreshTimeoutMilliseconds) / 1_000
         )
         let projection = try await GatewayProjectionAssembly.build(
             configuration: configuration,
             topology: topology,
-            coLocatedControlBuckets: coLocatedControlBuckets,
-            roomOwnerDatabaseURLs: ownerMaintenance.roomOwnerDatabaseURLs
+            coLocatedControlBuckets: coLocatedControlBuckets
         )
         let roomOwners = try GatewayRoomOwnerAssembly.build(
             configuration: configuration,
@@ -84,9 +77,9 @@ struct GatewayPreparedAssembly {
         )
         return .init(
             topology: topology,
-            userShardWork: userShardWork,
             frontdoor: frontdoor,
             ownerMaintenance: ownerMaintenance,
+            durableWorkMetrics: durableWorkMetrics,
             projection: projection,
             roomOwners: roomOwners,
             coLocatedControlBuckets: coLocatedControlBuckets
@@ -97,13 +90,27 @@ struct GatewayPreparedAssembly {
     /// 此操作仅登记路由；实际监听由 `GatewayRuntime.runServices` 启动。
     func registerMetrics(on app: Application, actors: V2RoomActorApplication, actorRealtimeMetrics: (any V2ActorRealtimeMetricsSource)? = nil) {
         let frontdoor = self.frontdoor
-        let ownerMaintenance = self.ownerMaintenance
         let projection = self.projection
         let roomOwners = self.roomOwners
         let topology = self.topology
         let physicalRecoveryOwners = Array(roomOwners.physicalResources.values)
-        let readReceiptBatcher = V2AggregatedReadReceiptBatchMetrics(
-            owners: roomOwners.physicalResources.values.map(\.receiptBatchMetrics))
+        let readReceiptBatcher: V2AggregatedReadReceiptBatchMetrics?
+        let sendOperationMetrics: V2AggregatedSendOperationBatchMetrics?
+        let sendOperationOwnerMetrics: V2AggregatedSendOperationOwnerMetrics?
+        let roomRecoveryBatches: (@Sendable () -> V2RoomRecoveryBatchPressureSnapshot)?
+        if physicalRecoveryOwners.isEmpty {
+            readReceiptBatcher = nil
+            sendOperationMetrics = nil
+            sendOperationOwnerMetrics = nil
+            roomRecoveryBatches = nil
+        } else {
+            readReceiptBatcher = .init(owners: physicalRecoveryOwners.map(\.receiptBatchMetrics))
+            sendOperationMetrics = .init(owners: physicalRecoveryOwners.map(\.sendOperationMetrics))
+            sendOperationOwnerMetrics = .init(owners: physicalRecoveryOwners)
+            roomRecoveryBatches = {
+                v2AggregateRecoveryBatchPressure(physicalRecoveryOwners.map { $0.recoveryBatchPressureSnapshot() })
+            }
+        }
         let schedulingRegistry = frontdoor.connectionRegistry
         let traceCollection: V2SendPathTrace.Collection? = switch ProcessInfo.processInfo.environment["IM_V2_SEND_PATH_TRACE_MODE"] {
         case "all": .all
@@ -113,7 +120,7 @@ struct GatewayPreparedAssembly {
         V2SendPathTraceLogging.install(collection: traceCollection)
         V2VaporMetricsRoutes.register(on: app, telemetry: frontdoor.prometheusTelemetry,
             connectionMetrics: frontdoor.connectionRegistry, transportMetrics: frontdoor.transportMetrics,
-            durableWorkMetrics: ownerMaintenance.durableWorkMetrics,
+            durableWorkMetrics: durableWorkMetrics, includesGlobalDurableWork: ownerMaintenance != nil,
             runtimePressureMetrics: V2GatewayRuntimePressureMetricsSource(
                 databaseWorkAdmission: frontdoor.databaseWorkAdmission, databasePools: frontdoor.databasePoolTopology,
                 syncWakeCoalescer: frontdoor.syncWakeCoalescer,
@@ -124,10 +131,8 @@ struct GatewayPreparedAssembly {
                 directRoomLogEventCache: projection.directRoomLogEventCache,
                 preparedGroupEventPageCache: projection.preparedGroupEventPageCache,
                 connectionRegistry: frontdoor.connectionRegistry, roomActors: actors,
-                sendOperationMetrics: V2AggregatedSendOperationBatchMetrics(
-                    owners: roomOwners.physicalResources.values.map(\.sendOperationMetrics)),
-                sendOperationOwnerMetrics: V2AggregatedSendOperationOwnerMetrics(
-                    owners: roomOwners.physicalResources.values.map { $0 as any V2SendOperationOwnerMetricsReading }),
+                sendOperationMetrics: sendOperationMetrics,
+                sendOperationOwnerMetrics: sendOperationOwnerMetrics,
                 databaseLoans: {
                     let snapshot = topology.loanMetricsSnapshot()
                     let ordinary = snapshot.classes[.ordinary, default: .init()]
@@ -145,9 +150,8 @@ struct GatewayPreparedAssembly {
                                     granted: sync.granted, rejected: sync.rejected),
                         observations: v2LoanObservationMetrics(snapshot.observations), pools: topology.loanMetricsByPool())
                 }, gatewayMessageSendBudget: frontdoor.messageSendBudget,
-                roomRecoveryBatches: {
-                    v2AggregateRecoveryBatchPressure(physicalRecoveryOwners.map { $0.recoveryBatchPressureSnapshot() })
-                }, additionalDatabaseWorkAdmissions: roomOwners.databaseWorkAdmissions.controllers),
+                roomRecoveryBatches: roomRecoveryBatches,
+                additionalDatabaseWorkAdmissions: roomOwners.databaseWorkAdmissions.controllers),
             actorRealtimeMetrics: actorRealtimeMetrics,
             recoverySchedulingMetrics: { schedulingRegistry.recoverySchedulingMetricsSnapshot() },
             roomHeadDeliveryMetrics: {

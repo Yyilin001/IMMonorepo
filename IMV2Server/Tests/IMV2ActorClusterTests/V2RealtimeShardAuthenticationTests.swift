@@ -9,6 +9,17 @@ import Testing
 
 @Suite("Realtime partition signed calls and actual drain")
 struct V2RealtimeShardAuthenticationTests {
+    @Test("adding ingress keeps the fixed Core discovery binding and changing owner invalidates it")
+    func fixedCoreIngressExtension() throws {
+        let roster = ["a": "a", "b": "b"]
+        let membership = try V2ActorServiceQualification.Membership(revision: 1, current: Set(roster.keys))
+        let digest = try v2RealtimeMembershipDigest(roster: roster, membership: membership, fixedOwnerNodeID: "a")
+        let extended = roster.merging(["c": "c"]) { _, new in new }
+        let expanded = try V2ActorServiceQualification.Membership(revision: 1, current: Set(extended.keys))
+        #expect(try digest == v2RealtimeMembershipDigest(roster: extended, membership: expanded, fixedOwnerNodeID: "a"))
+        #expect(try digest != v2RealtimeMembershipDigest(roster: extended, membership: expanded, fixedOwnerNodeID: "b"))
+    }
+
     @Test func uuidTopicKeysNormalizeEveryEntryAndPreserveOpaqueCase() throws {
         let upper = "EED841A8-28BD-5C9D-8BDC-896DAEDCF9A3", lower = upper.lowercased()
         let direct = V2RealtimeTopicKey(kind: .userSync, id: upper)

@@ -195,23 +195,30 @@ extension V2PostgresUserShardRouter: V2UserShardRouteBatchFencing {
         for userIDs: [UserID],
         _ operation: @escaping @Sendable ([V2UserShardRoute], any Database) async throws -> Result
     ) async throws -> Result {
-        guard !userIDs.isEmpty else {
-            return try await database.transaction { transaction in
-                try await operation([], transaction)
-            }
-        }
+        try await withCurrentRoutes(for: userIDs, deadline: nil, operation)
+    }
+
+    func withCurrentRoutes<Result: Sendable>(
+        for userIDs: [UserID], deadline: ContinuousClock.Instant?,
+        _ operation: @escaping @Sendable ([V2UserShardRoute], any Database) async throws -> Result
+    ) async throws -> Result {
         let uniqueUserIDs = Array(Set(userIDs.map(\.rawValue))).sorted()
         guard uniqueUserIDs.count <= 1_024,
               uniqueUserIDs.allSatisfy({ UUID(uuidString: $0) != nil })
         else { throw V2UserShardRouterError.invalidRoute }
 
-        return try await database.transaction { transaction in
+        let readAndApply: @Sendable (any Database) async throws -> Result = { transaction in
+            if userIDs.isEmpty { return try await operation([], transaction) }
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             let routes = try await routes(for: userIDs, sql: sql)
             return try await operation(routes, transaction)
         }
+        if let deadline {
+            return try await v2WithRoomActivationTransaction(database: database, deadline: deadline, readAndApply)
+        }
+        return try await database.transaction(readAndApply)
     }
 }
 

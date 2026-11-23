@@ -12,6 +12,7 @@ import Logging
 /// 连接池本身由调用方持有的 `V2DatabaseResources` 负责关闭。
 struct GatewayDatabaseTopology {
     let physicalDatabaseURLs: [String]
+    let workloadRoles: [V2PostgresWorkloadPoolBudget.Role]
     private let databasesByRole: [V2PostgresWorkloadPoolBudget.Role: [String: any Database]]
     private let initializationDatabasesByURL: [String: V2EventLoopBalancedDatabase]
     let initializationControlDatabase: any Database
@@ -121,7 +122,7 @@ struct GatewayDatabaseTopology {
         logger: Logger,
         actorConfiguration: V2RoomActorApplicationConfiguration
     ) async throws -> Self {
-        try configuration.requirePersistentMessageWritePool()
+        if !actorConfiguration.isSingleCoreIngress { try configuration.requirePersistentMessageWritePool() }
         let applicationName = actorConfiguration.hostIdentity.map(V2ActorPostgresSessionIdentity.applicationName)
         let workloads = resources
         // Routing, policy and room identity are foreground control dependencies.
@@ -132,7 +133,7 @@ struct GatewayDatabaseTopology {
         let expectedControlLoops = configuration.databaseWorkloadPoolIsolationEnabled
             ? configuration.databaseNonMessagePoolEventLoopThreads : configuration.databasePolicy.eventLoopThreads
         guard allControlEventLoops.count == expectedControlLoops,
-              !configuration.databaseWorkloadPoolIsolationEnabled || workloads.messageWrite != nil else {
+              !configuration.databaseWorkloadPoolIsolationEnabled || actorConfiguration.isSingleCoreIngress || workloads.messageWrite != nil else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         let physicalDatabaseURLs = Array(Set(
@@ -145,7 +146,10 @@ struct GatewayDatabaseTopology {
         ] = [:]
         let databaseRoles: [V2PostgresWorkloadPoolBudget.Role] =
             configuration.databaseWorkloadPoolIsolationEnabled
-                ? V2PostgresWorkloadPoolBudget.Role.allCases.filter { configuration.databaseWorkloadPoolBudget.connectionsPerEventLoop(for: $0) > 0 }
+                ? V2PostgresWorkloadPoolBudget.Role.allCases.filter {
+                    configuration.databaseWorkloadPoolBudget.connectionsPerEventLoop(for: $0) > 0
+                        && !(actorConfiguration.isSingleCoreIngress && ($0 == .messageWrite || $0 == .projection))
+                }
                 : [.foreground]
         for (urlIndex, url) in physicalDatabaseURLs.enumerated() {
             for role in databaseRoles {
@@ -176,8 +180,10 @@ struct GatewayDatabaseTopology {
                         maximumConnectionsPerEventLoop: capacity,
                         sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil,
                         unixSocketPath: role == .messageWrite ? configuration.messageWriteUnixSockets[url] : nil,
-                        prepareRoomQueries: (role == .messageWrite || role == .foreground || role == .sync)
-                            && ProcessInfo.processInfo.environment["IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED"] != "false"
+                        prepareRoomQueries: (role == .messageWrite || role == .foreground)
+                            && ProcessInfo.processInfo.environment["IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED"] != "false",
+                        prepareSyncQueries: role == .sync ||
+                            (role == .foreground && !configuration.databaseWorkloadPoolIsolationEnabled)
                     ),
                     as: identifier
                 )
@@ -346,6 +352,7 @@ struct GatewayDatabaseTopology {
         )
         return .init(
             physicalDatabaseURLs: physicalDatabaseURLs,
+            workloadRoles: databaseRoles,
             databasesByRole: databasesByRole,
             initializationDatabasesByURL: initializationDatabases,
             initializationControlDatabase: initializationControlDatabase,
@@ -373,7 +380,8 @@ private func postgresDatabaseConfiguration(
     maximumConnectionsPerEventLoop: Int,
     sessionTimeouts: V2RoomActivationSQLTimeouts? = nil,
     unixSocketPath: String? = nil,
-    prepareRoomQueries: Bool = false
+    prepareRoomQueries: Bool = false,
+    prepareSyncQueries: Bool = false
 ) throws -> DatabaseConfigurationFactory {
     var configuration = try SQLPostgresConfiguration(url: url)
     if let unixSocketPath {
@@ -387,8 +395,15 @@ private func postgresDatabaseConfiguration(
         configuration.coreConfiguration.options.additionalStartupParameters.append(("application_name", applicationName))
     }
     if prepareRoomQueries {
+        configuration.coreConfiguration.options.preparedQuerySQLPrefixes += [
+            "/* imv2_plain_direct_append */", "/* imv2_room_pull_snapshot */"
+        ]
+    }
+    if prepareSyncQueries {
+        configuration.coreConfiguration.options.preparedQuerySQLPrefixes += PostgresV2SyncStore.preparedSQLPrefixes
+    }
+    if prepareRoomQueries || prepareSyncQueries {
         configuration.coreConfiguration.options.preparedQueryCacheCapacity = 16
-        configuration.coreConfiguration.options.preparedQuerySQLPrefixes = ["/* imv2_plain_direct_append */", "/* imv2_room_pull_snapshot */"]
     }
     configuration.coreConfiguration.options.connectTimeout = .milliseconds(
         Int64(policy.connectTimeoutMilliseconds)

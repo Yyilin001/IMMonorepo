@@ -1,12 +1,14 @@
 import Synchronization
 
-/// Fixed reasons before distinct Owner failures map to wire overload.
+/// Fixed reasons before distinct subscription failures map to the wire reply.
 /// Contains no room, user, connection, or request identity.
 public final class V2RoomSubscriptionOwnerFailureMetrics: Sendable {
     public enum Reason: String, CaseIterable, Sendable {
         case busy, catchUpRequired, overloaded, pumpBindRefused
         case pumpBindingActive, pumpBindingCapacity, pumpBindingInProgress
         case subscribeTerminalPending, subscribeControlCutMismatch, subscribeLogGap
+        case restoreUnavailable, retainDeliverySessionUnavailable, subscribeUnavailable, resetUnavailable
+        case deliverySessionHostNotReady, deliverySessionOpenRefused, deliverySessionOpenFailed
     }
     public static let shared = V2RoomSubscriptionOwnerFailureMetrics()
     private let counters = Mutex<[Reason: UInt64]>([:])

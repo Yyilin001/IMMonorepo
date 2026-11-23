@@ -22,7 +22,7 @@ struct V2PlacementControlRuntimeTests {
             return try .init(document: document, hostsRooms: false, configuredShardIDs: ["rooms-primary"])
         }
         let configuration = try build(object)
-        #expect(configuration.hostIdentity == nil && configuration.placementControl.identity == nil)
+        #expect(configuration.hostIdentity == nil && configuration.placementControl?.identity == nil)
         #expect(configuration.policyPlacement == nil)
         #expect(!configuration.realtimePeers.contains { $0.serviceID == configuration.signer.serviceID.rawValue })
         var services = try #require(object["services"] as? [[String: Any]])

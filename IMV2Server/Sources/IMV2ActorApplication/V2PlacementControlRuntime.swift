@@ -28,7 +28,7 @@ package actor V2PlacementControlRuntime {
         guard !started, !closing else { throw V2PlacementRaftError.closed }
         started = true; starting = true
         defer { starting = false }
-        let control = configuration.placementControl
+        guard let control = configuration.placementControl else { throw V2PlacementRaftError.invalidConfiguration }
         let roster = Set(control.roles.values)
         var initial: [String: V2ActorPlacementSnapshot] = [:]
         for shard in control.shards {

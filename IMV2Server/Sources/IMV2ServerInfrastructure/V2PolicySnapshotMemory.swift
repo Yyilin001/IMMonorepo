@@ -60,13 +60,13 @@ final class V2PolicySnapshotMemory: Sendable {
 
     func cached(scopes: [V2PolicyAuthorizationScope], at instant: ContinuousClock.Instant) throws -> [V2PolicyFactsSnapshot]? {
         try Task.checkCancellation()
+        // Validate caller-owned inputs before competing with other rooms for the fact store.
+        let valid = !scopes.isEmpty && scopes.count <= 4 && scopes.allSatisfy(\.isValid)
+        let keys = valid ? scopes.map(\.canonical) : []
+        let distinct = valid && Set(keys).count == keys.count
         return try state.withLock { value in
             guard !value.closed else { throw V2PolicyAuthorizationLifecycleError.closed }
-            guard !scopes.isEmpty, scopes.count <= 4, scopes.allSatisfy(\.isValid),
-                  Set(scopes.map(\.canonical)).count == scopes.count else {
-                throw V2PolicyAuthorizationLifecycleError.invalidRequest
-            }
-            let keys = scopes.map(\.canonical)
+            guard distinct else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
             // No external callbacks under this lock. Session readiness takes a
             // separate short lock; control writers release it before publication.
             guard keys.allSatisfy({ key in

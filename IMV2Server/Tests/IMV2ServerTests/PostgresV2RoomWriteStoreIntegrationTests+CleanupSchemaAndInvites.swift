@@ -609,11 +609,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(expiry >= now.addingTimeInterval(9))
                 #expect((value.remainingLeaseSeconds ?? 0) > 9 && (value.remainingLeaseSeconds ?? 11) <= 10.001)
             }
-            #expect(try await !store.removePresence(
-                identity: peerIdentity,
-                connectionID: peerConnection,
-                now: now.addingTimeInterval(1.5)
-            ))
+            let removed = try await store.removePresenceBatch([
+                .init(identity: peerIdentity, connectionID: peerConnection),
+                .init(identity: peerIdentity, connectionID: firstConnection),
+            ], now: now.addingTimeInterval(1.5))
+            #expect(removed == [peerConnection: false, firstConnection: false])
+            #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 1)
 
             // Expire the actual row without sleeping or treating a future caller clock as authority.
             try await sql.raw("UPDATE im_v2.user_live_presence_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE connection_id=\(bind:firstConnection)").run()
@@ -638,11 +639,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 policy: policy,
                 now: afterExpiry
             ) == .rejected)
-            #expect(try await store.removePresence(
-                identity: identity,
-                connectionID: firstConnection,
-                now: afterExpiry
-            ))
+            let removedExpired = try await store.removePresenceBatch([
+                .init(identity: identity, connectionID: firstConnection),
+                .init(identity: peerIdentity, connectionID: peerConnection),
+            ], now: afterExpiry)
+            #expect(removedExpired == [firstConnection: true, peerConnection: false])
             #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 1)
             #expect(try await sql.raw("""
                 SELECT EXISTS (

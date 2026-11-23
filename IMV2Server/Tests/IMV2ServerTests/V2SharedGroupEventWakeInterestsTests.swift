@@ -78,6 +78,21 @@ struct V2SharedGroupEventWakeInterestsTests {
         }
     }
 
+    @Test("shutdown cancels the actual broker activation and joins its release")
+    func shutdownDuringActivation() async {
+        let broker = CancellableInterestBroker()
+        let shared = V2SharedGroupEventWakeInterests(underlying: broker)
+        let account = shared.manager(for: .account(UUID()))
+        let room = RoomID(uuid: UUID())
+        let activation = Task { try await account.activate(roomID: room) }
+        _ = await broker.started.stream.first { _ in true }
+
+        await shared.shutdown()
+
+        await #expect(throws: CancellationError.self) { try await activation.value }
+        #expect(await broker.releasedAfterCancellation)
+    }
+
     @Test("deactivation during broker activation settles to no subscription", arguments: [false, true])
     func concurrentRemoval(failActivation: Bool) async throws {
         let broker = InterestBrokerProbe(), room = RoomID(uuid: UUID())
@@ -108,6 +123,26 @@ struct V2SharedGroupEventWakeInterestsTests {
 }
 
 private struct InterestProbeFailure: Error {}
+
+private actor CancellableInterestBroker: V2GroupEventWakeInterestManaging {
+    let started = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    private var cancelled = false
+    private(set) var releasedAfterCancellation = false
+
+    func activate(roomID: RoomID) async throws {
+        started.continuation.yield(())
+        started.continuation.finish()
+        do { try await Task.sleep(for: .seconds(2)) }
+        catch is CancellationError {
+            cancelled = true
+            throw CancellationError()
+        }
+    }
+
+    func deactivate(roomID: RoomID) {
+        releasedAfterCancellation = cancelled
+    }
+}
 
 private actor InterestBrokerProbe: V2GroupEventWakeInterestManaging {
     private(set) var active: Set<RoomID> = []

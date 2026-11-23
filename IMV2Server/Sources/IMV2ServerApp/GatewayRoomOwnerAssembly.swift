@@ -41,6 +41,13 @@ struct GatewayRoomOwnerAssembly {
                     roomShardStorage: configuration.roomShardStorage.filter { $0.databaseURL == url },
                     maximumReadQueued: configuration.interactiveReadDatabaseWorkMaximumQueued))
             }))
+        if actorConfiguration.isSingleCoreIngress {
+            return .init(databaseWorkAdmissions: ownerAdmissions, actorConfiguration: actorConfiguration,
+                ownerResources: [:], physicalResources: [:],
+                physicalStoreKeyByShard: Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map {
+                    ($0.shardID, $0.databaseURL + "\u{0}" + $0.schema)
+                }), bootstraps: [:], forwardPairs: [:])
+        }
         let durableSchedulingConfiguration = configuration.durableSendSchedulingConfiguration()
         var ownerResources: [String: V2RoomServerOwnerResources] = [:]
         var physicalResources: [String: V2RoomServerOwnerResources] = [:]

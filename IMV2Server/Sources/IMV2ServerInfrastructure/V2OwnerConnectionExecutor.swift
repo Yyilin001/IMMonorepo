@@ -38,11 +38,11 @@ package typealias V2ScheduledSendExecution = @Sendable (V2OwnerConnectionTurn,
 package typealias V2ScheduledGroupExecution = @Sendable (V2OwnerConnectionTurn,
     [V2PreparedMessageSendBatch]) async throws -> [V2ScheduledSendOutcome]?
 
-/// Delivered to the already waiting room task after the database cycle settles.
-/// Finalization carries no borrowed database and never releases room ordering early.
+/// Result of one room in a settled cross-room transaction. Its publication
+/// captures only synchronous in-memory state and post-commit notifications.
 package struct V2ScheduledSendOutcome: Sendable {
     let result: Result<[V2RoomMessagingResult], any Error>
-    let finalize: @Sendable () async -> Void
+    let finalize: @Sendable () -> Void
 }
 
 package final class V2OwnerPostCommitWork: Sendable {

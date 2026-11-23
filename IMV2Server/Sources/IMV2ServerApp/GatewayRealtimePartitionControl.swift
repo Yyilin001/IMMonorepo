@@ -21,7 +21,7 @@ actor GatewayRealtimePartitionControl {
     private var owned: [LeaseKey: V2RealtimePartitionLease] = [:]
     private var watchdog: Task<Void, Never>?
     private let store: any V2RealtimePartitionLeaseStore
-    private let availableHosts: @Sendable () async -> Set<String>
+    private let availableHosts: (@Sendable () async -> Set<String>)?
     private let rotatePartitions: @Sendable () async -> Set<Int>
     private let install: @Sendable ([Installed]) async throws -> Void
     private var installed: [Int: Installed] = [:]
@@ -39,7 +39,7 @@ actor GatewayRealtimePartitionControl {
 
     init(identity: V2GatewayRealtimeIdentity, roster: Set<String>,
          store: any V2RealtimePartitionLeaseStore, qualification: V2ActorServiceQualification,
-         availableHosts: @escaping @Sendable () async -> Set<String>,
+         availableHosts: (@Sendable () async -> Set<String>)?,
          rotatePartitions: @escaping @Sendable () async -> Set<Int> = { [] },
          install: @escaping @Sendable ([Installed]) async throws -> Void) throws {
         guard qualification.matches(localNodeID: identity.nodeID, roster: roster),
@@ -176,22 +176,29 @@ actor GatewayRealtimePartitionControl {
         // Cleanup is allowed without service permission; claim/renew are not.
         try await releaseRetired()
         guard let proof = qualification.snapshot(), !closed else { return }
-        let reachable = await availableHosts().intersection(qualification.membership.nodes).union([identity.nodeID])
-        try await require(proof)
-        let candidates = reachable.sorted()
-        let desired = Set((0..<256).filter { partition in
-            candidates.max { left, right in
-                let lhs = Self.score(partition: partition, host: left)
-                let rhs = Self.score(partition: partition, host: right)
-                return lhs == rhs ? left < right : lhs < rhs
-            } == identity.nodeID
-        })
+        let desired: Set<Int>
+        if let availableHosts {
+            let reachable = await availableHosts().intersection(qualification.membership.nodes).union([identity.nodeID])
+            try await require(proof)
+            let candidates = reachable.sorted()
+            desired = Set((0..<256).filter { partition in
+                candidates.max { left, right in
+                    let lhs = Self.score(partition: partition, host: left)
+                    let rhs = Self.score(partition: partition, host: right)
+                    return lhs == rhs ? left < right : lhs < rhs
+                } == identity.nodeID
+            })
+        } else {
+            // The exclusive Core is the only eligible publisher.
+            desired = Set(0..<256)
+        }
         let rotating = await rotatePartitions()
         try await require(proof)
+        let beforeFiltering = installed.count
         installed = installed.filter { desired.contains($0.key) && !rotating.contains($0.key)
             && $0.value.deadline > .now && $0.value.qualificationGeneration == proof.generation }
-        // Retire local service/advertisements before strict token cleanup.
-        try await publishCurrent()
+        // Withdraw removed partitions before releasing their tokens.
+        if installed.count != beforeFiltering { try await publishCurrent() }
         try await require(proof)
         try await releaseRetired()
         try await require(proof)
@@ -224,10 +231,10 @@ actor GatewayRealtimePartitionControl {
             }
             let accepted = conservative(leases, began: began, proof: proof)
             for (id, value) in accepted where desired.contains(id) { installed[id] = value }
+            if accepted.keys.contains(where: desired.contains) { try await publishCurrent() }
             try await releaseRetired()
         }
         try await require(proof)
-        try await publishCurrent()
     }
     private func conservative(_ leases: [V2RealtimePartitionLease], began: ContinuousClock.Instant,
         proof: V2ActorServiceQualification.Snapshot) -> [Int: Installed] {

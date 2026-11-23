@@ -200,11 +200,14 @@ struct V2RoomClusterBridgeTests {
             guard case .response(let value) = response else { throw V2ActorAuthenticationError.invalidConfiguration }
             #expect(value == .recovery(.failure(.invalidRequest)))
             let observed = try #require(observations.withLock { $0.last })
-            let stages = Set(observed.spans.map(\.stage))
-            #expect(stages.contains("rpc_remote_return"))
-            #expect(stages.contains(textBytes == 32 ? "rpc_request_codec_inline" : "rpc_request_codec_offloaded"))
-            #expect(stages.contains(textBytes == 32 ? "rpc_reply_codec_inline" : "rpc_reply_codec_offloaded"))
-            #expect(stages.contains("rpc_reply_verification_return"))
+            let stages = observed.spans.map(\.stage)
+            let expected = textBytes == 32
+                ? ["rpc_dispatch_task_enter", "rpc_signing_enter", "rpc_remote_return",
+                   "rpc_reply_verification_return", "rpc_dispatch_settle"]
+                : ["rpc_request_codec_offloaded", "rpc_signing_enter", "rpc_dispatch_task_enter",
+                   "rpc_remote_return", "rpc_dispatch_settle", "rpc_reply_codec_offloaded",
+                   "rpc_reply_verification_return"]
+            #expect(stages.filter { expected.contains($0) } == expected)
         } catch { failure = error }
         #expect(await caller.quiesce(deadline: .now + .seconds(3)))
         #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)

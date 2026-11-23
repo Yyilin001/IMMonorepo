@@ -20,6 +20,23 @@ import Vapor
 
 @Suite("Production realtime partition lease controller", .serialized, .timeLimit(.minutes(1)))
 struct GatewayRealtimePartitionControlTests {
+    @Test("fixed Core publishes once per claim or renewal and withdraws on shutdown")
+    func fixedCorePublishesChangedDeadlinesOnce() async throws {
+        let identity = V2GatewayRealtimeIdentity(nodeID: "core", serviceID: "core", incarnationID: UUID())
+        let counts = Mutex<[Int]>([])
+        let control = try GatewayRealtimePartitionControl(identity: identity, roster: ["core"],
+            store: PartitionControllerControlledStore(),
+            qualification: V2ActorServiceQualification(localNodeID: "core", roster: ["core"]),
+            availableHosts: nil, install: { values in counts.withLock { $0.append(values.count) } })
+        try await control.start()
+        let deadline = ContinuousClock.now + .seconds(9)
+        while counts.withLock({ $0.count < 2 }), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try await control.shutdown()
+        #expect(counts.withLock { $0 } == [256, 256, 0])
+    }
+
     @Test("A standby starts against the committed roster without claiming a lease")
     func standbyControllerDoesNotAcquireAuthority() async throws {
         let identity = V2GatewayRealtimeIdentity(nodeID: "b", serviceID: "b", incarnationID: UUID())

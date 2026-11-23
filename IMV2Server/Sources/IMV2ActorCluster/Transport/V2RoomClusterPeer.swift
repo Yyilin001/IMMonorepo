@@ -864,8 +864,12 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         let isLocal = requireCachedLocal || (localPort.map { descriptor.identity == $0.identity &&
                                       descriptor.endpointID == $0.endpointID } == true &&
                       live.localCapability != nil)
+        // A warm remote send already owns a bounded physical worker. Encode the
+        // request and verify its reply there with the captured session, so
+        // separate rooms do not serialize their codecs on this Peer.
+        let codecOnDispatch = inlineMessageCodec && !isLocal && roomToken != nil
         let remotePacket: V2ActorSignedPacket?
-        if isLocal {
+        if isLocal || codecOnDispatch {
             remotePacket = nil
         } else {
             do {
@@ -927,16 +931,26 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                         generation: port.generation, boundToken: roomToken))
                 }
             } else if let roomToken {
-                guard let packet = remotePacket else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
                 guard let actor = reference?.actor else {
                     throw V2RoomCallFailure.notAccepted(.notReady)
                 }
                 transportReply = try await boundedDispatch(deadline: deadline, request: request,
-                                                           host: host, cached: requireCachedReference || requireCachedLocal, local: isLocal) {
+                                                           host: host, cached: requireCachedReference || requireCachedLocal, local: isLocal) { [self, mac = live.mac] in
+                    let packet: V2ActorSignedPacket
+                    if let remotePacket { packet = remotePacket }
+                    else {
+                        do { packet = try signRequest(call, mac: mac, maximumBytes: requestBytes) }
+                        catch { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                    }
                     let reply = try await IMRPCAdmission.$usesMessageWindow.withValue(messageOperation) {
                         try await IMRemoteCall.with(timeout: timeout) { try await actor.exchange(packet) }
                     }
                     sendTrace?.mark("rpc_remote_return")
+                    if codecOnDispatch {
+                        do {
+                            return .verified(try verifyReply(.signed(reply), for: call, mac: mac, maximumBytes: replyBytes))
+                        } catch { throw ReplyVerificationFailure(underlying: error) }
+                    }
                     return .signed(reply)
                 }
             } else {
@@ -955,6 +969,10 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                     return .signed(reply)
                 }
             }
+        } catch let failure as ReplyVerificationFailure {
+            logSendFailure(failure.underlying, request: request, stage: "reply_verification", local: isLocal,
+                           deadline: deadline)
+            throw transportFailure(for: request)
         } catch let refusal as IMRPCAdmission.Refusal {
             if case .invoke(_, .messaging(.sendOperation)) = request { unsentMessageSubmits &+= 1 }
             if case .invoke(_, .messaging(.recoverSendOperation)) = request { unsentMessageRecoveries &+= 1 }
@@ -998,7 +1016,9 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         do {
             sendTrace?.mark("rpc_reply_verification_dispatch")
             let response: V2ActorRPCResponse
-            if inlineMessageCodec, transportReply.codecBytes <= Self.maximumInlineMessageCodecBytes {
+            if case .verified(let result) = transportReply {
+                response = result
+            } else if inlineMessageCodec, transportReply.codecBytes <= Self.maximumInlineMessageCodecBytes {
                 sendTrace?.mark("rpc_reply_codec_inline")
                 response = try verifyReply(transportReply, for: call, mac: live.mac, maximumBytes: replyBytes)
             } else {
@@ -1102,6 +1122,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         trace?.mark("rpc_reply_verification_enter")
         defer { trace?.mark("rpc_reply_verification_return") }
         switch reply {
+        case .verified(let response): return response
         case .signed(let packet):
             if let mac {
                 let reply = try mac.open(packet, as: V2ActorAuthenticatedReply.self, reply: true, maximumBytes: maximumBytes)
@@ -1317,10 +1338,9 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
         guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
         let host = descriptor.identity
-        sessions = sessions.filter { $0.value.expires > .now + .milliseconds(100) }
-        if let current = sessions[host], current.expires > .now + .milliseconds(100) {
-            return current
-        }
+        let minimumExpiry = ContinuousClock.now + .milliseconds(100)
+        if let current = sessions[host], current.expires > minimumExpiry { return current }
+        sessions = sessions.filter { $0.value.expires > minimumExpiry }
         let waiterPermit = try budget.acquire(.waiter)
         defer { waiterPermit.release() }
         let generation = descriptorGenerations[host, default: 0]
@@ -1812,11 +1832,17 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         let permit: V2RoomClusterBudget.Permit
     }
 
+    private struct ReplyVerificationFailure: Error {
+        let underlying: any Error
+    }
+
     private enum TransportReply: Sendable {
+        case verified(V2ActorRPCResponse)
         case signed(V2ActorSignedPacket)
         case local(V2ActorLocalPayload<V2ActorAuthenticatedReply>)
         var codecBytes: Int {
             switch self {
+            case .verified: 0
             case .signed(let packet): packet.body.count
             case .local(let payload): payload.byteCount
             }

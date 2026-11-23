@@ -42,7 +42,7 @@ struct GatewayJournalRuntimeTests {
                 .init(sequence: 13, change: .controlInvalidation(roomID: room, ownerEpoch: 0, controlVersion: 2)),
                 .init(sequence: 14, change: .invalidate(roomID: room))]))
         let filtered = GatewayJournalRuntime.userControlProjection(input)
-        #expect(filtered.source == source && filtered.fence == fence)
+        #expect(filtered.batchID == input.batchID && filtered.source == source && filtered.fence == fence)
         #expect(filtered.payload == .changes(fromExclusive: 10, throughInclusive: 14, entries: [userControl]))
         let grant = V2RealtimeJournalRoomAuthorization(roomID: room, ownerEpoch: 0, permissionVersion: 1,
             controlVersion: 2, viewerMembershipRevisions: [user: 0], highWatermark: 99)

@@ -16,8 +16,18 @@ public enum V2RoomActorApplicationConfigurationError: Error, Equatable, Sendable
 /// 进程本地身份和明确的部署信任映射。
 /// 发现结果不得扩展已配置的服务、Host 或数据库分片集合。
 public struct V2RoomActorApplicationConfiguration: Sendable {
+    private var configurationPath: String?
     package var startupGate: V2RoomHostStartupGate? = nil
-    public let placementControl: V2PlacementControlConfiguration
+    public let placementControl: V2PlacementControlConfiguration?
+    public var isSingleCore: Bool { placementControl == nil }
+    public var isSingleCoreIngress: Bool { isSingleCore && hostIdentity == nil }
+
+    public var fixedRealtimeOwnerNodeID: String? {
+        guard isSingleCore, let core = discovery.peers.first else { return nil }
+        return realtimePeers.first {
+            $0.serviceID == core.serviceID.rawValue && $0.address == core.address && $0.port == core.port
+        }?.nodeID
+    }
     public let name: String
     public let address: String
     public let port: Int
@@ -49,13 +59,14 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         try self.init(document: JSONDecoder().decode(Document.self, from: bytes),
                       hostsRooms: hostsRooms, configuredShardIDs: configuredShardIDs,
                       batchWaitMilliseconds: batchWaitMilliseconds)
+        configurationPath = path
         let gateDirectory = environment.value(for: "IMV2_ROOM_ACTOR_STARTUP_GATE_DIRECTORY")
         let gateToken = environment.value(for: "IMV2_ROOM_ACTOR_STARTUP_GATE_TOKEN")
         let gateSupervisor = environment.value(for: "IMV2_ROOM_ACTOR_STARTUP_SUPERVISOR_ID")
         if gateDirectory != nil || gateToken != nil || gateSupervisor != nil {
             guard let directory = gateDirectory, directory.hasPrefix("/"), !directory.contains("\0"),
                   let tokenText = gateToken, let token = UUID(uuidString: tokenText),
-                  let supervisorText = gateSupervisor, let host = hostIdentity else {
+                  let supervisorText = gateSupervisor, let host = hostIdentity, !isSingleCore else {
                 throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
             let supervisor = try V2ActorServiceID(supervisorText)
@@ -66,6 +77,48 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
             startupGate = try .init(directory: URL(fileURLWithPath: directory, isDirectory: true),
                 host: host, serviceID: signer.serviceID, supervisorID: supervisor, launchToken: token)
         }
+    }
+
+    /// Only the explicitly provisioned ingress roster is reloadable. Room authority,
+    /// signing identity, partition ownership and storage stay bound to startup.
+    package func reloadGatewayRoster(on transport: V2RealtimeShardTransportHandle,
+                                     previous: Data?) async throws -> Data? {
+        guard let path = configurationPath, let core = discovery.peers.first,
+              let owner = fixedRealtimeOwnerNodeID else { return previous }
+        let bytes = try Self.readFile(path, maximumBytes: 1_048_576)
+        guard bytes != previous else { return previous }
+        let doc = try JSONDecoder().decode(Document.self, from: bytes)
+        guard doc.singleCore == true, doc.serviceID == signer.serviceID.rawValue,
+              doc.peers.count == 1, doc.peers[0].hostID == core.hostID.uuidValue,
+              doc.peers[0].serviceID == core.serviceID.rawValue,
+              doc.realtimePeers.count <= 64, doc.services.count <= 256,
+              Set(doc.services.map(\.id)).count == doc.services.count,
+              let scope = realtimeServiceOwnerAccess[core.serviceID] else {
+            throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+        }
+        let services = Dictionary(uniqueKeysWithValues: doc.services.map { ($0.id, $0) })
+        var peers: [V2RealtimeShardDiscoveryPeer] = []
+        var gateways: [V2ActorTrustedService] = []
+        for peer in doc.realtimePeers {
+            guard Self.isDNSName(peer.address), (1...65535).contains(peer.port),
+                  peer.nodeID == peer.serviceID, let service = services[peer.serviceID] else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+            }
+            peers.append(.init(nodeID: peer.nodeID, serviceID: peer.serviceID, address: peer.address, port: peer.port))
+            if peer.nodeID == owner { continue }
+            guard service.hostIDs.isEmpty, service.gatewayNodeIDs == [peer.nodeID],
+                  let key = Data(base64Encoded: service.publicKeyBase64) else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+            }
+            let buckets = service.userBucketIDs ?? []
+            var sources = Set(service.shardIDs).union(buckets.map { "user:" + $0 })
+            if !buckets.isEmpty { sources.insert("control") }
+            guard sources.isSubset(of: scope) else { throw V2RoomActorApplicationConfigurationError.invalidConfiguration }
+            gateways.append(try .init(serviceID: V2ActorServiceID(peer.serviceID), publicKey: key,
+                permissions: Set(service.permissions), gatewayNodeIDs: [peer.nodeID], sourceIDs: sources))
+        }
+        try await transport.extendFixedGateways(peers: peers, gateways: gateways)
+        return bytes
     }
 
     /// Managed launches publish their actual incarnation before any SQL pool,
@@ -80,6 +133,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         guard !document.name.isEmpty, document.name.utf8.count <= 128,
               Self.isDNSName(document.address),
               (1...65_535).contains(document.port), (1...64).contains(document.threadPoolSize),
+              (document.singleCore == true) == (document.placementControl == nil),
               !configuredShardIDs.isEmpty, configuredShardIDs.count <= 256,
               (1...256).contains(document.services.count), (1...256).contains(document.peers.count),
               (hostsRooms == nil || hostsRooms == (document.hostID != nil)), (1...25).contains(batchWaitMilliseconds) else {
@@ -211,9 +265,17 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         }
         self.trust = try .init(services: trusted)
         self.tls = tls
-        self.placementControl = try .init(document: document.placementControl, name: document.name,
-            address: document.address, roomPort: document.port, tls: tls, signer: self.signer, trust: self.trust,
-            processIncarnation: processIncarnation, shards: configuredShardIDs, roomPeers: peers, serviceAccess: access)
+        if let control = document.placementControl {
+            self.placementControl = try .init(document: control, name: document.name,
+                address: document.address, roomPort: document.port, tls: tls, signer: self.signer, trust: self.trust,
+                processIncarnation: processIncarnation, shards: configuredShardIDs, roomPeers: peers, serviceAccess: access)
+        } else {
+            guard peers.count == 1, let placement = document.policyPlacement,
+                  placement.owners.allSatisfy({ $0.hostID == peers[0].hostID.uuidValue }) else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+            }
+            self.placementControl = nil
+        }
         self.discovery = try .init(peers: peers)
         self.allowedShards = allowed
         guard !document.realtimePeers.isEmpty, document.realtimePeers.count <= 64,
@@ -235,13 +297,13 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         // must not acquire realtime publishing/receiving roles just to parse
         // the shared deployment configuration.
         let callerPermissions = try self.trust.configuredService(signingID).permissions
-        let exclusionOnly = identity == nil && self.placementControl.identity == nil &&
+        let exclusionOnly = identity == nil && self.placementControl != nil && self.placementControl?.identity == nil &&
             document.policyPlacement == nil &&
             (callerPermissions == Set([.placementRead, .placementWrite, .placementExclude]) ||
              callerPermissions == Set([.placementRead, .placementWrite, .placementMembership]) ||
              callerPermissions == Set([.placementRead, .placementWrite, .roomCoordination]))
         // The admin process calls the Policy Owner and never installs a realtime endpoint.
-        let policyCallerOnly = identity == nil && self.placementControl.identity == nil &&
+        let policyCallerOnly = identity == nil && self.placementControl?.identity == nil &&
             document.policyPlacement != nil && callerPermissions == Set([.policyMutation, .placementRead])
         guard exclusionOnly || policyCallerOnly || realtimePeers.contains(where: { $0.serviceID == document.serviceID && $0.address == document.address && $0.port == document.port }) else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
@@ -282,7 +344,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
     }
 
     struct Document: Decodable, Sendable {
-        let placementControl: V2PlacementControlConfiguration.Document
+        let placementControl: V2PlacementControlConfiguration.Document?
         let name: String
         let address: String
         let port: Int
@@ -300,6 +362,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         let peers: [Peer]
         let realtimePeers: [RealtimePeer]
         var policyPlacement: V2PolicyOwnerPlacementConfiguration? = nil
+        var singleCore: Bool? = nil
         struct RealtimePeer: Decodable, Sendable {
             let nodeID: String
             let serviceID: String
@@ -331,6 +394,6 @@ extension V2RoomActorApplicationConfiguration {
     package var transferShardIDs: Set<String> {
         guard let service = try? trust.configuredService(signer.serviceID),
               service.permissions.isSuperset(of: [.placementRead, .placementWrite, .roomCoordination]) else { return [] }
-        return placementControl.writers[signer.serviceID] ?? []
+        return placementControl?.writers[signer.serviceID] ?? []
     }
 }

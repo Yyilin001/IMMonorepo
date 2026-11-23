@@ -44,7 +44,7 @@ public actor V2PlacementControlService {
 
     private let runtime: V2PlacementControlRuntime
     public init(configuration: V2RoomActorApplicationConfiguration) throws {
-        guard configuration.hostIdentity == nil, configuration.placementControl.identity != nil,
+        guard configuration.hostIdentity == nil, configuration.placementControl?.identity != nil,
               configuration.policyPlacement == nil else { throw V2RoomActorApplicationError.invalidRole }
         runtime = .init(configuration: configuration)
     }
@@ -67,7 +67,7 @@ public actor V2PlacementControlService {
     public static func inspect(configuration: V2RoomActorApplicationConfiguration,
                                deadline: ContinuousClock.Instant = .now + .seconds(30))
         async throws -> [V2PlacementControlInspection] {
-        guard configuration.hostIdentity == nil, configuration.placementControl.identity == nil else {
+        guard configuration.hostIdentity == nil, configuration.placementControl != nil, configuration.placementControl?.identity == nil else {
             throw V2RoomActorApplicationError.invalidRole
         }
         let runtime = V2PlacementControlRuntime(configuration: configuration)
@@ -94,7 +94,7 @@ public actor V2PlacementControlService {
     /// Validate authority before an exclusion backend can stop any process.
     package static func exclusionShards(configuration: V2RoomActorApplicationConfiguration,
                                         host: V2ActorHostIdentity) throws -> Set<String> {
-        guard configuration.hostIdentity == nil, configuration.placementControl.identity == nil,
+        guard configuration.hostIdentity == nil, configuration.placementControl != nil, configuration.placementControl?.identity == nil,
               configuration.policyPlacement == nil,
               try configuration.trust.configuredService(configuration.signer.serviceID).permissions ==
                 Set([.placementRead, .placementWrite, .placementExclude]),
@@ -107,8 +107,8 @@ public actor V2PlacementControlService {
     /// Explicit provisioning creates only fresh voting files. Normal startup
     /// always opens existing history; it never invokes this operation.
     public static func provision(configuration: V2RoomActorApplicationConfiguration) async throws {
-        let control = configuration.placementControl
-        guard configuration.hostIdentity == nil, configuration.policyPlacement == nil, let identity = control.identity else {
+        guard let control = configuration.placementControl, configuration.hostIdentity == nil,
+              configuration.policyPlacement == nil, let identity = control.identity else {
             throw V2RoomActorApplicationError.invalidRole
         }
         let pool = NIOThreadPool(numberOfThreads: 2); pool.start()
@@ -138,7 +138,7 @@ package actor V2RoomHostControlSession {
     private var closed = false
 
     package init(configuration: V2RoomActorApplicationConfiguration) throws {
-        guard configuration.hostIdentity == nil, configuration.placementControl.identity == nil,
+        guard configuration.hostIdentity == nil, configuration.placementControl != nil, configuration.placementControl?.identity == nil,
               configuration.policyPlacement == nil else { throw V2RoomActorApplicationError.invalidRole }
         self.configuration = configuration
     }
@@ -178,7 +178,7 @@ package actor V2RoomHostControlSession {
         try await connection.retireAfterExclusion(proof, deadline: deadline)
         if takeOver {
             try await connection.takeOverRetiredHost(proof.host, shards: proof.settledShardIDs,
-                operationID: proof.operationID, eligibleHosts: configuration.placementControl.roomHosts, deadline: deadline)
+                operationID: proof.operationID, eligibleHosts: configuration.placementControl?.roomHosts ?? [:], deadline: deadline)
         }
         return try await inspect(deadline: deadline)
     }

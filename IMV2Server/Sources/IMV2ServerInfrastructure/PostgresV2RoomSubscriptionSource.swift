@@ -211,7 +211,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
         return try await lifetime.withPin(deadline: deadline) { bounds in
             return try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
                 callerDeadline: bounds.deadline) {
-                try await v2WithRoomSnapshotConnection(database: database, deadline: bounds.deadline) { sql in
+                try await v2WithBoundedPostgresStatement(database: database, deadline: bounds.deadline) { sql in
                     try await operation(sql)
                 }
             }

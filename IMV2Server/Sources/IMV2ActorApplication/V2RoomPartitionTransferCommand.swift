@@ -17,8 +17,8 @@ package struct V2RoomPartitionTransferCommand: Codable, Sendable {
     package let originRevision: UInt64
 
     package func validate(configuration: V2RoomActorApplicationConfiguration) throws {
-        guard deploymentID == configuration.placementControl.clusterID,
-              configuration.hostIdentity == nil, configuration.placementControl.identity == nil,
+        guard let control = configuration.placementControl, deploymentID == control.clusterID,
+              configuration.hostIdentity == nil, control.identity == nil,
               configuration.policyPlacement == nil,
               try configuration.trust.configuredService(configuration.signer.serviceID).permissions ==
                 Set([.placementRead, .placementWrite, .roomCoordination]),

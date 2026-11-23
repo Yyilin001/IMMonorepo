@@ -30,9 +30,10 @@ struct GatewayComposition {
     let accountRoomChangeService: V2AccountRoomChangeService
     let actorRealtime: GatewayActorRealtimeRuntime
     let authorPresentations: V2AuthorPresentationRuntime?
-    let authorDrainTimeout: Duration
+    let shutdownGrace: Duration
     let durableOwnerResources: [V2RoomServerOwnerResources]
     private let policies: GatewayPolicyAssembly?
+    private let roomCoreAuthority: GatewaySingleRoomCoreAuthority?
     private let databaseTopology: GatewayDatabaseTopology
     private let resourceStorage: V2ResourceStorageAssembly?
 
@@ -46,6 +47,7 @@ struct GatewayComposition {
     /// 若 Actor 无法在失败期限内排空，会以失败状态退出进程，避免释放仍被使用的数据库资源。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
+        actorConfiguration: V2RoomActorApplicationConfiguration,
         resourceConfiguration: V2ResourceRuntimeConfiguration?,
         resources: V2DatabaseWorkloadResources,
         app: Application,
@@ -61,6 +63,7 @@ struct GatewayComposition {
         var databaseTopology: GatewayDatabaseTopology?
         var preparedConnectionRegistry: V2DeviceConnectionRegistry?
         var policies: GatewayPolicyAssembly?
+        var roomCoreAuthority: GatewaySingleRoomCoreAuthority?
         var resourceStorage: V2ResourceStorageAssembly?
         do {
             guard !configuration.authorPresentationsEnabled || resourceConfiguration != nil else {
@@ -70,6 +73,7 @@ struct GatewayComposition {
             // 此时尚未启动房间 Actor，也未绑定任何监听端口。
             let prepared = try await GatewayPreparedAssembly.build(
                 configuration: configuration,
+                actorConfiguration: actorConfiguration,
                 resources: resources,
                 app: app,
                 logger: logger
@@ -78,37 +82,57 @@ struct GatewayComposition {
             preparedConnectionRegistry = prepared.frontdoor.connectionRegistry
             databaseTopology = prepared.topology
             let deployment = PostgresV2PolicyDeploymentPlacementStore(database: prepared.topology.roomIdentityControlDatabase)
-            guard let placement = prepared.roomOwners.actorConfiguration.policyPlacement else {
+            guard let placement = actorConfiguration.policyPlacement else {
                 throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
-            try await deployment.require(V2PolicyOwnerPlacement(placement))
+            let policyPlacement = try V2PolicyOwnerPlacement(placement)
+            if actorConfiguration.isSingleCoreIngress {
+                try await deployment.verifyExisting(policyPlacement)
+            } else {
+                try await deployment.require(policyPlacement)
+            }
             policies = try GatewayPolicyAssembly.build(prepared: prepared, logger: logger)
             if let policies { durableOwnerResources = policies.physicalResources }
-            // 2. 启动房间 Actor：有 hostIdentity 时启动房间承载节点及发现服务，
-            // 否则启动仅调用远端房间的客户端节点。返回的目录和预留协调器供房间服务使用。
-            // A caller-only Gateway has no local room executors or hosted
-            // policy authorization. Construct the factory only on room Hosts.
-            let actorFactory: V2RoomServerActivationFactory?
-            if prepared.roomOwners.actorConfiguration.hostIdentity != nil {
-                actorFactory = try V2RoomServerActivationFactory(
+
+            let actorFactory = try actorConfiguration.hostIdentity.map { _ in
+                try V2RoomServerActivationFactory(
                     owners: policies?.ownerResources ?? prepared.roomOwners.ownerResources,
                     safetyActorUserID: configuration.contentReviewSafetyActorUserID)
-            } else {
-                actorFactory = nil
             }
-            // Construct one qualification before starting the room host. The
-            // realtime discovery transport supplies authenticated witnesses to
-            // this same object; no host silently selects standalone operation.
-            let voterRoster = Set(prepared.roomOwners.actorConfiguration.realtimePeers.map(\.nodeID))
-                .union([configuration.gatewayNodeID])
-            let serviceQualification = try V2ActorServiceQualification(
-                localNodeID: configuration.gatewayNodeID, roster: voterRoster)
+            let nodeID = configuration.gatewayNodeID
+            let roster: Set<String> = actorConfiguration.isSingleCore
+                ? [nodeID] : Set(actorConfiguration.realtimePeers.map(\.nodeID)).union([nodeID])
+            let serviceQualification = try V2ActorServiceQualification(localNodeID: nodeID, roster: roster)
+            if actorConfiguration.isSingleCore {
+                guard let core = actorConfiguration.fixedRealtimeOwnerNodeID,
+                      (core == nodeID) == (actorConfiguration.hostIdentity != nil),
+                      actorConfiguration.realtimePeers.contains(where: {
+                          $0.nodeID == nodeID && $0.serviceID == actorConfiguration.signer.serviceID.rawValue
+                      }),
+                      configuration.roomShardStorage.count == 1,
+                      prepared.topology.physicalDatabaseURLs == [configuration.databaseURL],
+                      configuration.roomShardStorage.allSatisfy({ $0.schema == "im_v2" }),
+                      configuration.userShardStorage.count == 1,
+                      configuration.userShardStorage.allSatisfy({ $0.schema == "im_v2" }) else {
+                    throw V2RoomActorApplicationError.invalidRole
+                }
+                if let identity = actorConfiguration.hostIdentity {
+                    guard configuration.databaseAllocatedConnectionLimit < configuration.databasePolicy.maximumTotalConnections else {
+                        throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")
+                    }
+                    roomCoreAuthority = try await GatewaySingleRoomCoreAuthority.acquire(
+                        url: configuration.databaseURL, identity: identity,
+                        eventLoop: resources.resources(for: .foreground).eventLoopGroup.next(),
+                        policy: configuration.databasePolicy, qualification: serviceQualification, logger: logger)
+                }
+            }
             let actors = try await V2RoomActorApplication.start(
                 configuration: prepared.roomOwners.actorConfiguration,
                 ownerRouter: V2PostgresRoomShardRouter(database: prepared.topology.database),
                 roomDatabases: prepared.topology.roomShardDatabases,
                 factory: actorFactory,
-                qualification: serviceQualification, policyServices: policies?.hosted
+                qualification: serviceQualification, policyServices: policies?.hosted,
+                singleCoreEpoch: roomCoreAuthority?.epoch
             )
             // 从这里开始，后续任何抛错都必须先排空已启动的房间 Actor。
             roomActorApplication = actors
@@ -171,19 +195,12 @@ struct GatewayComposition {
             let accountChanges = V2AccountRoomChangeService()
             accountRoomChangeService = accountChanges
             await prepared.frontdoor.connectionRegistry.configureAccountRoomChanges(accountChanges)
-            // 6. 将房间、同步、社交和在线活动等命令接到统一处理器，再构造撤销、
-            // 投影清理等维护 Worker；后台循环仍须等待 backgroundWorkers.start()。
+            // 6. 将房间、同步、社交和在线活动等命令接到统一处理器。
             let commands = try await GatewayCommandAssembly.build(
                 configuration: configuration,
                 prepared: prepared,
                 roomServices: roomServices,
                 roomRecovery: roomRecovery,
-                actors: actors
-            )
-            let maintenance = try GatewayMaintenanceAssembly.build(
-                configuration: configuration,
-                prepared: prepared,
-                roomServices: roomServices,
                 actors: actors
             )
             // 7. 创建每条连接所需的会话工厂和 TLS 服务对象。构造期间加载 TLS 配置、
@@ -195,33 +212,38 @@ struct GatewayComposition {
                 authors: authorPresentations
             )
             constructedServer = server
-            // 8. 初始化两个持久化撤销游标，这是实际执行的启动期数据库操作，
-            // 必须在 TLS 接受客户端连接、维护 Worker 开始轮询之前完成。
+            // 8. 在 TLS 接受连接前初始化本机设备撤销游标。
             // 新命名的副本尚无活动连接。客户端认证前先记录当前撤销水位，
             // 避免扩容时重扫只追加历史；已有游标则保留，以支持崩溃恢复。
-            try await maintenance.deviceRevocationWorker.initializeForStartup()
-            // 存储清理使用独立的集群全局游标，首次部署从零开始，
-            // 以覆盖没有 Gateway 在线观察历史撤销的停机窗口。
-            try await maintenance.revokedDeviceProjectionCleanupWorker.initializeForStartup()
-            // 9. 组装跨分片转发投递及其后台任务依赖；assemble 只返回任务集合，
-            // runServices 会先绑定 TLS、再启动指标 HTTP，最后调用 backgroundWorkers.start()。
-            let forwardDelivery = try await GatewayForwardDeliveryAssembly.build(
-                configuration: configuration,
-                resourceConfiguration: resourceConfiguration,
-                storageAssembly: resourceStorage,
-                prepared: prepared,
-                roomServices: roomServices,
-                logger: logger
+            let deviceRevocationWorker = V2DeviceRevocationWorker(
+                store: V2PostgresDeviceRevocationEventStore(database: prepared.topology.maintenanceDatabase),
+                registry: prepared.frontdoor.connectionRegistry, nodeID: configuration.gatewayNodeID
             )
-            let backgroundWorkers = GatewayBackgroundWorkers.assemble(
-                configuration: configuration,
-                logger: logger,
-                prepared: prepared,
-                roomServices: roomServices,
-                realtime: realtime,
-                commands: commands,
-                maintenance: maintenance,
-                forwardDelivery: forwardDelivery
+            try await deviceRevocationWorker.initializeForStartup()
+
+            let durable: GatewayBackgroundWorkers.DurableWork?
+            if let ownerMaintenance = prepared.ownerMaintenance {
+                let maintenance = try GatewayMaintenanceAssembly.build(
+                    configuration: configuration, prepared: prepared, ownerMaintenance: ownerMaintenance,
+                    roomServices: roomServices, actors: actors
+                )
+                try await maintenance.revokedDeviceProjectionCleanupWorker.initializeForStartup()
+                let forwardDelivery = try await GatewayForwardDeliveryAssembly.build(
+                    configuration: configuration, resourceConfiguration: resourceConfiguration,
+                    storageAssembly: resourceStorage, prepared: prepared, roomServices: roomServices, logger: logger
+                )
+                durable = GatewayBackgroundWorkers.assembleDurableWork(
+                    prepared: prepared, ownerMaintenance: ownerMaintenance, realtime: realtime,
+                    commands: commands, maintenance: maintenance, forwardDelivery: forwardDelivery
+                )
+            } else {
+                durable = nil
+            }
+            let backgroundWorkers = GatewayBackgroundWorkers(
+                configuration: configuration, logger: logger,
+                directRoomLogEventCache: prepared.projection.directRoomLogEventCache,
+                syncWakeCoalescer: prepared.frontdoor.syncWakeCoalescer,
+                deviceRevocationWorker: deviceRevocationWorker, durable: durable
             )
             return .init(
                 server: server,
@@ -233,11 +255,16 @@ struct GatewayComposition {
                 accountRoomChangeService: accountChanges,
                 actorRealtime: realtime,
                 authorPresentations: authorPresentations,
-                authorDrainTimeout: .milliseconds(configuration.shutdownGraceMilliseconds),
+                shutdownGrace: .milliseconds(configuration.shutdownGraceMilliseconds),
                 durableOwnerResources: durableOwnerResources,
-                policies: policies, databaseTopology: prepared.topology, resourceStorage: resourceStorage
+                policies: policies, roomCoreAuthority: roomCoreAuthority,
+                databaseTopology: prepared.topology, resourceStorage: resourceStorage
             )
         } catch {
+            if roomCoreAuthority != nil, case V2RoomActorApplicationError.incompleteShutdown = error {
+                logger.critical("Room Core startup drain incomplete; retaining writer generation")
+                exit(EXIT_FAILURE)
+            }
             logger.error("IM V2 gateway composition failed; cleaning up", metadata:
                 V2SafeLogMetadata.failure(error, stage: "gateway_composition"))
             await Self.drainAuthors(authorPresentations, timeout: .milliseconds(configuration.shutdownGraceMilliseconds), logger: logger)
@@ -255,6 +282,7 @@ struct GatewayComposition {
             await Self.drainRoomReads(durableOwnerResources, logger: logger)
             await resourceStorage?.shutdown()
             if let databaseTopology { await Self.drainDatabaseLoans(databaseTopology, logger: logger) }
+            await Self.releaseRoomCore(roomCoreAuthority, logger: logger)
             throw error
         }
     }
@@ -262,8 +290,21 @@ struct GatewayComposition {
     /// 在连接注册表解除依赖后，先排空实时 Runtime，再关闭账号覆盖。
     func shutdownAuxiliaryServices(logger: Logger) async {
         logger.notice("IM V2 auxiliary shutdown stage started", metadata: ["stage": "registry"])
-        await connectionRegistry.shutdownRealtimeRecovery()
-        await connectionRegistry.finishLivePresenceRenewals()
+        let registryDrain = Task { [actorRealtime, connectionRegistry] in
+            // Release coverage waiters with the transports still available
+            // for cleanup RPCs that were already submitted.
+            await actorRealtime.closeRecoveryAdmission()
+            await connectionRegistry.shutdownRealtimeRecovery { component in
+                logger.notice("IM V2 registry component drained", metadata: ["component": .string(component)])
+            }
+            logger.notice("IM V2 presence lease drain started")
+            await connectionRegistry.finishLivePresenceRenewals()
+        }
+        guard await v2WaitForTaskDrain([registryDrain], timeout: shutdownGrace) else {
+            logger.critical("IM V2 registry drain exceeded its shutdown deadline",
+                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_registry_shutdown"))
+            exit(EXIT_FAILURE)
+        }
         logger.notice("IM V2 auxiliary shutdown stage completed", metadata: ["stage": "registry"])
         logger.notice("IM V2 auxiliary shutdown stage started", metadata: ["stage": "actor_realtime"])
         guard await actorRealtime.shutdown() else { exit(EXIT_FAILURE) }
@@ -290,6 +331,17 @@ struct GatewayComposition {
         await resourceStorage?.shutdown()
         await Self.drainRoomReads(durableOwnerResources, logger: logger)
         await Self.drainDatabaseLoans(databaseTopology, logger: logger)
+        await Self.releaseRoomCore(roomCoreAuthority, logger: logger)
+    }
+
+    private static func releaseRoomCore(_ authority: GatewaySingleRoomCoreAuthority?, logger: Logger) async {
+        do {
+            try await authority?.release()
+        } catch {
+            logger.critical("Room Core writer authority release failed", metadata:
+                V2SafeLogMetadata.failure(error, stage: "room_core_release"))
+            exit(EXIT_FAILURE)
+        }
     }
 
     private static func drainPolicies(_ policies: GatewayPolicyAssembly?, logger: Logger) async {
@@ -321,7 +373,7 @@ struct GatewayComposition {
     }
 
     func shutdownAuthorPresentations(logger: Logger) async {
-        await Self.drainAuthors(authorPresentations, timeout: authorDrainTimeout, logger: logger)
+        await Self.drainAuthors(authorPresentations, timeout: shutdownGrace, logger: logger)
     }
 
     private static func drainAuthors(_ authors: V2AuthorPresentationRuntime?, timeout: Duration, logger: Logger) async {

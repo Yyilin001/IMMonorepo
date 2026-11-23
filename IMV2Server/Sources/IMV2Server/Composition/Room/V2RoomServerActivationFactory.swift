@@ -313,6 +313,7 @@ public struct V2RoomServerActivationFactory: Sendable {
                 }
             },
                 invalidateReservation: { await instance.invalidate($0) },
+                hasLiveSubscriptions: { await deliverySessions.hasLiveSubscription(for: token) },
                 close: { await instance.close() })
         }
     }
@@ -533,6 +534,7 @@ private actor V2RoomServerActivation {
         case .roomSubscription(let command):
             try command.validate()
             guard command.roomID == token.roomID else { return .roomSubscription(.failure(.invalidRequest)) }
+            var unavailableStage = V2RoomSubscriptionOwnerFailureMetrics.Reason.restoreUnavailable
             do {
                 guard let activationValidUntil, activationValidUntil > .now else {
                     throw V2RoomCallFailure.notAccepted(.authorityLost)
@@ -540,16 +542,20 @@ private actor V2RoomServerActivation {
                 let owner = try await subscriptions(resources: resources, deadline: callDeadline)
                 switch command {
                 case .subscribe(let value):
+                    unavailableStage = .retainDeliverySessionUnavailable
                     let session = try await deliverySessions.retain(activation: token, gateway: value.gatewayDescriptor)
                     sessionGateways.insert(value.gatewayDescriptor.identity)
+                    unavailableStage = .subscribeUnavailable
                     let grant: V2RoomSubscriptionOwner.Grant
                     do { grant = try await owner.subscribe(gateway: value.gatewayDescriptor.identity, userID: value.actorUserID, token: token, deadline: callDeadline) }
                     catch { await releaseUnreferencedSession(value.gatewayDescriptor.identity); throw error }
                     return .roomSubscription(.granted(.init(fence: grant.fence, memberRevision: grant.memberRevision, userBaselineSequence: grant.baselineSequence, deliverySession: session)))
                 case .reset(let value):
+                    unavailableStage = .retainDeliverySessionUnavailable
                     let session = try await deliverySessions.retain(activation: token, gateway: value.gatewayDescriptor,
                         replacing: value.replacingDeliverySession)
                     sessionGateways.insert(value.gatewayDescriptor.identity)
+                    unavailableStage = .resetUnavailable
                     let grant: V2RoomSubscriptionOwner.Grant
                     do { grant = try await owner.resetGrant(gateway: value.gatewayDescriptor.identity, userID: value.actorUserID, expectedFence: value.expectedFence, token: token, deadline: callDeadline) }
                     catch { await releaseUnreferencedSession(value.gatewayDescriptor.identity); throw error }
@@ -573,7 +579,14 @@ private actor V2RoomServerActivation {
                     }
                 }
 
-                return .roomSubscription(.failure(try v2RoomSubscriptionFailure(for: error)))
+                let failure = try v2RoomSubscriptionFailure(for: error)
+                if failure == .unavailable {
+                    switch command {
+                    case .subscribe, .reset: V2RoomSubscriptionOwnerFailureMetrics.shared.record(unavailableStage)
+                    case .activate, .unsubscribe: break
+                    }
+                }
+                return .roomSubscription(.failure(failure))
             }
         case .forward(let command):
             do { return .forward(try await handlers.forwarding.execute(command)) }
@@ -914,6 +927,12 @@ package actor V2RoomSubscriptionHost {
                 // Release only the Owner's actually consumed prefix. A commit
                 // that arrived during the await remains in the bounded feed.
                 feed?.acknowledge(activation: entry.token, consumedThrough: report.consumedThrough)
+                // An Owner can make a prefix deliverable while this Host still
+                // has an arbitrarily large set of other rooms to read.
+                if !closed, entries[room]?.token == entry.token,
+                   pending.withLock({ $0.deliveryRooms.remove(room) != nil }) {
+                    await entry.owner.signalDelivery()
+                }
                 if report.hasMore { signal(room: room) }
             } catch V2RoomSubscriptionOwnerError.busy {
                 // Bounded single-owner delay, with no unowned retry tasks.

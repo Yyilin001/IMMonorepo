@@ -24,10 +24,9 @@ struct GatewayCommandAssembly {
         let topology = prepared.topology
         let projection = prepared.projection
         let frontdoor = prepared.frontdoor
-        let ownerMaintenance = prepared.ownerMaintenance
         // 仅配置了审核模式和安全执行身份时才创建各归属库的审核 Worker。
         let contentReviewWorker: V2RoutedContentReviewWorker?
-        if configuration.contentReviewMode == .enabled,
+        if let ownerMaintenance = prepared.ownerMaintenance, configuration.contentReviewMode == .enabled,
            configuration.contentReviewSafetyActorUserID != nil {
             let reviewer = V2ConfiguredContentReviewer(
                 violatingTerms: configuration.contentReviewViolationTerms,
@@ -37,14 +36,8 @@ struct GatewayCommandAssembly {
                 request, deadline in
                 try await actors.directory.room(request.roomID).call(request, principal: .service, deadline: deadline)
             }
-            let reviewWorkers = try ownerMaintenance.roomOwnerDatabaseURLs.map { ownerURL in
-                guard let ownerMaintenanceDatabase = topology.databaseForRole(
-                    for: .maintenance,
-                    url: ownerURL
-                ) else {
-                    throw V2RoomWriteStoreError.corruptPersistenceState
-                }
-                return try V2ContentReviewWorker(
+            let reviewWorkers = try ownerMaintenance.roomOwnerMaintenanceDatabases.map { ownerMaintenanceDatabase in
+                try V2ContentReviewWorker(
                     store: PostgresV2ContentReviewStore(
                         database: ownerMaintenanceDatabase
                     ),
@@ -82,7 +75,7 @@ struct GatewayCommandAssembly {
                     configuration.frameLimits.maximumPayloadBytes - 4_096
                 )
             )),
-            telemetry: ownerMaintenance.telemetry,
+            telemetry: frontdoor.telemetry,
             databaseWorkAdmission: configuration.databaseWorkAdmissionEnabled
                 ? frontdoor.databaseWorkAdmission
                 : nil,

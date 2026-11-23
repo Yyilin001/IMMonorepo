@@ -37,6 +37,10 @@ struct AdminRemoteProbes {
             },
             .actors: {
                 let state = try await caller.probePlacement(deadline: .now + .seconds(3))
+                if caller.isSingleCore {
+                    return .init(healthy: state.expected == 1 && state.healthy == 1,
+                                 detail: "单活 Room Core 就绪 \(state.healthy)/1")
+                }
                 let ok = state.shards > 0 && state.expected > 0 && state.healthy == state.expected
                 return .init(healthy: ok, detail: "已取得 \(state.shards) 个分片的多数派确认，Room Host 就绪 \(state.healthy)/\(state.expected)")
             },

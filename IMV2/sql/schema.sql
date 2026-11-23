@@ -16,6 +16,16 @@ SET row_security = off;
 
 CREATE SCHEMA im_v2;
 
+-- One process generation for the single-active Room Core. A dirty generation
+-- requires exclusion of the previous process before it can be cleared.
+CREATE TABLE im_v2.room_core_writer (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    epoch bigint NOT NULL DEFAULT 0 CHECK (epoch BETWEEN 0 AND 2147483647),
+    incarnation uuid
+);
+
+INSERT INTO im_v2.room_core_writer DEFAULT VALUES;
+
 CREATE FUNCTION im_v2.capture_user_projection_effect_v4() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -2049,14 +2059,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-83'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-83'::text))
+    schema_id text DEFAULT 'im-v2-current-84'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-84'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-83');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-84');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -4213,5 +4223,9 @@ DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION im_v2.capture_social
 CREATE CONSTRAINT TRIGGER user_block_presentation_change
 AFTER INSERT OR UPDATE ON im_v2.social_block_revisions
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION im_v2.capture_social_presentation_change();
+
+-- A cross-room implicit append must establish its mutation counts before
+-- PostgreSQL commits the statement, including transactional triggers.
+CREATE DOMAIN im_v2.complete_room_append AS boolean CHECK (VALUE IS TRUE);
 
 COMMIT;

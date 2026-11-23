@@ -67,11 +67,7 @@ public actor V2RoomClusterClientNode {
         var settings = IMActorSystemSettings(name: configuration.name,
                                              host: configuration.host, port: configuration.port,
                                              tls: configuration.tls)
-        settings.threadPoolSize = configuration.threadPoolSize
-        settings.maximumInboundFrameBytes = ( max(authenticationLimits.maximumRequestBytes,
-                       authenticationLimits.maximumReplyBytes) + 65_536
-        )
-        settings.errorTypes = [V2ActorAuthenticationError.self]
+        settings.configureRoomRPC(threadPoolSize: configuration.threadPoolSize, limits: authenticationLimits)
         settings.methods = try await V2ActorRPCManifest.methods()
         let system = try await IMActorSystem(configuration.name, settings: settings)
         self.system = system
@@ -101,11 +97,12 @@ public actor V2RoomClusterClientNode {
         serviceOwnerAccess: [V2ActorServiceID: Set<String>],
         discoveryPeers: [V2RealtimeShardDiscoveryPeer],
         limits: V2RealtimeTransportLimits = .init(),
-        serviceQualification: V2ActorServiceQualification? = nil) async throws -> V2RealtimeShardTransportHandle {
+        serviceQualification: V2ActorServiceQualification? = nil,
+        fixedOwnerNodeID: String? = nil) async throws -> V2RealtimeShardTransportHandle {
         guard let system, realtimeShards == nil, acceptingRealtime else { throw V2ActorAuthenticationError.invalidConfiguration }
         let handle = try buildRealtimeShardTransport(system: system, identity: identity,
             address: configuration.host, port: configuration.port, signer: signer, trust: trust,
-            serving: serving, serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits, serviceQualification: serviceQualification)
+            serving: serving, serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits, serviceQualification: serviceQualification, fixedOwnerNodeID: fixedOwnerNodeID)
         realtimeShards = handle
         try await handle.start()
         if !acceptingRealtime { _ = await handle.stop(deadline: .now + .seconds(2)); throw V2ActorAuthenticationError.overloaded }
@@ -135,10 +132,6 @@ public actor V2RoomClusterClientNode {
         try await discovery.installAuthorizedPeers(peers, revision: revision)
     }
     package func suspendRoomDiscovery() async { await discovery?.suspendAuthorization() }
-
-    public func discoverySnapshot() async -> V2RoomDiscoverySnapshot? {
-        await discovery?.snapshot()
-    }
 
     /// 不配合取消的原生或远程 RPC 仍在运行时返回 false。
     /// 此节点继续持有 IMActorSystem，供之后重试停止操作。

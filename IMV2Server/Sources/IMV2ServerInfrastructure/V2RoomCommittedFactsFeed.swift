@@ -11,12 +11,18 @@ public final class V2RoomCommittedFactsFeed: V2CommittedMessageBatchObserving, S
     private struct Room: Sendable {
         let activation: V2RoomActivationToken
         var messages: [UInt64: V2AcceptedMessage] = [:]
+        var headers: [UInt64: V2CommittedRoomMessageHeader] = [:]
+
+        var highWatermark: UInt64 {
+            max(dirty ?? 0, max(messages.keys.max() ?? 0, headers.keys.max() ?? 0))
+        }
         var bytes = 0
         var dirty: UInt64?
     }
     private struct State: Sendable {
         var rooms: [RoomID: Room] = [:]
         var facts = 0
+        var headers = 0
         var bytes = 0
         var finished = false
     }
@@ -26,15 +32,17 @@ public final class V2RoomCommittedFactsFeed: V2CommittedMessageBatchObserving, S
     private let maximumRooms: Int
     private let maximumFactsPerRoom: Int
     private let maximumFactsTotal: Int
+    private let maximumHeadersTotal: Int
     private let maximumTextBytes: Int
 
     public init(downstream: (any V2CommittedMessageBatchObserving)? = nil,
                 notify: @escaping @Sendable (RoomID) -> Void,
                 maximumRooms: Int = 8192, maximumFactsPerRoom: Int = 64,
-                maximumFactsTotal: Int = 4096, maximumTextBytes: Int = 16 * 1024 * 1024) {
-        precondition(maximumRooms > 0 && maximumFactsPerRoom > 0 && maximumFactsTotal > 0 && maximumTextBytes > 0)
+                maximumFactsTotal: Int = 4096, maximumHeadersTotal: Int = 65_536, maximumTextBytes: Int = 16 * 1024 * 1024) {
+        precondition(maximumRooms > 0 && maximumFactsPerRoom > 0 && maximumFactsTotal > 0 && maximumHeadersTotal >= 0 && maximumTextBytes > 0)
         self.downstream = downstream; self.notify = notify; self.maximumRooms = maximumRooms
         self.maximumFactsPerRoom = maximumFactsPerRoom; self.maximumFactsTotal = maximumFactsTotal
+        self.maximumHeadersTotal = maximumHeadersTotal
         self.maximumTextBytes = maximumTextBytes
     }
 
@@ -51,6 +59,7 @@ public final class V2RoomCommittedFactsFeed: V2CommittedMessageBatchObserving, S
     public func unregister(activation: V2RoomActivationToken) {
         state.withLock { value in
             guard let room = value.rooms[activation.roomID], room.activation == activation else { return }
+            value.headers -= room.headers.count
             value.facts -= room.messages.count; value.bytes -= room.bytes
             value.rooms.removeValue(forKey: activation.roomID)
         }
@@ -61,7 +70,7 @@ public final class V2RoomCommittedFactsFeed: V2CommittedMessageBatchObserving, S
     public func highWatermark(activation: V2RoomActivationToken) -> UInt64? {
         state.withLock { value in
             guard !value.finished, let room = value.rooms[activation.roomID], room.activation == activation else { return nil }
-            return max(room.dirty ?? 0, room.messages.keys.max() ?? 0)
+            return room.highWatermark
         }
     }
 
@@ -70,10 +79,11 @@ public final class V2RoomCommittedFactsFeed: V2CommittedMessageBatchObserving, S
     public func take(activation: V2RoomActivationToken) -> V2RoomCommittedFactsBatch? {
         state.withLock { value in
             guard !value.finished, let room = value.rooms[activation.roomID], room.activation == activation,
-                  !room.messages.isEmpty || room.dirty != nil else { return nil }
-            return .init(activation: activation,
-                messages: room.messages.sorted { $0.key < $1.key }.map(\.value),
-                dirtyHighWatermark: room.dirty)
+                  !room.messages.isEmpty || !room.headers.isEmpty || room.dirty != nil else { return nil }
+            var facts = room.messages.values.map(V2CommittedRoomMessageFact.body)
+            facts.append(contentsOf: room.headers.values.map(V2CommittedRoomMessageFact.header))
+            facts.sort { $0.roomSequence < $1.roomSequence }
+            return .init(activation: activation, facts: facts, dirtyHighWatermark: room.dirty)
         }
     }
 
@@ -86,13 +96,17 @@ public final class V2RoomCommittedFactsFeed: V2CommittedMessageBatchObserving, S
                 let bytes = message.text.utf8.count + 512
                 room.bytes -= bytes; value.bytes -= bytes; value.facts -= 1
             }
+            for sequence in room.headers.keys.filter({ $0 <= consumedThrough }) {
+                room.headers.removeValue(forKey: sequence)
+                value.headers -= 1
+            }
             if let dirty = room.dirty, dirty <= consumedThrough { room.dirty = nil }
             value.rooms[activation.roomID] = room
         }
     }
 
     public func finish() {
-        state.withLock { $0.finished = true; $0.rooms.removeAll(); $0.facts = 0; $0.bytes = 0 }
+        state.withLock { $0.finished = true; $0.rooms.removeAll(); $0.facts = 0; $0.headers = 0; $0.bytes = 0 }
     }
 
     public func observeCommittedMessages(_ outcomes: [V2SendMessageOutcome], activation: V2RoomActivationToken) {
@@ -104,17 +118,25 @@ public final class V2RoomCommittedFactsFeed: V2CommittedMessageBatchObserving, S
                 guard case .accepted(let message) = outcome, message.roomID == activation.roomID else { continue }
                 changed = true
                 let bytes = message.text.utf8.count + 512
-                let supported = message.sourceEventID != nil && message.acceptedMembershipRevision != nil
-                    && message.media.isEmpty && message.mediaPresentations.isEmpty && message.mentions.isEmpty
-                    && message.entities.isEmpty && message.replyTo == nil
                 if let previous = room.messages[message.roomSequence] {
                     if previous != message { Self.degrade(&room, through: message.roomSequence, state: &value) }
                     continue
                 }
-                if room.dirty != nil || !supported || room.messages.count >= maximumFactsPerRoom
-                    || value.facts >= maximumFactsTotal || bytes > maximumTextBytes
-                    || value.bytes > maximumTextBytes - bytes {
+                // An existing header cannot prove that a duplicate body is identical.
+                guard room.dirty == nil, room.headers[message.roomSequence] == nil,
+                      room.messages.count + room.headers.count < maximumFactsPerRoom,
+                      let header = V2CommittedRoomMessageHeader(message),
+                      bytes <= maximumTextBytes, value.bytes <= maximumTextBytes - bytes else {
                     Self.degrade(&room, through: message.roomSequence, state: &value)
+                    continue
+                }
+                if value.facts >= maximumFactsTotal {
+                    guard value.headers < maximumHeadersTotal else {
+                        Self.degrade(&room, through: message.roomSequence, state: &value)
+                        continue
+                    }
+                    room.headers[message.roomSequence] = header
+                    value.headers += 1
                 } else {
                     room.messages[message.roomSequence] = message; room.bytes += bytes
                     value.bytes += bytes; value.facts += 1
@@ -141,8 +163,9 @@ public final class V2RoomCommittedFactsFeed: V2CommittedMessageBatchObserving, S
         if changed { notify(roomID) }
     }
     private static func degrade(_ room: inout Room, through sequence: UInt64, state: inout State) {
-        let queuedHead = room.messages.keys.max() ?? 0
-        room.dirty = max(room.dirty ?? 0, max(sequence, queuedHead))
+        room.dirty = max(sequence, room.highWatermark)
+        state.headers -= room.headers.count
+        room.headers.removeAll()
         state.facts -= room.messages.count; state.bytes -= room.bytes
         room.messages.removeAll(keepingCapacity: true); room.bytes = 0
     }
